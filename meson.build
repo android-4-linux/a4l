@@ -21,9 +21,41 @@ cxx = meson.get_compiler('cpp')
 profile_automotive = get_option('profile_automotive')
 build_tests        = get_option('tests')
 
+# --- Optional OpenJDK (JVM) backend for runtime/ (ADR-0001 fallback) ----------
+# Detect a JDK (JNI headers + libjvm). Meson's built-in `jni` dependency is
+# unreliable across distros, so probe java.home directly. When no JDK is present
+# the Jvm backend compiles out and create_vm(Jvm) reports Unavailable.
+have_jni = false
+jni_dep = declare_dependency()   # empty no-op placeholder
+java_home = ''
+java_prog = find_program('java', required : false)
+if java_prog.found()
+  jprops = run_command(java_prog, '-XshowSettings:properties', '-version',
+                       check : false).stderr()
+  parts = jprops.split('java.home = ')
+  if parts.length() > 1
+    java_home = parts[1].split('\n')[0].strip()
+  endif
+endif
+if java_home != '' and import('fs').exists(java_home / 'include' / 'jni.h')
+  jvm_so_dir = java_home / 'lib' / 'server'
+  jvm_lib = cxx.find_library('jvm', dirs : [jvm_so_dir], required : false)
+  if jvm_lib.found()
+    jni_dep = declare_dependency(
+      compile_args : ['-I' + java_home / 'include',
+                      '-I' + java_home / 'include' / 'linux'],
+      dependencies : jvm_lib,
+      link_args : ['-Wl,-rpath,' + jvm_so_dir],
+    )
+    have_jni = true
+    message('JVM runtime backend enabled: OpenJDK at ' + java_home)
+  endif
+endif
+
 conf = configuration_data()
 conf.set('ACLCXX_VERSION', '"' + meson.project_version() + '"')
 conf.set10('ACLCXX_PROFILE_AUTOMOTIVE', profile_automotive)
+conf.set10('ACLCXX_HAVE_JNI', have_jni)
 
 # Public config header consumed across modules.
 configure_file(

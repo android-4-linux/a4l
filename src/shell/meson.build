@@ -8,6 +8,6 @@ executable(
   files('main.cpp'),
   include_directories : [config_inc, core_inc],
   link_with : module_libs,
-  dependencies : fmt_dep,   # via log/log.h
+  dependencies : [fmt_dep, jni_dep],   # fmt via log/log.h; jni links libjvm when present
   install : true,
 )

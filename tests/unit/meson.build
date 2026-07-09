@@ -41,10 +41,37 @@ if catch2_dep.found()
     unit_test_sources,
     include_directories : [config_inc, core_inc],
     link_with : module_libs,
-    dependencies : [catch2_dep, fmt_dep],
+    dependencies : [catch2_dep, fmt_dep, jni_dep],
   )
   # `depends` ensures the fixture is built before the test runs.
   test('unit', unit_tests, env : test_env, depends : fixture_deps)
+
+  # Isolated JVM integration test (one HotSpot VM per process). Built only when a
+  # JDK (have_jni) and javac are available; otherwise it SKIPs at runtime.
+  # Use the javac from the SAME java_home as the detected libjvm — a javac from a
+  # newer JDK on PATH would emit class files the embedded (older) VM cannot load.
+  javac = have_jni ? find_program(java_home / 'bin' / 'javac', required : false) \
+                   : disabler()
+  if have_jni and javac.found()
+    jvm_classes = custom_target(
+      'jvm-fixture-classes',
+      input : files('../fixtures/jvm/Main.java', '../fixtures/jvm/Boom.java'),
+      output : 'jvm-classes',
+      command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
+    )
+    jvm_test_env = environment()
+    jvm_test_env.set('ACLCXX_JVM_CLASSES', jvm_classes.full_path())
+    jvm_test = executable(
+      'aclcxx_jvm_test',
+      files('jvm_test.cpp'),
+      include_directories : [config_inc, core_inc],
+      link_with : module_libs,
+      dependencies : [catch2_dep, fmt_dep, jni_dep],
+    )
+    test('jvm-invoke', jvm_test, env : jvm_test_env, depends : [jvm_classes])
+  else
+    message('JDK/javac not both available; skipping jvm-invoke integration test.')
+  endif
 else
   warning('Catch2 not available; skipping Tier A unit tests. ' +
           'Provide subprojects/catch2 (meson wrap install catch2) to enable.')

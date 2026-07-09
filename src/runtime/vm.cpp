@@ -6,7 +6,12 @@
 #include <cstdlib>
 #include <utility>
 
+#include "aclcxx_config.h"
 #include "log/log.h"
+
+#if ACLCXX_HAVE_JNI
+#include "runtime/jvm_vm.h"
+#endif
 
 namespace aclcxx::runtime {
 namespace {
@@ -129,13 +134,18 @@ std::unique_ptr<Vm> create_vm(Backend backend, VmConfig config, Error& out_error
       return nullptr;
 
     case Backend::Jvm:
-      // ADR-0001 fallback. OpenJDK is present on this host but the backend (DEX
-      // ->JVM path + dalvik.system shims) is not wired yet.
+#if ACLCXX_HAVE_JNI
+      // ADR-0001 fallback: OpenJDK via the JNI Invocation API. Runs stock JVM
+      // bytecode; DEX support (d8-reversal) is a later step.
+      out_error = Error::ok();
+      return make_jvm_vm(std::move(config));
+#else
       out_error = Error::of(
           Status::Unavailable,
-          "OpenJDK (Classpath-Exception) fallback not yet wired; planned as the "
-          "Phase 1 JVM backend. See docs/adr/ADR-0001-dex-execution-host-art.md");
+          "JVM backend not built (no JDK found at configure time); rebuild with "
+          "a JDK present, or use --vm=null. See docs/adr/ADR-0001-dex-execution-host-art.md");
       return nullptr;
+#endif
   }
   out_error = Error::of(Status::InvalidConfig, "unknown backend");
   return nullptr;

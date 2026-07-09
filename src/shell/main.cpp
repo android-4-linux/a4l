@@ -45,6 +45,9 @@ void print_usage() {
       "run options:\n"
       "  --vm=<art|jvm|null>  runtime backend (default: $ACLCXX_VM or art)\n"
       "  --main=<class>       static main() class to invoke\n"
+      "  --classpath=<paths>  extra classpath entries (colon-separated); the JVM\n"
+      "                       backend runs .class/.jar from here (DEX is not loaded\n"
+      "                       by a stock JVM)\n"
       "  --cache=<dir>        DEX->OAT / dalvik-cache directory\n"
       "\n"
       "  -h, --help           show this help\n"
@@ -68,6 +71,7 @@ int cmd_run(const std::vector<std::string>& args) {
   std::string vm_name;
   std::string main_class;
   std::string cache_dir;
+  std::vector<std::string> extra_classpath;
 
   for (const std::string& a : args) {
     std::string v;
@@ -75,6 +79,15 @@ int cmd_run(const std::vector<std::string>& args) {
       vm_name = v;
     } else if (match_opt(a, "--main", v)) {
       main_class = v;
+    } else if (match_opt(a, "--classpath", v)) {
+      // Colon-separated, appended in order.
+      for (std::size_t start = 0; start <= v.size();) {
+        const std::size_t colon = v.find(':', start);
+        const std::size_t end = colon == std::string::npos ? v.size() : colon;
+        if (end > start) extra_classpath.push_back(v.substr(start, end - start));
+        if (colon == std::string::npos) break;
+        start = colon + 1;
+      }
     } else if (match_opt(a, "--cache", v)) {
       cache_dir = v;
     } else if (!a.empty() && a[0] == '-') {
@@ -136,6 +149,8 @@ int cmd_run(const std::vector<std::string>& args) {
   // real DEX/OAT cache is a later step (needs the framework boot classpath).
   r::VmConfig cfg;
   cfg.classpath = {apk_path};
+  cfg.classpath.insert(cfg.classpath.end(), extra_classpath.begin(),
+                       extra_classpath.end());
   cfg.cache_dir = cache_dir;
   // boot_classpath stays empty until the vendored framework lands.
 
