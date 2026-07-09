@@ -1,0 +1,47 @@
+# REUSE configuration (https://reuse.software, spec 3.3+)
+#
+# Supplies SPDX-FileCopyrightText (and a license fallback) for authored files so
+# contributors only need the inline SPDX-License-Identifier header that
+# scripts/check-spdx.sh enforces. precedence = "override" is NOT used: inline
+# license headers stay authoritative; these annotations fill the copyright gap and
+# supply a license only where a file has none.
+#
+# third_party/ vendored SOURCES are deliberately NOT covered here — each vendored
+# subtree carries its own upstream license/headers and its own METADATA. Only our
+# own third_party bookkeeping files (METADATA, README) are annotated below.
+version = 1
+
+[[annotations]]
+path = [
+  "src/**",
+  "hosts/**",
+  "tests/**",
+  "tools/**",
+  "scripts/**",
+  "specs/**",
+  "docs/**",
+  "cross/**",
+  ".github/**",
+  "subprojects/README.md",
+  "meson.build",
+  "meson.options",
+  "REUSE.toml",
+  "LICENSE",
+  "**.md",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "The aclcxx Authors"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = [".gitignore", "**/.gitkeep", "**.wrap", "**.ini"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "The aclcxx Authors"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Our own bookkeeping inside third_party/ (not the vendored code itself).
+[[annotations]]
+path = ["third_party/README.md", "third_party/**/METADATA"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "The aclcxx Authors"
+SPDX-License-Identifier = "Apache-2.0"

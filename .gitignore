@@ -1,0 +1,36 @@
+# Meson / Ninja build directories
+/build/
+/builddir/
+/build-*/
+*.o
+*.a
+*.so
+*.so.*
+
+# Meson subproject checkouts (wraps are tracked; downloaded sources are not)
+/subprojects/*/
+/subprojects/packagecache/
+/subprojects/.wraplock
+!/subprojects/*.wrap
+!/subprojects/packagefiles/
+
+# Vendored third-party sources are pulled by tooling, not committed wholesale.
+# Only METADATA, README, LICENSE, and any local patches are tracked.
+/third_party/aosp/*/
+/third_party/skia/src/
+/third_party/skia/*/
+
+# Editor / tooling
+.cache/
+compile_commands.json
+.clangd/
+.vscode/
+.idea/
+*.swp
+
+# Test/app corpus artifacts (APKs are hash-pinned by manifest, not committed)
+/tests/app-corpus/apks/
+/tests/**/golden-out/
+
+# Reports
+/reports/

@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+# Provenance: plan.md §A01.1 (ACLCXX_PROFILE_AUTOMOTIVE). No GPL-3.0 sources.
+
+option(
+  'profile_automotive',
+  type : 'boolean',
+  value : true,
+  description : 'Build the automotive profile: svc/car vehicle services, hosts/cal Car App Library host, hosts/media bridge. Default ON per plan.md §A01.1. An OFF build must emit zero automotive symbols (CI nm-diff gate).',
+)
+
+option(
+  'tests',
+  type : 'boolean',
+  value : true,
+  description : 'Build the Tier A unit tests and test harnesses under tests/.',
+)

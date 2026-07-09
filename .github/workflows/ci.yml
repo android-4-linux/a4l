@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: Apache-2.0
+# Provenance: plan.md §4 Phase 0 / Gate G0. No GPL-3.0 sources.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: Clean-room & license gates (Gate G0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install REUSE
+        run: pipx install reuse
+      - name: SPDX headers
+        run: ./scripts/check-spdx.sh
+      - name: Forbidden licenses (GPL-3.0 family)
+        run: ./scripts/check-licenses.sh
+      - name: Clean-room provenance (denylist + provenance comments)
+        run: ./scripts/check-provenance.sh
+      - name: REUSE lint
+        run: reuse lint
+
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Every commit is Signed-off-by
+        run: |
+          range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          bad=0
+          while read -r sha; do
+            if ! git show -s --format=%B "$sha" | grep -qE '^Signed-off-by: .+ <.+@.+>'; then
+              echo "FAIL: commit $sha missing DCO Signed-off-by" >&2
+              bad=1
+            fi
+          done < <(git rev-list "$range")
+          exit $bad
+
+  build:
+    name: Build & test (Meson)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build g++ pkg-config
+      - name: Fetch Catch2 (Tier A tests)
+        run: meson wrap install catch2 || true
+      - name: Configure (automotive profile, default ON)
+        run: meson setup build
+      - name: Compile
+        run: meson compile -C build
+      - name: Run the stub
+        run: ./build/src/shell/aclcxx
+      - name: Test
+        run: meson test -C build --print-errorlogs
+
+      - name: Configure phone profile
+        run: meson setup build-phone -Dprofile_automotive=false
+      - name: Compile phone profile
+        run: meson compile -C build-phone
+      - name: Automotive nm-diff gate (phone build exports zero automotive symbols)
+        run: |
+          if nm -C build-phone/src/shell/aclcxx 2>/dev/null \
+               | grep -E 'aclcxx::(svc::car|hosts::)'; then
+            echo "FAIL: automotive symbols present in phone-profile build" >&2
+            exit 1
+          fi
+          echo "OK: no automotive symbols in phone-profile build."

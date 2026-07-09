@@ -1,0 +1,10 @@
+aclcxx is licensed under the Apache License, Version 2.0.
+
+The full license text is in LICENSES/Apache-2.0.txt (per the REUSE specification,
+https://reuse.software). Every file in this repository declares its license with an
+SPDX-License-Identifier tag; run `reuse lint` to verify compliance.
+
+SPDX-License-Identifier: Apache-2.0
+
+See PROVENANCE.md for the source-provenance and clean-room policy that governs what
+may enter this tree, and docs/clean-room.md for the full clean-room protocol.

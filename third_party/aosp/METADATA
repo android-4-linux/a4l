@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# third_party METADATA template — fill in when AOSP components are vendored (Phase 1+).
+# Not yet vendored: this records the intended pins and the tag pairings that must be kept.
+
+name: "aosp"
+description: "Vendored AOSP components: art (host), frameworks/base subset, libandroidfw, libziparchive, bionic, CTS, packages/services/Car."
+license: "Apache-2.0"   # bionic subtree is BSD; record per-component below when vendored.
+
+# Platform pinning. Target API level 33 (Tiramisu) per ADR-0002.
+platform:
+  api_level: 33
+  manifest_url: "https://android.googlesource.com/platform/manifest"
+  branch: "TODO: android-13.0.0_rXX tag"
+  sha: "TODO"
+
+# Automotive Car API is versioned INDEPENDENTLY of the platform API (plan.md §A01.1).
+# Record the platform-tag <-> car-tag pairing here.
+automotive:
+  car_release_tag: "TODO"
+  platform_pairing: "TODO: which platform tag this car tag is validated against"
+
+# Skia milestone pairing (A02.2): the vendored frameworks/base tag implies a Skia m-branch.
+# Must match subprojects/skia.wrap and third_party/skia/METADATA — single pinned Skia.
+skia_milestone: "TODO: m-branch for the api-33 release"
+
+components:
+  - path: "art"                     # license: Apache-2.0
+  - path: "frameworks/base"         # license: Apache-2.0 (curated subset)
+  - path: "system/libandroidfw"     # license: Apache-2.0
+  - path: "system/libziparchive"    # license: Apache-2.0
+  - path: "bionic"                  # license: BSD
+  - path: "cts"                     # license: Apache-2.0
+  - path: "packages/services/Car"   # license: Apache-2.0 (automotive profile)
