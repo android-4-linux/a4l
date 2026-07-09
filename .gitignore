@@ -32,5 +32,9 @@ compile_commands.json
 /tests/app-corpus/apks/
 /tests/**/golden-out/
 
+# Python bytecode caches (fixture generators)
+__pycache__/
+*.pyc
+
 # Reports
 /reports/

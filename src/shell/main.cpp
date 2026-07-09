@@ -14,6 +14,7 @@
 #include "aclcxx_config.h"
 #include "log/log.h"
 #include "pkg/apk.h"
+#include "pkg/manifest.h"
 #include "runtime/vm.h"
 
 namespace {
@@ -145,6 +146,33 @@ int cmd_run(const std::vector<std::string>& args) {
     aclcxx::log::w(kTag, "no classes*.dex found — nothing to execute");
   }
 
+  // Parse the manifest for package identity and the launch class.
+  aclcxx::pkg::Manifest manifest;
+  aclcxx::pkg::ZipError merr;
+  if (auto mbytes = apk->read("AndroidManifest.xml", merr)) {
+    if (aclcxx::pkg::AxmlError ae = aclcxx::pkg::parse_manifest(*mbytes, manifest)) {
+      aclcxx::log::w(kTag, "manifest parse failed: [{}] {}",
+                     aclcxx::pkg::axml_status_name(ae.status), ae.message);
+    } else {
+      aclcxx::log::i(kTag, "package={} versionCode={} minSdk={} targetSdk={}",
+                     manifest.package.empty() ? "?" : manifest.package,
+                     manifest.version_code ? *manifest.version_code : 0,
+                     manifest.min_sdk ? *manifest.min_sdk : -1,
+                     manifest.target_sdk ? *manifest.target_sdk : -1);
+    }
+  } else {
+    aclcxx::log::w(kTag, "no AndroidManifest.xml: [{}] {}",
+                   aclcxx::pkg::zip_status_name(merr.status), merr.message);
+  }
+
+  // Resolve the launch class: explicit --main wins, else the manifest launcher.
+  if (main_class.empty()) {
+    if (const aclcxx::pkg::Activity* launch = manifest.launcher()) {
+      main_class = launch->name;
+      aclcxx::log::i(kTag, "launch activity: {}", main_class);
+    }
+  }
+
   // Configure the runtime. The APK is passed on the classpath; extraction to a
   // real DEX/OAT cache is a later step (needs the framework boot classpath).
   r::VmConfig cfg;
@@ -169,11 +197,9 @@ int cmd_run(const std::vector<std::string>& args) {
   }
 
   if (main_class.empty()) {
-    // Real launch-class resolution needs the (binary-XML) manifest, which is the
-    // next pkg/ step. For now require --main to actually invoke.
     aclcxx::log::w(kTag,
-                   "no --main given; manifest launch-class resolution is not "
-                   "implemented yet. VM started; nothing invoked.");
+                   "no launcher activity in the manifest and no --main given; "
+                   "VM started, nothing invoked");
   } else if (r::Error e = vm->call_static_main(main_class, {})) {
     aclcxx::log::e(kTag, "invoke {}.main failed: [{}] {}", main_class,
                    r::status_name(e.status), e.message);

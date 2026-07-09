@@ -15,22 +15,34 @@ unit_test_sources = files(
   'log_test.cpp',
   'runtime_test.cpp',
   'pkg_test.cpp',
+  'manifest_test.cpp',
 )
 
-# Build-time APK fixture for the pkg/ reader tests (no binary committed to git).
+# Build-time fixtures for the pkg/ reader tests (no binaries committed to git).
 # If python3 is unavailable the pkg tests SKIP at runtime (env var unset).
 python3 = find_program('python3', required : false)
 test_env = environment()
 fixture_deps = []
 if python3.found()
+  # fixture.apk embeds a UTF-8 AXML AndroidManifest.xml (make_fixture_apk.py
+  # imports make_axml.py, so declare it as a dependency for rebuilds).
   fixture_apk = custom_target(
     'fixture-apk',
     input : files('../fixtures/make_fixture_apk.py'),
     output : 'fixture.apk',
     command : [python3, '@INPUT@', '@OUTPUT@'],
+    depend_files : files('../fixtures/make_axml.py'),
+  )
+  # Standalone UTF-16 AXML to exercise the UTF-16 string-pool decode path.
+  axml_utf16 = custom_target(
+    'axml-utf16',
+    input : files('../fixtures/make_axml.py'),
+    output : 'manifest_utf16.axml',
+    command : [python3, '@INPUT@', '--utf16', '@OUTPUT@'],
   )
   test_env.set('ACLCXX_FIXTURE_APK', fixture_apk.full_path())
-  fixture_deps = [fixture_apk]
+  test_env.set('ACLCXX_AXML_UTF16', axml_utf16.full_path())
+  fixture_deps = [fixture_apk, axml_utf16]
 else
   warning('python3 not found; pkg/ fixture tests will SKIP.')
 endif

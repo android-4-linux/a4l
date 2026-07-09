@@ -9,9 +9,11 @@
 import sys
 import zipfile
 
+from make_axml import build_axml
+
 # (name, data, compression) — order is the central-directory order.
 ENTRIES = [
-    ("AndroidManifest.xml", b"\x00PLACEHOLDER-AXML\x00", zipfile.ZIP_STORED),
+    ("AndroidManifest.xml", build_axml(utf8=True), zipfile.ZIP_STORED),
     ("classes.dex", b"dex\n035\x00fake-dex-1", zipfile.ZIP_STORED),
     ("classes2.dex", b"dex\n035\x00fake-dex-2-" + b"x" * 200, zipfile.ZIP_DEFLATED),
     ("assets/hello.txt", b"hello aclcxx\n", zipfile.ZIP_DEFLATED),
