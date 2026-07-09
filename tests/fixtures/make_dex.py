@@ -48,6 +48,7 @@ STRINGS = [
     "main",                  # 6  method name
     "answer",                # 7  method name
     "HelloDex.java",         # 8  source file
+    "misc",                  # 9  method name (untranslatable -> stubbed)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
@@ -70,7 +71,7 @@ def build_dex():
     n_strings = len(STRINGS)
     n_types = len(TYPES)
     n_protos = 2
-    n_methods = 2
+    n_methods = 3
     n_classdefs = 1
 
     off_string_ids = header_size
@@ -107,18 +108,23 @@ def build_dex():
     code_answer_off = off_data + len(data)
     # const/16 v0, #42 (op 0x13) -> 0x0013, 0x002a ; return v0 (op 0x0f) -> 0x000f
     data.extend(code_item(1, 0, 0, [0x0013, 0x002A, 0x000F]))
+    code_misc_off = off_data + len(data)
+    # const-string v0, "misc" (op 0x1a, unsupported by the translator -> stubbed);
+    # const/4 v0, 0 (0x0012); return v0 (0x000f). Never executed (stub throws).
+    data.extend(code_item(1, 0, 0, [0x001A, S["misc"], 0x0012, 0x000F]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
     cd += uleb128(0)  # static_fields_size
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(2)  # direct_methods_size
+    cd += uleb128(3)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
     # direct methods, sorted by ascending method index; idx diffs are cumulative.
-    # m0=main (method_id 0), m1=answer (method_id 1).
+    # m0=main (id 0), m1=answer (id 1), m2=misc (id 2).
     cd += uleb128(0) + uleb128(0x9) + uleb128(code_main_off)     # diff 0 -> idx 0
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_answer_off)   # diff 1 -> idx 1
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_misc_off)     # diff 1 -> idx 2
     data.extend(cd)
 
     # map_list (4-aligned). Parser ignores it, but emit a valid one.
@@ -133,7 +139,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 1, type_list_main_off),
-        (0x2001, 2, code_main_off),
+        (0x2001, 3, code_main_off),
         (0x2000, 1, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -157,6 +163,7 @@ def build_dex():
     method_ids = b""
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 0, S["main"])
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["answer"])
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["misc"])  # proto ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",

@@ -76,7 +76,8 @@ if catch2_dep.found()
   if have_jni and javac.found()
     jvm_classes = custom_target(
       'jvm-fixture-classes',
-      input : files('../fixtures/jvm/Main.java', '../fixtures/jvm/Boom.java'),
+      input : files('../fixtures/jvm/Main.java', '../fixtures/jvm/Boom.java',
+                    '../fixtures/jvm/Runner.java'),
       output : 'jvm-classes',
       command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
     )

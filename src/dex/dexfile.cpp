@@ -163,17 +163,36 @@ struct Tables {
     out.name = str(name_idx);
     if (proto_idx >= proto_ids_size) { r.fail("proto index out of range"); return; }
     const std::uint64_t p = proto_ids_off + proto_idx * 12;
-    out.return_type = descriptor_to_java(type_desc(r.u32(p + 4)));
+    out.return_descriptor = type_desc(r.u32(p + 4));
+    out.return_type = descriptor_to_java(out.return_descriptor);
     const std::uint32_t params_off = r.u32(p + 8);
     if (params_off != 0) {
       const std::uint32_t count = r.u32(params_off);
       for (std::uint32_t i = 0; i < count; ++i) {
-        out.param_types.push_back(
-            descriptor_to_java(type_desc(r.u16(params_off + 4 + i * 2))));
+        std::string pd = type_desc(r.u16(params_off + 4 + i * 2));
+        out.param_types.push_back(descriptor_to_java(pd));
+        out.param_descriptors.push_back(std::move(pd));
       }
     }
   }
 };
+
+// Parse a code_item at `off` into `out`.
+void parse_code_item(Reader& r, std::uint64_t off, DexCode& out) {
+  out.registers_size = r.u16(off + 0);
+  out.ins_size = r.u16(off + 2);
+  out.outs_size = r.u16(off + 4);
+  const std::uint32_t insns_size = r.u32(off + 12);
+  const std::uint64_t insns_off = off + 16;
+  if (!r.in_bounds(insns_off, static_cast<std::uint64_t>(insns_size) * 2)) {
+    r.fail("code_item insns out of bounds");
+    return;
+  }
+  out.insns.reserve(insns_size);
+  for (std::uint32_t k = 0; k < insns_size; ++k) {
+    out.insns.push_back(r.u16(insns_off + k * 2));
+  }
+}
 
 // Parse a class_data_item: field and method encoded arrays.
 void parse_class_data(Reader& r, Tables& t, std::uint64_t off, DexClass& cls) {
@@ -196,8 +215,12 @@ void parse_class_data(Reader& r, Tables& t, std::uint64_t off, DexClass& cls) {
       const std::uint32_t code_off = r.uleb(off);
       DexMethod m;
       m.access_flags = access;
-      m.has_code = code_off != 0;
       t.method(method_idx, m);
+      if (code_off != 0) {
+        DexCode dc;
+        parse_code_item(r, code_off, dc);
+        m.code = std::move(dc);
+      }
       into.push_back(std::move(m));
     }
   };
@@ -206,6 +229,14 @@ void parse_class_data(Reader& r, Tables& t, std::uint64_t off, DexClass& cls) {
 }
 
 }  // namespace
+
+std::string DexMethod::jvm_descriptor() const {
+  std::string d = "(";
+  for (const std::string& p : param_descriptors) d += p;
+  d += ")";
+  d += return_descriptor;
+  return d;
+}
 
 std::optional<DexFile> DexFile::parse(const std::uint8_t* data, std::size_t size,
                                       DexError& out_error) {

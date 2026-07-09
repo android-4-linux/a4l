@@ -7,7 +7,7 @@
 # JVM backend runs converted classes; a future ART backend consumes DEX directly.
 module_libs += static_library(
   'aclcxx_dex',
-  files('dexfile.cpp', 'dex_to_jvm.cpp'),
+  files('dexfile.cpp', 'classwriter.cpp', 'dex_to_jvm.cpp'),
   include_directories : [config_inc, core_inc],
   dependencies : fmt_dep,   # via log/log.h
 )

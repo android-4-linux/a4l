@@ -94,12 +94,21 @@ TEST_CASE("JVM backend executes real Java, including a DEX->JVM converted class"
   // 4. An uncaught exception in main() maps to RuntimeError.
   CHECK(vm->call_static_main("Boom", {}).status == Status::RuntimeError);
 
-  // 5. DEX->JVM: the converted HelloDex class LOADS and its main RESOLVES; the
-  //    stub body throws UnsupportedOperationException -> RuntimeError. This
-  //    proves classloading/resolution of a DEX-derived class end to end.
+  // 5. DEX->JVM translation: the converted HelloDex.main was Dalvik return-void,
+  //    translated to a real JVM `return` — so it runs cleanly (no longer a stub
+  //    that throws). And HelloDex.answer() was `const/16 42; return v0`,
+  //    translated to executing bytecode: Runner reflectively calls it and must
+  //    observe an actual 42. This proves real bytecode ran, not a stub.
   if (!converted_dir.empty()) {
-    Error hello = vm->call_static_main("HelloDex", {});
-    CHECK(hello.status == Status::RuntimeError);  // loaded, resolved, invoked
+    CHECK(vm->call_static_main("HelloDex", {}).is_ok());  // translated return-void
+
+    const std::filesystem::path answer =
+        std::filesystem::temp_directory_path() / "aclcxx_answer.txt";
+    std::filesystem::remove(answer, ec);
+    Error rr = vm->call_static_main("Runner", {answer.string()});
+    CHECK(rr.is_ok());
+    CHECK(read_file(answer) == "42");  // translated answer() returned real 42
+    std::filesystem::remove(answer, ec);
   }
 
   CHECK(vm->shutdown().is_ok());

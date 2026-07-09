@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -56,13 +57,14 @@ TEST_CASE("DexFile parses classes and method signatures", "[dex]") {
   REQUIRE(c.super_name.has_value());
   CHECK(*c.super_name == "java.lang.Object");
   CHECK(c.access_flags & kAccPublic);
-  REQUIRE(c.direct_methods.size() == 2);
+  REQUIRE(c.direct_methods.size() == 3);
 
   const DexMethod* main = find(c.direct_methods, "main");
   REQUIRE(main != nullptr);
   CHECK(main->return_type == "void");
   CHECK(main->is_static());
-  CHECK(main->has_code);
+  CHECK(main->has_code());
+  CHECK(main->jvm_descriptor() == "([Ljava/lang/String;)V");
   REQUIRE(main->param_types.size() == 1);
   CHECK(main->param_types[0] == "java.lang.String[]");
 
@@ -81,17 +83,32 @@ TEST_CASE("DexFile rejects non-dex input", "[dex]") {
   CHECK(err.status == DexStatus::BadFormat);
 }
 
-TEST_CASE("emit_java_stub produces compilable class shape", "[dex]") {
+TEST_CASE("convert emits a real .class and translates the int subset", "[dex]") {
   const auto bytes = load_fixture_dex();
   if (bytes.empty()) SKIP("ACLCXX_FIXTURE_DEX not set");
   DexError err;
   auto dex = DexFile::parse(bytes, err);
   REQUIRE(dex.has_value());
 
-  const std::string src = emit_java_stub(dex->classes()[0]);
-  CHECK(src.find("public class HelloDex {") != std::string::npos);
-  CHECK(src.find("public static void main(java.lang.String[] a0)") !=
-        std::string::npos);
-  CHECK(src.find("public static int answer()") != std::string::npos);
-  CHECK(src.find("throw new UnsupportedOperationException") != std::string::npos);
+  ConvertOptions opts;
+  opts.work_dir = (std::filesystem::temp_directory_path() / "aclcxx-dex-utest")
+                      .string();
+  std::filesystem::remove_all(opts.work_dir);
+  ConvertResult res;
+  DexError cerr = convert(*dex, opts, res);
+  REQUIRE(cerr.is_ok());
+
+  // main (return-void) and answer (const/return) translate; misc (const-string)
+  // is unsupported and falls back to a bytecode stub.
+  CHECK(res.translated_methods == 2);
+  CHECK(res.stubbed_methods == 1);
+
+  const std::filesystem::path cls =
+      std::filesystem::path(res.classpath_dir) / "HelloDex.class";
+  REQUIRE(std::filesystem::exists(cls));
+  std::ifstream in(cls, std::ios::binary);
+  unsigned char magic[4] = {};
+  in.read(reinterpret_cast<char*>(magic), 4);
+  CHECK(magic[0] == 0xca);  // 0xCAFEBABE
+  CHECK(magic[1] == 0xfe);
 }

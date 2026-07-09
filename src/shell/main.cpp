@@ -264,7 +264,7 @@ void dump_methods(const char* kind, const std::vector<aclcxx::dex::DexMethod>& m
     }
     std::printf("    %s%s %s(%s) [%s%s]\n", m.is_static() ? "static " : "",
                 m.return_type.c_str(), m.name.c_str(), params.c_str(), kind,
-                m.has_code ? ", code" : "");
+                m.has_code() ? ", code" : "");
   }
 }
 

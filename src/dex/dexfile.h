@@ -43,14 +43,29 @@ enum : std::uint32_t {
   kAccNative = 0x0100,
 };
 
+// A method's Dalvik code_item (bytecode), when present.
+struct DexCode {
+  std::uint16_t registers_size = 0;   // total registers used by the method
+  std::uint16_t ins_size = 0;         // registers occupied by incoming args
+  std::uint16_t outs_size = 0;        // registers for outgoing-arg area
+  std::vector<std::uint16_t> insns;   // instruction stream (16-bit code units)
+};
+
 struct DexMethod {
   std::string name;                     // e.g. "main", "<init>"
-  std::string return_type;              // Java type, e.g. "void", "int"
-  std::vector<std::string> param_types; // Java types
+  std::string return_type;              // Java type, e.g. "void", "int" (display)
+  std::vector<std::string> param_types; // Java types (display)
+  // Raw type descriptors (JVM == Dalvik form): "V", "I", "[Ljava/lang/String;".
+  std::string return_descriptor;
+  std::vector<std::string> param_descriptors;
   std::uint32_t access_flags = 0;
-  bool has_code = false;                // code_off != 0
+  std::optional<DexCode> code;          // present iff code_off != 0
 
   bool is_static() const noexcept { return access_flags & kAccStatic; }
+  bool has_code() const noexcept { return code.has_value(); }
+
+  // JVM method descriptor, e.g. "([Ljava/lang/String;)V".
+  std::string jvm_descriptor() const;
 };
 
 struct DexClass {
