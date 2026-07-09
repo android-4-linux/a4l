@@ -56,6 +56,10 @@ conf = configuration_data()
 conf.set('ACLCXX_VERSION', '"' + meson.project_version() + '"')
 conf.set10('ACLCXX_PROFILE_AUTOMOTIVE', profile_automotive)
 conf.set10('ACLCXX_HAVE_JNI', have_jni)
+# javac matched to the detected libjvm (same java_home), for the DEX->JVM
+# converter. Empty when no JDK; the converter then needs an explicit path.
+conf.set('ACLCXX_JAVAC',
+         have_jni ? '"' + java_home / 'bin' / 'javac' + '"' : '""')
 
 # Public config header consumed across modules.
 configure_file(

@@ -7,11 +7,17 @@
 // they land (R-1 / ADR-0001); `--vm=null` exercises the full plumbing today.
 
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "aclcxx_config.h"
+#include "dex/dex_to_jvm.h"
+#include "dex/dexfile.h"
 #include "log/log.h"
 #include "pkg/apk.h"
 #include "pkg/manifest.h"
@@ -41,6 +47,7 @@ void print_usage() {
       "\n"
       "commands:\n"
       "  run <app.apk>        inspect and launch an APK\n"
+      "  dex <file>           dump classes/methods of a .dex or .apk\n"
       "  (no command)         print version and build profile\n"
       "\n"
       "run options:\n"
@@ -49,6 +56,8 @@ void print_usage() {
       "  --classpath=<paths>  extra classpath entries (colon-separated); the JVM\n"
       "                       backend runs .class/.jar from here (DEX is not loaded\n"
       "                       by a stock JVM)\n"
+      "  --convert-dex        convert the APK's DEX to JVM classes (prototype;\n"
+      "                       method bodies throw) and add them to the classpath\n"
       "  --cache=<dir>        DEX->OAT / dalvik-cache directory\n"
       "\n"
       "  -h, --help           show this help\n"
@@ -73,10 +82,13 @@ int cmd_run(const std::vector<std::string>& args) {
   std::string main_class;
   std::string cache_dir;
   std::vector<std::string> extra_classpath;
+  bool convert_dex = false;
 
   for (const std::string& a : args) {
     std::string v;
-    if (match_opt(a, "--vm", v)) {
+    if (a == "--convert-dex") {
+      convert_dex = true;
+    } else if (match_opt(a, "--vm", v)) {
       vm_name = v;
     } else if (match_opt(a, "--main", v)) {
       main_class = v;
@@ -182,6 +194,38 @@ int cmd_run(const std::vector<std::string>& args) {
   cfg.cache_dir = cache_dir;
   // boot_classpath stays empty until the vendored framework lands.
 
+  // DEX->JVM (prototype): convert each classes*.dex to JVM stub classes and add
+  // them to the classpath, so the JVM backend can load DEX-derived classes.
+  if (convert_dex) {
+    int dex_index = 0;
+    for (const std::string& dex_name : dex_files) {
+      const int idx = dex_index++;
+      auto db = apk->read(dex_name, zerr);
+      if (!db) {
+        aclcxx::log::w(kTag, "convert-dex: cannot read {}", dex_name);
+        continue;
+      }
+      aclcxx::dex::DexError de;
+      auto dx = aclcxx::dex::DexFile::parse(*db, de);
+      if (!dx) {
+        aclcxx::log::w(kTag, "convert-dex: parse {} failed: {}", dex_name, de.message);
+        continue;
+      }
+      // A distinct work dir per DEX so multi-dex classes don't overwrite.
+      aclcxx::dex::ConvertOptions opts;
+      opts.work_dir = (std::filesystem::temp_directory_path() /
+                       ("aclcxx-dex-" + std::to_string(idx))).string();
+      aclcxx::dex::ConvertResult cr;
+      if (aclcxx::dex::DexError ce = aclcxx::dex::convert(*dx, opts, cr)) {
+        aclcxx::log::w(kTag, "convert-dex: {} failed: {}", dex_name, ce.message);
+        continue;
+      }
+      aclcxx::log::i(kTag, "convert-dex: {} -> {} ({} classes)", dex_name,
+                     cr.classpath_dir, cr.classes.size());
+      cfg.classpath.push_back(cr.classpath_dir);
+    }
+  }
+
   r::Error err;
   auto vm = r::create_vm(backend, cfg, err);
   if (vm == nullptr) {
@@ -211,6 +255,70 @@ int cmd_run(const std::vector<std::string>& args) {
   return kOk;
 }
 
+void dump_methods(const char* kind, const std::vector<aclcxx::dex::DexMethod>& ms) {
+  for (const aclcxx::dex::DexMethod& m : ms) {
+    std::string params;
+    for (std::size_t i = 0; i < m.param_types.size(); ++i) {
+      if (i) params += ", ";
+      params += m.param_types[i];
+    }
+    std::printf("    %s%s %s(%s) [%s%s]\n", m.is_static() ? "static " : "",
+                m.return_type.c_str(), m.name.c_str(), params.c_str(), kind,
+                m.has_code ? ", code" : "");
+  }
+}
+
+int cmd_dex(const std::vector<std::string>& args) {
+  if (args.size() != 1) {
+    std::fprintf(stderr, "dex: expected exactly one <file>\n");
+    return kUsage;
+  }
+  const std::string& path = args[0];
+
+  // Accept a raw .dex or an .apk (from which classes.dex is extracted).
+  std::vector<std::uint8_t> bytes;
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    std::fprintf(stderr, "dex: cannot open %s\n", path.c_str());
+    return kUsage;
+  }
+  bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  const bool is_dex = bytes.size() >= 4 && std::memcmp(bytes.data(), "dex\n", 4) == 0;
+  if (!is_dex) {
+    aclcxx::pkg::ZipError zerr;
+    auto apk = aclcxx::pkg::Apk::open(path, zerr);
+    if (!apk.has_value()) {
+      std::fprintf(stderr, "dex: %s is neither a dex nor a readable apk: %s\n",
+                   path.c_str(), zerr.message.c_str());
+      return kUsage;
+    }
+    auto db = apk->read("classes.dex", zerr);
+    if (!db) {
+      std::fprintf(stderr, "dex: no classes.dex in %s\n", path.c_str());
+      return kUsage;
+    }
+    bytes = std::move(*db);
+  }
+
+  aclcxx::dex::DexError err;
+  auto dex = aclcxx::dex::DexFile::parse(bytes, err);
+  if (!dex.has_value()) {
+    std::fprintf(stderr, "dex: parse failed: [%s] %s\n",
+                 aclcxx::dex::dex_status_name(err.status), err.message.c_str());
+    return kRuntimeError;
+  }
+
+  std::printf("%zu class(es):\n", dex->classes().size());
+  for (const aclcxx::dex::DexClass& c : dex->classes()) {
+    std::printf("  class %s%s%s\n", c.java_name.c_str(),
+                c.super_name ? " extends " : "",
+                c.super_name ? c.super_name->c_str() : "");
+    dump_methods("direct", c.direct_methods);
+    dump_methods("virtual", c.virtual_methods);
+  }
+  return kOk;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -233,6 +341,9 @@ int main(int argc, char** argv) {
   }
   if (cmd == "run") {
     return cmd_run({args.begin() + 1, args.end()});
+  }
+  if (cmd == "dex") {
+    return cmd_dex({args.begin() + 1, args.end()});
   }
 
   std::fprintf(stderr, "aclcxx: unknown command '%s'\n\n", cmd.c_str());

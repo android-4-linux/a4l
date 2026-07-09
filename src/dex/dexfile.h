@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: Apache-2.0
+// Provenance: specs/dex.md (pending), public Dalvik .dex format specification
+// (source.android.com/docs/core/runtime/dex-format). No GPL-3.0 sources.
+#ifndef ACLCXX_DEX_DEXFILE_H
+#define ACLCXX_DEX_DEXFILE_H
+
+// Read-only parser for the Dalvik .dex container: header + string/type/proto/
+// method/class tables, exposing the class and method metadata the DEX->JVM
+// converter needs. This is the front-end of the runtime's DEX path; it parses
+// structure and signatures, not method bytecode (instruction translation is a
+// separate, larger step). Bounds-checked throughout.
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace aclcxx::dex {
+
+enum class DexStatus {
+  Ok,
+  BadFormat,    // bad magic / not a dex
+  Truncated,    // a table or item ran past the buffer
+  Unsupported,  // a construct this reader does not handle
+};
+
+const char* dex_status_name(DexStatus status) noexcept;
+
+struct DexError {
+  DexStatus status = DexStatus::Ok;
+  std::string message;
+  bool is_ok() const noexcept { return status == DexStatus::Ok; }
+  explicit operator bool() const noexcept { return status != DexStatus::Ok; }
+};
+
+// Dalvik/JVM access flags (subset).
+enum : std::uint32_t {
+  kAccPublic = 0x0001,
+  kAccStatic = 0x0008,
+  kAccFinal = 0x0010,
+  kAccAbstract = 0x0400,
+  kAccNative = 0x0100,
+};
+
+struct DexMethod {
+  std::string name;                     // e.g. "main", "<init>"
+  std::string return_type;              // Java type, e.g. "void", "int"
+  std::vector<std::string> param_types; // Java types
+  std::uint32_t access_flags = 0;
+  bool has_code = false;                // code_off != 0
+
+  bool is_static() const noexcept { return access_flags & kAccStatic; }
+};
+
+struct DexClass {
+  std::string descriptor;                   // "Lcom/example/Foo;"
+  std::string java_name;                    // "com.example.Foo"
+  std::optional<std::string> super_name;    // "java.lang.Object"
+  std::uint32_t access_flags = 0;
+  std::vector<DexMethod> direct_methods;    // static/private/ctor
+  std::vector<DexMethod> virtual_methods;
+};
+
+class DexFile {
+ public:
+  // Parse `data` (copied in). On failure returns nullopt and fills `out_error`.
+  static std::optional<DexFile> parse(const std::uint8_t* data, std::size_t size,
+                                      DexError& out_error);
+  static std::optional<DexFile> parse(const std::vector<std::uint8_t>& bytes,
+                                      DexError& out_error);
+
+  const std::vector<DexClass>& classes() const noexcept { return classes_; }
+
+ private:
+  DexFile() = default;
+  std::vector<std::uint8_t> data_;
+  std::vector<DexClass> classes_;
+};
+
+// Convert a type descriptor ("I", "V", "[I", "Lcom/example/Foo;") to a Java
+// type name ("int", "void", "int[]", "com.example.Foo").
+std::string descriptor_to_java(std::string_view descriptor);
+
+}  // namespace aclcxx::dex
+
+#endif  // ACLCXX_DEX_DEXFILE_H

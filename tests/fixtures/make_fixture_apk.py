@@ -10,12 +10,13 @@ import sys
 import zipfile
 
 from make_axml import build_axml
+from make_dex import build_dex
 
 # (name, data, compression) — order is the central-directory order.
 ENTRIES = [
     ("AndroidManifest.xml", build_axml(utf8=True), zipfile.ZIP_STORED),
-    ("classes.dex", b"dex\n035\x00fake-dex-1", zipfile.ZIP_STORED),
-    ("classes2.dex", b"dex\n035\x00fake-dex-2-" + b"x" * 200, zipfile.ZIP_DEFLATED),
+    ("classes.dex", build_dex(), zipfile.ZIP_STORED),
+    ("classes2.dex", build_dex(), zipfile.ZIP_DEFLATED),
     ("assets/hello.txt", b"hello aclcxx\n", zipfile.ZIP_DEFLATED),
     ("resources.arsc", b"\x02\x00\x0c\x00fake-arsc", zipfile.ZIP_STORED),
     ("lib/arm64-v8a/libfoo.so", b"\x7fELF-arm64", zipfile.ZIP_STORED),

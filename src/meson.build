@@ -6,6 +6,7 @@
 # linking everything. Order below is dependency-agnostic for the Phase 0 stubs.
 
 subdir('log')       # logging facade (fmt backend; spdlog/DLT sinks later)
+subdir('dex')       # Dalvik .dex parser + DEX->JVM converter (prototype)
 subdir('runtime')   # ART embedding, class-loader, DEX/OAT cache, JNI tables
 subdir('pkg')       # APK/zip parse, resources.arsc, manifest, split/ABI select
 subdir('gfx')       # Skia canvases (shm/egl/vulkan-dmabuf), text stack

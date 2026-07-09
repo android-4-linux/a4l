@@ -16,6 +16,7 @@ unit_test_sources = files(
   'runtime_test.cpp',
   'pkg_test.cpp',
   'manifest_test.cpp',
+  'dex_test.cpp',
 )
 
 # Build-time fixtures for the pkg/ reader tests (no binaries committed to git).
@@ -40,9 +41,17 @@ if python3.found()
     output : 'manifest_utf16.axml',
     command : [python3, '@INPUT@', '--utf16', '@OUTPUT@'],
   )
+  # Minimal valid classes.dex for the dex/ parser and DEX->JVM converter tests.
+  fixture_dex = custom_target(
+    'fixture-dex',
+    input : files('../fixtures/make_dex.py'),
+    output : 'classes.dex',
+    command : [python3, '@INPUT@', '@OUTPUT@'],
+  )
   test_env.set('ACLCXX_FIXTURE_APK', fixture_apk.full_path())
   test_env.set('ACLCXX_AXML_UTF16', axml_utf16.full_path())
-  fixture_deps = [fixture_apk, axml_utf16]
+  test_env.set('ACLCXX_FIXTURE_DEX', fixture_dex.full_path())
+  fixture_deps = [fixture_apk, axml_utf16, fixture_dex]
 else
   warning('python3 not found; pkg/ fixture tests will SKIP.')
 endif
@@ -73,6 +82,12 @@ if catch2_dep.found()
     )
     jvm_test_env = environment()
     jvm_test_env.set('ACLCXX_JVM_CLASSES', jvm_classes.full_path())
+    jvm_depends = [jvm_classes]
+    # Also feed the DEX fixture so the test exercises the DEX->JVM path.
+    if python3.found()
+      jvm_test_env.set('ACLCXX_FIXTURE_DEX', fixture_dex.full_path())
+      jvm_depends += fixture_dex
+    endif
     jvm_test = executable(
       'aclcxx_jvm_test',
       files('jvm_test.cpp'),
@@ -80,7 +95,7 @@ if catch2_dep.found()
       link_with : module_libs,
       dependencies : [catch2_dep, fmt_dep, jni_dep],
     )
-    test('jvm-invoke', jvm_test, env : jvm_test_env, depends : [jvm_classes])
+    test('jvm-invoke', jvm_test, env : jvm_test_env, depends : jvm_depends)
   else
     message('JDK/javac not both available; skipping jvm-invoke integration test.')
   endif
