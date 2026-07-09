@@ -6,7 +6,8 @@
 executable(
   'aclcxx',
   files('main.cpp'),
-  include_directories : config_inc,
+  include_directories : [config_inc, core_inc],
   link_with : module_libs,
+  dependencies : fmt_dep,   # via log/log.h
   install : true,
 )

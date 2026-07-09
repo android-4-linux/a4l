@@ -55,7 +55,8 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build g++ pkg-config
+          sudo apt-get install -y meson ninja-build g++ pkg-config \
+                                  libfmt-dev zlib1g-dev python3
       - name: Fetch Catch2 (Tier A tests)
         run: meson wrap install catch2 || true
       - name: Configure (automotive profile, default ON)

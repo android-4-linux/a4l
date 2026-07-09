@@ -32,16 +32,23 @@ configure_file(
 )
 config_inc = include_directories('.')
 
+# Public module headers are included as "<module>/<header>.h" off the src root.
+core_inc = include_directories('src')
+
 # --- Dependencies -------------------------------------------------------------
 # Heavy vendored deps (Skia via GN, AOSP via Soong) are consumed as prebuilt
 # imported artifacts and wired in per subsystem as they land — see
-# third_party/*/METADATA and subprojects/*.wrap. Phase 0 needs none of them yet.
+# third_party/*/METADATA. The AOSP APK/resource stack (libziparchive,
+# libandroidfw) is not vendored yet; Phase 1 pkg/ uses a zlib-backed reader
+# behind an interface until it lands.
 #
-# System libraries appear here as subsystems are implemented, e.g.:
+# Phase 1 runtime-spine dependencies (present on a normal Linux host):
+fmt_dep  = dependency('fmt')      # log facade backend (spdlog/DLT sinks come later)
+zlib_dep = dependency('zlib')     # APK (zip) inflate in pkg/
+
+# Later subsystems add their system libs here as they are implemented, e.g.:
 #   wayland_client = dependency('wayland-client')
 #   pipewire       = dependency('libpipewire-0.3')
-#   libinput       = dependency('libinput')
-# Kept empty in Phase 0 so the skeleton builds on a bare toolchain.
 
 # --- Source tree --------------------------------------------------------------
 # Each module subdir appends its static_library to `module_libs`, which the
