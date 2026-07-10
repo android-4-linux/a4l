@@ -101,7 +101,7 @@ mapping (plan.md §2 threading) lands with windowing (G2 proper).
 | **G2.b** ✅ | `android.util.Log` on the boot cp (docs-derived shim, `framework/shim/`) + its native `write0` bound by aclcxx (`runtime/framework_natives`) forwarding to `aclcxx::log` | app calls `android.util.Log.i(...)` → line via `aclcxx::log` (`run-apk-log`) |
 | **G2.c** ✅ | Extraction tool (`tools/fw_extract.py`) + AOSP pin (`android-13.0.0_r84`) + closure/budget/denylist report | tool reports class count + denylist edges (`fw-extract` test); METADATA pinned |
 | **G2.d** ✅ | Lifecycle driver (`JvmVm::call_activity_lifecycle`) + `Activity`/`Bundle` shims | `activity.apk`'s `MainActivity` subclass is instantiated and `onCreate`→`onStart`→`onResume` driven — no static `main` (`run-apk-activity`) |
-| **G2.e** 🚧 | Automotive media path (no Views): host a `MediaBrowserService`, browse tree + session | `media.apk`'s `MusicService` (via `--service`): `onCreate` publishes a `MediaSession` (now-playing title read via the `Token`), `onGetRoot`→root, `onLoadChildren`→2 `MediaItem`s (`run-apk-media`). Next: `PlaybackState` + transport `Callback` + PipeWire audio |
+| **G2.e** 🚧 | Automotive media path (no Views): `MediaBrowserService` + interactive `MediaSession` | `media.apk` (via `--service`): `onCreate` publishes a `MediaSession` w/ now-playing metadata + a transport `Callback`; host reads the title and drives `onPlay`/`onPause` (app's `MusicCallback` reacts); `onGetRoot`→root, `onLoadChildren`→2 items (`run-apk-media`). Next: `PlaybackState` + PipeWire audio |
 
 Windowing/`Canvas`/`Looper`-fidelity (real G2 "renders and is interactive", plan.md §4 Phase 2)
 builds on G2.d; the automotive media/template path (G1.5) is preferred first because it needs no

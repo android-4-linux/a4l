@@ -384,11 +384,34 @@ class JvmVm final : public Vm {
       }
     }
     log::i(kTag, "media session: title='{}' state={}", title, state);
+    if (session != nullptr) invoke_transport(ses_cls, session);
     if (ses_cls != nullptr) env_->DeleteLocalRef(ses_cls);
     if (session != nullptr) env_->DeleteLocalRef(session);
     env_->DeleteLocalRef(token_cls);
     env_->DeleteLocalRef(token);
     return Error::ok();
+  }
+
+  // Drive transport controls: fetch the session's Callback and invoke onPlay()
+  // then onPause() in-process (no controller/Binder) — the app's overrides react.
+  void invoke_transport(jclass ses_cls, jobject session) {
+    jobject cb = env_->CallObjectMethod(
+        session, env_->GetMethodID(ses_cls, "aclcxxCallback",
+                                   "()Landroid/media/session/MediaSession$Callback;"));
+    if (cb == nullptr) { clear_exception(); return; }  // app set no callback
+    jclass cb_cls = env_->GetObjectClass(cb);
+    for (const char* action : {"onPlay", "onPause"}) {
+      jmethodID m = env_->GetMethodID(cb_cls, action, "()V");
+      if (m == nullptr) { clear_exception(); continue; }
+      log::i(kTag, "media transport: {}", action);
+      env_->CallVoidMethod(cb, m);
+      if (env_->ExceptionCheck() == JNI_TRUE) {
+        env_->ExceptionDescribe();
+        env_->ExceptionClear();
+      }
+    }
+    env_->DeleteLocalRef(cb_cls);
+    env_->DeleteLocalRef(cb);
   }
 
   // Invoke one lifecycle callback (found on `cls` or a superclass). `pass_bundle`

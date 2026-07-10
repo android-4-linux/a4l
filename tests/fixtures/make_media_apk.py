@@ -91,13 +91,29 @@ STRINGS = [
     TITLE_KEY,                          # 42
     TITLE,                              # 43
     "LLL",                              # 44 putString shorty (String,String)->Builder
+    "Lcom/aclcxx/hello/MusicCallback;",             # 45 transport callback class
+    "Landroid/media/session/MediaSession$Callback;",  # 46 its superclass
+    "Landroid/util/Log;",               # 47
+    "onPlay",                           # 48
+    "onPause",                          # 49
+    "setCallback",                      # 50
+    "i",                                # 51
+    "aclcxx.app",                       # 52
+    "onPlay: playback started",         # 53
+    "onPause: playback paused",         # 54
+    "ILL",                              # 55 Log.i shorty (String,String)->int
 ]
 S = {s: i for i, s in enumerate(STRINGS)}  # "V" (idx 12) is the ()V / no-arg shorty
 TYPES = ["Lcom/aclcxx/hello/MusicService;", MBS, BROWSER_ROOT, RESULT,
          "Landroid/os/Bundle;", "Ljava/lang/String;", "Ljava/lang/Object;",
          "Ljava/lang/CharSequence;", ARRAYLIST, MEDIA_DESC, BUILDER, MEDIA_ITEM,
-         "V", "I", "Z", SESSION, TOKEN, METADATA, MMBUILDER]
+         "V", "I", "Z", SESSION, TOKEN, METADATA, MMBUILDER,
+         "Lcom/aclcxx/hello/MusicCallback;",
+         "Landroid/media/session/MediaSession$Callback;", "Landroid/util/Log;"]
 T = {t: i for i, t in enumerate(TYPES)}
+CALLBACK = "Landroid/media/session/MediaSession$Callback;"
+MUSIC_CB = "Lcom/aclcxx/hello/MusicCallback;"
+LOG = "Landroid/util/Log;"
 
 
 def uleb128(n):
@@ -128,7 +144,7 @@ def code_item(regs, ins, outs, insns):
 def build_dex():
     header_size = 112
     n_strings = len(STRINGS)
-    n_types, n_protos, n_fields, n_methods, n_classdefs = len(TYPES), 15, 0, 20, 1
+    n_types, n_protos, n_fields, n_methods, n_classdefs = len(TYPES), 17, 0, 26, 2
 
     off_string_ids = header_size
     off_type_ids = off_string_ids + n_strings * 4
@@ -162,7 +178,8 @@ def build_dex():
     tl_objstr = type_list(["Ljava/lang/Object;", "Ljava/lang/String;"])  # MediaSession.<init>
     tl_metadata = type_list([METADATA])          # setMetadata
     tl_token = type_list([TOKEN])                # setSessionToken
-    tl_2str = type_list(["Ljava/lang/String;", "Ljava/lang/String;"])  # putString
+    tl_2str = type_list(["Ljava/lang/String;", "Ljava/lang/String;"])  # putString / Log.i
+    tl_callback = type_list([CALLBACK])          # setCallback
 
     # <init>()V : super(); return-void   (v0=this)
     code_init = off_data + len(data)
@@ -217,14 +234,33 @@ def build_dex():
         0x106E, 0x0013, 0x0001,   # invoke-virtual {v1}, build (m19)
         0x010C,                   # move-result-object v1
         0x206E, 0x000E, 0x0010,   # invoke-virtual {v0,v1}, setMetadata (m14)
+        0x0122, T[MUSIC_CB],      # new-instance v1, MusicCallback
+        0x1070, 0x0015, 0x0001,   # invoke-direct {v1}, MusicCallback.<init> (m21)
+        0x206E, 0x0014, 0x0010,   # invoke-virtual {v0,v1}, setCallback (m20)
         0x106E, 0x000F, 0x0000,   # invoke-virtual {v0}, getSessionToken (m15)
         0x010C,                   # move-result-object v1
         0x206E, 0x0010, 0x0015,   # invoke-virtual {v5,v1}, setSessionToken (m16)
         0x000E,                   # return-void
     ]))
 
-    # class_data: 0 static, 0 instance, 1 direct (<init>), 3 virtual (by method idx:
-    #   onGetRoot m1, onLoadChildren m2, onCreate m12)
+    # MusicCallback methods: <init> super Callback.<init>; onPlay/onPause -> Log.i
+    code_cb_init = off_data + len(data)
+    data.extend(code_item(1, 1, 1, [
+        0x1070, 0x0018, 0x0000, 0x000E,  # invoke-direct {v0}, Callback.<init> (m24); return-void
+    ]))
+    code_cb_play = off_data + len(data)
+    data.extend(code_item(3, 1, 2, [
+        0x001A, S["aclcxx.app"], 0x011A, S["onPlay: playback started"],
+        0x2071, 0x0019, 0x0010, 0x000E,  # invoke-static {v0,v1}, Log.i (m25); return-void
+    ]))
+    code_cb_pause = off_data + len(data)
+    data.extend(code_item(3, 1, 2, [
+        0x001A, S["aclcxx.app"], 0x011A, S["onPause: playback paused"],
+        0x2071, 0x0019, 0x0010, 0x000E,
+    ]))
+
+    # class_data 0: MusicService — 1 direct (<init>), 3 virtual (onGetRoot m1,
+    # onLoadChildren m2, onCreate m12)
     class_data_off = off_data + len(data)
     cd = bytearray(uleb128(0) + uleb128(0) + uleb128(1) + uleb128(3))
     cd += uleb128(0) + uleb128(0x1) + uleb128(code_init)          # m0 <init>, public
@@ -232,6 +268,13 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x1) + uleb128(code_loadchildren)  # +1 -> m2 onLoadChildren
     cd += uleb128(10) + uleb128(0x1) + uleb128(code_oncreate)     # +10 -> m12 onCreate
     data.extend(cd)
+    # class_data 1: MusicCallback — 1 direct (<init> m21), 2 virtual (onPlay m22, onPause m23)
+    class_data_cb_off = off_data + len(data)
+    cd2 = bytearray(uleb128(0) + uleb128(0) + uleb128(1) + uleb128(2))
+    cd2 += uleb128(21) + uleb128(0x1) + uleb128(code_cb_init)     # m21 <init>
+    cd2 += uleb128(22) + uleb128(0x1) + uleb128(code_cb_play)     # m22 onPlay
+    cd2 += uleb128(1) + uleb128(0x1) + uleb128(code_cb_pause)     # +1 -> m23 onPause
+    data.extend(cd2)
 
     data.extend(align4(bytearray()))
     map_off = off_data + len(data)
@@ -239,8 +282,8 @@ def build_dex():
         (0x0000, 1, 0), (0x0001, n_strings, off_string_ids),
         (0x0002, n_types, off_type_ids), (0x0003, n_protos, off_proto_ids),
         (0x0005, n_methods, off_method_ids), (0x0006, n_classdefs, off_class_defs),
-        (0x2002, n_strings, string_data_off[0]), (0x1001, 10, tl_getroot),
-        (0x2001, 4, code_init), (0x2000, 1, class_data_off),
+        (0x2002, n_strings, string_data_off[0]), (0x1001, 11, tl_getroot),
+        (0x2001, 7, code_init), (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
     for mtype, size, off in items:
@@ -267,6 +310,8 @@ def build_dex():
     proto_ids += struct.pack("<III", S["VL"], T["V"], tl_token)               # 12 setSessionToken
     proto_ids += struct.pack("<III", S["LLL"], T[MMBUILDER], tl_2str)         # 13 putString
     proto_ids += struct.pack("<III", S["L"], T[METADATA], 0)                  # 14 build (metadata)
+    proto_ids += struct.pack("<III", S["VL"], T["V"], tl_callback)            # 15 setCallback
+    proto_ids += struct.pack("<III", S["ILL"], T["I"], tl_2str)               # 16 Log.i
 
     def m(cls, proto, name):
         return struct.pack("<HHI", T[cls], proto, S[name])
@@ -291,10 +336,19 @@ def build_dex():
         m(MMBUILDER, 0, "<init>"),                              # m17
         m(MMBUILDER, 13, "putString"),                          # m18
         m(MMBUILDER, 14, "build"),                              # m19
+        m(SESSION, 15, "setCallback"),                          # m20
+        m(MUSIC_CB, 0, "<init>"),                               # m21
+        m(MUSIC_CB, 0, "onPlay"),                               # m22
+        m(MUSIC_CB, 0, "onPause"),                              # m23
+        m(CALLBACK, 0, "<init>"),                               # m24 (super)
+        m(LOG, 16, "i"),                                        # m25 Log.i
     ])
     class_defs = struct.pack("<IIIIIIII",
                              T["Lcom/aclcxx/hello/MusicService;"], 0x1, T[MBS], 0,
                              0xFFFFFFFF, 0, class_data_off, 0)
+    class_defs += struct.pack("<IIIIIIII",
+                              T[MUSIC_CB], 0x1, T[CALLBACK], 0,
+                              0xFFFFFFFF, 0, class_data_cb_off, 0)
 
     header = bytearray(header_size)
     header[0:8] = b"dex\n035\x00"

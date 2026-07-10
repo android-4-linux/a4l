@@ -19,6 +19,7 @@ public final class MediaSession {
   private MediaMetadata metadata;
   private PlaybackState playbackState;
   private boolean active;
+  private Callback callback;
   private final Token token = new Token(this);
 
   public MediaSession(Object context, String tag) { this.tag = tag; }
@@ -26,6 +27,7 @@ public final class MediaSession {
   public void setMetadata(MediaMetadata metadata) { this.metadata = metadata; }
   public void setPlaybackState(PlaybackState state) { this.playbackState = state; }
   public void setActive(boolean active) { this.active = active; }
+  public void setCallback(Callback callback) { this.callback = callback; }
   public Token getSessionToken() { return token; }
   public void release() {}
 
@@ -33,10 +35,22 @@ public final class MediaSession {
   public MediaMetadata aclcxxMetadata() { return metadata; }
   public PlaybackState aclcxxPlaybackState() { return playbackState; }
   public boolean aclcxxActive() { return active; }
+  public Callback aclcxxCallback() { return callback; }
 
   public static final class Token {
     private final MediaSession session;
     Token(MediaSession session) { this.session = session; }
     public MediaSession aclcxxSession() { return session; }
+  }
+
+  // Transport controls the framework/host invokes; the app overrides what it
+  // handles. In-process the aclcxx media host calls these directly (no Binder).
+  public static class Callback {
+    public Callback() {}
+    public void onPlay() {}
+    public void onPause() {}
+    public void onStop() {}
+    public void onSkipToNext() {}
+    public void onSkipToPrevious() {}
   }
 }
