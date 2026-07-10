@@ -102,11 +102,17 @@ class DexFile {
     return index < method_refs_.size() ? &method_refs_[index] : nullptr;
   }
 
+  // Resolve a string_ids index (as referenced by const-string operands), or null.
+  const std::string* string_at(std::uint32_t index) const noexcept {
+    return index < strings_.size() ? &strings_[index] : nullptr;
+  }
+
  private:
   DexFile() = default;
   std::vector<std::uint8_t> data_;
   std::vector<DexClass> classes_;
   std::vector<MethodRef> method_refs_;
+  std::vector<std::string> strings_;
 };
 
 // Convert a type descriptor ("I", "V", "[I", "Lcom/example/Foo;") to a Java

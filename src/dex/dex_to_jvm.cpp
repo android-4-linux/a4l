@@ -33,7 +33,7 @@ enum : std::uint8_t {
   OP_ASTORE = 0x3a, OP_DUP = 0x59, OP_IADD = 0x60, OP_ISUB = 0x64,
   OP_IMUL = 0x68, OP_IRETURN = 0xac, OP_ARETURN = 0xb0, OP_RETURN = 0xb1,
   OP_NEW = 0xbb, OP_INVOKESPECIAL = 0xb7, OP_ATHROW = 0xbf, OP_GOTO = 0xa7,
-  OP_POP = 0x57, OP_INVOKESTATIC = 0xb8,
+  OP_POP = 0x57, OP_INVOKESTATIC = 0xb8, OP_INVOKEVIRTUAL = 0xb6,
 };
 
 std::string internal_name(const std::string& java) {
@@ -317,31 +317,48 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 1;
         break;
       }
+      case 0x1a: {  // const-string vAA, string@BBBB (21c)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const std::string* s = dex.string_at(in[pc + 1]);
+        if (s == nullptr) return std::nullopt;
+        e.ldc_string(cw.string_const(*s));
+        e.store_a(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x6e:    // invoke-virtual {vC..vG}, meth@BBBB (35c)
       case 0x71: {  // invoke-static {vC..vG}, meth@BBBB (35c)
         if (pc + 2 >= in.size()) return std::nullopt;
-        const int argc = (u >> 12) & 0xf;
+        const bool is_virtual = opcode == 0x6e;
+        const int argc = (u >> 12) & 0xf;  // includes receiver for invoke-virtual
+        if (is_virtual && argc < 1) return std::nullopt;
         const std::uint32_t midx = in[pc + 1];
         const std::uint16_t rw = in[pc + 2];
         const int arg_reg[5] = {rw & 0xf, (rw >> 4) & 0xf, (rw >> 8) & 0xf,
                                 (rw >> 12) & 0xf, (u >> 8) & 0xf};
         const MethodRef* mr = dex.method_ref(midx);
         if (mr == nullptr) return std::nullopt;
-        if (static_cast<int>(mr->param_descriptors.size()) != argc) {
-          return std::nullopt;  // static: arg count == param count (no receiver)
-        }
-        for (int i = 0; i < argc; ++i) {
+        const int nparams = static_cast<int>(mr->param_descriptors.size());
+        if (nparams != argc - (is_virtual ? 1 : 0)) return std::nullopt;
+
+        int reg = 0;
+        if (is_virtual) e.load_a(local(arg_reg[reg++]));  // receiver
+        for (int i = 0; i < nparams; ++i, ++reg) {
           const std::string& d = mr->param_descriptors[static_cast<std::size_t>(i)];
           if (is_wide_desc(d)) return std::nullopt;
-          if (is_ref_desc(d)) e.load_a(local(arg_reg[i]));
-          else if (is_int_family_desc(d)) e.load_i(local(arg_reg[i]));
+          if (is_ref_desc(d)) e.load_a(local(arg_reg[reg]));
+          else if (is_int_family_desc(d)) e.load_i(local(arg_reg[reg]));
           else return std::nullopt;
         }
         if (is_wide_desc(mr->return_descriptor)) return std::nullopt;
         const int retw = mr->return_descriptor == "V" ? 0 : 1;
         const std::uint16_t ref =
             cw.methodref(mr->owner_internal, mr->name, mr->descriptor);
-        e.op(OP_INVOKESTATIC); e.u2(ref); e.adj(-argc + retw);
-        // Discard the result if it isn't captured by a following move-result.
+        e.op(is_virtual ? OP_INVOKEVIRTUAL : OP_INVOKESTATIC);
+        e.u2(ref);
+        e.adj(-argc + retw);  // pops receiver+params, pushes return
+        // Discard the result if not captured by a following move-result.
         if (retw > 0) {
           const bool next_move_result =
               (pc + 3 < in.size()) &&

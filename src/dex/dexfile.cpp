@@ -260,6 +260,11 @@ std::optional<DexFile> DexFile::parse(const std::uint8_t* data, std::size_t size
            /*string_ids_size*/ r.u32(0x38), /*type_ids_size*/ r.u32(0x40),
            /*proto_ids_size*/ r.u32(0x48),  /*method_ids_size*/ r.u32(0x58)};
 
+  // Resolve the string table for const-string translation.
+  for (std::uint32_t i = 0; i < t.string_ids_size && r.ok(); ++i) {
+    dex.strings_.push_back(t.str(i));
+  }
+
   // Resolve every method_id so the translator can turn invoke-* operands into
   // JVM method references.
   for (std::uint32_t i = 0; i < t.method_ids_size && r.ok(); ++i) {

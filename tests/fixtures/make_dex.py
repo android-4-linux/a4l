@@ -51,11 +51,16 @@ STRINGS = [
     "misc",                  # 9  method name (untranslatable -> stubbed)
     "loopSum",               # 10 method name (branches: sum 1..10 = 55)
     "callSum",               # 11 method name (invoke-static: answer()+loopSum())
+    "Ljava/lang/String;",    # 12 type: String
+    "hello",                 # 13 const-string value
+    "length",                # 14 method name (String.length)
+    "strlen",                # 15 method name (const-string + invoke-virtual)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
 # type_ids -> string index for each descriptor.
-TYPES = ["LHelloDex;", "Ljava/lang/Object;", "V", "I", "[Ljava/lang/String;"]
+TYPES = ["LHelloDex;", "Ljava/lang/Object;", "V", "I", "[Ljava/lang/String;",
+         "Ljava/lang/String;"]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -73,7 +78,7 @@ def build_dex():
     n_strings = len(STRINGS)
     n_types = len(TYPES)
     n_protos = 2
-    n_methods = 5
+    n_methods = 7  # main, answer, misc, loopSum, callSum, strlen, String.length
     n_classdefs = 1
 
     off_string_ids = header_size
@@ -111,9 +116,10 @@ def build_dex():
     # const/16 v0, #42 (op 0x13) -> 0x0013, 0x002a ; return v0 (op 0x0f) -> 0x000f
     data.extend(code_item(1, 0, 0, [0x0013, 0x002A, 0x000F]))
     code_misc_off = off_data + len(data)
-    # const-string v0, "misc" (op 0x1a, unsupported by the translator -> stubbed);
-    # const/4 v0, 0 (0x0012); return v0 (0x000f). Never executed (stub throws).
-    data.extend(code_item(1, 0, 0, [0x001A, S["misc"], 0x0012, 0x000F]))
+    # new-instance v0, Ljava/lang/Object; (op 0x22, unsupported -> stubbed). The
+    # translator bails at the first unsupported opcode; the rest is never reached
+    # (the emitted stub throws). Keeps the stub-fallback path under test.
+    data.extend(code_item(1, 0, 0, [0x0022, T["Ljava/lang/Object;"], 0x0012, 0x000F]))
     code_loopsum_off = off_data + len(data)
     # int loopSum() { int sum=0,i=1; while(!(i>10)){ sum+=i; i+=1; } return sum; }
     #   pc0  const/4    v0, 0
@@ -138,21 +144,30 @@ def build_dex():
         0x0071, 0x0003, 0x0000, 0x010A,   # invoke-static {} loopSum; move-result v1
         0x0090, 0x0100, 0x000F,           # add-int v0,v0,v1 ; return v0
     ]))
+    code_strlen_off = off_data + len(data)
+    # int strlen() { return "hello".length(); }   (== 5)
+    #   const-string   v0, "hello"
+    #   invoke-virtual {v0}, String.length()I  (method 6) ; move-result v1
+    #   return v1
+    data.extend(code_item(2, 0, 1, [
+        0x001A, S["hello"], 0x106E, 0x0006, 0x0000, 0x010A, 0x010F,
+    ]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
     cd += uleb128(0)  # static_fields_size
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(5)  # direct_methods_size
+    cd += uleb128(6)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
     # direct methods, sorted by ascending method index; idx diffs are cumulative.
-    # m0=main, m1=answer, m2=misc, m3=loopSum, m4=callSum.
+    # m0=main, m1=answer, m2=misc, m3=loopSum, m4=callSum, m5=strlen.
     cd += uleb128(0) + uleb128(0x9) + uleb128(code_main_off)      # diff 0 -> idx 0
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_answer_off)    # diff 1 -> idx 1
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_misc_off)      # diff 1 -> idx 2
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_loopsum_off)   # diff 1 -> idx 3
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_callsum_off)   # diff 1 -> idx 4
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_strlen_off)    # diff 1 -> idx 5
     data.extend(cd)
 
     # map_list (4-aligned). Parser ignores it, but emit a valid one.
@@ -167,7 +182,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 1, type_list_main_off),
-        (0x2001, 5, code_main_off),
+        (0x2001, 6, code_main_off),
         (0x2000, 1, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -194,6 +209,8 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["misc"])     # proto ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["loopSum"])  # proto ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["callSum"])  # proto ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["strlen"])   # m5 ()I
+    method_ids += struct.pack("<HHI", T["Ljava/lang/String;"], 1, S["length"])  # m6 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",
