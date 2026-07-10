@@ -260,6 +260,24 @@ std::optional<DexFile> DexFile::parse(const std::uint8_t* data, std::size_t size
            /*string_ids_size*/ r.u32(0x38), /*type_ids_size*/ r.u32(0x40),
            /*proto_ids_size*/ r.u32(0x48),  /*method_ids_size*/ r.u32(0x58)};
 
+  // Resolve every method_id so the translator can turn invoke-* operands into
+  // JVM method references.
+  for (std::uint32_t i = 0; i < t.method_ids_size && r.ok(); ++i) {
+    DexMethod tmp;
+    t.method(i, tmp);
+    MethodRef mr;
+    std::string owner = t.type_desc(r.u16(t.method_ids_off + i * 8));
+    if (owner.size() >= 2 && owner.front() == 'L' && owner.back() == ';') {
+      owner = owner.substr(1, owner.size() - 2);
+    }
+    mr.owner_internal = std::move(owner);
+    mr.name = std::move(tmp.name);
+    mr.return_descriptor = tmp.return_descriptor;
+    mr.param_descriptors = tmp.param_descriptors;
+    mr.descriptor = tmp.jvm_descriptor();
+    dex.method_refs_.push_back(std::move(mr));
+  }
+
   const std::uint32_t class_defs_size = r.u32(0x60);
   const std::uint64_t class_defs_off = r.u32(0x64);
 

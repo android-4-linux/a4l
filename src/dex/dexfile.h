@@ -77,6 +77,16 @@ struct DexClass {
   std::vector<DexMethod> virtual_methods;
 };
 
+// A resolved method reference (from the method_ids table), for translating
+// invoke-* instructions.
+struct MethodRef {
+  std::string owner_internal;             // e.g. "java/lang/Integer"
+  std::string name;                       // e.g. "parseInt"
+  std::string descriptor;                 // e.g. "(Ljava/lang/String;)I"
+  std::string return_descriptor;          // e.g. "I"
+  std::vector<std::string> param_descriptors;
+};
+
 class DexFile {
  public:
   // Parse `data` (copied in). On failure returns nullopt and fills `out_error`.
@@ -87,10 +97,16 @@ class DexFile {
 
   const std::vector<DexClass>& classes() const noexcept { return classes_; }
 
+  // Resolve a method_ids index (as referenced by invoke-* operands), or nullptr.
+  const MethodRef* method_ref(std::uint32_t index) const noexcept {
+    return index < method_refs_.size() ? &method_refs_[index] : nullptr;
+  }
+
  private:
   DexFile() = default;
   std::vector<std::uint8_t> data_;
   std::vector<DexClass> classes_;
+  std::vector<MethodRef> method_refs_;
 };
 
 // Convert a type descriptor ("I", "V", "[I", "Lcom/example/Foo;") to a Java
