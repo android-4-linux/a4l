@@ -161,6 +161,7 @@ class JvmVm final : public Vm {
       log_context(activity);
       // onCreate(null) -> onStart() -> onResume(), the documented launch order.
       result = call_lifecycle(cls, activity, "onCreate", "(Landroid/os/Bundle;)V", true);
+      if (result.is_ok()) probe_managers(activity);
       if (result.is_ok())
         result = call_lifecycle(cls, activity, "onStart", "()V", false);
       if (result.is_ok())
@@ -200,6 +201,7 @@ class JvmVm final : public Vm {
       log::i(kTag, "hosting MediaBrowserService {}", service_class);
       log_context(svc);
       result = call_lifecycle(cls, svc, "onCreate", "()V", false);
+      if (result.is_ok()) probe_managers(svc);  // the app's MediaSession now shows up
       if (result.is_ok()) result = read_session(cls, svc);
       if (result.is_ok()) result = browse_root(cls, svc);
       env_->DeleteLocalRef(svc);
@@ -256,6 +258,55 @@ class JvmVm final : public Vm {
       env_->DeleteLocalRef(obj_cls);
     }
     env_->DeleteLocalRef(ctx_cls);
+  }
+
+  // Exercise the svc/-backed Managers via getSystemService on the app's Context —
+  // the framework itself calls these. Proves ActivityManager / WindowManager+Display
+  // / MediaSessionManager are wired; the MediaSession the app created shows up.
+  void probe_managers(jobject ctx) {
+    jclass ctx_cls = env_->GetObjectClass(ctx);
+    jmethodID gss = env_->GetMethodID(ctx_cls, "getSystemService",
+                                      "(Ljava/lang/String;)Ljava/lang/Object;");
+    env_->DeleteLocalRef(ctx_cls);
+    if (gss == nullptr) { clear_exception(); return; }
+
+    const auto svc = [&](const char* name) -> jobject {
+      jstring s = env_->NewStringUTF(name);
+      jobject o = env_->CallObjectMethod(ctx, gss, s);
+      env_->DeleteLocalRef(s);
+      if (env_->ExceptionCheck() == JNI_TRUE) env_->ExceptionClear();
+      return o;
+    };
+    const auto call_int = [&](jobject o, const char* method) -> int {
+      jclass c = env_->GetObjectClass(o);
+      jmethodID m = env_->GetMethodID(c, method, "()I");
+      const int v = m != nullptr ? env_->CallIntMethod(o, m) : -1;
+      if (m == nullptr) clear_exception();
+      env_->DeleteLocalRef(c);
+      return v;
+    };
+
+    if (jobject am = svc("activity")) {
+      log::i(kTag, "ActivityManager: memoryClass={} MB", call_int(am, "getMemoryClass"));
+      env_->DeleteLocalRef(am);
+    }
+    if (jobject wm = svc("window")) {
+      jclass c = env_->GetObjectClass(wm);
+      jmethodID gdd = env_->GetMethodID(c, "getDefaultDisplay", "()Landroid/view/Display;");
+      jobject d = gdd != nullptr ? env_->CallObjectMethod(wm, gdd) : nullptr;
+      if (d != nullptr) {
+        log::i(kTag, "WindowManager: display={}x{}", call_int(d, "getWidth"),
+               call_int(d, "getHeight"));
+        env_->DeleteLocalRef(d);
+      } else { clear_exception(); }
+      env_->DeleteLocalRef(c);
+      env_->DeleteLocalRef(wm);
+    }
+    if (jobject msm = svc("media_session")) {
+      log::i(kTag, "MediaSessionManager: activeSessions={}",
+             call_int(msm, "aclcxxActiveSessionCount"));
+      env_->DeleteLocalRef(msm);
+    }
   }
 
   // Print + clear a pending exception and return a RuntimeError describing `what`.

@@ -17,6 +17,7 @@ CHECKS = [
     "hosting MediaBrowserService com.aclcxx.hello.MusicService",
     "entry point is a Context: getPackageName()",  # MusicService extends Context
     "media session: title='Now Playing Track'",  # MediaSession(Context,...) published
+    "MediaSessionManager: activeSessions=1",  # the app's session surfaces in the svc hub
     "onPlay: playback started",                   # host onPlay -> app Callback reacted
     "onPause: playback paused",                   # host onPause -> app Callback reacted
     "media browse root: aclcxx_root",

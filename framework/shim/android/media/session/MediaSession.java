@@ -25,7 +25,12 @@ public final class MediaSession {
 
   // Now takes a real Context (the app passes `this` — its Service/Activity, which
   // are Contexts). Was Object before the Context hierarchy landed.
-  public MediaSession(Context context, String tag) { this.tag = tag; }
+  public MediaSession(Context context, String tag) {
+    this.tag = tag;
+    nativeRegister();  // surface in MediaSessionManager.getActiveSessions
+  }
+
+  private static native void nativeRegister();
 
   public void setMetadata(MediaMetadata metadata) { this.metadata = metadata; }
   public void setPlaybackState(PlaybackState state) { this.playbackState = state; }

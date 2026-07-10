@@ -117,6 +117,32 @@ jint JNICALL Prefs_nativeGetInt(JNIEnv* env, jclass /*c*/, jstring name, jstring
   return svc::prefs().get_int(to_utf8(env, name), to_utf8(env, key), def_value);
 }
 
+// --- ActivityManager / WindowManager.Display / MediaSessionManager -> svc/ ------
+jint JNICALL ActivityManager_getMemoryClass(JNIEnv*, jclass) {
+  return svc::activity().memory_class();
+}
+jboolean JNICALL ActivityManager_isLowRamDevice(JNIEnv*, jclass) {
+  return svc::activity().low_ram_device() ? JNI_TRUE : JNI_FALSE;
+}
+jint JNICALL Display_getWidth(JNIEnv*, jclass) { return svc::window().display_width(); }
+jint JNICALL Display_getHeight(JNIEnv*, jclass) { return svc::window().display_height(); }
+jint JNICALL Display_getRotation(JNIEnv*, jclass) { return svc::window().rotation(); }
+jint JNICALL MediaSessionManager_activeCount(JNIEnv*, jclass) {
+  return svc::media_sessions().active_sessions();
+}
+void JNICALL MediaSession_register(JNIEnv*, jclass) { svc::media_sessions().register_session(); }
+
+// Bind `n` static natives on class `name`; returns false (cleared) if the class or
+// registration is absent.
+bool bind(JNIEnv* env, const char* name, const JNINativeMethod* methods, int n) {
+  jclass cls = env->FindClass(name);
+  if (cls == nullptr) { env->ExceptionClear(); return false; }
+  const bool ok = env->RegisterNatives(cls, methods, n) == JNI_OK;
+  if (!ok) env->ExceptionClear();
+  env->DeleteLocalRef(cls);
+  return ok;
+}
+
 }  // namespace
 
 void register_framework_natives(JNIEnv* env) {
@@ -228,6 +254,37 @@ void register_framework_natives(JNIEnv* env) {
                "framework native bound: android.content.SharedPreferences");
   } else {
     env->ExceptionClear();
+  }
+
+  // More svc/ Managers (ActivityManager, WindowManager.Display, MediaSessionManager).
+  const JNINativeMethod am_m[] = {
+      {const_cast<char*>("nativeGetMemoryClass"), const_cast<char*>("()I"),
+       reinterpret_cast<void*>(&ActivityManager_getMemoryClass)},
+      {const_cast<char*>("nativeIsLowRamDevice"), const_cast<char*>("()Z"),
+       reinterpret_cast<void*>(&ActivityManager_isLowRamDevice)},
+  };
+  bind(env, "android/app/ActivityManager", am_m, 2);
+  const JNINativeMethod disp_m[] = {
+      {const_cast<char*>("nativeGetWidth"), const_cast<char*>("()I"),
+       reinterpret_cast<void*>(&Display_getWidth)},
+      {const_cast<char*>("nativeGetHeight"), const_cast<char*>("()I"),
+       reinterpret_cast<void*>(&Display_getHeight)},
+      {const_cast<char*>("nativeGetRotation"), const_cast<char*>("()I"),
+       reinterpret_cast<void*>(&Display_getRotation)},
+  };
+  bind(env, "android/view/Display", disp_m, 3);
+  const JNINativeMethod msm_m[] = {
+      {const_cast<char*>("nativeActiveSessionCount"), const_cast<char*>("()I"),
+       reinterpret_cast<void*>(&MediaSessionManager_activeCount)},
+  };
+  bind(env, "android/media/session/MediaSessionManager", msm_m, 1);
+  const JNINativeMethod ms_m[] = {
+      {const_cast<char*>("nativeRegister"), const_cast<char*>("()V"),
+       reinterpret_cast<void*>(&MediaSession_register)},
+  };
+  if (bind(env, "android/media/session/MediaSession", ms_m, 1)) {
+    log::write(log::Level::Info, "aclcxx.runtime.jvm",
+               "framework natives bound: ActivityManager, Display, MediaSession(Manager)");
   }
 }
 

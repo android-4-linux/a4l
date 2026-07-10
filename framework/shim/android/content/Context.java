@@ -33,6 +33,9 @@ public class Context {
   // call the in-process aclcxx svc/ hub. More Managers land as apps need them.
   public Object getSystemService(String name) {
     if (AUDIO_SERVICE.equals(name)) return new android.media.AudioManager();
+    if (ACTIVITY_SERVICE.equals(name)) return new android.app.ActivityManager();
+    if (WINDOW_SERVICE.equals(name)) return new android.view.WindowManager();
+    if (MEDIA_SESSION_SERVICE.equals(name)) return new android.media.session.MediaSessionManager();
     return null;
   }
 

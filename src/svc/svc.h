@@ -37,6 +37,34 @@ class AudioService {
   AudioService();
 };
 
+// Backs android.app.ActivityManager: process/memory facts.
+class ActivityService {
+ public:
+  int memory_class() const { return 192; }   // MB per-app heap (a typical value)
+  bool low_ram_device() const { return false; }
+};
+
+// Backs android.view.WindowManager / Display: display metrics. A fixed logical
+// display until the wm/ + gfx/ Wayland/Skia stack lands (Phase 2).
+class WindowService {
+ public:
+  int display_width() const { return 1920; }
+  int display_height() const { return 1080; }
+  int rotation() const { return 0; }          // Surface.ROTATION_0
+};
+
+// Backs android.media.session.MediaSessionManager: tracks active sessions. A
+// MediaSession registers on construction, so it surfaces in getActiveSessions.
+class MediaSessionService {
+ public:
+  void register_session() { ++active_; }
+  void unregister_session() { if (active_ > 0) --active_; }
+  int active_sessions() const { return active_; }
+
+ private:
+  int active_ = 0;
+};
+
 // Backs android.content.SharedPreferences: named key/value stores, in-process.
 // (A real hub persists these to per-package files; in-memory for now.)
 class PreferencesService {
@@ -53,6 +81,9 @@ class PreferencesService {
 
 // Process singletons for the hub's services.
 AudioService& audio();
+ActivityService& activity();
+WindowService& window();
+MediaSessionService& media_sessions();
 PreferencesService& prefs();
 
 const char* module_name() noexcept;

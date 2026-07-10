@@ -77,6 +77,21 @@ PreferencesService& prefs() {
   return instance;
 }
 
+ActivityService& activity() {
+  static ActivityService instance;
+  return instance;
+}
+
+WindowService& window() {
+  static WindowService instance;
+  return instance;
+}
+
+MediaSessionService& media_sessions() {
+  static MediaSessionService instance;
+  return instance;
+}
+
 const char* module_name() noexcept { return "svc"; }
 
 }  // namespace aclcxx::svc

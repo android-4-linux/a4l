@@ -42,6 +42,10 @@ def main() -> int:
         sys.stderr.write("FAIL: getSystemService(AUDIO) did not reach the svc hub\n"); ok = False
     if PREFS not in out:
         sys.stderr.write("FAIL: getSharedPreferences write did not reach the svc hub\n"); ok = False
+    for mgr in ("ActivityManager: memoryClass=192 MB", "WindowManager: display=1920x1080",
+                "MediaSessionManager: activeSessions=0"):
+        if mgr not in out:
+            sys.stderr.write(f"FAIL: svc Manager not reachable: '{mgr}'\n"); ok = False
     if "is not an Activity" in out or "invoking static main" in out:
         sys.stderr.write("FAIL: wrongly fell back to static main()\n"); ok = False
 
