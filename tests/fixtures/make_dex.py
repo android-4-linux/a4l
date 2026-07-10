@@ -52,15 +52,20 @@ STRINGS = [
     "loopSum",               # 10 method name (branches: sum 1..10 = 55)
     "callSum",               # 11 method name (invoke-static: answer()+loopSum())
     "Ljava/lang/String;",    # 12 type: String
-    "hello",                 # 13 const-string value
+    "hello",                 # 13 const-string value / hello() method name
     "length",                # 14 method name (String.length)
     "strlen",                # 15 method name (const-string + invoke-virtual)
+    "Ljava/lang/System;",    # 16 type: System
+    "Ljava/io/PrintStream;", # 17 type: PrintStream
+    "out",                   # 18 field name (System.out)
+    "println",               # 19 method name (PrintStream.println)
+    "hello aclcxx",          # 20 const-string value
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
 # type_ids -> string index for each descriptor.
 TYPES = ["LHelloDex;", "Ljava/lang/Object;", "V", "I", "[Ljava/lang/String;",
-         "Ljava/lang/String;"]
+         "Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;"]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -77,14 +82,16 @@ def build_dex():
     header_size = 112
     n_strings = len(STRINGS)
     n_types = len(TYPES)
-    n_protos = 2
-    n_methods = 7  # main, answer, misc, loopSum, callSum, strlen, String.length
+    n_protos = 4   # ()V-ish..., see below
+    n_fields = 1   # System.out
+    n_methods = 9  # + hello, PrintStream.println
     n_classdefs = 1
 
     off_string_ids = header_size
     off_type_ids = off_string_ids + n_strings * 4
     off_proto_ids = off_type_ids + n_types * 4
-    off_method_ids = off_proto_ids + n_protos * 12
+    off_field_ids = off_proto_ids + n_protos * 12
+    off_method_ids = off_field_ids + n_fields * 8
     off_class_defs = off_method_ids + n_methods * 8
     off_data = off_class_defs + n_classdefs * 32
 
@@ -107,6 +114,11 @@ def build_dex():
     type_list_main_off = off_data + len(data)
     tl = struct.pack("<I", 1) + struct.pack("<H", T["[Ljava/lang/String;"])
     data.extend(align4(bytearray(tl)))
+    # type_list for println's parameters: (String)
+    data.extend(align4(bytearray()))
+    type_list_println_off = off_data + len(data)
+    tl2 = struct.pack("<I", 1) + struct.pack("<H", T["Ljava/lang/String;"])
+    data.extend(align4(bytearray(tl2)))
 
     # code items
     code_main_off = off_data + len(data)
@@ -152,22 +164,32 @@ def build_dex():
     data.extend(code_item(2, 0, 1, [
         0x001A, S["hello"], 0x106E, 0x0006, 0x0000, 0x010A, 0x010F,
     ]))
+    code_hello_off = off_data + len(data)
+    # void hello() { System.out.println("hello aclcxx"); }
+    #   sget-object    v0, System.out:PrintStream   (field 0)
+    #   const-string   v1, "hello aclcxx"
+    #   invoke-virtual {v0, v1}, PrintStream.println(String)V  (method 8)
+    #   return-void
+    data.extend(code_item(2, 0, 2, [
+        0x0062, 0x0000, 0x011A, S["hello aclcxx"], 0x206E, 0x0008, 0x0010, 0x000E,
+    ]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
     cd += uleb128(0)  # static_fields_size
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(6)  # direct_methods_size
+    cd += uleb128(7)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
     # direct methods, sorted by ascending method index; idx diffs are cumulative.
-    # m0=main, m1=answer, m2=misc, m3=loopSum, m4=callSum, m5=strlen.
+    # m0=main, m1=answer, m2=misc, m3=loopSum, m4=callSum, m5=strlen, m7=hello.
     cd += uleb128(0) + uleb128(0x9) + uleb128(code_main_off)      # diff 0 -> idx 0
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_answer_off)    # diff 1 -> idx 1
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_misc_off)      # diff 1 -> idx 2
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_loopsum_off)   # diff 1 -> idx 3
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_callsum_off)   # diff 1 -> idx 4
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_strlen_off)    # diff 1 -> idx 5
+    cd += uleb128(2) + uleb128(0x9) + uleb128(code_hello_off)     # diff 2 -> idx 7
     data.extend(cd)
 
     # map_list (4-aligned). Parser ignores it, but emit a valid one.
@@ -178,11 +200,12 @@ def build_dex():
         (0x0001, n_strings, off_string_ids),
         (0x0002, n_types, off_type_ids),
         (0x0003, n_protos, off_proto_ids),
+        (0x0004, n_fields, off_field_ids),
         (0x0005, n_methods, off_method_ids),
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
-        (0x1001, 1, type_list_main_off),
-        (0x2001, 6, code_main_off),
+        (0x1001, 2, type_list_main_off),
+        (0x2001, 7, code_main_off),
         (0x2000, 1, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -202,6 +225,14 @@ def build_dex():
     proto_ids += struct.pack("<III", S["VL"], T["V"], type_list_main_off)
     # proto 1: answer -> shorty "I", return I, no params
     proto_ids += struct.pack("<III", S["I"], T["I"], 0)
+    # proto 2: println -> shorty "VL", return V, params (String)
+    proto_ids += struct.pack("<III", S["VL"], T["V"], type_list_println_off)
+    # proto 3: hello -> shorty "V", return V, no params
+    proto_ids += struct.pack("<III", S["V"], T["V"], 0)
+
+    # field_ids: {class_idx(u16), type_idx(u16), name_idx(u32)}
+    field_ids = struct.pack("<HHI", T["Ljava/lang/System;"],
+                            T["Ljava/io/PrintStream;"], S["out"])  # System.out
 
     method_ids = b""
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 0, S["main"])
@@ -211,6 +242,8 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["callSum"])  # proto ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["strlen"])   # m5 ()I
     method_ids += struct.pack("<HHI", T["Ljava/lang/String;"], 1, S["length"])  # m6 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 3, S["hello"])    # m7 ()V
+    method_ids += struct.pack("<HHI", T["Ljava/io/PrintStream;"], 2, S["println"])  # m8
 
     class_defs = struct.pack(
         "<IIIIIIII",
@@ -236,8 +269,8 @@ def build_dex():
     struct.pack_into("<I", header, 0x44, off_type_ids)
     struct.pack_into("<I", header, 0x48, n_protos)
     struct.pack_into("<I", header, 0x4C, off_proto_ids)
-    struct.pack_into("<I", header, 0x50, 0)   # field_ids_size
-    struct.pack_into("<I", header, 0x54, 0)   # field_ids_off
+    struct.pack_into("<I", header, 0x50, n_fields)       # field_ids_size
+    struct.pack_into("<I", header, 0x54, off_field_ids)  # field_ids_off
     struct.pack_into("<I", header, 0x58, n_methods)
     struct.pack_into("<I", header, 0x5C, off_method_ids)
     struct.pack_into("<I", header, 0x60, n_classdefs)
@@ -246,7 +279,7 @@ def build_dex():
     struct.pack_into("<I", header, 0x6C, off_data)
 
     dex = bytearray(header) + string_ids + type_ids + proto_ids + \
-        method_ids + class_defs + bytes(data)
+        field_ids + method_ids + class_defs + bytes(data)
     struct.pack_into("<I", dex, 0x20, len(dex))  # file_size
 
     # signature = SHA-1 over everything after the signature field (offset 32).

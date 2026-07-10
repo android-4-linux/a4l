@@ -32,6 +32,8 @@ class ClassWriter {
   std::uint16_t integer_const(std::int32_t v);
   std::uint16_t methodref(std::string_view cls, std::string_view name,
                           std::string_view desc);
+  std::uint16_t fieldref(std::string_view cls, std::string_view name,
+                         std::string_view desc);
 
   // Add a method with pre-assembled bytecode.
   void add_method(std::uint16_t access_flags, std::string_view name,

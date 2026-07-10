@@ -87,6 +87,13 @@ struct MethodRef {
   std::vector<std::string> param_descriptors;
 };
 
+// A resolved field reference (from the field_ids table), for sget/sput/etc.
+struct FieldRef {
+  std::string owner_internal;    // e.g. "java/lang/System"
+  std::string name;              // e.g. "out"
+  std::string type_descriptor;   // e.g. "Ljava/io/PrintStream;"
+};
+
 class DexFile {
  public:
   // Parse `data` (copied in). On failure returns nullopt and fills `out_error`.
@@ -107,11 +114,17 @@ class DexFile {
     return index < strings_.size() ? &strings_[index] : nullptr;
   }
 
+  // Resolve a field_ids index (as referenced by sget/sput/etc.), or nullptr.
+  const FieldRef* field_ref(std::uint32_t index) const noexcept {
+    return index < field_refs_.size() ? &field_refs_[index] : nullptr;
+  }
+
  private:
   DexFile() = default;
   std::vector<std::uint8_t> data_;
   std::vector<DexClass> classes_;
   std::vector<MethodRef> method_refs_;
+  std::vector<FieldRef> field_refs_;
   std::vector<std::string> strings_;
 };
 

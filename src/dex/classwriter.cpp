@@ -15,6 +15,7 @@ constexpr std::uint8_t kClass = 7;
 constexpr std::uint8_t kString = 8;
 constexpr std::uint8_t kNameAndType = 12;
 constexpr std::uint8_t kMethodref = 10;
+constexpr std::uint8_t kFieldref = 9;
 
 void be16(std::vector<std::uint8_t>& v, std::uint16_t x) {
   v.push_back(static_cast<std::uint8_t>(x >> 8));
@@ -90,6 +91,18 @@ std::uint16_t ClassWriter::methodref(std::string_view cls, std::string_view name
   be16(e, c);
   be16(e, nt);
   return add_entry(std::move(e), "M:" + std::string(cls) + ":" +
+                                     std::string(name) + ":" + std::string(desc));
+}
+
+std::uint16_t ClassWriter::fieldref(std::string_view cls, std::string_view name,
+                                    std::string_view desc) {
+  const std::uint16_t c = class_ref(cls);
+  const std::uint16_t nt = name_and_type(name, desc);
+  std::vector<std::uint8_t> e;
+  e.push_back(kFieldref);
+  be16(e, c);
+  be16(e, nt);
+  return add_entry(std::move(e), "F:" + std::string(cls) + ":" +
                                      std::string(name) + ":" + std::string(desc));
 }
 

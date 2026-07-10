@@ -143,8 +143,10 @@ namespace {
 // Bundles the header table offsets and resolves ids to strings/types/methods.
 struct Tables {
   Reader& r;
-  std::uint64_t string_ids_off, type_ids_off, proto_ids_off, method_ids_off;
-  std::uint32_t string_ids_size, type_ids_size, proto_ids_size, method_ids_size;
+  std::uint64_t string_ids_off, type_ids_off, proto_ids_off, method_ids_off,
+      field_ids_off;
+  std::uint32_t string_ids_size, type_ids_size, proto_ids_size, method_ids_size,
+      field_ids_size;
 
   std::string str(std::uint32_t idx) {
     if (idx >= string_ids_size) { r.fail("string index out of range"); return {}; }
@@ -257,8 +259,10 @@ std::optional<DexFile> DexFile::parse(const std::uint8_t* data, std::size_t size
   Tables t{r,
            /*string_ids_off*/ r.u32(0x3c), /*type_ids_off*/ r.u32(0x44),
            /*proto_ids_off*/ r.u32(0x4c),  /*method_ids_off*/ r.u32(0x5c),
+           /*field_ids_off*/ r.u32(0x54),
            /*string_ids_size*/ r.u32(0x38), /*type_ids_size*/ r.u32(0x40),
-           /*proto_ids_size*/ r.u32(0x48),  /*method_ids_size*/ r.u32(0x58)};
+           /*proto_ids_size*/ r.u32(0x48),  /*method_ids_size*/ r.u32(0x58),
+           /*field_ids_size*/ r.u32(0x50)};
 
   // Resolve the string table for const-string translation.
   for (std::uint32_t i = 0; i < t.string_ids_size && r.ok(); ++i) {
@@ -281,6 +285,20 @@ std::optional<DexFile> DexFile::parse(const std::uint8_t* data, std::size_t size
     mr.param_descriptors = tmp.param_descriptors;
     mr.descriptor = tmp.jvm_descriptor();
     dex.method_refs_.push_back(std::move(mr));
+  }
+
+  // Resolve every field_id for sget/sput translation.
+  for (std::uint32_t i = 0; i < t.field_ids_size && r.ok(); ++i) {
+    const std::uint64_t base = t.field_ids_off + i * 8;
+    FieldRef fr;
+    std::string owner = t.type_desc(r.u16(base + 0));
+    if (owner.size() >= 2 && owner.front() == 'L' && owner.back() == ';') {
+      owner = owner.substr(1, owner.size() - 2);
+    }
+    fr.owner_internal = std::move(owner);
+    fr.type_descriptor = t.type_desc(r.u16(base + 2));
+    fr.name = t.str(r.u32(base + 4));
+    dex.field_refs_.push_back(std::move(fr));
   }
 
   const std::uint32_t class_defs_size = r.u32(0x60);

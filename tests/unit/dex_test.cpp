@@ -57,7 +57,7 @@ TEST_CASE("DexFile parses classes and method signatures", "[dex]") {
   REQUIRE(c.super_name.has_value());
   CHECK(*c.super_name == "java.lang.Object");
   CHECK(c.access_flags & kAccPublic);
-  REQUIRE(c.direct_methods.size() == 6);
+  REQUIRE(c.direct_methods.size() == 7);
 
   const DexMethod* main = find(c.direct_methods, "main");
   REQUIRE(main != nullptr);
@@ -100,7 +100,7 @@ TEST_CASE("convert emits a real .class and translates the int subset", "[dex]") 
 
   // main, answer, and loopSum (branches) translate; misc (const-string) is
   // unsupported and falls back to a bytecode stub.
-  CHECK(res.translated_methods == 5);
+  CHECK(res.translated_methods == 6);
   CHECK(res.stubbed_methods == 1);
 
   const std::filesystem::path cls =

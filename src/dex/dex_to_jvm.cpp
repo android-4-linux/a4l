@@ -34,6 +34,7 @@ enum : std::uint8_t {
   OP_IMUL = 0x68, OP_IRETURN = 0xac, OP_ARETURN = 0xb0, OP_RETURN = 0xb1,
   OP_NEW = 0xbb, OP_INVOKESPECIAL = 0xb7, OP_ATHROW = 0xbf, OP_GOTO = 0xa7,
   OP_POP = 0x57, OP_INVOKESTATIC = 0xb8, OP_INVOKEVIRTUAL = 0xb6,
+  OP_GETSTATIC = 0xb2,
 };
 
 std::string internal_name(const std::string& java) {
@@ -323,6 +324,18 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         const std::string* s = dex.string_at(in[pc + 1]);
         if (s == nullptr) return std::nullopt;
         e.ldc_string(cw.string_const(*s));
+        e.store_a(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x62: {  // sget-object vAA, field@BBBB (21c)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        if (fr == nullptr || !is_ref_desc(fr->type_descriptor)) return std::nullopt;
+        e.op(OP_GETSTATIC);
+        e.u2(cw.fieldref(fr->owner_internal, fr->name, fr->type_descriptor));
+        e.adj(+1);
         e.store_a(local(a));
         pc += 2;
         break;
