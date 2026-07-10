@@ -142,15 +142,28 @@ std::unique_ptr<Vm> create_vm(Backend backend, VmConfig config, Error& out_error
       out_error = Error::ok();
       return std::make_unique<NullVm>(std::move(config));
 
-    case Backend::Art:
-      // R-1 / ADR-0001: the host ART build is the hardest infrastructure item and
-      // is not linked in this build. Vendor AOSP `art` (host) to enable it, or
-      // select the JVM fallback.
+    case Backend::Art: {
+      // R-1 / ADR-0001 (reaffirmed at the Gate-G1 confrontation): host ART is the
+      // target, but standing up a host-ART build is out of budget so far. The seam
+      // is ready — Backend::Art, VmConfig.boot_classpath, and cache_dir model what a
+      // host-ART VM consumes; ACLCXX_ART_HOME points at a prebuilt host ART. When
+      // the embedding lands (JNI_CreateJavaVM against libart.so with -Ximage=<boot
+      // image>) this branch constructs it. Until then it reports precisely how to
+      // enable it.
+      const char* art_home = std::getenv("ACLCXX_ART_HOME");
       out_error = Error::of(
           Status::Unavailable,
-          "host ART backend not available (R-1); vendor AOSP art (host build) "
-          "or use --vm=jvm. See docs/adr/ADR-0001-dex-execution-host-art.md");
+          (art_home != nullptr && *art_home != '\0')
+              ? std::string("ACLCXX_ART_HOME=") + art_home +
+                    " is set, but the host-ART embedding is not compiled into this "
+                    "build (R-1). The seam is ready; see "
+                    "docs/adr/ADR-0001-dex-execution-host-art.md."
+              : std::string(
+                    "host ART not available (R-1). Build a host ART + boot image, "
+                    "set ACLCXX_ART_HOME, or use --vm=jvm (the development/CI "
+                    "vehicle). See docs/adr/ADR-0001-dex-execution-host-art.md."));
       return nullptr;
+    }
 
     case Backend::Jvm:
 #if ACLCXX_HAVE_JNI
