@@ -248,8 +248,8 @@ std::string obj_internal(const std::string& desc) {
 int dalvik_insn_units(std::uint8_t op) {
   if (op == 0x18) return 5;                                        // const-wide
   if (op == 0x14 || op == 0x17 || op == 0x24 || op == 0x2b || op == 0x2c ||
-      (op >= 0x6e && op <= 0x72)) {
-    return 3;  // const, const-wide/32, filled-new-array, packed/sparse-switch, invoke-*
+      (op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) {
+    return 3;  // const, const-wide/32, filled-new-array, packed/sparse-switch, invoke-{,/range}
   }
   if (op == 0x13 || op == 0x15 || op == 0x16 || op == 0x19 || op == 0x1a ||
       op == 0x1c ||                  // const-class
@@ -1051,33 +1051,47 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
       case 0x6f:    // invoke-super     {vC..vG}, meth@BBBB (35c)
       case 0x70:    // invoke-direct    {vC..vG}, meth@BBBB (35c) - <init>/private
       case 0x71:    // invoke-static    {vC..vG}, meth@BBBB (35c)
-      case 0x72: {  // invoke-interface {vC..vG}, meth@BBBB (35c)
+      case 0x72:    // invoke-interface {vC..vG}, meth@BBBB (35c)
+      case 0x74:    // invoke-virtual/range   {vCCCC..vNNNN}, meth@BBBB (3rc)
+      case 0x75:    // invoke-super/range
+      case 0x76:    // invoke-direct/range
+      case 0x77:    // invoke-static/range
+      case 0x78: {  // invoke-interface/range
         if (pc + 2 >= in.size()) return std::nullopt;
-        const bool is_static_call = opcode == 0x71;
-        const bool is_interface = opcode == 0x72;
+        const bool is_range = opcode >= 0x74;
+        // Map /range opcodes (0x74..0x78) onto their 35c kin (0x6e..0x72).
+        const std::uint8_t kind = is_range
+            ? static_cast<std::uint8_t>(opcode - (0x74 - 0x6e)) : opcode;
+        const bool is_static_call = kind == 0x71;
+        const bool is_interface = kind == 0x72;
         const bool has_receiver = !is_static_call;
         const std::uint8_t invoke_op =
             is_static_call ? OP_INVOKESTATIC
-            : (opcode == 0x70 || opcode == 0x6f) ? OP_INVOKESPECIAL
-                                                 : OP_INVOKEVIRTUAL;
-        const int argc = (u >> 12) & 0xf;  // includes receiver when present
+            : (kind == 0x70 || kind == 0x6f) ? OP_INVOKESPECIAL
+                                             : OP_INVOKEVIRTUAL;
+        // 35c: arg count in the high nibble, registers nibble-packed.
+        // 3rc: arg count in AA, registers contiguous from CCCC.
+        const int argc = is_range ? ((u >> 8) & 0xff) : ((u >> 12) & 0xf);
         if (has_receiver && argc < 1) return std::nullopt;
         const std::uint32_t midx = in[pc + 1];
         const std::uint16_t rw = in[pc + 2];
-        const int arg_reg[5] = {rw & 0xf, (rw >> 4) & 0xf, (rw >> 8) & 0xf,
-                                (rw >> 12) & 0xf, (u >> 8) & 0xf};
+        const int nibble_reg[5] = {rw & 0xf, (rw >> 4) & 0xf, (rw >> 8) & 0xf,
+                                   (rw >> 12) & 0xf, (u >> 8) & 0xf};
+        const auto arg_reg = [&](int i) {
+          return is_range ? (rw + i) : nibble_reg[i];
+        };
         const MethodRef* mr = dex.method_ref(midx);
         if (mr == nullptr) return std::nullopt;
         const int nparams = static_cast<int>(mr->param_descriptors.size());
         if (nparams != argc - (has_receiver ? 1 : 0)) return std::nullopt;
 
         int reg = 0;
-        if (has_receiver) e.load_a(local(arg_reg[reg++]));  // receiver
+        if (has_receiver) e.load_a(local(arg_reg(reg++)));  // receiver
         for (int i = 0; i < nparams; ++i, ++reg) {
           const std::string& d = mr->param_descriptors[static_cast<std::size_t>(i)];
           if (is_wide_desc(d)) return std::nullopt;
-          if (is_ref_desc(d)) e.load_a(local(arg_reg[reg]));
-          else if (is_int_family_desc(d)) e.load_i(local(arg_reg[reg]));
+          if (is_ref_desc(d)) e.load_a(local(arg_reg(reg)));
+          else if (is_int_family_desc(d)) e.load_i(local(arg_reg(reg)));
           else return std::nullopt;
         }
         if (is_wide_desc(mr->return_descriptor)) return std::nullopt;

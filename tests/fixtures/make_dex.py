@@ -102,6 +102,9 @@ STRINGS = [
     "constClass",            # 60 method name (const-class)
     "<clinit>",              # 61 static-initializer method name
     "clinitTest",            # 62 method name (reads <clinit>-set field)
+    "IIIIIII",               # 63 shorty for (IIIIII)I
+    "sum6",                  # 64 method name (6-int target for invoke/range)
+    "rangeTest",             # 65 method name (invoke-static/range)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
@@ -140,9 +143,9 @@ def build_dex():
     header_size = 112
     n_strings = len(STRINGS)
     n_types = len(TYPES)
-    n_protos = 5    # + (I)V for Counter.<init>/add
+    n_protos = 6    # + (IIIIII)I for sum6
     n_fields = 6    # + HelloDex.ci (static int, <clinit> demo)
-    n_methods = 37  # + filledArray, constClass, <clinit>, clinitTest
+    n_methods = 39  # + filledArray, constClass, <clinit>, clinitTest, sum6, rangeTest
     n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
@@ -182,6 +185,11 @@ def build_dex():
     type_list_int_off = off_data + len(data)
     tl3 = struct.pack("<I", 1) + struct.pack("<H", T["I"])
     data.extend(align4(bytearray(tl3)))
+    # type_list for (IIIIII) parameters: six ints  [sum6]
+    data.extend(align4(bytearray()))
+    type_list_6int_off = off_data + len(data)
+    tl4 = struct.pack("<I", 6) + struct.pack("<H", T["I"]) * 6
+    data.extend(align4(bytearray(tl4)))
 
     # code items
     code_main_off = off_data + len(data)
@@ -471,13 +479,31 @@ def build_dex():
         0x0060, 0x0005,                # sget v0, HelloDex.ci (field 5)
         0x000F,                        # return v0
     ]))
+    code_sum6_off = off_data + len(data)
+    # int sum6(int a..f){ return a+b+c+d+e+f; }  (params in v0..v5)
+    data.extend(code_item(6, 6, 0, [
+        0x0090, 0x0100,                # add-int v0, v0, v1
+        0x0090, 0x0200,                # add-int v0, v0, v2
+        0x0090, 0x0300,                # add-int v0, v0, v3
+        0x0090, 0x0400,                # add-int v0, v0, v4
+        0x0090, 0x0500,                # add-int v0, v0, v5
+        0x000F,                        # return v0
+    ]))
+    code_range_off = off_data + len(data)
+    # int rangeTest(){ return sum6(1,2,3,4,5,6); }  = 21  (invoke-static/range)
+    data.extend(code_item(6, 0, 6, [
+        0x1012, 0x2112, 0x3212,        # const/4 v0,1 ; v1,2 ; v2,3
+        0x4312, 0x5412, 0x6512,        # const/4 v3,4 ; v4,5 ; v5,6
+        0x0677, 0x0025, 0x0000,        # invoke-static/range {v0..v5}, sum6 (m37)
+        0x000A, 0x000F,                # move-result v0 ; return v0
+    ]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
     cd += uleb128(3)  # static_fields_size (HelloDex.total, HelloDex.wf, HelloDex.ci)
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(27)  # direct_methods_size
+    cd += uleb128(29)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
     # static fields: total=f2, wf=f4, ci=f5 (cumulative diffs from 0)
     cd += uleb128(2) + uleb128(0x9)                               # f2 total, public static
@@ -512,6 +538,8 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_constclass_off)  # diff 1 -> idx 34
     cd += uleb128(1) + uleb128(0x10008) + uleb128(code_clinit_off)  # diff 1 -> idx 35 (<clinit>: ACC_STATIC|ACC_CONSTRUCTOR)
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_clinittest_off)  # diff 1 -> idx 36
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_sum6_off)        # diff 1 -> idx 37
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_range_off)       # diff 1 -> idx 38
     data.extend(cd)
 
     # --- Counter class code items (object model demo) -----------------------
@@ -584,7 +612,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 3, type_list_main_off),
-        (0x2001, 32, code_main_off),
+        (0x2001, 34, code_main_off),
         (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -610,6 +638,8 @@ def build_dex():
     proto_ids += struct.pack("<III", S["V"], T["V"], 0)
     # proto 4: (I)V -> shorty "VI", return V, params (int)
     proto_ids += struct.pack("<III", S["VI"], T["V"], type_list_int_off)
+    # proto 5: (IIIIII)I -> shorty "IIIIIII", return I, params (6 ints)
+    proto_ids += struct.pack("<III", S["IIIIIII"], T["I"], type_list_6int_off)
 
     # field_ids: {class_idx(u16), type_idx(u16), name_idx(u32)}
     field_ids = struct.pack("<HHI", T["Ljava/lang/System;"],
@@ -658,6 +688,8 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["constClass"])   # m34 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 3, S["<clinit>"])     # m35 ()V (proto 3)
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["clinitTest"])   # m36 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 5, S["sum6"])         # m37 (IIIIII)I (proto 5)
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["rangeTest"])    # m38 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",

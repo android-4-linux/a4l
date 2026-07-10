@@ -34,9 +34,10 @@ public class Runner {
     Object fa = c.getMethod("filledArray").invoke(null); // 42 (filled-new-array)
     Object cl = c.getMethod("constClass").invoke(null);  // 42 (const-class)
     Object ct = c.getMethod("clinitTest").invoke(null);  // 77 (static <clinit>)
+    Object rg = c.getMethod("rangeTest").invoke(null);   // 21 (invoke-static/range)
     if (args.length > 0) {
       java.nio.file.Files.write(java.nio.file.Paths.get(args[0]),
-          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr + "," + tc + "," + si + "," + oa + "," + ws + "," + wl + "," + ia + "," + il + "," + ba + "," + lb + "," + wa + "," + wf + "," + cc + "," + it + "," + ift + "," + sw + "," + fa + "," + cl + "," + ct).getBytes("UTF-8"));
+          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr + "," + tc + "," + si + "," + oa + "," + ws + "," + wl + "," + ia + "," + il + "," + ba + "," + lb + "," + wa + "," + wf + "," + cc + "," + it + "," + ift + "," + sw + "," + fa + "," + cl + "," + ct + "," + rg).getBytes("UTF-8"));
     }
   }
 }
