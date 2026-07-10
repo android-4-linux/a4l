@@ -5,3 +5,4 @@
 # the CTS-runner oracle harness, and the app-corpus screenshot/input-replay
 # harness are scaffolded as READMEs and land in later phases.
 subdir('unit')
+subdir('integration')

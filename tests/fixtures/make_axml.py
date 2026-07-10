@@ -128,12 +128,12 @@ def end_elem(pool, name):
     return _node(RES_XML_END_ELEM, struct.pack("<II", NO_ENTRY, pool.sid(name)))
 
 
-def build_axml(utf8=True):
+def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity"):
     pool = Pool()
     uri = lambda: pool.sid(ANDROID_URI)          # noqa: E731
     a = lambda name, val: _attribute(pool, uri(), pool.sid(name), val)  # noqa: E731
     pkg = lambda: _attribute(pool, NO_ENTRY, pool.sid("package"),  # noqa: E731
-                             ("str", "com.example.app"))
+                             ("str", package))
 
     body = b""
     body += _node(RES_XML_START_NS,
@@ -150,7 +150,7 @@ def build_axml(utf8=True):
     ])
     body += end_elem(pool, "uses-sdk")
     body += start_elem(pool, "application", [a("label", ("str", "Example"))])
-    body += start_elem(pool, "activity", [a("name", ("str", ".MainActivity"))])
+    body += start_elem(pool, "activity", [a("name", ("str", launcher))])
     body += start_elem(pool, "intent-filter", [])
     body += start_elem(pool, "action",
                        [a("name", ("str", "android.intent.action.MAIN"))])

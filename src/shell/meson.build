@@ -3,7 +3,8 @@
 #
 # shell/ — CLI launcher, per-app data dirs, xdg desktop integration, portals.
 # Builds the `aclcxx` executable, linking every native-core module library.
-executable(
+# Captured so the Tier B run-path integration test can exec the real binary.
+aclcxx_exe = executable(
   'aclcxx',
   files('main.cpp'),
   include_directories : [config_inc, core_inc],

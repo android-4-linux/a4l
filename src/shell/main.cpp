@@ -56,8 +56,8 @@ void print_usage() {
       "  --classpath=<paths>  extra classpath entries (colon-separated); the JVM\n"
       "                       backend runs .class/.jar from here (DEX is not loaded\n"
       "                       by a stock JVM)\n"
-      "  --convert-dex        convert the APK's DEX to JVM classes (prototype;\n"
-      "                       method bodies throw) and add them to the classpath\n"
+      "  --convert-dex        convert the APK's DEX to JVM classes and add them to\n"
+      "                       the classpath (implied by --vm=jvm)\n"
       "  --cache=<dir>        DEX->OAT / dalvik-cache directory\n"
       "\n"
       "  -h, --help           show this help\n"
@@ -194,9 +194,11 @@ int cmd_run(const std::vector<std::string>& args) {
   cfg.cache_dir = cache_dir;
   // boot_classpath stays empty until the vendored framework lands.
 
-  // DEX->JVM (prototype): convert each classes*.dex to JVM stub classes and add
-  // them to the classpath, so the JVM backend can load DEX-derived classes.
-  if (convert_dex) {
+  // DEX->JVM: convert each classes*.dex to JVM classes and add them to the
+  // classpath so the backend can load DEX-derived classes. A stock JVM cannot
+  // load DEX at all, so conversion is implied for the jvm backend.
+  const bool do_convert = convert_dex || backend == r::Backend::Jvm;
+  if (do_convert && !dex_files.empty()) {
     int dex_index = 0;
     for (const std::string& dex_name : dex_files) {
       const int idx = dex_index++;
