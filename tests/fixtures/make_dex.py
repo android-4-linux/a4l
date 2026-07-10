@@ -85,6 +85,9 @@ STRINGS = [
     "intLit",                # 43 method name (/2addr, /lit8, neg, not, int-to-byte)
     "[B",                    # 44 type: byte[]
     "byteArray",             # 45 method name (new-array byte, aput-byte, aget-byte)
+    "longBits",              # 46 method name (long div/rem/shl/shr)
+    "[J",                    # 47 type: long[]
+    "wideArray",             # 48 method name (new-array long, aput-wide, aget-wide)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
@@ -92,7 +95,7 @@ S = {s: i for i, s in enumerate(STRINGS)}
 TYPES = ["LHelloDex;", "Ljava/lang/Object;", "V", "I", "[Ljava/lang/String;",
          "Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;",
          "LCounter;", "[I", "Ljava/lang/RuntimeException;", "Ljava/lang/Exception;",
-         "[B"]
+         "[B", "[J"]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -125,7 +128,7 @@ def build_dex():
     n_types = len(TYPES)
     n_protos = 5    # + (I)V for Counter.<init>/add
     n_fields = 4    # System.out, Counter.value, HelloDex.total, Counter.label
-    n_methods = 25  # + intArith, intLit, byteArray
+    n_methods = 27  # + longBits, wideArray
     n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
@@ -347,13 +350,39 @@ def build_dex():
         0x0190, 0x0201,                # add-int v1,v1,v2
         0x010F,                        # return v1
     ]))
+    code_longbits_off = off_data + len(data)
+    # int longBits(){ long q=1000/7; q%=100; q<<=1; q>>=1; return (int)q; }  = 42
+    #   v0/v1=q, v2/v3=scratch ; shift amount is an int in v2.
+    data.extend(code_item(4, 0, 0, [
+        0x0018, 0x03E8, 0x0000, 0x0000, 0x0000,  # const-wide v0, 1000
+        0x0216, 0x0007,                # const-wide/16 v2, 7
+        0x009E, 0x0200,                # div-long v0,v0,v2  -> 142
+        0x0216, 0x0064,                # const-wide/16 v2, 100
+        0x009F, 0x0200,                # rem-long v0,v0,v2  -> 42
+        0x1212,                        # const/4 v2, 1  (int shift amount)
+        0x00A3, 0x0200,                # shl-long v0,v0,v2  -> 84
+        0x00A4, 0x0200,                # shr-long v0,v0,v2  -> 42
+        0x0084, 0x000F,                # long-to-int v0,v0 ; return v0
+    ]))
+    code_widearray_off = off_data + len(data)
+    # int wideArray(){ long[] a=new long[2]; a[0]=40; a[1]=2;
+    #                  return (int)(a[0]+a[1]); }  = 42  (new-array long/aput-wide/aget-wide)
+    data.extend(code_item(6, 0, 0, [
+        0x2012, 0x0023, T["[J"],       # const/4 v0,2 ; new-array v0,v0,long[]
+        0x0112, 0x0216, 0x0028, 0x024C, 0x0100,  # a[0]=40 (aput-wide)
+        0x1112, 0x0216, 0x0002, 0x024C, 0x0100,  # a[1]=2
+        0x0112, 0x0245, 0x0100,        # const/4 v1,0 ; aget-wide v2,v0,v1 (a[0])
+        0x1112, 0x0445, 0x0100,        # const/4 v1,1 ; aget-wide v4,v0,v1 (a[1])
+        0x029B, 0x0402,                # add-long v2,v2,v4
+        0x2084, 0x000F,                # long-to-int v0,v2 ; return v0
+    ]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
     cd += uleb128(1)  # static_fields_size (HelloDex.total)
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(16)  # direct_methods_size
+    cd += uleb128(18)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
     # static fields: HelloDex.total = field id 2 (diff from 0)
     cd += uleb128(2) + uleb128(0x9)                               # f2, public static
@@ -375,6 +404,8 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_intarith_off)  # diff 1 -> idx 22
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_intlit_off)    # diff 1 -> idx 23
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_bytearray_off) # diff 1 -> idx 24
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_longbits_off)  # diff 1 -> idx 25
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_widearray_off) # diff 1 -> idx 26
     data.extend(cd)
 
     # --- Counter class code items (object model demo) -----------------------
@@ -447,7 +478,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 3, type_list_main_off),
-        (0x2001, 21, code_main_off),
+        (0x2001, 23, code_main_off),
         (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -507,6 +538,8 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["intArith"])     # m22 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["intLit"])       # m23 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["byteArray"])    # m24 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["longBits"])     # m25 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["wideArray"])    # m26 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",

@@ -47,7 +47,23 @@ enum : std::uint8_t {
   OP_I2B = 0x91, OP_I2C = 0x92, OP_I2S = 0x93,
   OP_BALOAD = 0x33, OP_CALOAD = 0x34, OP_SALOAD = 0x35,
   OP_BASTORE = 0x54, OP_CASTORE = 0x55, OP_SASTORE = 0x56,
+  OP_LNEG = 0x75, OP_LXOR = 0x83, OP_LSHL = 0x79, OP_LSHR = 0x7b,
+  OP_LUSHR = 0x7d, OP_LALOAD = 0x2f, OP_LASTORE = 0x50,
 };
+
+// JVM opcode for a Dalvik long NON-shift binary op, index add,sub,mul,div,rem,
+// and,or,xor (matches 23x 0x9b.. and /2addr 0xbb..).
+std::uint8_t jvm_lbinop(int idx) {
+  static const std::uint8_t ops[] = {
+      0x61, 0x65, 0x69, 0x6d, 0x71, 0x7f, 0x81, 0x83,
+      // ladd lsub lmul ldiv lrem land  lor  lxor
+  };
+  return (idx >= 0 && idx < 8) ? ops[idx] : 0;
+}
+// JVM long shift opcode for a shift index 0=shl,1=shr,2=ushr.
+std::uint8_t jvm_lshift(int idx) {
+  return idx == 0 ? OP_LSHL : idx == 1 ? OP_LSHR : OP_LUSHR;
+}
 
 // JVM opcode for a Dalvik int binary op, index in the canonical order
 // add,sub,mul,div,rem,and,or,xor,shl,shr,ushr (matches 23x 0x90.. and /2addr 0xb0..).
@@ -318,13 +334,19 @@ void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod
     case 0x90: case 0x91: case 0x92: case 0x93: case 0x94:  // int binary 23x -> int
     case 0x95: case 0x96: case 0x97: case 0x98: case 0x99: case 0x9a:
       set(L((u >> 8) & 0xff), kInt); break;
-    case 0x9b: case 0x9c: case 0x9d:                        // add/sub/mul-long
+    case 0x9b: case 0x9c: case 0x9d: case 0x9e: case 0x9f:  // long binary 23x -> long
+    case 0xa0: case 0xa1: case 0xa2: case 0xa3: case 0xa4: case 0xa5:
+    case 0x45:                                              // aget-wide -> long
       set_long(L((u >> 8) & 0xff)); break;
     case 0x7b: case 0x7c: case 0x8d: case 0x8e: case 0x8f:  // neg/not/int-to-{b,c,s}
       set(L((u >> 8) & 0xf), kInt); break;
+    case 0x7d: case 0x7e:                                   // neg/not-long -> long
+      set_long(L((u >> 8) & 0xf)); break;
     default:
       if (op >= 0xb0 && op <= 0xba) {                       // int op/2addr -> int
         set(L((u >> 8) & 0xf), kInt);
+      } else if (op >= 0xbb && op <= 0xc5) {                // long op/2addr -> long
+        set_long(L((u >> 8) & 0xf));
       } else if (op >= 0xd0 && op <= 0xe2) {                // int op/lit -> int
         set(L(op >= 0xd8 ? (u >> 8) & 0xff : (u >> 8) & 0xf), kInt);
       }
@@ -585,16 +607,48 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 2;
         break;
       }
-      case 0x9b:    // add-long (23x)
-      case 0x9c:    // sub-long
-      case 0x9d: {  // mul-long
+      case 0x9b: case 0x9c: case 0x9d: case 0x9e: case 0x9f:  // long binary (23x)
+      case 0xa0: case 0xa1: case 0xa2:                        //   add..xor
+      case 0xa3: case 0xa4: case 0xa5: {                      //   shl,shr,ushr
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xff;
         const int bb = in[pc + 1] & 0xff, cc = (in[pc + 1] >> 8) & 0xff;
-        e.load_l(local(bb)); e.load_l(local(cc));
-        e.lbinop(opcode == 0x9b ? OP_LADD : opcode == 0x9c ? OP_LSUB : OP_LMUL);
+        if (opcode >= 0xa3) {  // shift: value is long, amount is int
+          e.load_l(local(bb)); e.load_i(local(cc));
+          e.op(jvm_lshift(opcode - 0xa3)); e.adj(-1);  // long(2)+int(1) -> long(2)
+        } else {
+          e.load_l(local(bb)); e.load_l(local(cc));
+          e.lbinop(jvm_lbinop(opcode - 0x9b));
+        }
         e.store_l(local(a));
         pc += 2;
+        break;
+      }
+      case 0xbb: case 0xbc: case 0xbd: case 0xbe: case 0xbf:  // long op/2addr (12x)
+      case 0xc0: case 0xc1: case 0xc2: case 0xc3: case 0xc4: case 0xc5: {
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        if (opcode >= 0xc3) {  // shift: amount is int
+          e.load_l(local(a)); e.load_i(local(b));
+          e.op(jvm_lshift(opcode - 0xc3)); e.adj(-1);
+        } else {
+          e.load_l(local(a)); e.load_l(local(b));
+          e.lbinop(jvm_lbinop(opcode - 0xbb));
+        }
+        e.store_l(local(a));
+        pc += 1;
+        break;
+      }
+      case 0x7d: {  // neg-long (12x)
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        e.load_l(local(b)); e.op(OP_LNEG); e.store_l(local(a));
+        pc += 1;
+        break;
+      }
+      case 0x7e: {  // not-long (12x): ~x = x ^ -1L
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        e.load_l(local(b)); e.push_long(-1); e.op(OP_LXOR); e.adj(-2);
+        e.store_l(local(a));
+        pc += 1;
         break;
       }
       case 0x90: case 0x91: case 0x92: case 0x93: case 0x94:  // int binary op (23x)
@@ -773,6 +827,22 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         }
         // size popped, arrayref pushed (net 0 on stack); then store.
         e.store_a(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x45:    // aget-wide vAA, vBB, vCC (23x) - long[] (double[] stubs elsewhere)
+      case 0x4c: {  // aput-wide vAA, vBB, vCC (23x)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const int bb = in[pc + 1] & 0xff, cc = (in[pc + 1] >> 8) & 0xff;
+        if (opcode == 0x45) {  // vAA = vBB[vCC]
+          e.load_a(local(bb)); e.load_i(local(cc));
+          e.op(OP_LALOAD); e.adj(0);  // array(1)+index(1) -> long(2): net 0
+          e.store_l(local(a));
+        } else {               // vBB[vCC] = vAA
+          e.load_a(local(bb)); e.load_i(local(cc)); e.load_l(local(a));
+          e.op(OP_LASTORE); e.adj(-4);  // pop array+index+long
+        }
         pc += 2;
         break;
       }
