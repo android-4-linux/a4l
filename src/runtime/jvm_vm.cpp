@@ -17,6 +17,7 @@
 #include <jni.h>
 
 #include "log/log.h"
+#include "runtime/framework_natives.h"
 
 namespace aclcxx::runtime {
 namespace {
@@ -84,6 +85,8 @@ class JvmVm final : public Vm {
     env_ = env;
     log::i(kTag, "JVM started: boot=[{}] classpath=[{}]",
            join(config_.boot_classpath, ':'), join(config_.classpath, ':'));
+    // Bind aclcxx C++ to the android.* native methods on the boot classpath.
+    register_framework_natives(env_);
     return Error::ok();
   }
 

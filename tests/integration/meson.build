@@ -48,6 +48,30 @@ if py3.found() and have_jni
       depends : [aclcxx_exe, probe_apk, framework_classes],
       timeout : 120,
     )
+
+    # Gate G2.b: the JNI native underside. log.apk's main() calls
+    # android.util.Log.i(...); the framework Log shim's native write0() is bound by
+    # aclcxx (RegisterNatives) and forwards to aclcxx::log.
+    log_apk = custom_target(
+      'log-apk',
+      input : files('../fixtures/make_hello_apk.py'),
+      output : 'log.apk',
+      command : [py3, '@INPUT@', '--log', '@OUTPUT@'],
+      depend_files : files('../fixtures/make_axml.py'),
+    )
+    framework_shim = custom_target(
+      'framework-shim-classes',
+      input : files('../../framework/shim/android/util/Log.java'),
+      output : 'framework-shim',
+      command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
+    )
+    test(
+      'run-apk-log',
+      py3,
+      args : [files('run_log_test.py'), aclcxx_exe, log_apk, framework_shim],
+      depends : [aclcxx_exe, log_apk, framework_shim],
+      timeout : 120,
+    )
   else
     message('javac not found; skipping run-apk-framework integration test.')
   endif

@@ -25,6 +25,8 @@ from make_axml import build_axml
 
 MSG = "aclcxx: hello from a real APK"
 PROBE_CLASS = "com.aclcxx.fw.Probe"
+LOG_TAG = "aclcxx.app"
+LOG_MSG = "hello via android.util.Log"
 
 
 def uleb128(n):
@@ -45,9 +47,10 @@ def align4(buf):
     return buf
 
 
-def build_dex(probe=False):
-    # Interned strings; the Probe entities are always present but only referenced
-    # by main() in --probe mode (unused refs are valid and never resolved).
+def build_dex(mode="hello"):
+    # Interned strings; the Probe/Log entities are always present but only
+    # referenced by main() in the matching mode (unused refs are valid and never
+    # resolved).
     STRINGS = [
         "Lcom/aclcxx/hello/Main;",   # 0  this class
         "Ljava/lang/Object;",        # 1  superclass
@@ -64,16 +67,22 @@ def build_dex(probe=False):
         "tag",                       # 12
         "Lcom/aclcxx/fw/Probe;",     # 13 framework-supplied (not bundled)
         MSG,                         # 14
+        "I",                         # 15 int (Log.i return type / shorty)
+        "Landroid/util/Log;",        # 16 framework class (native underside)
+        "i",                         # 17
+        "ILL",                       # 18 shorty (String,String)->int
+        LOG_TAG,                     # 19
+        LOG_MSG,                     # 20
     ]
     S = {s: i for i, s in enumerate(STRINGS)}
     TYPES = ["Lcom/aclcxx/hello/Main;", "Ljava/lang/Object;", "Ljava/lang/String;",
              "[Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;",
-             "V", "Lcom/aclcxx/fw/Probe;"]
+             "V", "Lcom/aclcxx/fw/Probe;", "I", "Landroid/util/Log;"]
     T = {t: i for i, t in enumerate(TYPES)}
 
     header_size = 112
     n_strings, n_types, n_protos, n_fields, n_methods, n_classdefs = \
-        len(STRINGS), len(TYPES), 3, 1, 3, 1
+        len(STRINGS), len(TYPES), 4, 1, 4, 1
 
     off_string_ids = header_size
     off_type_ids = off_string_ids + n_strings * 4
@@ -98,14 +107,25 @@ def build_dex(probe=False):
     type_list_str_off = off_data + len(data)
     data.extend(align4(bytearray(
         struct.pack("<I", 1) + struct.pack("<H", T["Ljava/lang/String;"]))))
+    data.extend(align4(bytearray()))
+    type_list_2str_off = off_data + len(data)
+    data.extend(align4(bytearray(
+        struct.pack("<I", 2) + struct.pack("<H", T["Ljava/lang/String;"]) * 2)))
 
     code_main_off = off_data + len(data)
-    if probe:
+    if mode == "probe":
         # System.out.println(Probe.tag()) — Probe is on the boot classpath only.
         insns = [0x0062, 0x0000,          # sget-object v0, System.out (f0)
                  0x0071, 0x0002, 0x0000,  # invoke-static {}, Probe.tag() (m2)
                  0x010C,                  # move-result-object v1
                  0x206E, 0x0001, 0x0010,  # invoke-virtual {v0,v1}, println (m1)
+                 0x000E]                  # return-void
+    elif mode == "log":
+        # android.util.Log.i(LOG_TAG, LOG_MSG) — Log is a framework class whose
+        # native underside is provided by aclcxx (result int ignored).
+        insns = [0x001A, S[LOG_TAG],      # const-string v0, LOG_TAG
+                 0x011A, S[LOG_MSG],      # const-string v1, LOG_MSG
+                 0x2071, 0x0003, 0x0010,  # invoke-static {v0,v1}, Log.i (m3)
                  0x000E]                  # return-void
     else:
         # System.out.println(MSG) — fully self-contained.
@@ -150,11 +170,13 @@ def build_dex(probe=False):
     proto_ids = struct.pack("<III", S["VL"], T["V"], type_list_argv_off)   # main (String[])V
     proto_ids += struct.pack("<III", S["VL"], T["V"], type_list_str_off)   # println (String)V
     proto_ids += struct.pack("<III", S["L"], T["Ljava/lang/String;"], 0)   # tag ()String
+    proto_ids += struct.pack("<III", S["ILL"], T["I"], type_list_2str_off)  # (String,String)I
     field_ids = struct.pack("<HHI", T["Ljava/lang/System;"],
                             T["Ljava/io/PrintStream;"], S["out"])          # f0 System.out
     method_ids = struct.pack("<HHI", T["Lcom/aclcxx/hello/Main;"], 0, S["main"])   # m0
     method_ids += struct.pack("<HHI", T["Ljava/io/PrintStream;"], 1, S["println"])  # m1
     method_ids += struct.pack("<HHI", T["Lcom/aclcxx/fw/Probe;"], 2, S["tag"])      # m2
+    method_ids += struct.pack("<HHI", T["Landroid/util/Log;"], 3, S["i"])           # m3 Log.i
     class_defs = struct.pack("<IIIIIIII",
                              T["Lcom/aclcxx/hello/Main;"], 0x1,
                              T["Ljava/lang/Object;"], 0, 0xFFFFFFFF, 0,
@@ -183,24 +205,28 @@ def build_dex(probe=False):
     return bytes(dex)
 
 
-def build_apk(probe=False):
+def build_apk(mode="hello"):
     return {
         "AndroidManifest.xml": build_axml(
             utf8=True, package="com.aclcxx.hello",
             launcher="com.aclcxx.hello.Main"),
-        "classes.dex": build_dex(probe=probe),
+        "classes.dex": build_dex(mode=mode),
     }
 
 
 def main():
     args = sys.argv[1:]
-    probe = "--probe" in args
-    args = [a for a in args if a != "--probe"]
+    mode = "hello"
+    if "--probe" in args:
+        mode = "probe"
+    elif "--log" in args:
+        mode = "log"
+    args = [a for a in args if a not in ("--probe", "--log")]
     if len(args) != 1:
-        sys.stderr.write("usage: make_hello_apk.py [--probe] <output.apk>\n")
+        sys.stderr.write("usage: make_hello_apk.py [--probe|--log] <output.apk>\n")
         return 2
     with zipfile.ZipFile(args[0], "w") as z:
-        for name, blob in build_apk(probe=probe).items():
+        for name, blob in build_apk(mode=mode).items():
             info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_STORED
             z.writestr(info, blob)

@@ -9,7 +9,7 @@ runtime_deps = [fmt_dep]   # via log/log.h
 
 # ADR-0001 fallback: OpenJDK-backed backend, compiled only when a JDK was found.
 if have_jni
-  runtime_sources += files('jvm_vm.cpp')
+  runtime_sources += files('jvm_vm.cpp', 'framework_natives.cpp')
   runtime_deps += jni_dep
 endif
 
