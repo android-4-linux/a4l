@@ -106,6 +106,15 @@ STRINGS = [
     "sum6",                  # 64 method name (6-int target for invoke/range)
     "rangeTest",             # 65 method name (invoke-static/range)
     "fillData",              # 66 method name (fill-array-data)
+    "floatArith",            # 67 method name (float const/add/float-to-int)
+    "doubleArith",           # 68 method name (double const/add/double-to-int)
+    "F",                     # 69 type: float (field/param descriptor)
+    "D",                     # 70 type: double
+    "fscale",                # 71 static float field
+    "floatField",            # 72 method name (sget/sput float)
+    "floatParam",            # 73 method name (float parameter)
+    "IF",                    # 74 shorty for (F)I
+    "floatLoop",             # 75 method name (float across a stack-map frame)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
@@ -113,7 +122,8 @@ S = {s: i for i, s in enumerate(STRINGS)}
 TYPES = ["LHelloDex;", "Ljava/lang/Object;", "V", "I", "[Ljava/lang/String;",
          "Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;",
          "LCounter;", "[I", "Ljava/lang/RuntimeException;", "Ljava/lang/Exception;",
-         "[B", "[J", "J", "Ljava/lang/CharSequence;", "Ljava/lang/Class;"]
+         "[B", "[J", "J", "Ljava/lang/CharSequence;", "Ljava/lang/Class;",
+         "F", "D"]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -144,9 +154,9 @@ def build_dex():
     header_size = 112
     n_strings = len(STRINGS)
     n_types = len(TYPES)
-    n_protos = 6    # + (IIIIII)I for sum6
-    n_fields = 6    # + HelloDex.ci (static int, <clinit> demo)
-    n_methods = 40  # + filledArray, constClass, <clinit>, clinitTest, sum6, rangeTest, fillData
+    n_protos = 7    # + (F)I for floatParam
+    n_fields = 7    # + HelloDex.fscale (static float)
+    n_methods = 45  # + floatArith, doubleArith, floatField, floatParam, floatLoop
     n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
@@ -191,6 +201,11 @@ def build_dex():
     type_list_6int_off = off_data + len(data)
     tl4 = struct.pack("<I", 6) + struct.pack("<H", T["I"]) * 6
     data.extend(align4(bytearray(tl4)))
+    # type_list for (F) parameters: one float  [floatParam]
+    data.extend(align4(bytearray()))
+    type_list_float_off = off_data + len(data)
+    tl5 = struct.pack("<I", 1) + struct.pack("<H", T["F"])
+    data.extend(align4(bytearray(tl5)))
 
     # code items
     code_main_off = off_data + len(data)
@@ -515,17 +530,72 @@ def build_dex():
         0x0005, 0x0000, 0x000F, 0x0000, 0x0016, 0x0000,
     ]))
 
+    code_floatarith_off = off_data + len(data)
+    # int floatArith(){ float f=40.5f, g=1.5f; return (int)(f+g); }  = 42
+    data.extend(code_item(4, 0, 0, [
+        0x0014, 0x0000, 0x4222,        # const v0, 0x42220000 (40.5f)
+        0x0114, 0x0000, 0x3FC0,        # const v1, 0x3FC00000 (1.5f)
+        0x02A6, 0x0100,                # add-float v2, v0, v1   (42.0f)
+        0x2387,                        # float-to-int v3, v2    (42)
+        0x030F,                        # return v3
+    ]))
+    code_doublearith_off = off_data + len(data)
+    # int doubleArith(){ double a=40.5, b=1.5; return (int)(a+b); }  = 42
+    data.extend(code_item(7, 0, 0, [
+        0x0018, 0x0000, 0x0000, 0x4000, 0x4044,  # const-wide v0, 40.5
+        0x0218, 0x0000, 0x0000, 0x0000, 0x3FF8,  # const-wide v2, 1.5
+        0x04AB, 0x0200,                # add-double v4, v0, v2  (42.0)
+        0x468A,                        # double-to-int v6, v4   (42)
+        0x060F,                        # return v6
+    ]))
+    code_floatfield_off = off_data + len(data)
+    # int floatField(){ fscale=6.0f; return (int)(fscale*7.0f); }  = 42
+    data.extend(code_item(3, 0, 0, [
+        0x0014, 0x0000, 0x40C0,        # const v0, 0x40C00000 (6.0f)
+        0x0067, 0x0006,                # sput v0, HelloDex.fscale (field 6)
+        0x0060, 0x0006,                # sget v0, HelloDex.fscale
+        0x0114, 0x0000, 0x40E0,        # const v1, 0x40E00000 (7.0f)
+        0x00A8, 0x0100,                # mul-float v0, v0, v1   (42.0f)
+        0x0287,                        # float-to-int v2, v0    (42)
+        0x020F,                        # return v2
+    ]))
+    code_floatparam_off = off_data + len(data)
+    # int floatParam(float x){ return (int)(x + 0.5f); }  x=v3 (registers=4, ins=1)
+    data.extend(code_item(4, 1, 0, [
+        0x0014, 0x0000, 0x3F00,        # const v0, 0x3F000000 (0.5f)
+        0x01A6, 0x0003,                # add-float v1, v3, v0   (x + 0.5)
+        0x1287,                        # float-to-int v2, v1
+        0x020F,                        # return v2
+    ]))
+
+    code_floatloop_off = off_data + len(data)
+    # int floatLoop(){ float f=0; for(int i=0;i<3;i++) f+=14.0f; return (int)f; }  = 42
+    #   v0=f (float, live across the loop-head frame), v1=i, v2=tmp/int, v3=14.0f
+    data.extend(code_item(4, 0, 0, [
+        0x0014, 0x0000, 0x0000,        # pc0  const v0, 0.0f
+        0x0112,                        # pc3  const/4 v1, 0
+        0x0213, 0x0003,                # pc4  (loop) const/16 v2, 3
+        0x2135, 0x000A,                # pc6  if-ge v1, v2, +10 (-> done @ pc16)
+        0x0314, 0x0000, 0x4160,        # pc8  const v3, 14.0f
+        0x00A6, 0x0300,                # pc11 add-float v0, v0, v3
+        0x01D8, 0x0101,                # pc13 add-int/lit8 v1, v1, 1
+        0xF528,                        # pc15 goto -11 (-> loop @ pc4)
+        0x0287,                        # pc16 (done) float-to-int v2, v0
+        0x020F,                        # pc17 return v2
+    ]))
+
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
-    cd += uleb128(3)  # static_fields_size (HelloDex.total, HelloDex.wf, HelloDex.ci)
+    cd += uleb128(4)  # static_fields_size (total, wf, ci, fscale)
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(30)  # direct_methods_size
+    cd += uleb128(35)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
-    # static fields: total=f2, wf=f4, ci=f5 (cumulative diffs from 0)
+    # static fields: total=f2, wf=f4, ci=f5, fscale=f6 (cumulative diffs from 0)
     cd += uleb128(2) + uleb128(0x9)                               # f2 total, public static
     cd += uleb128(2) + uleb128(0x9)                               # +2 -> f4 wf, public static
     cd += uleb128(1) + uleb128(0x9)                               # +1 -> f5 ci, public static
+    cd += uleb128(1) + uleb128(0x9)                               # +1 -> f6 fscale, public static
     # direct methods, sorted by ascending method index; idx diffs are cumulative.
     # m0=main..m5=strlen, m7=hello, m14=arraySum, m16=tryCatch, m17=staticInt, m18=objArray.
     cd += uleb128(0) + uleb128(0x9) + uleb128(code_main_off)      # diff 0 -> idx 0
@@ -558,6 +628,11 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_sum6_off)        # diff 1 -> idx 37
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_range_off)       # diff 1 -> idx 38
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_filldata_off)    # diff 1 -> idx 39
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_floatarith_off)  # diff 1 -> idx 40
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_doublearith_off) # diff 1 -> idx 41
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_floatfield_off)  # diff 1 -> idx 42
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_floatparam_off)  # diff 1 -> idx 43
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_floatloop_off)   # diff 1 -> idx 44
     data.extend(cd)
 
     # --- Counter class code items (object model demo) -----------------------
@@ -630,7 +705,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 3, type_list_main_off),
-        (0x2001, 35, code_main_off),
+        (0x2001, 40, code_main_off),
         (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -658,6 +733,8 @@ def build_dex():
     proto_ids += struct.pack("<III", S["VI"], T["V"], type_list_int_off)
     # proto 5: (IIIIII)I -> shorty "IIIIIII", return I, params (6 ints)
     proto_ids += struct.pack("<III", S["IIIIIII"], T["I"], type_list_6int_off)
+    # proto 6: (F)I -> shorty "IF", return I, params (float)
+    proto_ids += struct.pack("<III", S["IF"], T["I"], type_list_float_off)
 
     # field_ids: {class_idx(u16), type_idx(u16), name_idx(u32)}
     field_ids = struct.pack("<HHI", T["Ljava/lang/System;"],
@@ -667,6 +744,7 @@ def build_dex():
     field_ids += struct.pack("<HHI", T["LCounter;"], T["Ljava/lang/String;"], S["label"])  # f3
     field_ids += struct.pack("<HHI", T["LHelloDex;"], T["J"], S["wf"])  # f4 HelloDex.wf:long
     field_ids += struct.pack("<HHI", T["LHelloDex;"], T["I"], S["ci"])  # f5 HelloDex.ci:int
+    field_ids += struct.pack("<HHI", T["LHelloDex;"], T["F"], S["fscale"])  # f6 HelloDex.fscale:float
 
     method_ids = b""
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 0, S["main"])
@@ -709,6 +787,11 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 5, S["sum6"])         # m37 (IIIIII)I (proto 5)
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["rangeTest"])    # m38 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["fillData"])     # m39 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["floatArith"])   # m40 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["doubleArith"])  # m41 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["floatField"])   # m42 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 6, S["floatParam"])   # m43 (F)I (proto 6)
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["floatLoop"])    # m44 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",

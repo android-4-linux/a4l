@@ -11,7 +11,9 @@ namespace {
 // Constant pool tags (JVMS 4.4).
 constexpr std::uint8_t kUtf8 = 1;
 constexpr std::uint8_t kInteger = 3;
+constexpr std::uint8_t kFloat = 4;
 constexpr std::uint8_t kLong = 5;
+constexpr std::uint8_t kDouble = 6;
 constexpr std::uint8_t kClass = 7;
 constexpr std::uint8_t kString = 8;
 constexpr std::uint8_t kNameAndType = 12;
@@ -70,6 +72,27 @@ std::uint16_t ClassWriter::integer_const(std::int32_t v) {
   e.push_back(kInteger);
   be32(e, static_cast<std::uint32_t>(v));
   return add_entry(std::move(e), "I:" + std::to_string(v));
+}
+
+std::uint16_t ClassWriter::float_const(std::uint32_t raw_bits) {
+  std::vector<std::uint8_t> e;
+  e.push_back(kFloat);
+  be32(e, raw_bits);
+  return add_entry(std::move(e), "f:" + std::to_string(raw_bits));
+}
+
+std::uint16_t ClassWriter::double_const(std::uint64_t raw_bits) {
+  const std::string key = "d:" + std::to_string(raw_bits);
+  if (auto it = interned_.find(key); it != interned_.end()) return it->second;
+  std::vector<std::uint8_t> e;
+  e.push_back(kDouble);
+  be32(e, static_cast<std::uint32_t>(raw_bits >> 32));
+  be32(e, static_cast<std::uint32_t>(raw_bits & 0xffffffff));
+  const auto index = static_cast<std::uint16_t>(pool_.size() + 1);
+  pool_.push_back(std::move(e));
+  pool_.push_back({});  // CONSTANT_Double occupies two cp slots; second unusable
+  interned_.emplace(key, index);
+  return index;
 }
 
 std::uint16_t ClassWriter::long_const(std::int64_t v) {

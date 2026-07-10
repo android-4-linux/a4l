@@ -36,9 +36,14 @@ public class Runner {
     Object ct = c.getMethod("clinitTest").invoke(null);  // 77 (static <clinit>)
     Object rg = c.getMethod("rangeTest").invoke(null);   // 21 (invoke-static/range)
     Object fd = c.getMethod("fillData").invoke(null);    // 42 (fill-array-data)
+    Object fla = c.getMethod("floatArith").invoke(null);  // 42 (float const/add/f2i)
+    Object da = c.getMethod("doubleArith").invoke(null);  // 42 (double const/add/d2i)
+    Object ff = c.getMethod("floatField").invoke(null);   // 42 (sget/sput float)
+    Object fp = c.getMethod("floatParam", float.class).invoke(null, 41.5f);  // 42 (float param)
+    Object flp = c.getMethod("floatLoop").invoke(null);   // 42 (float across a frame)
     if (args.length > 0) {
       java.nio.file.Files.write(java.nio.file.Paths.get(args[0]),
-          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr + "," + tc + "," + si + "," + oa + "," + ws + "," + wl + "," + ia + "," + il + "," + ba + "," + lb + "," + wa + "," + wf + "," + cc + "," + it + "," + ift + "," + sw + "," + fa + "," + cl + "," + ct + "," + rg + "," + fd).getBytes("UTF-8"));
+          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr + "," + tc + "," + si + "," + oa + "," + ws + "," + wl + "," + ia + "," + il + "," + ba + "," + lb + "," + wa + "," + wf + "," + cc + "," + it + "," + ift + "," + sw + "," + fa + "," + cl + "," + ct + "," + rg + "," + fd + "," + fla + "," + da + "," + ff + "," + fp + "," + flp).getBytes("UTF-8"));
     }
   }
 }

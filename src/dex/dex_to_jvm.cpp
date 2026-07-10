@@ -50,7 +50,28 @@ enum : std::uint8_t {
   OP_LNEG = 0x75, OP_LXOR = 0x83, OP_LSHL = 0x79, OP_LSHR = 0x7b,
   OP_LUSHR = 0x7d, OP_LALOAD = 0x2f, OP_LASTORE = 0x50,
   OP_CHECKCAST = 0xc0, OP_INSTANCEOF = 0xc1, OP_INVOKEINTERFACE = 0xb9,
+  // Float / double.
+  OP_FLOAD = 0x17, OP_DLOAD = 0x18, OP_FSTORE = 0x38, OP_DSTORE = 0x39,
+  OP_FCONST_0 = 0x0b, OP_DCONST_0 = 0x0e,
+  OP_FRETURN = 0xae, OP_DRETURN = 0xaf,
+  OP_FALOAD = 0x30, OP_DALOAD = 0x31, OP_FASTORE = 0x51, OP_DASTORE = 0x52,
+  OP_FCMPL = 0x95, OP_FCMPG = 0x96, OP_DCMPL = 0x97, OP_DCMPG = 0x98,
+  OP_FNEG = 0x76, OP_DNEG = 0x77,
+  OP_I2F = 0x86, OP_I2D = 0x87, OP_L2F = 0x89, OP_L2D = 0x8a,
+  OP_F2I = 0x8b, OP_F2L = 0x8c, OP_F2D = 0x8d,
+  OP_D2I = 0x8e, OP_D2L = 0x8f, OP_D2F = 0x90,
 };
+
+// JVM opcode for a Dalvik float non-shift binary op (add,sub,mul,div,rem).
+std::uint8_t jvm_fbinop(int idx) {
+  static const std::uint8_t ops[] = {0x62, 0x66, 0x6a, 0x6e, 0x72};  // f{add,sub,mul,div,rem}
+  return (idx >= 0 && idx < 5) ? ops[idx] : 0;
+}
+// JVM opcode for a Dalvik double non-shift binary op (add,sub,mul,div,rem).
+std::uint8_t jvm_dbinop(int idx) {
+  static const std::uint8_t ops[] = {0x63, 0x67, 0x6b, 0x6f, 0x73};  // d{add,sub,mul,div,rem}
+  return (idx >= 0 && idx < 5) ? ops[idx] : 0;
+}
 
 // A type index -> the class-name form used by checkcast/instanceof/anewarray:
 // "Lfoo;" -> "foo"; "[..." -> the array descriptor itself. Empty if neither.
@@ -215,6 +236,30 @@ struct Emitter {
   void load_l(int slot) { op(OP_LLOAD); u1(static_cast<std::uint8_t>(slot)); adj(+2); }
   void store_l(int slot) { op(OP_LSTORE); u1(static_cast<std::uint8_t>(slot)); adj(-2); }
   void lbinop(std::uint8_t o) { op(o); adj(-2); }  // 2 longs -> 1 long
+  // Float (1 slot) and double (2 slots) helpers.
+  void load_f(int slot) { op(OP_FLOAD); u1(static_cast<std::uint8_t>(slot)); adj(+1); }
+  void store_f(int slot) { op(OP_FSTORE); u1(static_cast<std::uint8_t>(slot)); adj(-1); }
+  void load_d(int slot) { op(OP_DLOAD); u1(static_cast<std::uint8_t>(slot)); adj(+2); }
+  void store_d(int slot) { op(OP_DSTORE); u1(static_cast<std::uint8_t>(slot)); adj(-2); }
+  void push_float(std::uint32_t bits) {
+    if (bits == 0x00000000) { op(OP_FCONST_0); }        // 0.0f
+    else if (bits == 0x3f800000) { op(OP_FCONST_0 + 1); }  // 1.0f
+    else if (bits == 0x40000000) { op(OP_FCONST_0 + 2); }  // 2.0f
+    else {
+      const std::uint16_t idx = cw.float_const(bits);
+      if (idx <= 255) { op(OP_LDC); u1(static_cast<std::uint8_t>(idx)); }
+      else { op(OP_LDC_W); u2(idx); }
+    }
+    adj(+1);
+  }
+  void push_double(std::uint64_t bits) {
+    if (bits == 0x0000000000000000ULL) { op(OP_DCONST_0); }        // 0.0
+    else if (bits == 0x3ff0000000000000ULL) { op(OP_DCONST_0 + 1); }  // 1.0
+    else { op(OP_LDC2_W); u2(cw.double_const(bits)); }
+    adj(+2);
+  }
+  void fbinop(std::uint8_t o) { op(o); adj(-1); }  // 2 floats -> 1 float
+  void dbinop(std::uint8_t o) { op(o); adj(-2); }  // 2 doubles -> 1 double
 };
 
 struct Translated {
@@ -254,10 +299,11 @@ int dalvik_insn_units(std::uint8_t op) {
   if (op == 0x13 || op == 0x15 || op == 0x16 || op == 0x19 || op == 0x1a ||
       op == 0x1c ||                  // const-class
       op == 0x1f || op == 0x20 ||    // check-cast, instance-of
-      op == 0x22 || op == 0x23 || op == 0x29 || op == 0x31 ||
+      op == 0x22 || op == 0x23 || op == 0x29 ||
+      (op >= 0x2d && op <= 0x31) ||   // cmpl/cmpg-float/double, cmp-long
       (op >= 0x32 && op <= 0x3d) ||   // if-test / if-testz
       (op >= 0x44 && op <= 0x6d) ||   // aget/aput, iget/iput, sget/sput (all typed)
-      (op >= 0x90 && op <= 0xa5) ||   // int/long binary ops (23x)
+      (op >= 0x90 && op <= 0xaf) ||   // int/long/float/double binary ops (23x)
       (op >= 0xd0 && op <= 0xe2)) {   // int op/lit16, op/lit8
     return 2;
   }
@@ -349,7 +395,21 @@ void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod
     }
     case 0x81: set_long(L((u >> 8) & 0xf)); break;          // int-to-long
     case 0x84: set(L((u >> 8) & 0xf), kInt); break;         // long-to-int
+    case 0x82: case 0x85: case 0x87: case 0x8c:             // ..-to-float (1 slot)
+      set(L((u >> 8) & 0xf), kInt); break;
+    case 0x83: case 0x86: case 0x89:                        // ..-to-double (2 slots)
+      set_long(L((u >> 8) & 0xf)); break;
+    case 0x88: set_long(L((u >> 8) & 0xf)); break;          // float-to-long
+    case 0x8a: set(L((u >> 8) & 0xf), kInt); break;         // double-to-int
+    case 0x8b: set_long(L((u >> 8) & 0xf)); break;          // double-to-long
+    case 0x7f: set(L((u >> 8) & 0xf), kInt); break;         // neg-float (1 slot)
+    case 0x80: set_long(L((u >> 8) & 0xf)); break;          // neg-double (2 slots)
+    case 0x2d: case 0x2e: case 0x2f: case 0x30:             // cmp*-float/double -> int
     case 0x31: set(L((u >> 8) & 0xff), kInt); break;        // cmp-long -> int
+    case 0xa6: case 0xa7: case 0xa8: case 0xa9: case 0xaa:  // float binary 23x -> float (1)
+      set(L((u >> 8) & 0xff), kInt); break;
+    case 0xab: case 0xac: case 0xad: case 0xae: case 0xaf:  // double binary 23x -> double (2)
+      set_long(L((u >> 8) & 0xff)); break;
     case 0x90: case 0x91: case 0x92: case 0x93: case 0x94:  // int binary 23x -> int
     case 0x95: case 0x96: case 0x97: case 0x98: case 0x99: case 0x9a:
       set(L((u >> 8) & 0xff), kInt); break;
@@ -375,6 +435,10 @@ void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod
         set(L((u >> 8) & 0xf), kInt);
       } else if (op >= 0xbb && op <= 0xc5) {                // long op/2addr -> long
         set_long(L((u >> 8) & 0xf));
+      } else if (op >= 0xc6 && op <= 0xca) {                // float op/2addr -> float (1)
+        set(L((u >> 8) & 0xf), kInt);
+      } else if (op >= 0xcb && op <= 0xcf) {                // double op/2addr -> double (2)
+        set_long(L((u >> 8) & 0xf));
       } else if (op >= 0xd0 && op <= 0xe2) {                // int op/lit -> int
         set(L(op >= 0xd8 ? (u >> 8) & 0xff : (u >> 8) & 0xf), kInt);
       }
@@ -382,10 +446,225 @@ void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod
   }
 }
 
+// Per-register numeric kind, so the type-ambiguous const/move opcodes can pick the
+// correctly-typed JVM load/store/const. Float occupies one slot (like int), double
+// two (like long); their arithmetic/convert/compare opcodes are unambiguous, so we
+// pin registers from those and propagate through moves via union-find.
+enum class RKind { Unknown, Int, Float, Long, Double, Ref };
+
+// Returns nullopt if a register is used as two incompatible types (method stubbed).
+std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
+                                                  const DexMethod& m) {
+  const DexCode& c = *m.code;
+  const int nregs = c.registers_size;
+  // Per-register kind bitmask. Int/Long are the defaults (disambiguated by opcode
+  // width), so we track only which of {Int,Float,Long,Double} a register is used
+  // as, and flag a genuine ambiguity: Float-vs-Int or Double-vs-Long on one
+  // register (the const/move opcode can't tell those apart). Int-vs-Long reuse is
+  // fine (add-int vs add-long already differ).
+  constexpr int kI = 1, kF = 2, kL = 4, kD = 8;
+  const auto bit = [](RKind k) {
+    switch (k) {
+      case RKind::Int: return kI; case RKind::Float: return kF;
+      case RKind::Long: return kL; case RKind::Double: return kD;
+      default: return 0;
+    }
+  };
+  std::vector<int> parent(static_cast<std::size_t>(nregs));
+  std::vector<int> mask(static_cast<std::size_t>(nregs), 0);
+  for (int i = 0; i < nregs; ++i) parent[static_cast<std::size_t>(i)] = i;
+  const auto find = [&](int x) {
+    while (parent[static_cast<std::size_t>(x)] != x) {
+      parent[static_cast<std::size_t>(x)] =
+          parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(x)])];
+      x = parent[static_cast<std::size_t>(x)];
+    }
+    return x;
+  };
+  const auto pin = [&](int r, RKind k) {
+    if (r < 0 || r >= nregs) return;
+    mask[static_cast<std::size_t>(find(r))] |= bit(k);
+  };
+  const auto unite = [&](int a, int b) {
+    if (a < 0 || b < 0 || a >= nregs || b >= nregs) return;
+    const int ra = find(a), rb = find(b);
+    if (ra == rb) return;
+    parent[static_cast<std::size_t>(ra)] = rb;
+    mask[static_cast<std::size_t>(rb)] |= mask[static_cast<std::size_t>(ra)];
+  };
+
+  // Parameter registers (high registers): kind from the signature.
+  int pr = nregs - c.ins_size;
+  if (!m.is_static()) pr += 1;  // 'this' is a ref (no float/double bearing)
+  for (const std::string& d : m.param_descriptors) {
+    if (d == "F") { pin(pr, RKind::Float); pr += 1; }
+    else if (d == "D") { pin(pr, RKind::Double); pr += 2; }
+    else if (d == "J") { pin(pr, RKind::Long); pr += 2; }
+    else if (is_int_family_desc(d)) { pin(pr, RKind::Int); pr += 1; }
+    else pr += 1;  // ref
+  }
+
+  const std::vector<std::uint16_t>& in = c.insns;
+  std::size_t pc = 0;
+  const MethodRef* pending_ret = nullptr;  // invoke return type -> next move-result
+  while (pc < in.size()) {
+    const std::uint16_t u0 = in[pc];
+    if (u0 == 0x0100) { pc += 4 + (pc + 1 < in.size() ? in[pc + 1] * 2 : 0); continue; }
+    if (u0 == 0x0200) { pc += 2 + (pc + 1 < in.size() ? in[pc + 1] * 4 : 0); continue; }
+    if (u0 == 0x0300) {
+      const std::uint32_t sz = pc + 3 < in.size()
+          ? (static_cast<std::uint32_t>(in[pc + 2]) |
+             (static_cast<std::uint32_t>(in[pc + 3]) << 16)) : 0;
+      const int w = pc + 1 < in.size() ? in[pc + 1] : 1;
+      pc += 4 + (static_cast<std::size_t>(sz) * w + 1) / 2;
+      continue;
+    }
+    const std::uint8_t op = u0 & 0xff;
+    const int A4 = (u0 >> 8) & 0xf, B4 = (u0 >> 12) & 0xf, A8 = (u0 >> 8) & 0xff;
+    const int BB = pc + 1 < in.size() ? (in[pc + 1] & 0xff) : 0;
+    const int CC = pc + 1 < in.size() ? ((in[pc + 1] >> 8) & 0xff) : 0;
+    const MethodRef* this_invoke = nullptr;
+
+    if (op >= 0x90 && op <= 0x9a) { pin(A8, RKind::Int); pin(BB, RKind::Int); pin(CC, RKind::Int); }  // int 23x
+    else if (op >= 0x9b && op <= 0xa2) { pin(A8, RKind::Long); pin(BB, RKind::Long); pin(CC, RKind::Long); }  // long non-shift
+    else if (op >= 0xa3 && op <= 0xa5) { pin(A8, RKind::Long); pin(BB, RKind::Long); pin(CC, RKind::Int); }   // long shift: CC int
+    else if (op >= 0xa6 && op <= 0xaa) { pin(A8, RKind::Float); pin(BB, RKind::Float); pin(CC, RKind::Float); }  // float 23x
+    else if (op >= 0xab && op <= 0xaf) { pin(A8, RKind::Double); pin(BB, RKind::Double); pin(CC, RKind::Double); }  // double 23x
+    else if (op >= 0xb0 && op <= 0xba) { pin(A4, RKind::Int); pin(B4, RKind::Int); }    // int /2addr
+    else if (op >= 0xbb && op <= 0xc2) { pin(A4, RKind::Long); pin(B4, RKind::Long); }  // long non-shift /2addr
+    else if (op >= 0xc3 && op <= 0xc5) { pin(A4, RKind::Long); pin(B4, RKind::Int); }   // long shift /2addr
+    else if (op >= 0xc6 && op <= 0xca) { pin(A4, RKind::Float); pin(B4, RKind::Float); }    // float /2addr
+    else if (op >= 0xcb && op <= 0xcf) { pin(A4, RKind::Double); pin(B4, RKind::Double); }  // double /2addr
+    else if (op >= 0xd0 && op <= 0xd7) { pin(A4, RKind::Int); pin(B4, RKind::Int); }    // int /lit16 (22s: nibbles)
+    else if (op >= 0xd8 && op <= 0xe2) { pin(A8, RKind::Int); pin(BB, RKind::Int); }    // int /lit8 (22b: bytes)
+    // Moves unify (32-bit and 64-bit), so a const/move-linked register inherits
+    // the type pinned elsewhere.
+    if (op == 0x01) unite(A4, B4);                       // move
+    else if (op == 0x02) unite(A8, in[pc + 1]);          // move/from16
+    else if (op == 0x03) unite(in[pc + 1], in[pc + 2]);  // move/16
+    else if (op == 0x04) unite(A4, B4);                  // move-wide
+    else if (op == 0x05) unite(A8, in[pc + 1]);          // move-wide/from16
+    else if (op == 0x06) unite(in[pc + 1], in[pc + 2]);  // move-wide/16
+
+    switch (op) {
+      case 0x7b: case 0x7c: pin(A4, RKind::Int); pin(B4, RKind::Int); break;      // neg/not-int
+      case 0x7d: case 0x7e: pin(A4, RKind::Long); pin(B4, RKind::Long); break;    // neg/not-long
+      case 0x7f: pin(A4, RKind::Float); pin(B4, RKind::Float); break;             // neg-float
+      case 0x80: pin(A4, RKind::Double); pin(B4, RKind::Double); break;           // neg-double
+      case 0x81: pin(A4, RKind::Long); pin(B4, RKind::Int); break;                // int-to-long
+      case 0x82: pin(A4, RKind::Float); pin(B4, RKind::Int); break;               // int-to-float
+      case 0x83: pin(A4, RKind::Double); pin(B4, RKind::Int); break;              // int-to-double
+      case 0x84: pin(A4, RKind::Int); pin(B4, RKind::Long); break;                // long-to-int
+      case 0x85: pin(A4, RKind::Float); pin(B4, RKind::Long); break;              // long-to-float
+      case 0x86: pin(A4, RKind::Double); pin(B4, RKind::Long); break;             // long-to-double
+      case 0x87: pin(A4, RKind::Int); pin(B4, RKind::Float); break;               // float-to-int
+      case 0x88: pin(A4, RKind::Long); pin(B4, RKind::Float); break;              // float-to-long
+      case 0x89: pin(A4, RKind::Double); pin(B4, RKind::Float); break;            // float-to-double
+      case 0x8a: pin(A4, RKind::Int); pin(B4, RKind::Double); break;              // double-to-int
+      case 0x8b: pin(A4, RKind::Long); pin(B4, RKind::Double); break;             // double-to-long
+      case 0x8c: pin(A4, RKind::Float); pin(B4, RKind::Double); break;            // double-to-float
+      case 0x8d: case 0x8e: case 0x8f: pin(A4, RKind::Int); pin(B4, RKind::Int); break;  // int-to-b/c/s
+      case 0x2d: case 0x2e: pin(A8, RKind::Int); pin(BB, RKind::Float); pin(CC, RKind::Float); break;   // cmp*-float
+      case 0x2f: case 0x30: pin(A8, RKind::Int); pin(BB, RKind::Double); pin(CC, RKind::Double); break; // cmp*-double
+      case 0x31: pin(A8, RKind::Int); pin(BB, RKind::Long); pin(CC, RKind::Long); break;                // cmp-long
+      case 0x0f: pin(A8, m.return_descriptor == "F" ? RKind::Float : RKind::Int); break;  // return
+      case 0x10: pin(A8, m.return_descriptor == "D" ? RKind::Double : RKind::Long); break;  // return-wide
+      case 0x0a:  // move-result
+        if (pending_ret) {
+          pin(A8, pending_ret->return_descriptor == "F" ? RKind::Float : RKind::Int);
+        }
+        break;
+      case 0x0b:  // move-result-wide
+        if (pending_ret) {
+          pin(A8, pending_ret->return_descriptor == "D" ? RKind::Double : RKind::Long);
+        }
+        break;
+      case 0x52: case 0x53: case 0x54: {  // iget / iget-wide / iget-object
+        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        if (fr) pin(A4, fr->type_descriptor == "F" ? RKind::Float
+                        : fr->type_descriptor == "D" ? RKind::Double
+                        : is_wide_desc(fr->type_descriptor) ? RKind::Long : RKind::Int);
+        break;
+      }
+      case 0x59: case 0x5a: case 0x5b: {  // iput / iput-wide / iput-object
+        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        if (fr) pin(A4, fr->type_descriptor == "F" ? RKind::Float
+                        : fr->type_descriptor == "D" ? RKind::Double
+                        : is_wide_desc(fr->type_descriptor) ? RKind::Long : RKind::Int);
+        break;
+      }
+      case 0x60: case 0x61: {  // sget / sget-wide
+        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        if (fr) pin(A8, fr->type_descriptor == "F" ? RKind::Float
+                        : fr->type_descriptor == "D" ? RKind::Double
+                        : is_wide_desc(fr->type_descriptor) ? RKind::Long : RKind::Int);
+        break;
+      }
+      case 0x67: case 0x68: {  // sput / sput-wide
+        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        if (fr) pin(A8, fr->type_descriptor == "F" ? RKind::Float
+                        : fr->type_descriptor == "D" ? RKind::Double
+                        : is_wide_desc(fr->type_descriptor) ? RKind::Long : RKind::Int);
+        break;
+      }
+      case 0x44: case 0x47: case 0x48: case 0x49: case 0x4a:  // aget int/narrow: dst Int, idx Int
+      case 0x4b: case 0x4e: case 0x4f: case 0x50: case 0x51:  // aput int/narrow
+        pin(A8, RKind::Int); pin(CC, RKind::Int); break;
+      case 0x45: case 0x4c: pin(A8, RKind::Long); pin(CC, RKind::Int); break;  // aget/aput-wide (long)
+      case 0x6e: case 0x6f: case 0x70: case 0x71: case 0x72:  // invoke 35c
+      case 0x74: case 0x75: case 0x76: case 0x77: case 0x78:  // invoke /range
+        this_invoke = dex.method_ref(in[pc + 1]);
+        if (this_invoke) {
+          const bool is_static = (op == 0x71 || op == 0x77);
+          const bool range = op >= 0x74;
+          const int argc = range ? A8 : ((u0 >> 12) & 0xf);
+          const std::uint16_t rw = pc + 2 < in.size() ? in[pc + 2] : 0;
+          const int nib[5] = {rw & 0xf, (rw >> 4) & 0xf, (rw >> 8) & 0xf,
+                              (rw >> 12) & 0xf, A8};
+          int idx = is_static ? 0 : 1;
+          for (const std::string& d : this_invoke->param_descriptors) {
+            const int r = range ? (rw + idx) : nib[idx];
+            if (d == "F") pin(r, RKind::Float);
+            else if (d == "D") { pin(r, RKind::Double); }
+            else if (d == "J") pin(r, RKind::Long);
+            else if (is_int_family_desc(d)) pin(r, RKind::Int);
+            idx += is_wide_desc(d) ? 2 : 1;
+            (void)argc;
+          }
+        }
+        break;
+      default: break;
+    }
+    pending_ret = this_invoke;  // a move-result immediately after reads this
+    pc += dalvik_insn_units(op);
+  }
+
+  std::vector<RKind> out(static_cast<std::size_t>(nregs), RKind::Unknown);
+  for (int i = 0; i < nregs; ++i) {
+    const int mk = mask[static_cast<std::size_t>(find(i))];
+    // Genuine ambiguity a whole-method kind cannot resolve -> stub the method.
+    if (((mk & kF) && (mk & kI)) || ((mk & kD) && (mk & kL)) ||
+        ((mk & kF) && (mk & kD))) {
+      return std::nullopt;
+    }
+    out[static_cast<std::size_t>(i)] =
+        (mk & kD) ? RKind::Double : (mk & kF) ? RKind::Float : RKind::Unknown;
+  }
+  return out;
+}
+
 // Serialize one full_frame's verification_type_info list for `slots`, trimming
 // trailing Top entries. Returns (bytes, entry_count).
+// `rk`/`ins` refine a width-typed local (Int/Long) to Float/Double per the
+// inferred register kind (JVM slot i maps to Dalvik register i-ins).
 std::pair<std::vector<std::uint8_t>, std::uint16_t> encode_vtypes(
-    ClassWriter& cw, const std::vector<VType>& slots) {
+    ClassWriter& cw, const std::vector<VType>& slots,
+    const std::vector<RKind>& rk, int ins) {
+  const auto slot_kind = [&](int i) -> RKind {
+    const int reg = i - ins;
+    return (reg >= 0 && reg < static_cast<int>(rk.size()))
+               ? rk[static_cast<std::size_t>(reg)] : RKind::Unknown;
+  };
   int last = -1;
   for (int i = 0; i < static_cast<int>(slots.size()); ++i) {
     if (slots[i].kind != VType::Top && slots[i].kind != VType::LongHi) last = i;
@@ -395,8 +674,13 @@ std::pair<std::vector<std::uint8_t>, std::uint16_t> encode_vtypes(
   for (int i = 0; i <= last; ++i) {
     ++count;
     switch (slots[i].kind) {
-      case VType::Int:    out.push_back(1); break;
-      case VType::Long:   out.push_back(4); ++i; break;  // skip the LongHi slot
+      case VType::Int:
+        out.push_back(slot_kind(i) == RKind::Float ? 2 : 1);  // Float : Integer
+        break;
+      case VType::Long:
+        out.push_back(slot_kind(i) == RKind::Double ? 3 : 4);  // Double : Long
+        ++i;  // skip the high slot
+        break;
       case VType::Obj: {
         out.push_back(7);
         const std::uint16_t ci = cw.class_ref(slots[i].cls);
@@ -414,7 +698,8 @@ std::pair<std::vector<std::uint8_t>, std::uint16_t> encode_vtypes(
 // bytecode. Returns nullopt (caller stubs the method) on any unsupported
 // opcode, type, or register width.
 std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
-                                           const DexMethod& m) {
+                                           const DexMethod& m,
+                                           const std::string& this_internal) {
   if (!m.has_code()) return std::nullopt;
   const DexCode& c = *m.code;
   const int ins = c.ins_size;
@@ -423,33 +708,71 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
   if (max_locals > 255) return std::nullopt;
 
   const std::string& ret = m.return_descriptor;
-  const bool ret_void = ret == "V";
-  const bool ret_int = is_int_family_desc(ret);
-  const bool ret_ref = is_ref_desc(ret);
-  if (!ret_void && !ret_int && !ret_ref) return std::nullopt;
+  // All scalar return kinds are supported (void/int/long/float/double/ref).
 
-  // Incoming-argument reference-ness, in order: [this?] then params. Wide args
-  // are not handled.
-  std::vector<bool> arg_is_ref;
-  if (!m.is_static()) arg_is_ref.push_back(true);  // this
-  for (const std::string& d : m.param_descriptors) {
-    if (is_wide_desc(d)) return std::nullopt;
-    if (is_ref_desc(d)) arg_is_ref.push_back(true);
-    else if (is_int_family_desc(d)) arg_is_ref.push_back(false);
-    else return std::nullopt;
-  }
-  if (static_cast<int>(arg_is_ref.size()) != ins) return std::nullopt;
+  // Register-kind inference disambiguates the type-ambiguous const/move opcodes
+  // (int-vs-float, long-vs-double). A conflict -> stub.
+  auto reg_kinds = infer_reg_kinds(dex, m);
+  if (!reg_kinds) return std::nullopt;
+  const std::vector<RKind>& rk = *reg_kinds;
+  const auto rkind = [&](int reg) -> RKind {
+    return (reg >= 0 && reg < regs) ? rk[static_cast<std::size_t>(reg)]
+                                    : RKind::Unknown;
+  };
 
   Emitter e(cw);
   const auto local = [&](int reg) { return ins + reg; };  // Dalvik reg -> JVM local
 
   // Prologue: incoming JVM args (locals 0..ins-1) -> Dalvik param registers
-  // (which live at JVM locals regs..regs+ins-1). Copy in declaration order.
-  for (int i = 0; i < ins; ++i) {
-    const int dst = regs + i;
-    if (arg_is_ref[static_cast<std::size_t>(i)]) { e.load_a(i); e.store_a(dst); }
-    else { e.load_i(i); e.store_i(dst); }
+  // (JVM locals regs..regs+ins-1). Copy with the correctly-typed load/store, and
+  // seed the frame fixpoint's entry state so params read-before-write are typed.
+  std::vector<VType> entry_locals(static_cast<std::size_t>(max_locals));  // all Top
+  {
+    int islot = 0;  // incoming JVM slot cursor
+    const auto do_arg = [&](RKind k, const std::string& obj_cls) {
+      const int dst = regs + islot;
+      auto seed = [&](int slot, VType v) {
+        if (slot >= 0 && slot < max_locals) {
+          entry_locals[static_cast<std::size_t>(slot)] = std::move(v);
+        }
+      };
+      switch (k) {
+        case RKind::Long: case RKind::Double:
+          e.load_l(islot); e.store_l(dst);  // wide load/store move both slots
+          seed(dst, {VType::Long, {}}); seed(dst + 1, {VType::LongHi, {}});
+          islot += 2; break;
+        case RKind::Float:
+          e.load_f(islot); e.store_f(dst); seed(dst, {VType::Int, {}}); islot += 1; break;
+        case RKind::Ref:
+          e.load_a(islot); e.store_a(dst); seed(dst, {VType::Obj, obj_cls});
+          islot += 1; break;
+        default:  // Int
+          e.load_i(islot); e.store_i(dst); seed(dst, {VType::Int, {}}); islot += 1; break;
+      }
+    };
+    if (!m.is_static()) do_arg(RKind::Ref, this_internal);  // 'this'
+    for (const std::string& d : m.param_descriptors) {
+      if (d == "J" || d == "D") do_arg(d == "J" ? RKind::Long : RKind::Double, "");
+      else if (d == "F") do_arg(RKind::Float, "");
+      else if (is_ref_desc(d)) do_arg(RKind::Ref, obj_internal(d));
+      else if (is_int_family_desc(d)) do_arg(RKind::Int, "");
+      else return std::nullopt;
+    }
+    if (islot != ins) return std::nullopt;
   }
+
+  // Const/move emit helpers: pick the float/double form when the destination
+  // register's inferred kind demands it (the raw bit pattern is reinterpreted).
+  const auto emit_const32 = [&](int a, std::int32_t lit) {
+    if (rkind(a) == RKind::Float) {
+      e.push_float(static_cast<std::uint32_t>(lit)); e.store_f(local(a));
+    } else { e.push_int(lit); e.store_i(local(a)); }
+  };
+  const auto emit_const64 = [&](int a, std::int64_t lit) {
+    if (rkind(a) == RKind::Double) {
+      e.push_double(static_cast<std::uint64_t>(lit)); e.store_d(local(a));
+    } else { e.push_long(lit); e.store_l(local(a)); }
+  };
 
   // Branch handling: record every Dalvik pc -> JVM code offset, and each branch's
   // JVM operand site + Dalvik target, then patch relative offsets in a second
@@ -520,7 +843,8 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         break;
       case 0x01: {  // move vA, vB (12x)
         const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
-        e.load_i(local(b)); e.store_i(local(a));
+        if (rkind(a) == RKind::Float) { e.load_f(local(b)); e.store_f(local(a)); }
+        else { e.load_i(local(b)); e.store_i(local(a)); }
         pc += 1;
         break;
       }
@@ -534,9 +858,10 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         e.op(OP_RETURN);
         pc += 1;
         break;
-      case 0x0f: {  // return vAA (11x)
+      case 0x0f: {  // return vAA (11x): int or float, per the return descriptor
         const int reg = (u >> 8) & 0xff;
-        e.load_i(local(reg)); e.op(OP_IRETURN); e.adj(-1);
+        if (ret == "F") { e.load_f(local(reg)); e.op(OP_FRETURN); e.adj(-1); }
+        else { e.load_i(local(reg)); e.op(OP_IRETURN); e.adj(-1); }
         pc += 1;
         break;
       }
@@ -550,85 +875,72 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         const int a = (u >> 8) & 0xf;
         int lit = (u >> 12) & 0xf;
         if (lit & 0x8) lit -= 16;  // sign-extend 4 bits
-        e.push_int(lit); e.store_i(local(a));
+        emit_const32(a, lit);
         pc += 1;
         break;
       }
       case 0x13: {  // const/16 vAA, #+BBBB (21s)
         if (pc + 1 >= in.size()) return std::nullopt;
-        const int a = (u >> 8) & 0xff;
-        const std::int32_t lit = static_cast<std::int16_t>(in[pc + 1]);
-        e.push_int(lit); e.store_i(local(a));
+        emit_const32((u >> 8) & 0xff, static_cast<std::int16_t>(in[pc + 1]));
         pc += 2;
         break;
       }
       case 0x14: {  // const vAA, #+BBBBBBBB (31i)
         if (pc + 2 >= in.size()) return std::nullopt;
-        const int a = (u >> 8) & 0xff;
-        const std::int32_t lit = static_cast<std::int32_t>(
+        emit_const32((u >> 8) & 0xff, static_cast<std::int32_t>(
             static_cast<std::uint32_t>(in[pc + 1]) |
-            (static_cast<std::uint32_t>(in[pc + 2]) << 16));
-        e.push_int(lit); e.store_i(local(a));
+            (static_cast<std::uint32_t>(in[pc + 2]) << 16)));
         pc += 3;
         break;
       }
       case 0x15: {  // const/high16 vAA, #+BBBB0000 (21h)
         if (pc + 1 >= in.size()) return std::nullopt;
-        const int a = (u >> 8) & 0xff;
-        const std::int32_t lit =
-            static_cast<std::int32_t>(static_cast<std::uint32_t>(in[pc + 1]) << 16);
-        e.push_int(lit); e.store_i(local(a));
+        emit_const32((u >> 8) & 0xff,
+            static_cast<std::int32_t>(static_cast<std::uint32_t>(in[pc + 1]) << 16));
         pc += 2;
         break;
       }
-      case 0x16: {  // const-wide/16 vAA, #+BBBB (21s) - long
+      case 0x16: {  // const-wide/16 vAA, #+BBBB (21s) - long/double
         if (pc + 1 >= in.size()) return std::nullopt;
-        const int a = (u >> 8) & 0xff;
-        e.push_long(static_cast<std::int16_t>(in[pc + 1]));
-        e.store_l(local(a));
+        emit_const64((u >> 8) & 0xff, static_cast<std::int16_t>(in[pc + 1]));
         pc += 2;
         break;
       }
-      case 0x17: {  // const-wide/32 vAA, #+BBBBBBBB (31i) - long
+      case 0x17: {  // const-wide/32 vAA, #+BBBBBBBB (31i) - long/double
         if (pc + 2 >= in.size()) return std::nullopt;
-        const int a = (u >> 8) & 0xff;
-        const std::int32_t lo32 = static_cast<std::int32_t>(
+        emit_const64((u >> 8) & 0xff, static_cast<std::int32_t>(
             static_cast<std::uint32_t>(in[pc + 1]) |
-            (static_cast<std::uint32_t>(in[pc + 2]) << 16));
-        e.push_long(lo32);
-        e.store_l(local(a));
+            (static_cast<std::uint32_t>(in[pc + 2]) << 16)));
         pc += 3;
         break;
       }
-      case 0x18: {  // const-wide vAA, #+BBBB...(64) (51l) - long
+      case 0x18: {  // const-wide vAA, #+BBBB...(64) (51l) - long/double
         if (pc + 4 >= in.size()) return std::nullopt;
-        const int a = (u >> 8) & 0xff;
         std::uint64_t lit = 0;
         for (int k = 0; k < 4; ++k) {
           lit |= static_cast<std::uint64_t>(in[pc + 1 + k]) << (16 * k);
         }
-        e.push_long(static_cast<std::int64_t>(lit));
-        e.store_l(local(a));
+        emit_const64((u >> 8) & 0xff, static_cast<std::int64_t>(lit));
         pc += 5;
         break;
       }
-      case 0x19: {  // const-wide/high16 vAA, #+BBBB000000000000 (21h) - long
+      case 0x19: {  // const-wide/high16 vAA, #+BBBB000000000000 (21h) - long/double
         if (pc + 1 >= in.size()) return std::nullopt;
-        const int a = (u >> 8) & 0xff;
-        e.push_long(static_cast<std::int64_t>(in[pc + 1]) << 48);
-        e.store_l(local(a));
+        emit_const64((u >> 8) & 0xff, static_cast<std::int64_t>(in[pc + 1]) << 48);
         pc += 2;
         break;
       }
-      case 0x04: {  // move-wide vA, vB (12x) - long
+      case 0x04: {  // move-wide vA, vB (12x) - long/double
         const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
-        e.load_l(local(b)); e.store_l(local(a));
+        if (rkind(a) == RKind::Double) { e.load_d(local(b)); e.store_d(local(a)); }
+        else { e.load_l(local(b)); e.store_l(local(a)); }
         pc += 1;
         break;
       }
-      case 0x10: {  // return-wide vAA (11x) - long
+      case 0x10: {  // return-wide vAA (11x): long or double, per return descriptor
         const int a = (u >> 8) & 0xff;
-        e.load_l(local(a)); e.op(OP_LRETURN); e.adj(-2);
+        if (ret == "D") { e.load_d(local(a)); e.op(OP_DRETURN); e.adj(-2); }
+        else { e.load_l(local(a)); e.op(OP_LRETURN); e.adj(-2); }
         pc += 1;
         break;
       }
@@ -760,6 +1072,93 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 1;
         break;
       }
+      case 0xa6: case 0xa7: case 0xa8: case 0xa9: case 0xaa: {  // float binary (23x)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const int bb = in[pc + 1] & 0xff, cc = (in[pc + 1] >> 8) & 0xff;
+        e.load_f(local(bb)); e.load_f(local(cc));
+        e.fbinop(jvm_fbinop(opcode - 0xa6));
+        e.store_f(local(a));
+        pc += 2;
+        break;
+      }
+      case 0xab: case 0xac: case 0xad: case 0xae: case 0xaf: {  // double binary (23x)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const int bb = in[pc + 1] & 0xff, cc = (in[pc + 1] >> 8) & 0xff;
+        e.load_d(local(bb)); e.load_d(local(cc));
+        e.dbinop(jvm_dbinop(opcode - 0xab));
+        e.store_d(local(a));
+        pc += 2;
+        break;
+      }
+      case 0xc6: case 0xc7: case 0xc8: case 0xc9: case 0xca: {  // float op/2addr (12x)
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        e.load_f(local(a)); e.load_f(local(b));
+        e.fbinop(jvm_fbinop(opcode - 0xc6));
+        e.store_f(local(a));
+        pc += 1;
+        break;
+      }
+      case 0xcb: case 0xcc: case 0xcd: case 0xce: case 0xcf: {  // double op/2addr (12x)
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        e.load_d(local(a)); e.load_d(local(b));
+        e.dbinop(jvm_dbinop(opcode - 0xcb));
+        e.store_d(local(a));
+        pc += 1;
+        break;
+      }
+      case 0x7f: {  // neg-float (12x)
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        e.load_f(local(b)); e.op(OP_FNEG); e.store_f(local(a));
+        pc += 1;
+        break;
+      }
+      case 0x80: {  // neg-double (12x)
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        e.load_d(local(b)); e.op(OP_DNEG); e.store_d(local(a));
+        pc += 1;
+        break;
+      }
+      case 0x82: case 0x83: case 0x85: case 0x86:  // int/long -> float/double
+      case 0x87: case 0x88: case 0x89: case 0x8a: case 0x8b: case 0x8c: {  // float/double -> ..
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        switch (opcode) {
+          case 0x82: e.load_i(local(b)); e.op(OP_I2F); e.store_f(local(a)); break;
+          case 0x83: e.load_i(local(b)); e.op(OP_I2D); e.adj(+1); e.store_d(local(a)); break;
+          case 0x85: e.load_l(local(b)); e.op(OP_L2F); e.adj(-1); e.store_f(local(a)); break;
+          case 0x86: e.load_l(local(b)); e.op(OP_L2D); e.store_d(local(a)); break;
+          case 0x87: e.load_f(local(b)); e.op(OP_F2I); e.store_i(local(a)); break;
+          case 0x88: e.load_f(local(b)); e.op(OP_F2L); e.adj(+1); e.store_l(local(a)); break;
+          case 0x89: e.load_f(local(b)); e.op(OP_F2D); e.adj(+1); e.store_d(local(a)); break;
+          case 0x8a: e.load_d(local(b)); e.op(OP_D2I); e.adj(-1); e.store_i(local(a)); break;
+          case 0x8b: e.load_d(local(b)); e.op(OP_D2L); e.store_l(local(a)); break;
+          case 0x8c: e.load_d(local(b)); e.op(OP_D2F); e.adj(-1); e.store_f(local(a)); break;
+          default: return std::nullopt;
+        }
+        pc += 1;
+        break;
+      }
+      case 0x2d: case 0x2e: {  // cmpl-float / cmpg-float (23x) -> int
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const int bb = in[pc + 1] & 0xff, cc = (in[pc + 1] >> 8) & 0xff;
+        e.load_f(local(bb)); e.load_f(local(cc));
+        e.op(opcode == 0x2d ? OP_FCMPL : OP_FCMPG); e.adj(-1);  // 2 floats -> int
+        e.store_i(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x2f: case 0x30: {  // cmpl-double / cmpg-double (23x) -> int
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const int bb = in[pc + 1] & 0xff, cc = (in[pc + 1] >> 8) & 0xff;
+        e.load_d(local(bb)); e.load_d(local(cc));
+        e.op(opcode == 0x2f ? OP_DCMPL : OP_DCMPG); e.adj(-3);  // 2 doubles -> int
+        e.store_i(local(a));
+        pc += 2;
+        break;
+      }
       case 0x28: {  // goto +AA (10t)
         const std::int32_t off = static_cast<std::int8_t>((u >> 8) & 0xff);
         branch_to(OP_GOTO, rel_target(off));
@@ -786,14 +1185,17 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 2;
         break;
       }
-      case 0x0a: {  // move-result vAA (11x): capture preceding invoke's int result
+      case 0x0a: {  // move-result vAA (11x): capture preceding invoke's int/float result
         const int a = (u >> 8) & 0xff;
-        e.store_i(local(a));  // pops the value the invoke left on the stack
+        if (rkind(a) == RKind::Float) e.store_f(local(a));
+        else e.store_i(local(a));  // pops the value the invoke left on the stack
         pc += 1;
         break;
       }
-      case 0x0b: {  // move-result-wide vAA: capture a long/wide result
-        e.store_l(local((u >> 8) & 0xff));  // pops the two-slot value
+      case 0x0b: {  // move-result-wide vAA: capture a long/double result
+        const int a = (u >> 8) & 0xff;
+        if (rkind(a) == RKind::Double) e.store_d(local(a));
+        else e.store_l(local(a));  // pops the two-slot value
         pc += 1;
         break;
       }
@@ -821,18 +1223,21 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         const FieldRef* fr = dex.field_ref(in[pc + 1]);
         if (fr == nullptr) return std::nullopt;
         const bool is_object = opcode == 0x62 || opcode == 0x69;
+        const bool is_float = fr->type_descriptor == "F";
         const bool is_get = opcode == 0x62 || (opcode >= 0x60 && opcode <= 0x66);
         if (is_object ? !is_ref_desc(fr->type_descriptor)
-                      : !is_int_family_desc(fr->type_descriptor)) {
+                      : !(is_float || is_int_family_desc(fr->type_descriptor))) {
           return std::nullopt;
         }
         const std::uint16_t ref =
             cw.fieldref(fr->owner_internal, fr->name, fr->type_descriptor);
         if (is_get) {
           e.op(OP_GETSTATIC); e.u2(ref); e.adj(+1);
-          if (is_object) e.store_a(local(a)); else e.store_i(local(a));
+          if (is_object) e.store_a(local(a));
+          else if (is_float) e.store_f(local(a)); else e.store_i(local(a));
         } else {
-          if (is_object) e.load_a(local(a)); else e.load_i(local(a));
+          if (is_object) e.load_a(local(a));
+          else if (is_float) e.load_f(local(a)); else e.load_i(local(a));
           e.op(OP_PUTSTATIC); e.u2(ref); e.adj(-1);
         }
         pc += 2;
@@ -928,35 +1333,40 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 2;
         break;
       }
-      case 0x53: case 0x5a: {  // iget-wide / iput-wide (22c) - long field only
+      case 0x53: case 0x5a: {  // iget-wide / iput-wide (22c) - long or double field
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
         const FieldRef* fr = dex.field_ref(in[pc + 1]);
-        if (fr == nullptr || fr->type_descriptor != "J") return std::nullopt;
+        if (fr == nullptr || !is_wide_desc(fr->type_descriptor)) return std::nullopt;
+        const bool dbl = fr->type_descriptor == "D";
         const std::uint16_t ref =
             cw.fieldref(fr->owner_internal, fr->name, fr->type_descriptor);
         if (opcode == 0x53) {  // vA(wide) = vB.field
           e.load_a(local(b));
-          e.op(OP_GETFIELD); e.u2(ref); e.adj(+1);  // obj(1) -> long(2)
-          e.store_l(local(a));
+          e.op(OP_GETFIELD); e.u2(ref); e.adj(+1);  // obj(1) -> wide(2)
+          if (dbl) e.store_d(local(a)); else e.store_l(local(a));
         } else {               // vB.field = vA(wide)
-          e.load_a(local(b)); e.load_l(local(a));
+          e.load_a(local(b));
+          if (dbl) e.load_d(local(a)); else e.load_l(local(a));
           e.op(OP_PUTFIELD); e.u2(ref); e.adj(-3);
         }
         pc += 2;
         break;
       }
-      case 0x61: case 0x68: {  // sget-wide / sput-wide (21c) - long field only
+      case 0x61: case 0x68: {  // sget-wide / sput-wide (21c) - long or double field
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xff;
         const FieldRef* fr = dex.field_ref(in[pc + 1]);
-        if (fr == nullptr || fr->type_descriptor != "J") return std::nullopt;
+        if (fr == nullptr || !is_wide_desc(fr->type_descriptor)) return std::nullopt;
+        const bool dbl = fr->type_descriptor == "D";
         const std::uint16_t ref =
             cw.fieldref(fr->owner_internal, fr->name, fr->type_descriptor);
         if (opcode == 0x61) {
-          e.op(OP_GETSTATIC); e.u2(ref); e.adj(+2); e.store_l(local(a));
+          e.op(OP_GETSTATIC); e.u2(ref); e.adj(+2);
+          if (dbl) e.store_d(local(a)); else e.store_l(local(a));
         } else {
-          e.load_l(local(a)); e.op(OP_PUTSTATIC); e.u2(ref); e.adj(-2);
+          if (dbl) e.load_d(local(a)); else e.load_l(local(a));
+          e.op(OP_PUTSTATIC); e.u2(ref); e.adj(-2);
         }
         pc += 2;
         break;
@@ -1099,9 +1509,10 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         const FieldRef* fr = dex.field_ref(in[pc + 1]);
         if (fr == nullptr) return std::nullopt;
         const bool is_object = opcode == 0x54 || opcode == 0x5b;
+        const bool is_float = fr->type_descriptor == "F";
         const bool is_get = opcode == 0x54 || (opcode >= 0x52 && opcode <= 0x58);
         if (is_object ? !is_ref_desc(fr->type_descriptor)
-                      : !is_int_family_desc(fr->type_descriptor)) {
+                      : !(is_float || is_int_family_desc(fr->type_descriptor))) {
           return std::nullopt;
         }
         const std::uint16_t ref =
@@ -1109,10 +1520,12 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         if (is_get) {                    // vA = vB.field
           e.load_a(local(b));
           e.op(OP_GETFIELD); e.u2(ref);  // pop obj, push value (net 0)
-          if (is_object) e.store_a(local(a)); else e.store_i(local(a));
+          if (is_object) e.store_a(local(a));
+          else if (is_float) e.store_f(local(a)); else e.store_i(local(a));
         } else {                         // vB.field = vA
           e.load_a(local(b));
-          if (is_object) e.load_a(local(a)); else e.load_i(local(a));
+          if (is_object) e.load_a(local(a));
+          else if (is_float) e.load_f(local(a)); else e.load_i(local(a));
           e.op(OP_PUTFIELD); e.u2(ref); e.adj(-2);
         }
         pc += 2;
@@ -1158,31 +1571,32 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
 
         int reg = 0;
         if (has_receiver) e.load_a(local(arg_reg(reg++)));  // receiver
-        for (int i = 0; i < nparams; ++i, ++reg) {
+        for (int i = 0; i < nparams; ++i) {
           const std::string& d = mr->param_descriptors[static_cast<std::size_t>(i)];
-          if (is_wide_desc(d)) return std::nullopt;
-          if (is_ref_desc(d)) e.load_a(local(arg_reg(reg)));
-          else if (is_int_family_desc(d)) e.load_i(local(arg_reg(reg)));
+          if (d == "J") { e.load_l(local(arg_reg(reg))); reg += 2; }
+          else if (d == "D") { e.load_d(local(arg_reg(reg))); reg += 2; }
+          else if (d == "F") { e.load_f(local(arg_reg(reg))); reg += 1; }
+          else if (is_ref_desc(d)) { e.load_a(local(arg_reg(reg))); reg += 1; }
+          else if (is_int_family_desc(d)) { e.load_i(local(arg_reg(reg))); reg += 1; }
           else return std::nullopt;
         }
-        if (is_wide_desc(mr->return_descriptor)) return std::nullopt;
-        const int retw = mr->return_descriptor == "V" ? 0 : 1;
+        const std::string& rd = mr->return_descriptor;
+        const int retw = rd == "V" ? 0 : is_wide_desc(rd) ? 2 : 1;
         if (is_interface) {
           e.op(OP_INVOKEINTERFACE);
           e.u2(cw.interface_methodref(mr->owner_internal, mr->name, mr->descriptor));
-          e.u1(static_cast<std::uint8_t>(argc));  // arg word count (non-wide)
+          e.u1(static_cast<std::uint8_t>(argc));  // outgoing arg word count
           e.u1(0);
         } else {
           e.op(invoke_op);
           e.u2(cw.methodref(mr->owner_internal, mr->name, mr->descriptor));
         }
         e.adj(-argc + retw);  // pops receiver+params, pushes return
-        // Discard the result if not captured by a following move-result.
+        // Discard the result if not captured by a following move-result{,-wide}.
         if (retw > 0) {
-          const bool next_move_result =
-              (pc + 3 < in.size()) &&
-              ((in[pc + 3] & 0xff) == 0x0a || (in[pc + 3] & 0xff) == 0x0c);
-          if (!next_move_result) { e.op(OP_POP); e.adj(-1); }
+          const std::uint8_t nxt = pc + 3 < in.size() ? (in[pc + 3] & 0xff) : 0;
+          const bool captured = nxt == 0x0a || nxt == 0x0b || nxt == 0x0c;
+          if (!captured) { e.op(retw == 2 ? 0x58 : OP_POP); e.adj(-retw); }  // pop2/pop
         }
         pc += 3;
         break;
@@ -1341,7 +1755,7 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
     };
     // Worklist fixpoint: in-state (JVM local types) at each Dalvik pc.
     std::map<std::uint32_t, std::vector<VType>> in_state;
-    in_state[0] = std::vector<VType>(nloc);  // args omitted: frame methods are no-arg static
+    in_state[0] = entry_locals;  // seeded with incoming param types (see prologue)
     const auto merge_into = [&](std::uint32_t pc, const std::vector<VType>& s) -> bool {
       auto it = in_state.find(pc);
       if (it == in_state.end()) { in_state[pc] = s; return true; }
@@ -1421,7 +1835,7 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
     for (const Frame& f : frames) {
       stackmap.push_back(255);  // full_frame
       be16v(stackmap, static_cast<std::uint16_t>(f.off - prev - 1));
-      auto [lbytes, lcount] = encode_vtypes(cw, f.locals);
+      auto [lbytes, lcount] = encode_vtypes(cw, f.locals, rk, ins);
       be16v(stackmap, lcount);
       stackmap.insert(stackmap.end(), lbytes.begin(), lbytes.end());
       be16v(stackmap, static_cast<std::uint16_t>(f.stack.size()));
@@ -1494,7 +1908,7 @@ DexError convert(const DexFile& dex, const ConvertOptions& opts,
         if (!emittable_method(m)) continue;
         const std::uint16_t access =
             0x0001 | (m.is_static() ? 0x0008 : 0);  // public [static]
-        if (auto t = translate_method(cw, dex, m)) {
+        if (auto t = translate_method(cw, dex, m, internal_name(cls.java_name))) {
           cw.add_method(access, m.name, m.jvm_descriptor(), t->max_stack,
                         t->max_locals, std::move(t->code), std::move(t->exceptions),
                         std::move(t->stackmaptable));
