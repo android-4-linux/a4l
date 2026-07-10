@@ -96,6 +96,11 @@ if py3.found() and have_jni
                     '../../framework/shim/android/media/session/MediaSessionManager.java',
                     '../../framework/shim/android/media/session/PlaybackState.java',
                     '../../framework/shim/android/service/media/MediaBrowserService.java',
+                    '../../framework/shim/android/graphics/Color.java',
+                    '../../framework/shim/android/graphics/Paint.java',
+                    '../../framework/shim/android/graphics/Bitmap.java',
+                    '../../framework/shim/android/graphics/Canvas.java',
+                    '../../framework/shim/android/view/View.java',
                     '../../framework/shim/android/util/Log.java'),
       output : 'framework-shim',
       command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
@@ -159,6 +164,25 @@ if py3.found() and have_jni
       py3,
       args : [files('run_audio_test.py'), aclcxx_exe, audio_apk, framework_shim],
       depends : [aclcxx_exe, audio_apk, framework_shim],
+      timeout : 120,
+    )
+
+    # Phase 2 (gfx/Canvas): gfx.apk's main() builds a custom MyView extends
+    # android.view.View; v.draw(c) -> onDraw(c) fills a Bitmap-backed Canvas blue and
+    # draws a red rect. The Canvas/Bitmap natives raster into aclcxx::gfx::Surface and
+    # aclcxxDescribe() dumps sample pixels — verifiable headlessly (no compositor).
+    gfx_apk = custom_target(
+      'gfx-apk',
+      input : files('../fixtures/make_gfx_apk.py'),
+      output : 'gfx.apk',
+      command : [py3, '@INPUT@', '@OUTPUT@'],
+      depend_files : files('../fixtures/make_axml.py'),
+    )
+    test(
+      'run-apk-gfx',
+      py3,
+      args : [files('run_gfx_test.py'), aclcxx_exe, gfx_apk, framework_shim],
+      depends : [aclcxx_exe, gfx_apk, framework_shim],
       timeout : 120,
     )
   else

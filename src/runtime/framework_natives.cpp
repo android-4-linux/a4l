@@ -16,6 +16,7 @@
 #include <string>
 
 #include "audio/audio.h"
+#include "gfx/gfx.h"
 #include "log/log.h"
 #include "svc/svc.h"
 
@@ -131,6 +132,33 @@ jint JNICALL MediaSessionManager_activeCount(JNIEnv*, jclass) {
   return svc::media_sessions().active_sessions();
 }
 void JNICALL MediaSession_register(JNIEnv*, jclass) { svc::media_sessions().register_session(); }
+
+// --- android.graphics.Bitmap / Canvas -> aclcxx::gfx::Surface ------------------
+jlong JNICALL Bitmap_nativeCreate(JNIEnv*, jclass, jint w, jint h) {
+  return reinterpret_cast<jlong>(new gfx::Surface(w, h));
+}
+jint JNICALL Bitmap_nativeGetPixel(JNIEnv*, jclass, jlong ptr, jint x, jint y) {
+  auto* s = reinterpret_cast<gfx::Surface*>(ptr);
+  return s != nullptr ? static_cast<jint>(s->pixel(x, y)) : 0;
+}
+void JNICALL Bitmap_nativeDescribe(JNIEnv*, jclass, jlong ptr) {
+  auto* s = reinterpret_cast<gfx::Surface*>(ptr);
+  if (s == nullptr) return;
+  log::i("aclcxx.gfx", "bitmap {}x{} pixel(0,0)={:#010x} pixel({},{})={:#010x}",
+         s->width(), s->height(), s->pixel(0, 0), s->width() / 2, s->height() / 2,
+         s->pixel(s->width() / 2, s->height() / 2));
+}
+void JNICALL Canvas_nativeDrawColor(JNIEnv*, jclass, jlong ptr, jint color) {
+  if (auto* s = reinterpret_cast<gfx::Surface*>(ptr))
+    s->draw_color(static_cast<std::uint32_t>(color));
+}
+void JNICALL Canvas_nativeDrawRect(JNIEnv*, jclass, jlong ptr, jfloat l, jfloat t,
+                                   jfloat r, jfloat b, jint color) {
+  if (auto* s = reinterpret_cast<gfx::Surface*>(ptr)) {
+    s->fill_rect(static_cast<int>(l), static_cast<int>(t), static_cast<int>(r),
+                 static_cast<int>(b), static_cast<std::uint32_t>(color));
+  }
+}
 
 // Bind `n` static natives on class `name`; returns false (cleared) if the class or
 // registration is absent.
@@ -285,6 +313,27 @@ void register_framework_natives(JNIEnv* env) {
   if (bind(env, "android/media/session/MediaSession", ms_m, 1)) {
     log::write(log::Level::Info, "aclcxx.runtime.jvm",
                "framework natives bound: ActivityManager, Display, MediaSession(Manager)");
+  }
+
+  // android.graphics.Bitmap / Canvas -> gfx/ rasterizer.
+  const JNINativeMethod bmp_m[] = {
+      {const_cast<char*>("nativeCreate"), const_cast<char*>("(II)J"),
+       reinterpret_cast<void*>(&Bitmap_nativeCreate)},
+      {const_cast<char*>("nativeGetPixel"), const_cast<char*>("(JII)I"),
+       reinterpret_cast<void*>(&Bitmap_nativeGetPixel)},
+      {const_cast<char*>("nativeDescribe"), const_cast<char*>("(J)V"),
+       reinterpret_cast<void*>(&Bitmap_nativeDescribe)},
+  };
+  bind(env, "android/graphics/Bitmap", bmp_m, 3);
+  const JNINativeMethod canvas_m[] = {
+      {const_cast<char*>("nativeDrawColor"), const_cast<char*>("(JI)V"),
+       reinterpret_cast<void*>(&Canvas_nativeDrawColor)},
+      {const_cast<char*>("nativeDrawRect"), const_cast<char*>("(JFFFFI)V"),
+       reinterpret_cast<void*>(&Canvas_nativeDrawRect)},
+  };
+  if (bind(env, "android/graphics/Canvas", canvas_m, 2)) {
+    log::write(log::Level::Info, "aclcxx.runtime.jvm",
+               "framework natives bound: android.graphics.Canvas/Bitmap -> gfx");
   }
 }
 

@@ -7,5 +7,5 @@
 module_libs += static_library(
   'aclcxx_gfx',
   files('gfx.cpp'),
-  include_directories : config_inc,
+  include_directories : [config_inc, core_inc],
 )
