@@ -34,8 +34,12 @@ enum : std::uint8_t {
   OP_IMUL = 0x68, OP_IRETURN = 0xac, OP_ARETURN = 0xb0, OP_RETURN = 0xb1,
   OP_NEW = 0xbb, OP_INVOKESPECIAL = 0xb7, OP_ATHROW = 0xbf, OP_GOTO = 0xa7,
   OP_POP = 0x57, OP_INVOKESTATIC = 0xb8, OP_INVOKEVIRTUAL = 0xb6,
-  OP_GETSTATIC = 0xb2,
+  OP_GETSTATIC = 0xb2, OP_GETFIELD = 0xb4, OP_PUTFIELD = 0xb5,
 };
+
+// JVM field access flags that carry over 1:1 from Dalvik field flags.
+constexpr std::uint32_t kFieldFlagsMask =
+    0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010 | 0x0040 | 0x0080 | 0x1000 | 0x4000;
 
 std::string internal_name(const std::string& java) {
   std::string s = java;
@@ -70,8 +74,9 @@ bool skippable_class(const DexClass& c) {
 }
 
 bool emittable_method(const DexMethod& m) {
-  if (m.name == "<init>" || m.name == "<clinit>") return false;
   if (m.access_flags & (kAccAbstract | kAccNative)) return false;
+  if (m.name == "<clinit>") return false;   // static initializer not handled yet
+  if (m.name == "<init>") return true;      // constructor: a valid JVM method name
   if (m.name.empty()) return false;
   for (char c : m.name) {
     if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$')) {
@@ -138,22 +143,30 @@ struct Translated {
 // opcode, type, or register width.
 std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
                                            const DexMethod& m) {
-  if (!m.is_static() || !m.has_code()) return std::nullopt;
+  if (!m.has_code()) return std::nullopt;
   const DexCode& c = *m.code;
   const int ins = c.ins_size;
   const int regs = c.registers_size;
   const int max_locals = ins + regs;
   if (max_locals > 255) return std::nullopt;
 
-  // Only int-family / reference params and returns are handled.
-  for (const std::string& d : m.param_descriptors) {
-    if (!is_int_family_desc(d) && !is_ref_desc(d)) return std::nullopt;
-  }
   const std::string& ret = m.return_descriptor;
   const bool ret_void = ret == "V";
   const bool ret_int = is_int_family_desc(ret);
   const bool ret_ref = is_ref_desc(ret);
   if (!ret_void && !ret_int && !ret_ref) return std::nullopt;
+
+  // Incoming-argument reference-ness, in order: [this?] then params. Wide args
+  // are not handled.
+  std::vector<bool> arg_is_ref;
+  if (!m.is_static()) arg_is_ref.push_back(true);  // this
+  for (const std::string& d : m.param_descriptors) {
+    if (is_wide_desc(d)) return std::nullopt;
+    if (is_ref_desc(d)) arg_is_ref.push_back(true);
+    else if (is_int_family_desc(d)) arg_is_ref.push_back(false);
+    else return std::nullopt;
+  }
+  if (static_cast<int>(arg_is_ref.size()) != ins) return std::nullopt;
 
   Emitter e(cw);
   const auto local = [&](int reg) { return ins + reg; };  // Dalvik reg -> JVM local
@@ -161,9 +174,8 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
   // Prologue: incoming JVM args (locals 0..ins-1) -> Dalvik param registers
   // (which live at JVM locals regs..regs+ins-1). Copy in declaration order.
   for (int i = 0; i < ins; ++i) {
-    const std::string& d = m.param_descriptors[static_cast<std::size_t>(i)];
     const int dst = regs + i;
-    if (is_ref_desc(d)) { e.load_a(i); e.store_a(dst); }
+    if (arg_is_ref[static_cast<std::size_t>(i)]) { e.load_a(i); e.store_a(dst); }
     else { e.load_i(i); e.store_i(dst); }
   }
 
@@ -340,12 +352,54 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 2;
         break;
       }
+      case 0x22: {  // new-instance vAA, type@BBBB (21c)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const std::string* td = dex.type_at(in[pc + 1]);
+        if (td == nullptr || td->size() < 2 || td->front() != 'L' ||
+            td->back() != ';') {
+          return std::nullopt;  // only plain object types
+        }
+        e.op(OP_NEW);
+        e.u2(cw.class_ref(td->substr(1, td->size() - 2)));
+        e.adj(+1);
+        e.store_a(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x52:    // iget vA, vB, field@CCCC (22c)  - int
+      case 0x59: {  // iput vA, vB, field@CCCC (22c)  - int
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        if (fr == nullptr || !is_int_family_desc(fr->type_descriptor)) {
+          return std::nullopt;
+        }
+        const std::uint16_t ref =
+            cw.fieldref(fr->owner_internal, fr->name, fr->type_descriptor);
+        if (opcode == 0x52) {           // iget: vA = vB.field
+          e.load_a(local(b));
+          e.op(OP_GETFIELD); e.u2(ref);  // pop obj, push value (net 0)
+          e.store_i(local(a));
+        } else {                        // iput: vB.field = vA
+          e.load_a(local(b));
+          e.load_i(local(a));
+          e.op(OP_PUTFIELD); e.u2(ref); e.adj(-2);
+        }
+        pc += 2;
+        break;
+      }
       case 0x6e:    // invoke-virtual {vC..vG}, meth@BBBB (35c)
-      case 0x71: {  // invoke-static {vC..vG}, meth@BBBB (35c)
+      case 0x70:    // invoke-direct  {vC..vG}, meth@BBBB (35c) - <init>/private
+      case 0x71: {  // invoke-static  {vC..vG}, meth@BBBB (35c)
         if (pc + 2 >= in.size()) return std::nullopt;
-        const bool is_virtual = opcode == 0x6e;
-        const int argc = (u >> 12) & 0xf;  // includes receiver for invoke-virtual
-        if (is_virtual && argc < 1) return std::nullopt;
+        const bool is_static_call = opcode == 0x71;
+        const bool has_receiver = !is_static_call;  // virtual and direct
+        const std::uint8_t invoke_op = is_static_call ? OP_INVOKESTATIC
+                                       : opcode == 0x70 ? OP_INVOKESPECIAL
+                                                        : OP_INVOKEVIRTUAL;
+        const int argc = (u >> 12) & 0xf;  // includes receiver when present
+        if (has_receiver && argc < 1) return std::nullopt;
         const std::uint32_t midx = in[pc + 1];
         const std::uint16_t rw = in[pc + 2];
         const int arg_reg[5] = {rw & 0xf, (rw >> 4) & 0xf, (rw >> 8) & 0xf,
@@ -353,10 +407,10 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         const MethodRef* mr = dex.method_ref(midx);
         if (mr == nullptr) return std::nullopt;
         const int nparams = static_cast<int>(mr->param_descriptors.size());
-        if (nparams != argc - (is_virtual ? 1 : 0)) return std::nullopt;
+        if (nparams != argc - (has_receiver ? 1 : 0)) return std::nullopt;
 
         int reg = 0;
-        if (is_virtual) e.load_a(local(arg_reg[reg++]));  // receiver
+        if (has_receiver) e.load_a(local(arg_reg[reg++]));  // receiver
         for (int i = 0; i < nparams; ++i, ++reg) {
           const std::string& d = mr->param_descriptors[static_cast<std::size_t>(i)];
           if (is_wide_desc(d)) return std::nullopt;
@@ -368,7 +422,7 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         const int retw = mr->return_descriptor == "V" ? 0 : 1;
         const std::uint16_t ref =
             cw.methodref(mr->owner_internal, mr->name, mr->descriptor);
-        e.op(is_virtual ? OP_INVOKEVIRTUAL : OP_INVOKESTATIC);
+        e.op(invoke_op);
         e.u2(ref);
         e.adj(-argc + retw);  // pops receiver+params, pushes return
         // Discard the result if not captured by a following move-result.
@@ -447,7 +501,18 @@ DexError convert(const DexFile& dex, const ConvertOptions& opts,
 
   for (const DexClass& cls : dex.classes()) {
     if (skippable_class(cls)) continue;
-    ClassWriter cw(internal_name(cls.java_name), "java/lang/Object");
+    const std::string super =
+        cls.super_name ? internal_name(*cls.super_name) : "java/lang/Object";
+    ClassWriter cw(internal_name(cls.java_name), super);
+
+    for (const DexField& f : cls.static_fields) {
+      cw.add_field(static_cast<std::uint16_t>(f.access_flags & kFieldFlagsMask),
+                   f.name, f.type_descriptor);
+    }
+    for (const DexField& f : cls.instance_fields) {
+      cw.add_field(static_cast<std::uint16_t>(f.access_flags & kFieldFlagsMask),
+                   f.name, f.type_descriptor);
+    }
 
     const auto emit_all = [&](const std::vector<DexMethod>& ms) {
       for (const DexMethod& m : ms) {

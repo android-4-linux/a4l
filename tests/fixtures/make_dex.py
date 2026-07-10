@@ -60,12 +60,20 @@ STRINGS = [
     "out",                   # 18 field name (System.out)
     "println",               # 19 method name (PrintStream.println)
     "hello aclcxx",          # 20 const-string value
+    "LCounter;",             # 21 type: the object-model demo class
+    "<init>",                # 22 constructor name
+    "value",                 # 23 instance field name
+    "get",                   # 24 method name
+    "add",                   # 25 method name
+    "useCounter",            # 26 method name (static, news up a Counter)
+    "VI",                    # 27 shorty for (I)V
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
 # type_ids -> string index for each descriptor.
 TYPES = ["LHelloDex;", "Ljava/lang/Object;", "V", "I", "[Ljava/lang/String;",
-         "Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;"]
+         "Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;",
+         "LCounter;"]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -82,10 +90,10 @@ def build_dex():
     header_size = 112
     n_strings = len(STRINGS)
     n_types = len(TYPES)
-    n_protos = 4   # ()V-ish..., see below
-    n_fields = 1   # System.out
-    n_methods = 9  # + hello, PrintStream.println
-    n_classdefs = 1
+    n_protos = 5    # + (I)V for Counter.<init>/add
+    n_fields = 2    # System.out, Counter.value
+    n_methods = 14  # + Object.<init>, Counter.{<init>,get,add,useCounter}
+    n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
     off_type_ids = off_string_ids + n_strings * 4
@@ -119,6 +127,11 @@ def build_dex():
     type_list_println_off = off_data + len(data)
     tl2 = struct.pack("<I", 1) + struct.pack("<H", T["Ljava/lang/String;"])
     data.extend(align4(bytearray(tl2)))
+    # type_list for (I)V parameters: (int)  [Counter.<init>, Counter.add]
+    data.extend(align4(bytearray()))
+    type_list_int_off = off_data + len(data)
+    tl3 = struct.pack("<I", 1) + struct.pack("<H", T["I"])
+    data.extend(align4(bytearray(tl3)))
 
     # code items
     code_main_off = off_data + len(data)
@@ -128,10 +141,10 @@ def build_dex():
     # const/16 v0, #42 (op 0x13) -> 0x0013, 0x002a ; return v0 (op 0x0f) -> 0x000f
     data.extend(code_item(1, 0, 0, [0x0013, 0x002A, 0x000F]))
     code_misc_off = off_data + len(data)
-    # new-instance v0, Ljava/lang/Object; (op 0x22, unsupported -> stubbed). The
-    # translator bails at the first unsupported opcode; the rest is never reached
-    # (the emitted stub throws). Keeps the stub-fallback path under test.
-    data.extend(code_item(1, 0, 0, [0x0022, T["Ljava/lang/Object;"], 0x0012, 0x000F]))
+    # monitor-enter v0 (op 0x1d, unsupported -> stubbed). The translator bails at
+    # the first unsupported opcode; the rest is never reached (the stub throws).
+    # Keeps the stub-fallback path under test.
+    data.extend(code_item(1, 0, 0, [0x001D, 0x0012, 0x000F]))
     code_loopsum_off = off_data + len(data)
     # int loopSum() { int sum=0,i=1; while(!(i>10)){ sum+=i; i+=1; } return sum; }
     #   pc0  const/4    v0, 0
@@ -192,6 +205,53 @@ def build_dex():
     cd += uleb128(2) + uleb128(0x9) + uleb128(code_hello_off)     # diff 2 -> idx 7
     data.extend(cd)
 
+    # --- Counter class code items (object model demo) -----------------------
+    # field id 1 = Counter.value:I ; method ids: 9=Object.<init>, 10=Counter.<init>,
+    # 11=Counter.get, 12=Counter.add, 13=Counter.useCounter. type 8 = LCounter;.
+    code_cinit_off = off_data + len(data)
+    # Counter(int start){ super(); value = start; }   ins=2: v0=this, v1=start
+    #   invoke-direct {v0}, Object.<init>()V (m9) ; iput v1,v0,value(f1) ; return-void
+    data.extend(code_item(2, 2, 1, [
+        0x1070, 0x0009, 0x0000, 0x0159, 0x0001, 0x000E,
+    ]))
+    code_cget_off = off_data + len(data)
+    # int get(){ return value; }   registers=2, ins=1: v1=this, v0=temp
+    #   iget v0, v1, value(f1) ; return v0
+    data.extend(code_item(2, 1, 0, [0x1052, 0x0001, 0x000F]))
+    code_cadd_off = off_data + len(data)
+    # void add(int n){ value = value + n; }  registers=3, ins=2: v1=this, v2=n, v0=temp
+    #   iget v0,v1,value ; add-int v0,v0,v2 ; iput v0,v1,value ; return-void
+    data.extend(code_item(3, 2, 0, [
+        0x1052, 0x0001, 0x0090, 0x0200, 0x1059, 0x0001, 0x000E,
+    ]))
+    code_ccount_off = off_data + len(data)
+    # static int useCounter(){ Counter c=new Counter(10); c.add(5); return c.get(); }
+    #   new-instance v0, Counter(type8) ; const/16 v1,10 ;
+    #   invoke-direct {v0,v1}, Counter.<init>(m10) ; const/4 v1,5 ;
+    #   invoke-virtual {v0,v1}, Counter.add(m12) ;
+    #   invoke-virtual {v0}, Counter.get(m11) ; move-result v1 ; return v1
+    data.extend(code_item(2, 0, 2, [
+        0x0022, 0x0008, 0x0113, 0x000A, 0x2070, 0x000A, 0x0010,
+        0x5112, 0x206E, 0x000C, 0x0010, 0x106E, 0x000B, 0x0000,
+        0x010A, 0x010F,
+    ]))
+
+    counter_class_data_off = off_data + len(data)
+    ccd = bytearray()
+    ccd += uleb128(0)  # static_fields_size
+    ccd += uleb128(1)  # instance_fields_size
+    ccd += uleb128(2)  # direct_methods_size  (<init>, useCounter)
+    ccd += uleb128(2)  # virtual_methods_size (get, add)
+    # instance fields: value = field id 1 (diff from 0)
+    ccd += uleb128(1) + uleb128(0x1)                             # f1, public
+    # direct methods: <init>=m10, useCounter=m13
+    ccd += uleb128(10) + uleb128(0x1) + uleb128(code_cinit_off)  # idx 10, public
+    ccd += uleb128(3) + uleb128(0x9) + uleb128(code_ccount_off)  # +3 -> idx 13, public static
+    # virtual methods: get=m11, add=m12
+    ccd += uleb128(11) + uleb128(0x1) + uleb128(code_cget_off)   # idx 11, public
+    ccd += uleb128(1) + uleb128(0x1) + uleb128(code_cadd_off)    # +1 -> idx 12, public
+    data.extend(ccd)
+
     # map_list (4-aligned). Parser ignores it, but emit a valid one.
     data.extend(align4(bytearray()))
     map_off = off_data + len(data)
@@ -204,9 +264,9 @@ def build_dex():
         (0x0005, n_methods, off_method_ids),
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
-        (0x1001, 2, type_list_main_off),
-        (0x2001, 7, code_main_off),
-        (0x2000, 1, class_data_off),
+        (0x1001, 3, type_list_main_off),
+        (0x2001, 11, code_main_off),
+        (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
     for mtype, size, off in items:
@@ -229,10 +289,13 @@ def build_dex():
     proto_ids += struct.pack("<III", S["VL"], T["V"], type_list_println_off)
     # proto 3: hello -> shorty "V", return V, no params
     proto_ids += struct.pack("<III", S["V"], T["V"], 0)
+    # proto 4: (I)V -> shorty "VI", return V, params (int)
+    proto_ids += struct.pack("<III", S["VI"], T["V"], type_list_int_off)
 
     # field_ids: {class_idx(u16), type_idx(u16), name_idx(u32)}
     field_ids = struct.pack("<HHI", T["Ljava/lang/System;"],
-                            T["Ljava/io/PrintStream;"], S["out"])  # System.out
+                            T["Ljava/io/PrintStream;"], S["out"])     # f0 System.out
+    field_ids += struct.pack("<HHI", T["LCounter;"], T["I"], S["value"])  # f1 Counter.value
 
     method_ids = b""
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 0, S["main"])
@@ -244,6 +307,11 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["Ljava/lang/String;"], 1, S["length"])  # m6 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 3, S["hello"])    # m7 ()V
     method_ids += struct.pack("<HHI", T["Ljava/io/PrintStream;"], 2, S["println"])  # m8
+    method_ids += struct.pack("<HHI", T["Ljava/lang/Object;"], 3, S["<init>"])  # m9 Object.<init>()V
+    method_ids += struct.pack("<HHI", T["LCounter;"], 4, S["<init>"])     # m10 Counter.<init>(I)V
+    method_ids += struct.pack("<HHI", T["LCounter;"], 1, S["get"])        # m11 Counter.get()I
+    method_ids += struct.pack("<HHI", T["LCounter;"], 4, S["add"])        # m12 Counter.add(I)V
+    method_ids += struct.pack("<HHI", T["LCounter;"], 1, S["useCounter"]) # m13 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",
@@ -255,6 +323,17 @@ def build_dex():
         0,                      # annotations_off
         class_data_off,         # class_data_off
         0,                      # static_values_off
+    )
+    class_defs += struct.pack(
+        "<IIIIIIII",
+        T["LCounter;"],           # class_idx
+        0x1,                       # access_flags = public
+        T["Ljava/lang/Object;"],   # superclass_idx (Counter extends Object)
+        0,                         # interfaces_off
+        0xFFFFFFFF,                # source_file_idx = NO_INDEX
+        0,                         # annotations_off
+        counter_class_data_off,    # class_data_off
+        0,                         # static_values_off
     )
 
     # --- header -------------------------------------------------------------

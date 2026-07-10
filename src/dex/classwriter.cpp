@@ -112,6 +112,11 @@ ClassWriter::ClassWriter(std::string this_internal, std::string super_internal) 
   code_attr_name_ = utf8("Code");
 }
 
+void ClassWriter::add_field(std::uint16_t access_flags, std::string_view name,
+                            std::string_view descriptor) {
+  fields_.push_back({access_flags, utf8(name), utf8(descriptor)});
+}
+
 void ClassWriter::add_method(std::uint16_t access_flags, std::string_view name,
                              std::string_view descriptor, std::uint16_t max_stack,
                              std::uint16_t max_locals,
@@ -137,7 +142,14 @@ std::vector<std::uint8_t> ClassWriter::build() const {
   be16(out, this_class_);
   be16(out, super_class_);
   be16(out, 0);  // interfaces_count
-  be16(out, 0);  // fields_count
+
+  be16(out, static_cast<std::uint16_t>(fields_.size()));
+  for (const Field& f : fields_) {
+    be16(out, f.access_flags);
+    be16(out, f.name_index);
+    be16(out, f.descriptor_index);
+    be16(out, 0);  // field attributes_count
+  }
 
   be16(out, static_cast<std::uint16_t>(methods_.size()));
   for (const Method& m : methods_) {

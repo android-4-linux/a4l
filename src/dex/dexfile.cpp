@@ -177,6 +177,14 @@ struct Tables {
       }
     }
   }
+
+  // Fill a field's name/type from a field_id index (access comes from class_data).
+  void field(std::uint32_t idx, DexField& out) {
+    if (idx >= field_ids_size) { r.fail("field index out of range"); return; }
+    const std::uint64_t base = field_ids_off + idx * 8;
+    out.type_descriptor = type_desc(r.u16(base + 2));
+    out.name = str(r.u32(base + 4));
+  }
 };
 
 // Parse a code_item at `off` into `out`.
@@ -203,11 +211,20 @@ void parse_class_data(Reader& r, Tables& t, std::uint64_t off, DexClass& cls) {
   const std::uint32_t direct_methods = r.uleb(off);
   const std::uint32_t virtual_methods = r.uleb(off);
 
-  // Skip encoded_field arrays (idx_diff, access_flags) — fields not modeled yet.
-  for (std::uint32_t i = 0; i < static_fields + instance_fields; ++i) {
-    r.uleb(off);
-    r.uleb(off);
-  }
+  // encoded_field arrays: each list's idx_diff is cumulative from 0.
+  auto read_fields = [&](std::uint32_t n, std::vector<DexField>& into) {
+    std::uint32_t field_idx = 0;
+    for (std::uint32_t i = 0; i < n && r.ok(); ++i) {
+      field_idx += r.uleb(off);
+      const std::uint32_t access = r.uleb(off);
+      DexField f;
+      f.access_flags = access;
+      t.field(field_idx, f);
+      into.push_back(std::move(f));
+    }
+  };
+  read_fields(static_fields, cls.static_fields);
+  read_fields(instance_fields, cls.instance_fields);
 
   auto read_methods = [&](std::uint32_t n, std::vector<DexMethod>& into) {
     std::uint32_t method_idx = 0;
@@ -264,9 +281,12 @@ std::optional<DexFile> DexFile::parse(const std::uint8_t* data, std::size_t size
            /*proto_ids_size*/ r.u32(0x48),  /*method_ids_size*/ r.u32(0x58),
            /*field_ids_size*/ r.u32(0x50)};
 
-  // Resolve the string table for const-string translation.
+  // Resolve the string and type tables for const-string / new-instance.
   for (std::uint32_t i = 0; i < t.string_ids_size && r.ok(); ++i) {
     dex.strings_.push_back(t.str(i));
+  }
+  for (std::uint32_t i = 0; i < t.type_ids_size && r.ok(); ++i) {
+    dex.type_descriptors_.push_back(t.type_desc(i));
   }
 
   // Resolve every method_id so the translator can turn invoke-* operands into

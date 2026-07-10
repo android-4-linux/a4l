@@ -13,9 +13,11 @@ public class Runner {
     Object callSum = c.getMethod("callSum").invoke(null);    // 97 (invoke-static)
     Object strlen = c.getMethod("strlen").invoke(null);      // 5 (const-string+invoke-virtual)
     c.getMethod("hello").invoke(null);  // prints "hello aclcxx" (sget-object+println); void
+    // Object model: new Counter(10); c.add(5); c.get() == 15
+    Object counter = Class.forName("Counter").getMethod("useCounter").invoke(null);
     if (args.length > 0) {
       java.nio.file.Files.write(java.nio.file.Paths.get(args[0]),
-          (answer + "," + loopSum + "," + callSum + "," + strlen).getBytes("UTF-8"));
+          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter).getBytes("UTF-8"));
     }
   }
 }

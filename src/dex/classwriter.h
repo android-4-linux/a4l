@@ -35,6 +35,10 @@ class ClassWriter {
   std::uint16_t fieldref(std::string_view cls, std::string_view name,
                          std::string_view desc);
 
+  // Add a field declaration.
+  void add_field(std::uint16_t access_flags, std::string_view name,
+                 std::string_view descriptor);
+
   // Add a method with pre-assembled bytecode.
   void add_method(std::uint16_t access_flags, std::string_view name,
                   std::string_view descriptor, std::uint16_t max_stack,
@@ -46,6 +50,12 @@ class ClassWriter {
  private:
   std::uint16_t add_entry(std::vector<std::uint8_t> cp_info, const std::string& key);
   std::uint16_t name_and_type(std::string_view name, std::string_view desc);
+
+  struct Field {
+    std::uint16_t access_flags;
+    std::uint16_t name_index;
+    std::uint16_t descriptor_index;
+  };
 
   struct Method {
     std::uint16_t access_flags;
@@ -61,6 +71,7 @@ class ClassWriter {
   std::uint16_t this_class_;
   std::uint16_t super_class_;
   std::uint16_t code_attr_name_;  // utf8 "Code"
+  std::vector<Field> fields_;
   std::vector<Method> methods_;
 };
 

@@ -68,11 +68,19 @@ struct DexMethod {
   std::string jvm_descriptor() const;
 };
 
+struct DexField {
+  std::string name;              // e.g. "value"
+  std::string type_descriptor;  // e.g. "I", "Ljava/lang/String;"
+  std::uint32_t access_flags = 0;
+};
+
 struct DexClass {
   std::string descriptor;                   // "Lcom/example/Foo;"
   std::string java_name;                    // "com.example.Foo"
   std::optional<std::string> super_name;    // "java.lang.Object"
   std::uint32_t access_flags = 0;
+  std::vector<DexField> static_fields;
+  std::vector<DexField> instance_fields;
   std::vector<DexMethod> direct_methods;    // static/private/ctor
   std::vector<DexMethod> virtual_methods;
 };
@@ -119,6 +127,11 @@ class DexFile {
     return index < field_refs_.size() ? &field_refs_[index] : nullptr;
   }
 
+  // Resolve a type_ids index (as referenced by new-instance/etc.), or nullptr.
+  const std::string* type_at(std::uint32_t index) const noexcept {
+    return index < type_descriptors_.size() ? &type_descriptors_[index] : nullptr;
+  }
+
  private:
   DexFile() = default;
   std::vector<std::uint8_t> data_;
@@ -126,6 +139,7 @@ class DexFile {
   std::vector<MethodRef> method_refs_;
   std::vector<FieldRef> field_refs_;
   std::vector<std::string> strings_;
+  std::vector<std::string> type_descriptors_;
 };
 
 // Convert a type descriptor ("I", "V", "[I", "Lcom/example/Foo;") to a Java

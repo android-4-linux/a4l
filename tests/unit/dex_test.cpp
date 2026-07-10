@@ -50,7 +50,7 @@ TEST_CASE("DexFile parses classes and method signatures", "[dex]") {
   auto dex = DexFile::parse(bytes, err);
   REQUIRE(dex.has_value());
   REQUIRE(err.is_ok());
-  REQUIRE(dex->classes().size() == 1);
+  REQUIRE(dex->classes().size() == 2);
 
   const DexClass& c = dex->classes()[0];
   CHECK(c.java_name == "HelloDex");
@@ -73,6 +73,18 @@ TEST_CASE("DexFile parses classes and method signatures", "[dex]") {
   CHECK(answer->return_type == "int");
   CHECK(answer->param_types.empty());
   CHECK(answer->is_static());
+
+  // The object-model class: an instance field and instance methods.
+  const DexClass& counter = dex->classes()[1];
+  CHECK(counter.java_name == "Counter");
+  REQUIRE(counter.instance_fields.size() == 1);
+  CHECK(counter.instance_fields[0].name == "value");
+  CHECK(counter.instance_fields[0].type_descriptor == "I");
+  CHECK(find(counter.direct_methods, "<init>") != nullptr);      // constructor
+  const DexMethod* get = find(counter.virtual_methods, "get");
+  REQUIRE(get != nullptr);
+  CHECK_FALSE(get->is_static());                                  // instance method
+  CHECK(get->return_type == "int");
 }
 
 TEST_CASE("DexFile rejects non-dex input", "[dex]") {
@@ -100,7 +112,7 @@ TEST_CASE("convert emits a real .class and translates the int subset", "[dex]") 
 
   // main, answer, and loopSum (branches) translate; misc (const-string) is
   // unsupported and falls back to a bytecode stub.
-  CHECK(res.translated_methods == 6);
+  CHECK(res.translated_methods == 10);
   CHECK(res.stubbed_methods == 1);
 
   const std::filesystem::path cls =
