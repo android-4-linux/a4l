@@ -18,6 +18,7 @@
 
 #include "log/log.h"
 #include "runtime/framework_natives.h"
+#include "svc/svc.h"
 
 namespace aclcxx::runtime {
 namespace {
@@ -166,6 +167,7 @@ class JvmVm final : public Vm {
         result = call_lifecycle(cls, activity, "onStart", "()V", false);
       if (result.is_ok())
         result = call_lifecycle(cls, activity, "onResume", "()V", false);
+      if (result.is_ok()) render_content_view(activity);
       env_->DeleteLocalRef(activity);
     }
     env_->DeleteLocalRef(activity_cls);
@@ -307,6 +309,73 @@ class JvmVm final : public Vm {
              call_int(msm, "aclcxxActiveSessionCount"));
       env_->DeleteLocalRef(msm);
     }
+  }
+
+  // Phase-2 ViewRoot traversal. If the Activity set a content View (setContentView),
+  // run the measure -> layout -> draw pass ViewRootImpl.performTraversals drives —
+  // against the WindowManager display metrics, into a Bitmap-backed Canvas — and
+  // describe the resulting pixels. Proves View(Context) + a real measure/layout/draw
+  // traversal over the app's view tree renders verifiable output (no compositor).
+  void render_content_view(jobject activity) {
+    jclass acls = env_->GetObjectClass(activity);
+    jmethodID gcv = env_->GetMethodID(acls, "aclcxxContentView", "()Landroid/view/View;");
+    env_->DeleteLocalRef(acls);
+    if (gcv == nullptr) { clear_exception(); return; }
+    jobject view = env_->CallObjectMethod(activity, gcv);
+    if (view == nullptr) { clear_exception(); return; }  // no content view set
+
+    const int w = svc::window().display_width();
+    const int h = svc::window().display_height();
+    // MeasureSpec.makeMeasureSpec(size, EXACTLY): size in the low 30 bits, mode 1.
+    const jint mask = 0x3 << 30;
+    const jint wspec = (w & ~mask) | (1 << 30);
+    const jint hspec = (h & ~mask) | (1 << 30);
+
+    jclass vcls = env_->GetObjectClass(view);
+    jmethodID measure = env_->GetMethodID(vcls, "measure", "(II)V");
+    jmethodID gmw = env_->GetMethodID(vcls, "getMeasuredWidth", "()I");
+    jmethodID gmh = env_->GetMethodID(vcls, "getMeasuredHeight", "()I");
+    jmethodID layout = env_->GetMethodID(vcls, "layout", "(IIII)V");
+    jmethodID draw = env_->GetMethodID(vcls, "draw", "(Landroid/graphics/Canvas;)V");
+    env_->DeleteLocalRef(vcls);
+    if (measure == nullptr || gmw == nullptr || gmh == nullptr || layout == nullptr ||
+        draw == nullptr) {
+      clear_exception();
+      env_->DeleteLocalRef(view);
+      return;
+    }
+
+    env_->CallVoidMethod(view, measure, wspec, hspec);
+    const int mw = env_->CallIntMethod(view, gmw);
+    const int mh = env_->CallIntMethod(view, gmh);
+    log::i(kTag, "ViewRoot: performTraversals measured={}x{}, laying out {}x{}", mw, mh, w, h);
+    env_->CallVoidMethod(view, layout, 0, 0, mw, mh);
+
+    // Bitmap b = Bitmap.createBitmap(w, h); Canvas c = new Canvas(b); view.draw(c);
+    jclass bmp_cls = env_->FindClass("android/graphics/Bitmap");
+    jclass canvas_cls = env_->FindClass("android/graphics/Canvas");
+    jobject bmp = nullptr;
+    if (bmp_cls != nullptr && canvas_cls != nullptr) {
+      jmethodID create = env_->GetStaticMethodID(bmp_cls, "createBitmap",
+                                                 "(II)Landroid/graphics/Bitmap;");
+      jmethodID cctor = env_->GetMethodID(canvas_cls, "<init>",
+                                          "(Landroid/graphics/Bitmap;)V");
+      if (create != nullptr && cctor != nullptr) {
+        bmp = env_->CallStaticObjectMethod(bmp_cls, create, w, h);
+        jobject canvas = bmp != nullptr ? env_->NewObject(canvas_cls, cctor, bmp) : nullptr;
+        if (canvas != nullptr) {
+          env_->CallVoidMethod(view, draw, canvas);
+          jmethodID describe = env_->GetMethodID(bmp_cls, "aclcxxDescribe", "()V");
+          if (describe != nullptr) env_->CallVoidMethod(bmp, describe);
+          env_->DeleteLocalRef(canvas);
+        }
+      }
+    }
+    if (env_->ExceptionCheck() == JNI_TRUE) fail_with_exception("render content view");
+    if (bmp != nullptr) env_->DeleteLocalRef(bmp);
+    if (bmp_cls != nullptr) env_->DeleteLocalRef(bmp_cls);
+    if (canvas_cls != nullptr) env_->DeleteLocalRef(canvas_cls);
+    env_->DeleteLocalRef(view);
   }
 
   // Print + clear a pending exception and return a RuntimeError describing `what`.

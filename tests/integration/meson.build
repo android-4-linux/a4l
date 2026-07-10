@@ -101,6 +101,7 @@ if py3.found() and have_jni
                     '../../framework/shim/android/graphics/Bitmap.java',
                     '../../framework/shim/android/graphics/Canvas.java',
                     '../../framework/shim/android/view/View.java',
+                    '../../framework/shim/android/view/ViewGroup.java',
                     '../../framework/shim/android/util/Log.java'),
       output : 'framework-shim',
       command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
@@ -183,6 +184,27 @@ if py3.found() and have_jni
       py3,
       args : [files('run_gfx_test.py'), aclcxx_exe, gfx_apk, framework_shim],
       depends : [aclcxx_exe, gfx_apk, framework_shim],
+      timeout : 120,
+    )
+
+    # Phase 2 (View traversal): view.apk's launcher MainActivity.onCreate does
+    # setContentView(new Panel(this)); Panel extends ViewGroup holding two Tiles
+    # (custom Views). After the launch lifecycle the ViewRoot driver (jvm_vm
+    # render_content_view) runs measure -> layout -> draw over the tree into a
+    # display-sized Bitmap: the top half rasters blue, the bottom half red —
+    # verifiable headlessly. Proves View(Context) + a real measure/layout/draw pass.
+    view_apk = custom_target(
+      'view-apk',
+      input : files('../fixtures/make_view_apk.py'),
+      output : 'view.apk',
+      command : [py3, '@INPUT@', '@OUTPUT@'],
+      depend_files : files('../fixtures/make_axml.py'),
+    )
+    test(
+      'run-apk-view',
+      py3,
+      args : [files('run_view_test.py'), aclcxx_exe, view_apk, framework_shim],
+      depends : [aclcxx_exe, view_apk, framework_shim],
       timeout : 120,
     )
   else

@@ -12,8 +12,10 @@
 package android.app;
 
 import android.os.Bundle;
+import android.view.View;
 
 public class Activity extends android.view.ContextThemeWrapper {
+  private View mContentView;
   public Activity() {}
 
   // The lifecycle callbacks the aclcxx native driver calls, in order, to launch
@@ -26,8 +28,13 @@ public class Activity extends android.view.ContextThemeWrapper {
   protected void onStop() {}
   protected void onDestroy() {}
 
-  // Documented no-op-friendly accessors so simple onCreate bodies link. Real
-  // implementations arrive with the View stack / Context services.
+  // The View-stack entry point (Phase 2): the app hands its root view here in
+  // onCreate; the aclcxx ViewRoot driver retrieves it (aclcxxContentView) after the
+  // launch lifecycle and runs the measure/layout/draw traversal. Real setContentView
+  // routes through getWindow().setContentView into a DecorView; this stores the root
+  // directly until the Window/PhoneWindow stack lands.
+  public void setContentView(View view) { mContentView = view; }
   public void setContentView(int layoutResID) {}
+  public View aclcxxContentView() { return mContentView; }
   public void finish() {}
 }
