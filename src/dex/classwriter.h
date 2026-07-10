@@ -39,10 +39,19 @@ class ClassWriter {
   void add_field(std::uint16_t access_flags, std::string_view name,
                  std::string_view descriptor);
 
+  // One Code-attribute exception_table entry (catch_type = 0 for catch-all).
+  struct ExceptionEntry {
+    std::uint16_t start_pc;
+    std::uint16_t end_pc;
+    std::uint16_t handler_pc;
+    std::uint16_t catch_type;
+  };
+
   // Add a method with pre-assembled bytecode.
   void add_method(std::uint16_t access_flags, std::string_view name,
                   std::string_view descriptor, std::uint16_t max_stack,
-                  std::uint16_t max_locals, std::vector<std::uint8_t> code);
+                  std::uint16_t max_locals, std::vector<std::uint8_t> code,
+                  std::vector<ExceptionEntry> exceptions = {});
 
   // Serialize the complete class file.
   std::vector<std::uint8_t> build() const;
@@ -64,6 +73,7 @@ class ClassWriter {
     std::uint16_t max_stack;
     std::uint16_t max_locals;
     std::vector<std::uint8_t> code;
+    std::vector<ExceptionEntry> exceptions;
   };
 
   std::vector<std::vector<std::uint8_t>> pool_;  // cp_info entries (1-based)

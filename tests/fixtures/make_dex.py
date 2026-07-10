@@ -69,13 +69,16 @@ STRINGS = [
     "VI",                    # 27 shorty for (I)V
     "[I",                    # 28 type: int[]
     "arraySum",              # 29 method name (new-array/aput/aget/array-length)
+    "Ljava/lang/RuntimeException;",  # 30 type: thrown class
+    "Ljava/lang/Exception;",         # 31 type: caught class
+    "tryCatch",              # 32 method name (try/throw/catch/move-exception)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
 # type_ids -> string index for each descriptor.
 TYPES = ["LHelloDex;", "Ljava/lang/Object;", "V", "I", "[Ljava/lang/String;",
          "Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;",
-         "LCounter;", "[I"]
+         "LCounter;", "[I", "Ljava/lang/RuntimeException;", "Ljava/lang/Exception;"]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -88,13 +91,27 @@ def code_item(regs, ins, outs, insns_u16):
     return align4(bytearray(body))
 
 
+def code_item_try(regs, ins, outs, insns_u16, tries, handlers_bytes):
+    # tries: list of (start_addr, insn_count, handler_off) ; handlers_bytes is the
+    # encoded_catch_handler_list (uleb size + handlers).
+    body = struct.pack("<HHHHII", regs, ins, outs, len(tries), 0, len(insns_u16))
+    for u in insns_u16:
+        body += struct.pack("<H", u)
+    if len(insns_u16) % 2 == 1:   # pad so try_item[] is 4-byte aligned
+        body += b"\x00\x00"
+    for (sa, ic, ho) in tries:
+        body += struct.pack("<IHH", sa, ic, ho)
+    body += handlers_bytes
+    return align4(bytearray(body))
+
+
 def build_dex():
     header_size = 112
     n_strings = len(STRINGS)
     n_types = len(TYPES)
     n_protos = 5    # + (I)V for Counter.<init>/add
     n_fields = 2    # System.out, Counter.value
-    n_methods = 15  # + arraySum
+    n_methods = 17  # + RuntimeException.<init>, tryCatch
     n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
@@ -211,13 +228,31 @@ def build_dex():
         0xF728,                       # goto :loop
         0x020F,                       # :end  return v2
     ]))
+    code_trycatch_off = off_data + len(data)
+    # int tryCatch() { try { throw new RuntimeException(); }
+    #                  catch (Exception e) { return 99; } }
+    #   pc0 new-instance v0, RuntimeException(type10)
+    #   pc2 invoke-direct {v0}, RuntimeException.<init>()V (m15)
+    #   pc5 throw v0            <- try range [5,6)
+    #   pc6 move-exception v0   <- handler (catch Exception)
+    #   pc7 const/16 v0, 99 ; pc9 return v0
+    trycatch_handlers = (uleb128(1)                          # 1 handler in list
+                         + uleb128(1)                        # 1 typed catch, no catch-all
+                         + uleb128(T["Ljava/lang/Exception;"])  # catch type
+                         + uleb128(6))                       # handler addr = pc6
+    data.extend(code_item_try(
+        1, 0, 1,
+        [0x0022, 0x000A, 0x1070, 0x000F, 0x0000, 0x0027,
+         0x000D, 0x0013, 0x0063, 0x000F],
+        tries=[(5, 1, 1)],              # start=pc5, count=1, handler_off=1
+        handlers_bytes=trycatch_handlers))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
     cd += uleb128(0)  # static_fields_size
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(8)  # direct_methods_size
+    cd += uleb128(9)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
     # direct methods, sorted by ascending method index; idx diffs are cumulative.
     # m0=main..m5=strlen, m7=hello, m14=arraySum.
@@ -229,6 +264,7 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_strlen_off)    # diff 1 -> idx 5
     cd += uleb128(2) + uleb128(0x9) + uleb128(code_hello_off)     # diff 2 -> idx 7
     cd += uleb128(7) + uleb128(0x9) + uleb128(code_arraysum_off)  # diff 7 -> idx 14
+    cd += uleb128(2) + uleb128(0x9) + uleb128(code_trycatch_off)  # diff 2 -> idx 16
     data.extend(cd)
 
     # --- Counter class code items (object model demo) -----------------------
@@ -291,7 +327,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 3, type_list_main_off),
-        (0x2001, 12, code_main_off),
+        (0x2001, 13, code_main_off),
         (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -339,6 +375,8 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LCounter;"], 4, S["add"])        # m12 Counter.add(I)V
     method_ids += struct.pack("<HHI", T["LCounter;"], 1, S["useCounter"]) # m13 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["arraySum"])   # m14 ()I
+    method_ids += struct.pack("<HHI", T["Ljava/lang/RuntimeException;"], 3, S["<init>"])  # m15 ()V
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["tryCatch"])   # m16 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",

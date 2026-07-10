@@ -43,12 +43,23 @@ enum : std::uint32_t {
   kAccNative = 0x0100,
 };
 
+// One (try-range, handler) pair. Dalvik lists a try range with a set of typed
+// handlers plus an optional catch-all; each becomes one of these.
+struct DexTryHandler {
+  std::uint32_t start_addr = 0;    // code-unit offset of the try range start
+  std::uint32_t end_addr = 0;      // code-unit offset just past the try range
+  std::uint32_t handler_addr = 0;  // code-unit offset of the handler
+  bool catch_all = false;          // true = finally / catch-all
+  std::uint32_t type_idx = 0;      // caught class (type_ids index) if !catch_all
+};
+
 // A method's Dalvik code_item (bytecode), when present.
 struct DexCode {
   std::uint16_t registers_size = 0;   // total registers used by the method
   std::uint16_t ins_size = 0;         // registers occupied by incoming args
   std::uint16_t outs_size = 0;        // registers for outgoing-arg area
   std::vector<std::uint16_t> insns;   // instruction stream (16-bit code units)
+  std::vector<DexTryHandler> handlers;
 };
 
 struct DexMethod {

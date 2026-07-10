@@ -10,6 +10,7 @@
 #include <fstream>
 #include <map>
 #include <optional>
+#include <set>
 #include <system_error>
 #include <utility>
 
@@ -148,6 +149,7 @@ struct Translated {
   std::vector<std::uint8_t> code;
   std::uint16_t max_stack;
   std::uint16_t max_locals;
+  std::vector<ClassWriter::ExceptionEntry> exceptions;
 };
 
 // Translate the supported linear integer subset of a static method's Dalvik
@@ -204,16 +206,38 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
     fixups.push_back({at, target});
   };
 
+  // Catch-handler entry points: the JVM enters these with the exception on the
+  // operand stack, so reset the tracked height to 1 (move-exception then pops it).
+  std::set<std::uint32_t> handler_pcs;
+  for (const DexTryHandler& h : c.handlers) handler_pcs.insert(h.handler_addr);
+
   const std::vector<std::uint16_t>& in = c.insns;
   std::size_t pc = 0;
   while (pc < in.size()) {
     pc_to_jvm[static_cast<std::uint32_t>(pc)] = e.code.size();
+    if (handler_pcs.count(static_cast<std::uint32_t>(pc))) {
+      e.stack = 1;
+      if (e.max_stack < 1) e.max_stack = 1;
+    }
     const std::uint16_t u = in[pc];
     const std::uint8_t opcode = u & 0xff;
     const auto rel_target = [&](std::int64_t off) {
       return static_cast<std::uint32_t>(static_cast<std::int64_t>(pc) + off);
     };
     switch (opcode) {
+      case 0x0d: {  // move-exception vAA (11x): the handler's exception -> local
+        const int a = (u >> 8) & 0xff;
+        e.store_a(local(a));  // pops the exception the JVM pushed on handler entry
+        pc += 1;
+        break;
+      }
+      case 0x27: {  // throw vAA (11x)
+        const int a = (u >> 8) & 0xff;
+        e.load_a(local(a));
+        e.op(OP_ATHROW); e.adj(-1);
+        pc += 1;
+        break;
+      }
       case 0x00:  // nop
         pc += 1;
         break;
@@ -527,8 +551,33 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
     e.code[fx.branch_at + 2] = static_cast<std::uint8_t>(rel & 0xff);
   }
 
+  // Build the JVM exception table from the Dalvik try/handler pairs.
+  const auto jvm_off = [&](std::uint32_t addr) -> std::optional<std::uint32_t> {
+    if (addr == in.size()) return static_cast<std::uint32_t>(e.code.size());
+    const auto it = pc_to_jvm.find(addr);
+    if (it == pc_to_jvm.end()) return std::nullopt;
+    return static_cast<std::uint32_t>(it->second);
+  };
+  std::vector<ClassWriter::ExceptionEntry> exceptions;
+  for (const DexTryHandler& h : c.handlers) {
+    const auto s = jvm_off(h.start_addr), en = jvm_off(h.end_addr),
+               hd = jvm_off(h.handler_addr);
+    if (!s || !en || !hd || *s > 0xffff || *en > 0xffff || *hd > 0xffff) {
+      return std::nullopt;  // ranges must map and fit u2
+    }
+    std::uint16_t catch_type = 0;  // 0 = catch-all
+    if (!h.catch_all) {
+      const std::string* td = dex.type_at(h.type_idx);
+      if (td == nullptr || td->size() < 2 || td->front() != 'L') return std::nullopt;
+      catch_type = cw.class_ref(td->substr(1, td->size() - 2));
+    }
+    exceptions.push_back({static_cast<std::uint16_t>(*s),
+                          static_cast<std::uint16_t>(*en),
+                          static_cast<std::uint16_t>(*hd), catch_type});
+  }
+
   return Translated{std::move(e.code), static_cast<std::uint16_t>(e.max_stack),
-                    static_cast<std::uint16_t>(max_locals)};
+                    static_cast<std::uint16_t>(max_locals), std::move(exceptions)};
 }
 
 // A method body that throws UnsupportedOperationException.
@@ -547,7 +596,7 @@ Translated emit_stub(ClassWriter& cw, const DexMethod& m) {
   e.op(OP_ATHROW); e.adj(-1);
   const int locals = arg_slots(m);
   return {std::move(e.code), static_cast<std::uint16_t>(e.max_stack),
-          static_cast<std::uint16_t>(locals < 1 ? 0 : locals)};
+          static_cast<std::uint16_t>(locals < 1 ? 0 : locals), {}};
 }
 
 }  // namespace
@@ -584,7 +633,7 @@ DexError convert(const DexFile& dex, const ConvertOptions& opts,
             0x0001 | (m.is_static() ? 0x0008 : 0);  // public [static]
         if (auto t = translate_method(cw, dex, m)) {
           cw.add_method(access, m.name, m.jvm_descriptor(), t->max_stack,
-                        t->max_locals, std::move(t->code));
+                        t->max_locals, std::move(t->code), std::move(t->exceptions));
           ++out.translated_methods;
         } else {
           Translated s = emit_stub(cw, m);

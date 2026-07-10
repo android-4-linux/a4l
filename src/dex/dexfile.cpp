@@ -57,6 +57,21 @@ class Reader {
     return result;
   }
 
+  std::int32_t sleb(std::uint64_t& off) {
+    std::int32_t result = 0;
+    int shift = 0;
+    std::uint8_t b = 0;
+    for (int i = 0; i < 5; ++i) {
+      if (!require(off, 1)) return 0;
+      b = base_[off++];
+      result |= static_cast<std::int32_t>(b & 0x7f) << shift;
+      shift += 7;
+      if ((b & 0x80) == 0) break;
+    }
+    if (shift < 32 && (b & 0x40)) result |= -(1 << shift);  // sign-extend
+    return result;
+  }
+
   // MUTF-8 string_data_item at `off`: uleb128 utf16 length, then bytes to NUL.
   std::string string_data(std::uint64_t off) {
     uleb(off);  // utf16 char count (unused; we read to the NUL terminator)
@@ -192,6 +207,7 @@ void parse_code_item(Reader& r, std::uint64_t off, DexCode& out) {
   out.registers_size = r.u16(off + 0);
   out.ins_size = r.u16(off + 2);
   out.outs_size = r.u16(off + 4);
+  const std::uint16_t tries_size = r.u16(off + 6);
   const std::uint32_t insns_size = r.u32(off + 12);
   const std::uint64_t insns_off = off + 16;
   if (!r.in_bounds(insns_off, static_cast<std::uint64_t>(insns_size) * 2)) {
@@ -201,6 +217,42 @@ void parse_code_item(Reader& r, std::uint64_t off, DexCode& out) {
   out.insns.reserve(insns_size);
   for (std::uint32_t k = 0; k < insns_size; ++k) {
     out.insns.push_back(r.u16(insns_off + k * 2));
+  }
+
+  if (tries_size == 0) return;
+
+  // try_item[] follows the insns, 4-byte aligned (a 2-byte pad if insns_size odd).
+  std::uint64_t tries_off = insns_off + static_cast<std::uint64_t>(insns_size) * 2;
+  if (insns_size & 1) tries_off += 2;
+  const std::uint64_t handlers_off = tries_off + static_cast<std::uint64_t>(tries_size) * 8;
+
+  for (std::uint16_t i = 0; i < tries_size; ++i) {
+    const std::uint64_t ti = tries_off + i * 8;
+    const std::uint32_t start_addr = r.u32(ti + 0);
+    const std::uint16_t insn_count = r.u16(ti + 4);
+    const std::uint16_t handler_off = r.u16(ti + 6);
+
+    // encoded_catch_handler at handlers_off + handler_off.
+    std::uint64_t h = handlers_off + handler_off;
+    const std::int32_t size = r.sleb(h);
+    const std::uint32_t n_pairs =
+        static_cast<std::uint32_t>(size < 0 ? -size : size);
+    for (std::uint32_t p = 0; p < n_pairs; ++p) {
+      DexTryHandler th;
+      th.start_addr = start_addr;
+      th.end_addr = start_addr + insn_count;
+      th.type_idx = r.uleb(h);
+      th.handler_addr = r.uleb(h);
+      out.handlers.push_back(th);
+    }
+    if (size <= 0) {  // trailing catch-all address
+      DexTryHandler th;
+      th.start_addr = start_addr;
+      th.end_addr = start_addr + insn_count;
+      th.catch_all = true;
+      th.handler_addr = r.uleb(h);
+      out.handlers.push_back(th);
+    }
   }
 }
 

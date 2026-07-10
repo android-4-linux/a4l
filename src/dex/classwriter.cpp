@@ -120,9 +120,10 @@ void ClassWriter::add_field(std::uint16_t access_flags, std::string_view name,
 void ClassWriter::add_method(std::uint16_t access_flags, std::string_view name,
                              std::string_view descriptor, std::uint16_t max_stack,
                              std::uint16_t max_locals,
-                             std::vector<std::uint8_t> code) {
+                             std::vector<std::uint8_t> code,
+                             std::vector<ExceptionEntry> exceptions) {
   methods_.push_back({access_flags, utf8(name), utf8(descriptor), max_stack,
-                      max_locals, std::move(code)});
+                      max_locals, std::move(code), std::move(exceptions)});
 }
 
 std::vector<std::uint8_t> ClassWriter::build() const {
@@ -158,12 +159,20 @@ std::vector<std::uint8_t> ClassWriter::build() const {
     be16(out, m.descriptor_index);
     be16(out, 1);  // attributes_count: just Code
     be16(out, code_attr_name_);
-    be32(out, static_cast<std::uint32_t>(12 + m.code.size()));  // attr length
+    const std::uint32_t code_attr_len = static_cast<std::uint32_t>(
+        12 + m.code.size() + m.exceptions.size() * 8);
+    be32(out, code_attr_len);
     be16(out, m.max_stack);
     be16(out, m.max_locals);
     be32(out, static_cast<std::uint32_t>(m.code.size()));
     out.insert(out.end(), m.code.begin(), m.code.end());
-    be16(out, 0);  // exception_table_length
+    be16(out, static_cast<std::uint16_t>(m.exceptions.size()));
+    for (const ExceptionEntry& ex : m.exceptions) {
+      be16(out, ex.start_pc);
+      be16(out, ex.end_pc);
+      be16(out, ex.handler_pc);
+      be16(out, ex.catch_type);
+    }
     be16(out, 0);  // code attributes_count
   }
 

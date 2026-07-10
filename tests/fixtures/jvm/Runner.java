@@ -16,9 +16,10 @@ public class Runner {
     // Object model: new Counter(10); c.add(5); c.get() == 15
     Object counter = Class.forName("Counter").getMethod("useCounter").invoke(null);
     Object arr = c.getMethod("arraySum").invoke(null);  // 42 (arrays)
+    Object tc = c.getMethod("tryCatch").invoke(null);   // 99 (try/catch/throw)
     if (args.length > 0) {
       java.nio.file.Files.write(java.nio.file.Paths.get(args[0]),
-          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr).getBytes("UTF-8"));
+          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr + "," + tc).getBytes("UTF-8"));
     }
   }
 }
