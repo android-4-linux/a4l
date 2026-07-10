@@ -99,7 +99,7 @@ mapping (plan.md §2 threading) lands with windowing (G2 proper).
 |------|-------------|----------------|
 | **G2.a** ✅ | Boot-classpath seam (A1) + `--framework` + native-seam scaffold (A3) | an app resolves a class it does NOT bundle, from `--framework` (`run-apk-framework`) |
 | **G2.b** ✅ | `android.util.Log` on the boot cp (docs-derived shim, `framework/shim/`) + its native `write0` bound by aclcxx (`runtime/framework_natives`) forwarding to `aclcxx::log` | app calls `android.util.Log.i(...)` → line via `aclcxx::log` (`run-apk-log`) |
-| **G2.c** | Extraction tool + AOSP pin + closure/budget/denylist report for the seed packages | `tools/` prints class count + denylist edges; METADATA pinned |
+| **G2.c** ✅ | Extraction tool (`tools/fw_extract.py`) + AOSP pin (`android-13.0.0_r84`) + closure/budget/denylist report | tool reports class count + denylist edges (`fw-extract` test); METADATA pinned |
 | **G2.d** | Lifecycle driver (A4) + minimal `Activity`/`Bundle`/`Context` subset+shims | a hand-built APK with an `Activity` subclass runs `onCreate` → observable side effect |
 | **G2.e** | First real no-View app slice (automotive-first: media/CAL path draws no Views, plan.md §A01.3) | a redistributable no-View APK reaches `onResume` without crashing |
 

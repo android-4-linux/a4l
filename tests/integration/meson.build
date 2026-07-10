@@ -6,6 +6,20 @@
 # DEX/JVM -> JVM -> app-output vertical runs. Needs python3 (fixture) and a JDK
 # (have_jni, so the jvm backend can execute); otherwise the test is skipped.
 py3 = find_program('python3', required : false)
+
+# Gate G2.c: the frameworks/base subsetting tool. Pure static analysis over a
+# synthetic AOSP-shaped source tree — needs only python3 (no JVM), so it runs even
+# where the JDK is absent.
+if py3.found()
+  test(
+    'fw-extract',
+    py3,
+    args : [files('fw_extract_test.py'), files('../../tools/fw_extract.py'),
+            meson.current_source_dir() / '../fixtures/fwsrc'],
+    timeout : 60,
+  )
+endif
+
 if py3.found() and have_jni
   hello_apk = custom_target(
     'hello-apk',
