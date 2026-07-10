@@ -93,6 +93,9 @@ STRINGS = [
     "checkCast",             # 51 method name (check-cast)
     "instTest",              # 52 method name (instance-of)
     "J",                     # 53 type: long (field descriptor)
+    "Ljava/lang/CharSequence;",  # 54 type: interface for invoke-interface
+    "ifaceTest",             # 55 method name (invoke-interface)
+    "switchTest",            # 56 method name (packed-switch)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
@@ -100,7 +103,7 @@ S = {s: i for i, s in enumerate(STRINGS)}
 TYPES = ["LHelloDex;", "Ljava/lang/Object;", "V", "I", "[Ljava/lang/String;",
          "Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;",
          "LCounter;", "[I", "Ljava/lang/RuntimeException;", "Ljava/lang/Exception;",
-         "[B", "[J", "J"]
+         "[B", "[J", "J", "Ljava/lang/CharSequence;"]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -133,7 +136,7 @@ def build_dex():
     n_types = len(TYPES)
     n_protos = 5    # + (I)V for Counter.<init>/add
     n_fields = 5    # + HelloDex.wf (static long)
-    n_methods = 30  # + wideField, checkCast, instTest
+    n_methods = 33  # + CharSequence.length, ifaceTest, switchTest
     n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
@@ -404,13 +407,34 @@ def build_dex():
         0x0013, 0x002A, 0x000F,        # const/16 v0,42 ; return v0
         0x0012, 0x000F,                # :else const/4 v0,0 ; return v0
     ]))
+    code_iface_off = off_data + len(data)
+    # int ifaceTest(){ CharSequence cs="hello"; return cs.length(); }  = 5
+    #   invoke-interface CharSequence.length (method 30)
+    data.extend(code_item(1, 0, 1, [
+        0x001A, S["hello"],            # const-string v0,"hello"
+        0x1072, 0x001E, 0x0000,        # invoke-interface {v0}, CharSequence.length (m30)
+        0x000A, 0x000F,                # move-result v0 ; return v0
+    ]))
+    code_switch_off = off_data + len(data)
+    # int switchTest(){ int x=2; switch(x){case 0:10;case 1:20;case 2:42;default:0;} }  = 42
+    data.extend(code_item(1, 0, 0, [
+        0x2012,                        # pc0  const/4 v0, 2
+        0x002B, 0x000E, 0x0000,        # pc1  packed-switch v0, +14 (payload @ pc15)
+        0x0012, 0x000F,                # pc4  (default) const/4 v0,0 ; return v0
+        0x0013, 0x000A, 0x000F,        # pc6  :c0 const/16 v0,10 ; return
+        0x0013, 0x0014, 0x000F,        # pc9  :c1 const/16 v0,20 ; return
+        0x0013, 0x002A, 0x000F,        # pc12 :c2 const/16 v0,42 ; return
+        # pc15 packed-switch-payload: ident, size=3, first_key=0, targets to c0/c1/c2
+        0x0100, 0x0003, 0x0000, 0x0000,
+        0x0005, 0x0000, 0x0008, 0x0000, 0x000B, 0x0000,
+    ]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
     cd += uleb128(2)  # static_fields_size (HelloDex.total, HelloDex.wf)
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(21)  # direct_methods_size
+    cd += uleb128(23)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
     # static fields: total=f2, wf=f4 (cumulative diffs from 0)
     cd += uleb128(2) + uleb128(0x9)                               # f2 total, public static
@@ -438,6 +462,8 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_widefield_off) # diff 1 -> idx 27
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_checkcast_off) # diff 1 -> idx 28
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_insttest_off)  # diff 1 -> idx 29
+    cd += uleb128(2) + uleb128(0x9) + uleb128(code_iface_off)     # diff 2 -> idx 31 (m30=CharSequence.length)
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_switch_off)    # diff 1 -> idx 32
     data.extend(cd)
 
     # --- Counter class code items (object model demo) -----------------------
@@ -510,7 +536,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 3, type_list_main_off),
-        (0x2001, 26, code_main_off),
+        (0x2001, 28, code_main_off),
         (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -576,6 +602,9 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["wideField"])    # m27 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["checkCast"])    # m28 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["instTest"])     # m29 ()I
+    method_ids += struct.pack("<HHI", T["Ljava/lang/CharSequence;"], 1, S["length"])  # m30 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["ifaceTest"])    # m31 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["switchTest"])   # m32 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",

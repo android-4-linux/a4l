@@ -29,9 +29,11 @@ public class Runner {
     Object wf = c.getMethod("wideField").invoke(null);  // 42 (long static field)
     Object cc = c.getMethod("checkCast").invoke(null);  // 5 (check-cast)
     Object it = c.getMethod("instTest").invoke(null);   // 42 (instance-of)
+    Object ift = c.getMethod("ifaceTest").invoke(null); // 5 (invoke-interface)
+    Object sw = c.getMethod("switchTest").invoke(null); // 42 (packed-switch)
     if (args.length > 0) {
       java.nio.file.Files.write(java.nio.file.Paths.get(args[0]),
-          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr + "," + tc + "," + si + "," + oa + "," + ws + "," + wl + "," + ia + "," + il + "," + ba + "," + lb + "," + wa + "," + wf + "," + cc + "," + it).getBytes("UTF-8"));
+          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr + "," + tc + "," + si + "," + oa + "," + ws + "," + wl + "," + ia + "," + il + "," + ba + "," + lb + "," + wa + "," + wf + "," + cc + "," + it + "," + ift + "," + sw).getBytes("UTF-8"));
     }
   }
 }

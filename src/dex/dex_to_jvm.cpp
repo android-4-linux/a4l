@@ -49,7 +49,7 @@ enum : std::uint8_t {
   OP_BASTORE = 0x54, OP_CASTORE = 0x55, OP_SASTORE = 0x56,
   OP_LNEG = 0x75, OP_LXOR = 0x83, OP_LSHL = 0x79, OP_LSHR = 0x7b,
   OP_LUSHR = 0x7d, OP_LALOAD = 0x2f, OP_LASTORE = 0x50,
-  OP_CHECKCAST = 0xc0, OP_INSTANCEOF = 0xc1,
+  OP_CHECKCAST = 0xc0, OP_INSTANCEOF = 0xc1, OP_INVOKEINTERFACE = 0xb9,
 };
 
 // A type index -> the class-name form used by checkcast/instanceof/anewarray:
@@ -247,8 +247,9 @@ std::string obj_internal(const std::string& desc) {
 // stack-map forward pass, which only ever sees already-translatable opcodes).
 int dalvik_insn_units(std::uint8_t op) {
   if (op == 0x18) return 5;                                        // const-wide
-  if (op == 0x14 || op == 0x17 || op == 0x6e || op == 0x70 || op == 0x71) {
-    return 3;  // const, const-wide/32, invoke-{virtual,direct,static}
+  if (op == 0x14 || op == 0x17 || op == 0x2b || op == 0x2c ||
+      (op >= 0x6e && op <= 0x72)) {
+    return 3;  // const, const-wide/32, packed/sparse-switch, invoke-*
   }
   if (op == 0x13 || op == 0x15 || op == 0x16 || op == 0x19 || op == 0x1a ||
       op == 0x1f || op == 0x20 ||    // check-cast, instance-of
@@ -454,6 +455,10 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
     e.u2(0);  // placeholder, patched below
     fixups.push_back({at, target});
   };
+  // 4-byte switch offsets (relative to the switch opcode), patched below.
+  struct SwitchFixup { std::size_t operand_at; std::uint32_t target_pc;
+                       std::size_t switch_op_at; };
+  std::vector<SwitchFixup> switch_fixups;
 
   // Catch-handler entry points: the JVM enters these with the exception on the
   // operand stack, so reset the tracked height to 1 (move-exception then pops it).
@@ -463,6 +468,9 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
   const std::vector<std::uint16_t>& in = c.insns;
   std::size_t pc = 0;
   while (pc < in.size()) {
+    // Skip inline switch/array payloads (data, not instructions).
+    if (in[pc] == 0x0100) { pc += 4 + (pc + 1 < in.size() ? in[pc + 1] * 2 : 0); continue; }
+    if (in[pc] == 0x0200) { pc += 2 + (pc + 1 < in.size() ? in[pc + 1] * 4 : 0); continue; }
     pc_to_jvm[static_cast<std::uint32_t>(pc)] = e.code.size();
     if (handler_pcs.count(static_cast<std::uint32_t>(pc))) {
       e.stack = 1;
@@ -972,15 +980,19 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 2;
         break;
       }
-      case 0x6e:    // invoke-virtual {vC..vG}, meth@BBBB (35c)
-      case 0x70:    // invoke-direct  {vC..vG}, meth@BBBB (35c) - <init>/private
-      case 0x71: {  // invoke-static  {vC..vG}, meth@BBBB (35c)
+      case 0x6e:    // invoke-virtual   {vC..vG}, meth@BBBB (35c)
+      case 0x6f:    // invoke-super     {vC..vG}, meth@BBBB (35c)
+      case 0x70:    // invoke-direct    {vC..vG}, meth@BBBB (35c) - <init>/private
+      case 0x71:    // invoke-static    {vC..vG}, meth@BBBB (35c)
+      case 0x72: {  // invoke-interface {vC..vG}, meth@BBBB (35c)
         if (pc + 2 >= in.size()) return std::nullopt;
         const bool is_static_call = opcode == 0x71;
-        const bool has_receiver = !is_static_call;  // virtual and direct
-        const std::uint8_t invoke_op = is_static_call ? OP_INVOKESTATIC
-                                       : opcode == 0x70 ? OP_INVOKESPECIAL
-                                                        : OP_INVOKEVIRTUAL;
+        const bool is_interface = opcode == 0x72;
+        const bool has_receiver = !is_static_call;
+        const std::uint8_t invoke_op =
+            is_static_call ? OP_INVOKESTATIC
+            : (opcode == 0x70 || opcode == 0x6f) ? OP_INVOKESPECIAL
+                                                 : OP_INVOKEVIRTUAL;
         const int argc = (u >> 12) & 0xf;  // includes receiver when present
         if (has_receiver && argc < 1) return std::nullopt;
         const std::uint32_t midx = in[pc + 1];
@@ -1003,10 +1015,15 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         }
         if (is_wide_desc(mr->return_descriptor)) return std::nullopt;
         const int retw = mr->return_descriptor == "V" ? 0 : 1;
-        const std::uint16_t ref =
-            cw.methodref(mr->owner_internal, mr->name, mr->descriptor);
-        e.op(invoke_op);
-        e.u2(ref);
+        if (is_interface) {
+          e.op(OP_INVOKEINTERFACE);
+          e.u2(cw.interface_methodref(mr->owner_internal, mr->name, mr->descriptor));
+          e.u1(static_cast<std::uint8_t>(argc));  // arg word count (non-wide)
+          e.u1(0);
+        } else {
+          e.op(invoke_op);
+          e.u2(cw.methodref(mr->owner_internal, mr->name, mr->descriptor));
+        }
         e.adj(-argc + retw);  // pops receiver+params, pushes return
         // Discard the result if not captured by a following move-result.
         if (retw > 0) {
@@ -1031,9 +1048,83 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 2;
         break;
       }
+      case 0x2b:    // packed-switch vAA, +offset (31t)
+      case 0x2c: {  // sparse-switch vAA, +offset (31t)
+        if (pc + 2 >= in.size()) return std::nullopt;
+        const int reg = (u >> 8) & 0xff;
+        const std::int32_t poff = static_cast<std::int32_t>(
+            static_cast<std::uint32_t>(in[pc + 1]) |
+            (static_cast<std::uint32_t>(in[pc + 2]) << 16));
+        const std::size_t ppc = static_cast<std::size_t>(
+            static_cast<std::int64_t>(pc) + poff);
+        if (ppc + 1 >= in.size()) return std::nullopt;
+        const std::uint16_t ident = in[ppc];
+        const int size = in[ppc + 1];
+        if ((opcode == 0x2b && ident != 0x0100) ||
+            (opcode == 0x2c && ident != 0x0200)) {
+          return std::nullopt;
+        }
+        const auto put_s4 = [&](std::int32_t v) {
+          e.code.push_back(static_cast<std::uint8_t>((v >> 24) & 0xff));
+          e.code.push_back(static_cast<std::uint8_t>((v >> 16) & 0xff));
+          e.code.push_back(static_cast<std::uint8_t>((v >> 8) & 0xff));
+          e.code.push_back(static_cast<std::uint8_t>(v & 0xff));
+        };
+        const auto s4_at = [&](std::size_t p) {
+          return static_cast<std::int32_t>(
+              static_cast<std::uint32_t>(in[p]) |
+              (static_cast<std::uint32_t>(in[p + 1]) << 16));
+        };
+        const auto switch_target = [&](std::uint32_t target) {
+          switch_fixups.push_back({e.code.size(), target,
+                                   /*switch_op_at set below*/ 0});
+          put_s4(0);  // placeholder
+        };
+
+        e.load_i(local(reg));
+        const std::size_t sw_at = e.code.size();
+        e.op(opcode == 0x2b ? 0xaa : 0xab);  // tableswitch / lookupswitch
+        while (e.code.size() % 4 != 0) e.code.push_back(0);  // align operands
+        const std::size_t first_fixup = switch_fixups.size();
+        switch_target(static_cast<std::uint32_t>(pc + 3));  // default -> fall-through
+        if (opcode == 0x2b) {  // tableswitch: low, high, targets
+          const std::int32_t first_key = s4_at(ppc + 2);
+          put_s4(first_key);
+          put_s4(first_key + size - 1);
+          for (int i = 0; i < size; ++i) {
+            switch_target(static_cast<std::uint32_t>(
+                static_cast<std::int64_t>(pc) + s4_at(ppc + 4 + 2 * i)));
+          }
+        } else {  // lookupswitch: npairs, then (key, offset)*
+          put_s4(size);
+          for (int i = 0; i < size; ++i) {
+            put_s4(s4_at(ppc + 2 + 2 * i));  // key
+            switch_target(static_cast<std::uint32_t>(
+                static_cast<std::int64_t>(pc) + s4_at(ppc + 2 + 2 * size + 2 * i)));
+          }
+        }
+        for (std::size_t i = first_fixup; i < switch_fixups.size(); ++i) {
+          switch_fixups[i].switch_op_at = sw_at;
+        }
+        e.adj(-1);  // the switch pops the int value
+        pc += 3;
+        break;
+      }
       default:
         return std::nullopt;  // unsupported opcode -> stub the method
     }
+  }
+
+  // Resolve switch offsets (4 bytes, relative to the switch opcode).
+  for (const SwitchFixup& sf : switch_fixups) {
+    const auto it = pc_to_jvm.find(sf.target_pc);
+    if (it == pc_to_jvm.end()) return std::nullopt;
+    const std::int32_t rel = static_cast<std::int32_t>(
+        static_cast<std::int64_t>(it->second) - static_cast<std::int64_t>(sf.switch_op_at));
+    e.code[sf.operand_at + 0] = static_cast<std::uint8_t>((rel >> 24) & 0xff);
+    e.code[sf.operand_at + 1] = static_cast<std::uint8_t>((rel >> 16) & 0xff);
+    e.code[sf.operand_at + 2] = static_cast<std::uint8_t>((rel >> 8) & 0xff);
+    e.code[sf.operand_at + 3] = static_cast<std::uint8_t>(rel & 0xff);
   }
 
   // Resolve branch targets to relative JVM offsets (from the branch opcode).
@@ -1079,6 +1170,7 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
   // generated code, so a single pass (no fixpoint) is exact.
   std::map<std::uint32_t, std::vector<VType>> frame_stack;  // dalvik pc -> stack
   for (const Fixup& fx : fixups) frame_stack[fx.target_pc];  // empty stack
+  for (const SwitchFixup& sf : switch_fixups) frame_stack[sf.target_pc];  // empty stack
   for (const DexTryHandler& h : c.handlers) {
     std::string cls = "java/lang/Throwable";
     if (!h.catch_all) {
@@ -1124,6 +1216,24 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
       } else if (op == 0x29) {  // goto/16
         succ.push_back(static_cast<std::uint32_t>(
             static_cast<std::int64_t>(pc) + static_cast<std::int16_t>(in[pc + 1])));
+      } else if (op == 0x2b || op == 0x2c) {  // packed/sparse-switch
+        succ.push_back(pc + 3);  // default = fall-through
+        const std::int32_t poff = static_cast<std::int32_t>(
+            static_cast<std::uint32_t>(in[pc + 1]) |
+            (static_cast<std::uint32_t>(in[pc + 2]) << 16));
+        const std::size_t ppc =
+            static_cast<std::size_t>(static_cast<std::int64_t>(pc) + poff);
+        const int size = in[ppc + 1];
+        const auto s4 = [&](std::size_t p) {
+          return static_cast<std::int32_t>(static_cast<std::uint32_t>(in[p]) |
+                                           (static_cast<std::uint32_t>(in[p + 1]) << 16));
+        };
+        for (int i = 0; i < size; ++i) {
+          const std::size_t toff =
+              op == 0x2b ? ppc + 4 + 2 * i : ppc + 2 + 2 * size + 2 * i;
+          succ.push_back(static_cast<std::uint32_t>(
+              static_cast<std::int64_t>(pc) + s4(toff)));
+        }
       } else if (!ends) {
         succ.push_back(pc + dalvik_insn_units(op));  // fall-through
         if ((op >= 0x32 && op <= 0x37) || (op >= 0x38 && op <= 0x3d)) {  // if-*
