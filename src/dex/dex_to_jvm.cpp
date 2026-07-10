@@ -49,7 +49,18 @@ enum : std::uint8_t {
   OP_BASTORE = 0x54, OP_CASTORE = 0x55, OP_SASTORE = 0x56,
   OP_LNEG = 0x75, OP_LXOR = 0x83, OP_LSHL = 0x79, OP_LSHR = 0x7b,
   OP_LUSHR = 0x7d, OP_LALOAD = 0x2f, OP_LASTORE = 0x50,
+  OP_CHECKCAST = 0xc0, OP_INSTANCEOF = 0xc1,
 };
+
+// A type index -> the class-name form used by checkcast/instanceof/anewarray:
+// "Lfoo;" -> "foo"; "[..." -> the array descriptor itself. Empty if neither.
+std::string class_operand(const std::string& desc) {
+  if (desc.size() >= 2 && desc.front() == 'L' && desc.back() == ';') {
+    return desc.substr(1, desc.size() - 2);
+  }
+  if (!desc.empty() && desc.front() == '[') return desc;
+  return {};
+}
 
 // JVM opcode for a Dalvik long NON-shift binary op, index add,sub,mul,div,rem,
 // and,or,xor (matches 23x 0x9b.. and /2addr 0xbb..).
@@ -240,6 +251,7 @@ int dalvik_insn_units(std::uint8_t op) {
     return 3;  // const, const-wide/32, invoke-{virtual,direct,static}
   }
   if (op == 0x13 || op == 0x15 || op == 0x16 || op == 0x19 || op == 0x1a ||
+      op == 0x1f || op == 0x20 ||    // check-cast, instance-of
       op == 0x22 || op == 0x23 || op == 0x29 || op == 0x31 ||
       (op >= 0x32 && op <= 0x3d) ||   // if-test / if-testz
       (op >= 0x44 && op <= 0x6d) ||   // aget/aput, iget/iput, sget/sput (all typed)
@@ -337,7 +349,14 @@ void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod
     case 0x9b: case 0x9c: case 0x9d: case 0x9e: case 0x9f:  // long binary 23x -> long
     case 0xa0: case 0xa1: case 0xa2: case 0xa3: case 0xa4: case 0xa5:
     case 0x45:                                              // aget-wide -> long
+    case 0x61:                                              // sget-wide -> long
       set_long(L((u >> 8) & 0xff)); break;
+    case 0x53: set_long(L((u >> 8) & 0xf)); break;          // iget-wide -> long
+    case 0x20: set(L((u >> 8) & 0xf), kInt); break;         // instance-of -> int
+    case 0x1f: {  // check-cast -> Obj(cast type)
+      const std::string* td = dex.type_at(in[pc + 1]);
+      set(L((u >> 8) & 0xff), {VType::Obj, td ? class_operand(*td) : ""}); break;
+    }
     case 0x7b: case 0x7c: case 0x8d: case 0x8e: case 0x8f:  // neg/not/int-to-{b,c,s}
       set(L((u >> 8) & 0xf), kInt); break;
     case 0x7d: case 0x7e:                                   // neg/not-long -> long
@@ -793,6 +812,65 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         e.u2(cw.class_ref(td->substr(1, td->size() - 2)));
         e.adj(+1);
         e.store_a(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x1f: {  // check-cast vAA, type@BBBB (21c)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const std::string* td = dex.type_at(in[pc + 1]);
+        if (td == nullptr) return std::nullopt;
+        const std::string cls = class_operand(*td);
+        if (cls.empty()) return std::nullopt;
+        e.load_a(local(a));
+        e.op(OP_CHECKCAST); e.u2(cw.class_ref(cls));  // net 0
+        e.store_a(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x20: {  // instance-of vA, vB, type@CCCC (22c)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        const std::string* td = dex.type_at(in[pc + 1]);
+        if (td == nullptr) return std::nullopt;
+        const std::string cls = class_operand(*td);
+        if (cls.empty()) return std::nullopt;
+        e.load_a(local(b));
+        e.op(OP_INSTANCEOF); e.u2(cw.class_ref(cls));  // ref -> int, net 0
+        e.store_i(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x53: case 0x5a: {  // iget-wide / iput-wide (22c) - long field only
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        if (fr == nullptr || fr->type_descriptor != "J") return std::nullopt;
+        const std::uint16_t ref =
+            cw.fieldref(fr->owner_internal, fr->name, fr->type_descriptor);
+        if (opcode == 0x53) {  // vA(wide) = vB.field
+          e.load_a(local(b));
+          e.op(OP_GETFIELD); e.u2(ref); e.adj(+1);  // obj(1) -> long(2)
+          e.store_l(local(a));
+        } else {               // vB.field = vA(wide)
+          e.load_a(local(b)); e.load_l(local(a));
+          e.op(OP_PUTFIELD); e.u2(ref); e.adj(-3);
+        }
+        pc += 2;
+        break;
+      }
+      case 0x61: case 0x68: {  // sget-wide / sput-wide (21c) - long field only
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        if (fr == nullptr || fr->type_descriptor != "J") return std::nullopt;
+        const std::uint16_t ref =
+            cw.fieldref(fr->owner_internal, fr->name, fr->type_descriptor);
+        if (opcode == 0x61) {
+          e.op(OP_GETSTATIC); e.u2(ref); e.adj(+2); e.store_l(local(a));
+        } else {
+          e.load_l(local(a)); e.op(OP_PUTSTATIC); e.u2(ref); e.adj(-2);
+        }
         pc += 2;
         break;
       }

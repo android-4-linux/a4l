@@ -88,6 +88,11 @@ STRINGS = [
     "longBits",              # 46 method name (long div/rem/shl/shr)
     "[J",                    # 47 type: long[]
     "wideArray",             # 48 method name (new-array long, aput-wide, aget-wide)
+    "wf",                    # 49 static long field name
+    "wideField",             # 50 method name (sget-wide/sput-wide)
+    "checkCast",             # 51 method name (check-cast)
+    "instTest",              # 52 method name (instance-of)
+    "J",                     # 53 type: long (field descriptor)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
@@ -95,7 +100,7 @@ S = {s: i for i, s in enumerate(STRINGS)}
 TYPES = ["LHelloDex;", "Ljava/lang/Object;", "V", "I", "[Ljava/lang/String;",
          "Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;",
          "LCounter;", "[I", "Ljava/lang/RuntimeException;", "Ljava/lang/Exception;",
-         "[B", "[J"]
+         "[B", "[J", "J"]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -127,8 +132,8 @@ def build_dex():
     n_strings = len(STRINGS)
     n_types = len(TYPES)
     n_protos = 5    # + (I)V for Counter.<init>/add
-    n_fields = 4    # System.out, Counter.value, HelloDex.total, Counter.label
-    n_methods = 27  # + longBits, wideArray
+    n_fields = 5    # + HelloDex.wf (static long)
+    n_methods = 30  # + wideField, checkCast, instTest
     n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
@@ -376,16 +381,40 @@ def build_dex():
         0x029B, 0x0402,                # add-long v2,v2,v4
         0x2084, 0x000F,                # long-to-int v0,v2 ; return v0
     ]))
+    code_widefield_off = off_data + len(data)
+    # int wideField(){ wf = 40; return (int)(wf + 2); }  = 42   (sput/sget-wide, field 4)
+    data.extend(code_item(4, 0, 0, [
+        0x0016, 0x0028, 0x0068, 0x0004,  # const-wide/16 v0,40 ; sput-wide v0, wf
+        0x0061, 0x0004,                # sget-wide v0, wf  -> 40
+        0x0216, 0x0002, 0x009B, 0x0200,  # const-wide/16 v2,2 ; add-long v0,v0,v2
+        0x0084, 0x000F,                # long-to-int v0,v0 ; return v0
+    ]))
+    code_checkcast_off = off_data + len(data)
+    # int checkCast(){ Object o="hello"; return ((String)o).length(); }  = 5
+    data.extend(code_item(1, 0, 1, [
+        0x001A, S["hello"], 0x001F, 0x0005,  # const-string v0,"hello" ; check-cast v0,String
+        0x106E, 0x0006, 0x0000, 0x000A, 0x000F,  # invoke length; move-result v0; return v0
+    ]))
+    code_insttest_off = off_data + len(data)
+    # int instTest(){ Object o="hello"; return (o instanceof String) ? 42 : 0; }  = 42
+    data.extend(code_item(1, 0, 0, [
+        0x001A, S["hello"],            # const-string v0,"hello"
+        0x0020, 0x0005,                # instance-of v0, v0, String  -> 1
+        0x0038, 0x0005,                # if-eqz v0, :else
+        0x0013, 0x002A, 0x000F,        # const/16 v0,42 ; return v0
+        0x0012, 0x000F,                # :else const/4 v0,0 ; return v0
+    ]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
-    cd += uleb128(1)  # static_fields_size (HelloDex.total)
+    cd += uleb128(2)  # static_fields_size (HelloDex.total, HelloDex.wf)
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(18)  # direct_methods_size
+    cd += uleb128(21)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
-    # static fields: HelloDex.total = field id 2 (diff from 0)
-    cd += uleb128(2) + uleb128(0x9)                               # f2, public static
+    # static fields: total=f2, wf=f4 (cumulative diffs from 0)
+    cd += uleb128(2) + uleb128(0x9)                               # f2 total, public static
+    cd += uleb128(2) + uleb128(0x9)                               # +2 -> f4 wf, public static
     # direct methods, sorted by ascending method index; idx diffs are cumulative.
     # m0=main..m5=strlen, m7=hello, m14=arraySum, m16=tryCatch, m17=staticInt, m18=objArray.
     cd += uleb128(0) + uleb128(0x9) + uleb128(code_main_off)      # diff 0 -> idx 0
@@ -406,6 +435,9 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_bytearray_off) # diff 1 -> idx 24
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_longbits_off)  # diff 1 -> idx 25
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_widearray_off) # diff 1 -> idx 26
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_widefield_off) # diff 1 -> idx 27
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_checkcast_off) # diff 1 -> idx 28
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_insttest_off)  # diff 1 -> idx 29
     data.extend(cd)
 
     # --- Counter class code items (object model demo) -----------------------
@@ -478,7 +510,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 3, type_list_main_off),
-        (0x2001, 23, code_main_off),
+        (0x2001, 26, code_main_off),
         (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -511,6 +543,7 @@ def build_dex():
     field_ids += struct.pack("<HHI", T["LCounter;"], T["I"], S["value"])  # f1 Counter.value
     field_ids += struct.pack("<HHI", T["LHelloDex;"], T["I"], S["total"])  # f2 HelloDex.total
     field_ids += struct.pack("<HHI", T["LCounter;"], T["Ljava/lang/String;"], S["label"])  # f3
+    field_ids += struct.pack("<HHI", T["LHelloDex;"], T["J"], S["wf"])  # f4 HelloDex.wf:long
 
     method_ids = b""
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 0, S["main"])
@@ -540,6 +573,9 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["byteArray"])    # m24 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["longBits"])     # m25 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["wideArray"])    # m26 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["wideField"])    # m27 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["checkCast"])    # m28 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["instTest"])     # m29 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",

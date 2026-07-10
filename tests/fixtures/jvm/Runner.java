@@ -26,9 +26,12 @@ public class Runner {
     Object ba = c.getMethod("byteArray").invoke(null);  // 42 (narrow byte array)
     Object lb = c.getMethod("longBits").invoke(null);   // 42 (long div/rem/shl/shr)
     Object wa = c.getMethod("wideArray").invoke(null);  // 42 (long array)
+    Object wf = c.getMethod("wideField").invoke(null);  // 42 (long static field)
+    Object cc = c.getMethod("checkCast").invoke(null);  // 5 (check-cast)
+    Object it = c.getMethod("instTest").invoke(null);   // 42 (instance-of)
     if (args.length > 0) {
       java.nio.file.Files.write(java.nio.file.Paths.get(args[0]),
-          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr + "," + tc + "," + si + "," + oa + "," + ws + "," + wl + "," + ia + "," + il + "," + ba + "," + lb + "," + wa).getBytes("UTF-8"));
+          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr + "," + tc + "," + si + "," + oa + "," + ws + "," + wl + "," + ia + "," + il + "," + ba + "," + lb + "," + wa + "," + wf + "," + cc + "," + it).getBytes("UTF-8"));
     }
   }
 }
