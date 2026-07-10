@@ -35,7 +35,19 @@ enum : std::uint8_t {
   OP_NEW = 0xbb, OP_INVOKESPECIAL = 0xb7, OP_ATHROW = 0xbf, OP_GOTO = 0xa7,
   OP_POP = 0x57, OP_INVOKESTATIC = 0xb8, OP_INVOKEVIRTUAL = 0xb6,
   OP_GETSTATIC = 0xb2, OP_GETFIELD = 0xb4, OP_PUTFIELD = 0xb5,
+  OP_IALOAD = 0x2e, OP_IASTORE = 0x4f, OP_NEWARRAY = 0xbc,
+  OP_ANEWARRAY = 0xbd, OP_ARRAYLENGTH = 0xbe,
 };
+
+// JVM newarray atype codes for primitive element descriptors.
+int newarray_atype(char prim) {
+  switch (prim) {
+    case 'Z': return 4;  case 'C': return 5;  case 'F': return 6;
+    case 'D': return 7;  case 'B': return 8;  case 'S': return 9;
+    case 'I': return 10; case 'J': return 11;
+    default:  return -1;
+  }
+}
 
 // JVM field access flags that carry over 1:1 from Dalvik field flags.
 constexpr std::uint32_t kFieldFlagsMask =
@@ -364,6 +376,57 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         e.u2(cw.class_ref(td->substr(1, td->size() - 2)));
         e.adj(+1);
         e.store_a(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x21: {  // array-length vA, vB (12x)
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        e.load_a(local(b));
+        e.op(OP_ARRAYLENGTH);  // pop arrayref, push int (net 0)
+        e.store_i(local(a));
+        pc += 1;
+        break;
+      }
+      case 0x23: {  // new-array vA, vB, type@CCCC (22c)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        const std::string* td = dex.type_at(in[pc + 1]);
+        if (td == nullptr || td->size() < 2 || td->front() != '[') {
+          return std::nullopt;
+        }
+        const std::string elem = td->substr(1);  // one dimension off
+        e.load_i(local(b));                        // size
+        if (elem.size() == 1) {
+          const int atype = newarray_atype(elem[0]);
+          if (atype < 0) return std::nullopt;
+          e.op(OP_NEWARRAY); e.u1(static_cast<std::uint8_t>(atype));
+        } else if (elem[0] == 'L' && elem.back() == ';') {
+          e.op(OP_ANEWARRAY);
+          e.u2(cw.class_ref(elem.substr(1, elem.size() - 2)));
+        } else if (elem[0] == '[') {
+          e.op(OP_ANEWARRAY); e.u2(cw.class_ref(elem));  // array of arrays
+        } else {
+          return std::nullopt;
+        }
+        // size popped, arrayref pushed (net 0 on stack); then store.
+        e.store_a(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x44:    // aget   vAA, vBB, vCC (23x)  - int
+      case 0x4b: {  // aput   vAA, vBB, vCC (23x)  - int
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const int bb = in[pc + 1] & 0xff;         // array
+        const int cc = (in[pc + 1] >> 8) & 0xff;  // index
+        if (opcode == 0x44) {                      // aget: vAA = vBB[vCC]
+          e.load_a(local(bb)); e.load_i(local(cc));
+          e.op(OP_IALOAD); e.adj(-1);              // pop array+index, push value
+          e.store_i(local(a));
+        } else {                                   // aput: vBB[vCC] = vAA
+          e.load_a(local(bb)); e.load_i(local(cc)); e.load_i(local(a));
+          e.op(OP_IASTORE); e.adj(-3);             // pop array+index+value
+        }
         pc += 2;
         break;
       }

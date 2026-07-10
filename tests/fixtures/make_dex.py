@@ -67,13 +67,15 @@ STRINGS = [
     "add",                   # 25 method name
     "useCounter",            # 26 method name (static, news up a Counter)
     "VI",                    # 27 shorty for (I)V
+    "[I",                    # 28 type: int[]
+    "arraySum",              # 29 method name (new-array/aput/aget/array-length)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
 # type_ids -> string index for each descriptor.
 TYPES = ["LHelloDex;", "Ljava/lang/Object;", "V", "I", "[Ljava/lang/String;",
          "Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;",
-         "LCounter;"]
+         "LCounter;", "[I"]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -92,7 +94,7 @@ def build_dex():
     n_types = len(TYPES)
     n_protos = 5    # + (I)V for Counter.<init>/add
     n_fields = 2    # System.out, Counter.value
-    n_methods = 14  # + Object.<init>, Counter.{<init>,get,add,useCounter}
+    n_methods = 15  # + arraySum
     n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
@@ -186,16 +188,39 @@ def build_dex():
     data.extend(code_item(2, 0, 2, [
         0x0062, 0x0000, 0x011A, S["hello aclcxx"], 0x206E, 0x0008, 0x0010, 0x000E,
     ]))
+    code_arraysum_off = off_data + len(data)
+    # int arraySum() {
+    #   int[] a = new int[3]; a[0]=10; a[1]=20; a[2]=12;
+    #   int sum=0; for (int i=0; i<a.length; i++) sum += a[i]; return sum;   // 42
+    # }  registers: v0=array, v1=index, v2=value/sum, v3=len/elem
+    data.extend(code_item(4, 0, 0, [
+        0x3112,                       # const/4 v1, 3
+        0x1023, T["[I"],              # new-array v0, v1, int[]
+        0x0112, 0x0213, 0x000A,       # const/4 v1,0 ; const/16 v2,10
+        0x024B, 0x0100,               # aput v2, v0, v1     (a[0]=10)
+        0x1112, 0x0213, 0x0014,       # const/4 v1,1 ; const/16 v2,20
+        0x024B, 0x0100,               # aput v2, v0, v1     (a[1]=20)
+        0x2112, 0x0213, 0x000C,       # const/4 v1,2 ; const/16 v2,12
+        0x024B, 0x0100,               # aput v2, v0, v1     (a[2]=12)
+        0x0212, 0x0112,               # const/4 v2,0 (sum) ; const/4 v1,0 (i)
+        0x0321,                       # :loop  array-length v3, v0
+        0x3135, 0x0009,               # if-ge v1, v3, :end
+        0x0344, 0x0100,               # aget v3, v0, v1
+        0x0290, 0x0302,               # add-int v2, v2, v3
+        0x01D8, 0x0101,               # add-int/lit8 v1, v1, 1
+        0xF728,                       # goto :loop
+        0x020F,                       # :end  return v2
+    ]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
     cd += uleb128(0)  # static_fields_size
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(7)  # direct_methods_size
+    cd += uleb128(8)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
     # direct methods, sorted by ascending method index; idx diffs are cumulative.
-    # m0=main, m1=answer, m2=misc, m3=loopSum, m4=callSum, m5=strlen, m7=hello.
+    # m0=main..m5=strlen, m7=hello, m14=arraySum.
     cd += uleb128(0) + uleb128(0x9) + uleb128(code_main_off)      # diff 0 -> idx 0
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_answer_off)    # diff 1 -> idx 1
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_misc_off)      # diff 1 -> idx 2
@@ -203,6 +228,7 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_callsum_off)   # diff 1 -> idx 4
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_strlen_off)    # diff 1 -> idx 5
     cd += uleb128(2) + uleb128(0x9) + uleb128(code_hello_off)     # diff 2 -> idx 7
+    cd += uleb128(7) + uleb128(0x9) + uleb128(code_arraysum_off)  # diff 7 -> idx 14
     data.extend(cd)
 
     # --- Counter class code items (object model demo) -----------------------
@@ -265,7 +291,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 3, type_list_main_off),
-        (0x2001, 11, code_main_off),
+        (0x2001, 12, code_main_off),
         (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -312,6 +338,7 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LCounter;"], 1, S["get"])        # m11 Counter.get()I
     method_ids += struct.pack("<HHI", T["LCounter;"], 4, S["add"])        # m12 Counter.add(I)V
     method_ids += struct.pack("<HHI", T["LCounter;"], 1, S["useCounter"]) # m13 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["arraySum"])   # m14 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",
