@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <deque>
 #include <optional>
 #include <set>
 #include <system_error>
@@ -163,7 +164,161 @@ struct Translated {
   std::uint16_t max_stack;
   std::uint16_t max_locals;
   std::vector<ClassWriter::ExceptionEntry> exceptions;
+  std::vector<std::uint8_t> stackmaptable;  // StackMapTable attribute body (v51)
 };
+
+// A JVM verification type for one local slot. Long occupies two slots: the low
+// slot is Long, the high slot LongHi (skipped when serialized).
+struct VType {
+  enum Kind { Top, Int, Long, LongHi, Obj } kind = Top;
+  std::string cls;  // internal name when kind == Obj
+  bool operator==(const VType& o) const { return kind == o.kind && cls == o.cls; }
+};
+
+// Object-typed field/element/return descriptor -> internal class name (or "" if
+// not a plain object type).
+std::string obj_internal(const std::string& desc) {
+  if (desc.size() >= 2 && desc.front() == 'L' && desc.back() == ';') {
+    return desc.substr(1, desc.size() - 2);
+  }
+  if (!desc.empty() && desc.front() == '[') return desc;  // array class name
+  return {};
+}
+
+// Number of 16-bit code units of a supported Dalvik instruction (used by the
+// stack-map forward pass, which only ever sees already-translatable opcodes).
+int dalvik_insn_units(std::uint8_t op) {
+  switch (op) {
+    case 0x18: return 5;                                        // const-wide
+    case 0x14: case 0x17: case 0x6e: case 0x70: case 0x71:      // const, cw/32, invoke
+      return 3;
+    case 0x13: case 0x15: case 0x16: case 0x19: case 0x1a:      // const/16.., const-string
+    case 0x22: case 0x23: case 0x31:                            // new-instance/array, cmp-long
+    case 0x32: case 0x33: case 0x34: case 0x35: case 0x36: case 0x37:  // if-test
+    case 0x38: case 0x39: case 0x3a: case 0x3b: case 0x3c: case 0x3d:  // if-testz
+    case 0x29: case 0x44: case 0x46: case 0x4b: case 0x4d:      // goto/16, aget/aput
+    case 0x52: case 0x54: case 0x59: case 0x5b:                 // iget/iput
+    case 0x60: case 0x62: case 0x67: case 0x69:                 // sget/sput
+    case 0x90: case 0x91: case 0x92: case 0x9b: case 0x9c: case 0x9d:  // arith
+    case 0xd0: case 0xd8:                                       // add-int/lit
+      return 2;
+    default: return 1;  // 1-unit forms (nop, move, const/4, returns, goto, etc.)
+  }
+}
+
+// Update the local-variable types for one instruction's writes.
+void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod& m,
+                 const std::vector<std::uint16_t>& in, std::size_t pc, int ins) {
+  const auto L = [&](int reg) { return ins + reg; };
+  const auto set = [&](int slot, VType t) {
+    if (slot >= 0 && slot < static_cast<int>(locals.size())) locals[slot] = t;
+  };
+  const auto set_long = [&](int slot) {
+    set(slot, {VType::Long, {}});
+    set(slot + 1, {VType::LongHi, {}});
+  };
+  const std::uint16_t u = in[pc];
+  const std::uint8_t op = u & 0xff;
+  const VType kInt{VType::Int, {}};
+  switch (op) {
+    case 0x12: case 0x13: case 0x14: case 0x15:  // const* -> int
+      set(L((u >> 8) & (op == 0x12 ? 0xf : 0xff)), kInt); break;
+    case 0x16: case 0x17: case 0x18: case 0x19:  // const-wide* -> long
+      set_long(L((u >> 8) & 0xff)); break;
+    case 0x1a:  // const-string -> String
+      set(L((u >> 8) & 0xff), {VType::Obj, "java/lang/String"}); break;
+    case 0x01: case 0x07: {  // move / move-object: copy
+      const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+      set(L(a), locals[L(b)]); break;
+    }
+    case 0x04: {  // move-wide
+      const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+      (void)b; set_long(L(a)); break;
+    }
+    case 0x22: {  // new-instance -> Obj (uninitialized elided; no frame between new/<init>)
+      const std::string* td = dex.type_at(in[pc + 1]);
+      set(L((u >> 8) & 0xff), {VType::Obj, td ? obj_internal(*td) : ""}); break;
+    }
+    case 0x23: {  // new-array vA, vB, type -> vA = Obj(array)
+      const std::string* td = dex.type_at(in[pc + 1]);
+      set(L((u >> 8) & 0xf), {VType::Obj, td ? *td : ""}); break;
+    }
+    case 0x21: set(L((u >> 8) & 0xf), kInt); break;         // array-length -> int
+    case 0x0a: set(L((u >> 8) & 0xff), kInt); break;        // move-result -> int
+    case 0x0b: set_long(L((u >> 8) & 0xff)); break;         // move-result-wide
+    case 0x0c: {  // move-result-object -> Obj(return type of the preceding invoke)
+      std::string cls;
+      if (pc >= 3) {
+        const MethodRef* mr = dex.method_ref(in[pc - 2]);
+        if (mr) cls = obj_internal(mr->return_descriptor);
+      }
+      set(L((u >> 8) & 0xff), {VType::Obj, cls}); break;
+    }
+    case 0x0d: {  // move-exception -> Obj(caught type at this handler)
+      std::string cls = "java/lang/Throwable";
+      for (const DexTryHandler& h : m.code->handlers) {
+        if (h.handler_addr == pc && !h.catch_all) {
+          const std::string* td = dex.type_at(h.type_idx);
+          if (td) cls = obj_internal(*td);
+        }
+      }
+      set(L((u >> 8) & 0xff), {VType::Obj, cls}); break;
+    }
+    case 0x52: case 0x60: set(L((u >> 8) & (op == 0x52 ? 0xf : 0xff)), kInt); break;  // iget/sget int
+    case 0x54: case 0x62: {  // iget-object / sget-object -> Obj(field type)
+      const FieldRef* fr = dex.field_ref(in[pc + 1]);
+      set(L((u >> 8) & (op == 0x54 ? 0xf : 0xff)),
+          {VType::Obj, fr ? obj_internal(fr->type_descriptor) : ""}); break;
+    }
+    case 0x44: set(L((u >> 8) & 0xff), kInt); break;        // aget int
+    case 0x46: {  // aget-object -> Obj(element of the array local)
+      const int bb = in[pc + 1] & 0xff;
+      const VType& arr = locals[L(bb)];
+      std::string cls;
+      if (arr.kind == VType::Obj && !arr.cls.empty() && arr.cls.front() == '[') {
+        cls = obj_internal(arr.cls.substr(1));
+      }
+      set(L((u >> 8) & 0xff), {VType::Obj, cls}); break;
+    }
+    case 0x81: set_long(L((u >> 8) & 0xf)); break;          // int-to-long
+    case 0x84: set(L((u >> 8) & 0xf), kInt); break;         // long-to-int
+    case 0x31: set(L((u >> 8) & 0xff), kInt); break;        // cmp-long -> int
+    case 0x90: case 0x91: case 0x92:                        // add/sub/mul-int
+    case 0xd0: case 0xd8:                                   // add-int/lit
+      set(L((u >> 8) & 0xff), kInt); break;
+    case 0x9b: case 0x9c: case 0x9d:                        // add/sub/mul-long
+      set_long(L((u >> 8) & 0xff)); break;
+    default: break;  // no local write
+  }
+}
+
+// Serialize one full_frame's verification_type_info list for `slots`, trimming
+// trailing Top entries. Returns (bytes, entry_count).
+std::pair<std::vector<std::uint8_t>, std::uint16_t> encode_vtypes(
+    ClassWriter& cw, const std::vector<VType>& slots) {
+  int last = -1;
+  for (int i = 0; i < static_cast<int>(slots.size()); ++i) {
+    if (slots[i].kind != VType::Top && slots[i].kind != VType::LongHi) last = i;
+  }
+  std::vector<std::uint8_t> out;
+  std::uint16_t count = 0;
+  for (int i = 0; i <= last; ++i) {
+    ++count;
+    switch (slots[i].kind) {
+      case VType::Int:    out.push_back(1); break;
+      case VType::Long:   out.push_back(4); ++i; break;  // skip the LongHi slot
+      case VType::Obj: {
+        out.push_back(7);
+        const std::uint16_t ci = cw.class_ref(slots[i].cls);
+        out.push_back(static_cast<std::uint8_t>(ci >> 8));
+        out.push_back(static_cast<std::uint8_t>(ci & 0xff));
+        break;
+      }
+      default:            out.push_back(0); break;  // Top
+    }
+  }
+  return {out, count};
+}
 
 // Translate the supported linear integer subset of a static method's Dalvik
 // bytecode. Returns nullopt (caller stubs the method) on any unsupported
@@ -699,8 +854,113 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
                           static_cast<std::uint16_t>(*hd), catch_type});
   }
 
+  // --- StackMapTable (for class-file v51) --------------------------------------
+  // Frame points: branch targets (empty stack) and exception handlers (stack =
+  // [caught exception]). One forward pass over the Dalvik code computes the JVM
+  // local types at each; each Dalvik register keeps an invariant type in our
+  // generated code, so a single pass (no fixpoint) is exact.
+  std::map<std::uint32_t, std::vector<VType>> frame_stack;  // dalvik pc -> stack
+  for (const Fixup& fx : fixups) frame_stack[fx.target_pc];  // empty stack
+  for (const DexTryHandler& h : c.handlers) {
+    std::string cls = "java/lang/Throwable";
+    if (!h.catch_all) {
+      const std::string* td = dex.type_at(h.type_idx);
+      if (td) cls = obj_internal(*td);
+    }
+    frame_stack[h.handler_addr] = {{VType::Obj, cls}};
+  }
+
+  std::vector<std::uint8_t> stackmap;
+  if (!frame_stack.empty()) {
+    const std::size_t nloc = static_cast<std::size_t>(max_locals);
+    const auto merge1 = [](VType a, VType b) -> VType {
+      if (a == b) return a;
+      return {VType::Top, {}};  // no supertype lattice: disagreement -> Top
+    };
+    // Worklist fixpoint: in-state (JVM local types) at each Dalvik pc.
+    std::map<std::uint32_t, std::vector<VType>> in_state;
+    in_state[0] = std::vector<VType>(nloc);  // args omitted: frame methods are no-arg static
+    const auto merge_into = [&](std::uint32_t pc, const std::vector<VType>& s) -> bool {
+      auto it = in_state.find(pc);
+      if (it == in_state.end()) { in_state[pc] = s; return true; }
+      bool changed = false;
+      for (std::size_t i = 0; i < nloc; ++i) {
+        VType mg = merge1(it->second[i], s[i]);
+        if (!(mg == it->second[i])) { it->second[i] = mg; changed = true; }
+      }
+      return changed;
+    };
+    std::deque<std::uint32_t> work{0};
+    while (!work.empty()) {
+      const std::uint32_t pc = work.front(); work.pop_front();
+      if (pc >= in.size()) continue;
+      std::vector<VType> out = in_state[pc];
+      sm_transfer(out, dex, m, in, pc, ins);
+      const std::uint8_t op = in[pc] & 0xff;
+      const bool ends = op == 0x0e || op == 0x0f || op == 0x11 || op == 0x10 ||
+                        op == 0x27;  // return* / throw
+      std::vector<std::uint32_t> succ;
+      if (op == 0x28) {  // goto
+        succ.push_back(static_cast<std::uint32_t>(
+            static_cast<std::int64_t>(pc) + static_cast<std::int8_t>((in[pc] >> 8) & 0xff)));
+      } else if (op == 0x29) {  // goto/16
+        succ.push_back(static_cast<std::uint32_t>(
+            static_cast<std::int64_t>(pc) + static_cast<std::int16_t>(in[pc + 1])));
+      } else if (!ends) {
+        succ.push_back(pc + dalvik_insn_units(op));  // fall-through
+        if ((op >= 0x32 && op <= 0x37) || (op >= 0x38 && op <= 0x3d)) {  // if-*
+          succ.push_back(static_cast<std::uint32_t>(
+              static_cast<std::int64_t>(pc) + static_cast<std::int16_t>(in[pc + 1])));
+        }
+      }
+      for (std::uint32_t s : succ) {
+        if (merge_into(s, out)) work.push_back(s);
+      }
+      for (const DexTryHandler& h : c.handlers) {
+        if (pc >= h.start_addr && pc < h.end_addr) {
+          if (merge_into(h.handler_addr, in_state[pc])) work.push_back(h.handler_addr);
+        }
+      }
+    }
+
+    struct Frame { std::uint32_t off; std::vector<VType> locals; std::vector<VType> stack; };
+    std::vector<Frame> frames;
+    for (const auto& [dpc, stk] : frame_stack) {
+      const auto it = in_state.find(dpc);
+      if (it == in_state.end()) continue;  // unreachable frame point
+      frames.push_back({static_cast<std::uint32_t>(pc_to_jvm[dpc]), it->second, stk});
+    }
+    // frame_stack (a map) iterates dpc-ascending == jvm-offset-ascending.
+
+    const auto be16v = [](std::vector<std::uint8_t>& v, std::uint16_t x) {
+      v.push_back(static_cast<std::uint8_t>(x >> 8));
+      v.push_back(static_cast<std::uint8_t>(x & 0xff));
+    };
+    be16v(stackmap, static_cast<std::uint16_t>(frames.size()));
+    std::int32_t prev = -1;
+    for (const Frame& f : frames) {
+      stackmap.push_back(255);  // full_frame
+      be16v(stackmap, static_cast<std::uint16_t>(f.off - prev - 1));
+      auto [lbytes, lcount] = encode_vtypes(cw, f.locals);
+      be16v(stackmap, lcount);
+      stackmap.insert(stackmap.end(), lbytes.begin(), lbytes.end());
+      be16v(stackmap, static_cast<std::uint16_t>(f.stack.size()));
+      for (const VType& s : f.stack) {
+        if (s.kind == VType::Obj) {
+          stackmap.push_back(7);
+          const std::uint16_t ci = cw.class_ref(s.cls);
+          be16v(stackmap, ci);
+        } else {
+          stackmap.push_back(s.kind == VType::Int ? 1 : 0);
+        }
+      }
+      prev = static_cast<std::int32_t>(f.off);
+    }
+  }
+
   return Translated{std::move(e.code), static_cast<std::uint16_t>(e.max_stack),
-                    static_cast<std::uint16_t>(max_locals), std::move(exceptions)};
+                    static_cast<std::uint16_t>(max_locals), std::move(exceptions),
+                    std::move(stackmap)};
 }
 
 // A method body that throws UnsupportedOperationException.
@@ -719,7 +979,7 @@ Translated emit_stub(ClassWriter& cw, const DexMethod& m) {
   e.op(OP_ATHROW); e.adj(-1);
   const int locals = arg_slots(m);
   return {std::move(e.code), static_cast<std::uint16_t>(e.max_stack),
-          static_cast<std::uint16_t>(locals < 1 ? 0 : locals), {}};
+          static_cast<std::uint16_t>(locals < 1 ? 0 : locals), {}, {}};
 }
 
 }  // namespace
@@ -756,7 +1016,8 @@ DexError convert(const DexFile& dex, const ConvertOptions& opts,
             0x0001 | (m.is_static() ? 0x0008 : 0);  // public [static]
         if (auto t = translate_method(cw, dex, m)) {
           cw.add_method(access, m.name, m.jvm_descriptor(), t->max_stack,
-                        t->max_locals, std::move(t->code), std::move(t->exceptions));
+                        t->max_locals, std::move(t->code), std::move(t->exceptions),
+                        std::move(t->stackmaptable));
           ++out.translated_methods;
         } else {
           Translated s = emit_stub(cw, m);

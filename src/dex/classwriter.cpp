@@ -136,20 +136,23 @@ void ClassWriter::add_method(std::uint16_t access_flags, std::string_view name,
                              std::string_view descriptor, std::uint16_t max_stack,
                              std::uint16_t max_locals,
                              std::vector<std::uint8_t> code,
-                             std::vector<ExceptionEntry> exceptions) {
+                             std::vector<ExceptionEntry> exceptions,
+                             std::vector<std::uint8_t> stackmaptable) {
+  if (!stackmaptable.empty() && stackmap_name_ == 0) {
+    stackmap_name_ = utf8("StackMapTable");
+  }
   methods_.push_back({access_flags, utf8(name), utf8(descriptor), max_stack,
-                      max_locals, std::move(code), std::move(exceptions)});
+                      max_locals, std::move(code), std::move(exceptions),
+                      std::move(stackmaptable)});
 }
 
 std::vector<std::uint8_t> ClassWriter::build() const {
   std::vector<std::uint8_t> out;
   be32(out, 0xCAFEBABE);
   be16(out, 0);   // minor
-  // Major 49 (Java 5): the JVM verifies these with the type-inference verifier,
-  // which needs no StackMapTable — so the translator can emit branches without
-  // computing stack-map frames. The translation keeps the operand stack empty at
-  // every instruction boundary, which that verifier accepts.
-  be16(out, 49);
+  // Major 51 (Java 7): the type-checking verifier is used, so branch/exception
+  // methods carry a StackMapTable (computed by the translator).
+  be16(out, 51);
 
   be16(out, static_cast<std::uint16_t>(pool_.size() + 1));  // cp count
   for (const auto& e : pool_) out.insert(out.end(), e.begin(), e.end());
@@ -174,8 +177,11 @@ std::vector<std::uint8_t> ClassWriter::build() const {
     be16(out, m.descriptor_index);
     be16(out, 1);  // attributes_count: just Code
     be16(out, code_attr_name_);
+    const bool has_smt = !m.stackmaptable.empty();
+    const std::uint32_t smt_attr_size =
+        has_smt ? static_cast<std::uint32_t>(6 + m.stackmaptable.size()) : 0;
     const std::uint32_t code_attr_len = static_cast<std::uint32_t>(
-        12 + m.code.size() + m.exceptions.size() * 8);
+        12 + m.code.size() + m.exceptions.size() * 8) + smt_attr_size;
     be32(out, code_attr_len);
     be16(out, m.max_stack);
     be16(out, m.max_locals);
@@ -188,7 +194,12 @@ std::vector<std::uint8_t> ClassWriter::build() const {
       be16(out, ex.handler_pc);
       be16(out, ex.catch_type);
     }
-    be16(out, 0);  // code attributes_count
+    be16(out, has_smt ? 1 : 0);  // code attributes_count
+    if (has_smt) {
+      be16(out, stackmap_name_);
+      be32(out, static_cast<std::uint32_t>(m.stackmaptable.size()));
+      out.insert(out.end(), m.stackmaptable.begin(), m.stackmaptable.end());
+    }
   }
 
   be16(out, 0);  // class attributes_count

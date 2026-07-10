@@ -80,6 +80,7 @@ STRINGS = [
     "label",                 # 38 Counter instance object field
     "tagLen",                # 39 method name (iget-object/iput-object)
     "wideSum",               # 40 method name (long arithmetic)
+    "wideLoop",              # 41 method name (long at a stack-map frame point)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
@@ -119,7 +120,7 @@ def build_dex():
     n_types = len(TYPES)
     n_protos = 5    # + (I)V for Counter.<init>/add
     n_fields = 4    # System.out, Counter.value, HelloDex.total, Counter.label
-    n_methods = 21  # + wideSum
+    n_methods = 22  # + wideLoop
     n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
@@ -287,13 +288,27 @@ def build_dex():
         0x4084,                        # long-to-int v0, v4
         0x000F,                        # return v0
     ]))
+    code_wideloop_off = off_data + len(data)
+    # int wideLoop(){ long sum=0; for(i=0;i<5;i++) sum+=(long)i; return (int)sum; } (10)
+    #   v0/v1=sum, v2=i, v3=limit, v4/v5=(long)i ; registers=6.
+    #   The loop head's frame has a long local (sum) -> exercises StackMapTable + wide.
+    data.extend(code_item(6, 0, 0, [
+        0x0018, 0x0000, 0x0000, 0x0000, 0x0000,  # const-wide v0, 0 (sum)
+        0x0212, 0x5312,                # const/4 v2,0 (i) ; const/4 v3,5 (limit)
+        0x3235, 0x0008,                # :loop if-ge v2,v3,:end
+        0x2481,                        # int-to-long v4, v2
+        0x009B, 0x0400,                # add-long v0,v0,v4  (sum += (long)i)
+        0x02D8, 0x0102,                # add-int/lit8 v2,v2,1
+        0xF928,                        # goto :loop
+        0x0084, 0x000F,                # :end long-to-int v0,v0 ; return v0
+    ]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
     cd += uleb128(1)  # static_fields_size (HelloDex.total)
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(12)  # direct_methods_size
+    cd += uleb128(13)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
     # static fields: HelloDex.total = field id 2 (diff from 0)
     cd += uleb128(2) + uleb128(0x9)                               # f2, public static
@@ -311,6 +326,7 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_staticint_off) # diff 1 -> idx 17
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_objarray_off)  # diff 1 -> idx 18
     cd += uleb128(2) + uleb128(0x9) + uleb128(code_widesum_off)   # diff 2 -> idx 20
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_wideloop_off)  # diff 1 -> idx 21
     data.extend(cd)
 
     # --- Counter class code items (object model demo) -----------------------
@@ -383,7 +399,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 3, type_list_main_off),
-        (0x2001, 17, code_main_off),
+        (0x2001, 18, code_main_off),
         (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -439,6 +455,7 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["objArray"])   # m18 ()I
     method_ids += struct.pack("<HHI", T["LCounter;"], 1, S["tagLen"])       # m19 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["wideSum"])      # m20 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["wideLoop"])     # m21 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",

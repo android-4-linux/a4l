@@ -48,11 +48,13 @@ class ClassWriter {
     std::uint16_t catch_type;
   };
 
-  // Add a method with pre-assembled bytecode.
+  // Add a method with pre-assembled bytecode. `stackmaptable` is the
+  // StackMapTable attribute body (number_of_entries + frames), or empty.
   void add_method(std::uint16_t access_flags, std::string_view name,
                   std::string_view descriptor, std::uint16_t max_stack,
                   std::uint16_t max_locals, std::vector<std::uint8_t> code,
-                  std::vector<ExceptionEntry> exceptions = {});
+                  std::vector<ExceptionEntry> exceptions = {},
+                  std::vector<std::uint8_t> stackmaptable = {});
 
   // Serialize the complete class file.
   std::vector<std::uint8_t> build() const;
@@ -75,13 +77,15 @@ class ClassWriter {
     std::uint16_t max_locals;
     std::vector<std::uint8_t> code;
     std::vector<ExceptionEntry> exceptions;
+    std::vector<std::uint8_t> stackmaptable;
   };
 
   std::vector<std::vector<std::uint8_t>> pool_;  // cp_info entries (1-based)
   std::map<std::string, std::uint16_t> interned_;
   std::uint16_t this_class_;
   std::uint16_t super_class_;
-  std::uint16_t code_attr_name_;  // utf8 "Code"
+  std::uint16_t code_attr_name_;   // utf8 "Code"
+  std::uint16_t stackmap_name_ = 0;  // utf8 "StackMapTable" (lazily interned)
   std::vector<Field> fields_;
   std::vector<Method> methods_;
 };
