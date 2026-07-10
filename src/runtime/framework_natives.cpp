@@ -12,8 +12,10 @@
 #include "runtime/framework_natives.h"
 
 #include <array>
+#include <cstdint>
 #include <string>
 
+#include "audio/audio.h"
 #include "log/log.h"
 
 namespace aclcxx::runtime {
@@ -40,6 +42,47 @@ jint JNICALL Log_write0(JNIEnv* env, jclass /*cls*/, jint priority, jstring tag,
   return static_cast<jint>(msg_s.size());
 }
 
+// --- android.media.AudioTrack: 16-bit PCM -> aclcxx::audio::Sink ---------------
+// The sink pointer is carried across JNI as the AudioTrack.nativeHandle jlong.
+
+jlong JNICALL AudioTrack_nativeOpen(JNIEnv* /*env*/, jclass /*cls*/, jint sample_rate,
+                                    jint channels) {
+  auto sink = audio::make_sink();
+  audio::Format fmt{sample_rate, channels};
+  if (!sink->open(fmt)) {
+    log::write(log::Level::Warn, "aclcxx.audio", "AudioTrack open failed");
+  }
+  return reinterpret_cast<jlong>(sink.release());  // handle owns the sink
+}
+
+jint JNICALL AudioTrack_nativeWrite(JNIEnv* env, jclass /*cls*/, jlong handle,
+                                    jshortArray data, jint offset, jint size) {
+  auto* sink = reinterpret_cast<audio::Sink*>(handle);
+  if (sink == nullptr || data == nullptr || size <= 0) return 0;
+  const jsize len = env->GetArrayLength(data);
+  if (offset < 0 || size > len - offset) return -1;  // AudioTrack.ERROR_BAD_VALUE-ish
+  jshort* elems = env->GetShortArrayElements(data, nullptr);
+  if (elems == nullptr) return 0;
+  const int written = sink->write(reinterpret_cast<std::int16_t*>(elems) + offset, size);
+  env->ReleaseShortArrayElements(data, elems, JNI_ABORT);  // read-only, no copy-back
+  return written;
+}
+
+void JNICALL AudioTrack_nativeStart(JNIEnv* /*env*/, jclass /*cls*/, jlong /*handle*/) {
+  // The sink streams as data arrives; play() is a no-op for this backend.
+}
+
+void JNICALL AudioTrack_nativeStop(JNIEnv* /*env*/, jclass /*cls*/, jlong handle) {
+  if (auto* sink = reinterpret_cast<audio::Sink*>(handle)) sink->drain();
+}
+
+void JNICALL AudioTrack_nativeRelease(JNIEnv* /*env*/, jclass /*cls*/, jlong handle) {
+  if (auto* sink = reinterpret_cast<audio::Sink*>(handle)) {
+    sink->close();
+    delete sink;
+  }
+}
+
 }  // namespace
 
 void register_framework_natives(JNIEnv* env) {
@@ -64,6 +107,34 @@ void register_framework_natives(JNIEnv* env) {
     env->DeleteLocalRef(log_cls);
   } else {
     env->ExceptionClear();  // no framework on the boot classpath -> nothing to bind
+  }
+
+  // android.media.AudioTrack -> aclcxx::audio (PipeWire / counting sink).
+  if (jclass at_cls = env->FindClass("android/media/AudioTrack"); at_cls != nullptr) {
+    const std::array<JNINativeMethod, 5> methods{{
+        {const_cast<char*>("nativeOpen"), const_cast<char*>("(II)J"),
+         reinterpret_cast<void*>(&AudioTrack_nativeOpen)},
+        {const_cast<char*>("nativeWrite"), const_cast<char*>("(J[SII)I"),
+         reinterpret_cast<void*>(&AudioTrack_nativeWrite)},
+        {const_cast<char*>("nativeStart"), const_cast<char*>("(J)V"),
+         reinterpret_cast<void*>(&AudioTrack_nativeStart)},
+        {const_cast<char*>("nativeStop"), const_cast<char*>("(J)V"),
+         reinterpret_cast<void*>(&AudioTrack_nativeStop)},
+        {const_cast<char*>("nativeRelease"), const_cast<char*>("(J)V"),
+         reinterpret_cast<void*>(&AudioTrack_nativeRelease)},
+    }};
+    if (env->RegisterNatives(at_cls, methods.data(),
+                             static_cast<jint>(methods.size())) != JNI_OK) {
+      env->ExceptionClear();
+      log::write(log::Level::Warn, "aclcxx.runtime.jvm",
+                 "RegisterNatives(android.media.AudioTrack) failed");
+    } else {
+      log::write(log::Level::Info, "aclcxx.runtime.jvm",
+                 "framework native bound: android.media.AudioTrack");
+    }
+    env->DeleteLocalRef(at_cls);
+  } else {
+    env->ExceptionClear();
   }
 }
 

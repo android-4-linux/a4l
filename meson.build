@@ -52,10 +52,16 @@ if java_home != '' and import('fs').exists(java_home / 'include' / 'jni.h')
   endif
 endif
 
+# audio/ backend: PipeWire when present (the AudioTrack sink actually plays);
+# otherwise audio/ builds with only the counting/null sink (headless, deterministic).
+pw_dep = dependency('libpipewire-0.3', required : false)
+have_pipewire = pw_dep.found()
+
 conf = configuration_data()
 conf.set('ACLCXX_VERSION', '"' + meson.project_version() + '"')
 conf.set10('ACLCXX_PROFILE_AUTOMOTIVE', profile_automotive)
 conf.set10('ACLCXX_HAVE_JNI', have_jni)
+conf.set10('ACLCXX_HAVE_PIPEWIRE', have_pipewire)
 # javac matched to the detected libjvm (same java_home), for the DEX->JVM
 # converter. Empty when no JDK; the converter then needs an explicit path.
 conf.set('ACLCXX_JAVAC',
@@ -84,7 +90,6 @@ zlib_dep = dependency('zlib')     # APK (zip) inflate in pkg/
 
 # Later subsystems add their system libs here as they are implemented, e.g.:
 #   wayland_client = dependency('wayland-client')
-#   pipewire       = dependency('libpipewire-0.3')
 
 # --- Source tree --------------------------------------------------------------
 # Each module subdir appends its static_library to `module_libs`, which the

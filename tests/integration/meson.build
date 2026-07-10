@@ -80,6 +80,7 @@ if py3.found() and have_jni
       input : files('../../framework/shim/android/os/Bundle.java',
                     '../../framework/shim/android/app/Service.java',
                     '../../framework/shim/android/app/Activity.java',
+                    '../../framework/shim/android/media/AudioTrack.java',
                     '../../framework/shim/android/media/MediaDescription.java',
                     '../../framework/shim/android/media/MediaMetadata.java',
                     '../../framework/shim/android/media/browse/MediaBrowser.java',
@@ -131,6 +132,24 @@ if py3.found() and have_jni
       py3,
       args : [files('run_media_test.py'), aclcxx_exe, media_apk, framework_shim],
       depends : [aclcxx_exe, media_apk, framework_shim],
+      timeout : 120,
+    )
+
+    # Gate G2.e (media audio): an app writes PCM via android.media.AudioTrack; the
+    # aclcxx native underside forwards it to aclcxx::audio (counting sink here;
+    # ACLCXX_AUDIO=pipewire actually plays it on the daemon).
+    audio_apk = custom_target(
+      'audio-apk',
+      input : files('../fixtures/make_audio_apk.py'),
+      output : 'audio.apk',
+      command : [py3, '@INPUT@', '@OUTPUT@'],
+      depend_files : files('../fixtures/make_axml.py'),
+    )
+    test(
+      'run-apk-audio',
+      py3,
+      args : [files('run_audio_test.py'), aclcxx_exe, audio_apk, framework_shim],
+      depends : [aclcxx_exe, audio_apk, framework_shim],
       timeout : 120,
     )
   else
