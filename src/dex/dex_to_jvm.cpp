@@ -151,7 +151,7 @@ bool skippable_class(const DexClass& c) {
 
 bool emittable_method(const DexMethod& m) {
   if (m.access_flags & (kAccAbstract | kAccNative)) return false;
-  if (m.name == "<clinit>") return false;   // static initializer not handled yet
+  if (m.name == "<clinit>") return true;    // static initializer: valid JVM method name
   if (m.name == "<init>") return true;      // constructor: a valid JVM method name
   if (m.name.empty()) return false;
   for (char c : m.name) {
@@ -247,11 +247,12 @@ std::string obj_internal(const std::string& desc) {
 // stack-map forward pass, which only ever sees already-translatable opcodes).
 int dalvik_insn_units(std::uint8_t op) {
   if (op == 0x18) return 5;                                        // const-wide
-  if (op == 0x14 || op == 0x17 || op == 0x2b || op == 0x2c ||
+  if (op == 0x14 || op == 0x17 || op == 0x24 || op == 0x2b || op == 0x2c ||
       (op >= 0x6e && op <= 0x72)) {
-    return 3;  // const, const-wide/32, packed/sparse-switch, invoke-*
+    return 3;  // const, const-wide/32, filled-new-array, packed/sparse-switch, invoke-*
   }
   if (op == 0x13 || op == 0x15 || op == 0x16 || op == 0x19 || op == 0x1a ||
+      op == 0x1c ||                  // const-class
       op == 0x1f || op == 0x20 ||    // check-cast, instance-of
       op == 0x22 || op == 0x23 || op == 0x29 || op == 0x31 ||
       (op >= 0x32 && op <= 0x3d) ||   // if-test / if-testz
@@ -303,11 +304,16 @@ void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod
     case 0x21: set(L((u >> 8) & 0xf), kInt); break;         // array-length -> int
     case 0x0a: set(L((u >> 8) & 0xff), kInt); break;        // move-result -> int
     case 0x0b: set_long(L((u >> 8) & 0xff)); break;         // move-result-wide
-    case 0x0c: {  // move-result-object -> Obj(return type of the preceding invoke)
+    case 0x0c: {  // move-result-object -> Obj(preceding invoke return / filled-new-array)
       std::string cls;
       if (pc >= 3) {
-        const MethodRef* mr = dex.method_ref(in[pc - 2]);
-        if (mr) cls = obj_internal(mr->return_descriptor);
+        if ((in[pc - 3] & 0xff) == 0x24) {  // filled-new-array: result is the array type
+          const std::string* td = dex.type_at(in[pc - 2]);
+          if (td) cls = class_operand(*td);
+        } else {
+          const MethodRef* mr = dex.method_ref(in[pc - 2]);
+          if (mr) cls = obj_internal(mr->return_descriptor);
+        }
       }
       set(L((u >> 8) & 0xff), {VType::Obj, cls}); break;
     }
@@ -358,6 +364,8 @@ void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod
       const std::string* td = dex.type_at(in[pc + 1]);
       set(L((u >> 8) & 0xff), {VType::Obj, td ? class_operand(*td) : ""}); break;
     }
+    case 0x1c:  // const-class -> Obj(java/lang/Class)
+      set(L((u >> 8) & 0xff), {VType::Obj, "java/lang/Class"}); break;
     case 0x7b: case 0x7c: case 0x8d: case 0x8e: case 0x8f:  // neg/not/int-to-{b,c,s}
       set(L((u >> 8) & 0xf), kInt); break;
     case 0x7d: case 0x7e:                                   // neg/not-long -> long
@@ -772,6 +780,16 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 1;
         break;
       }
+      case 0x0b: {  // move-result-wide vAA: capture a long/wide result
+        e.store_l(local((u >> 8) & 0xff));  // pops the two-slot value
+        pc += 1;
+        break;
+      }
+      case 0x0c: {  // move-result-object vAA: capture an object/array result
+        e.store_a(local((u >> 8) & 0xff));  // pops the reference
+        pc += 1;
+        break;
+      }
       case 0x1a: {  // const-string vAA, string@BBBB (21c)
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xff;
@@ -821,6 +839,55 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         e.adj(+1);
         e.store_a(local(a));
         pc += 2;
+        break;
+      }
+      case 0x1c: {  // const-class vAA, type@BBBB (21c)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const std::string* td = dex.type_at(in[pc + 1]);
+        if (td == nullptr) return std::nullopt;
+        const std::string cls = class_operand(*td);
+        if (cls.empty()) return std::nullopt;
+        e.ldc_string(cw.class_ref(cls));  // ldc of a Class constant
+        e.store_a(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x24: {  // filled-new-array {vC..vG}, type@BBBB (35c)
+        if (pc + 2 >= in.size()) return std::nullopt;
+        const int argc = (u >> 12) & 0xf;
+        const std::string* td = dex.type_at(in[pc + 1]);
+        if (td == nullptr || td->size() < 2 || td->front() != '[') return std::nullopt;
+        const std::string elem = td->substr(1);
+        const std::uint16_t rw = in[pc + 2];
+        const int arg_reg[5] = {rw & 0xf, (rw >> 4) & 0xf, (rw >> 8) & 0xf,
+                                (rw >> 12) & 0xf, (u >> 8) & 0xf};
+        // Element store op + ref-ness.
+        std::uint8_t store_op;
+        bool is_ref = false;
+        if (elem == "I") { store_op = OP_IASTORE; }
+        else if (elem[0] == 'L' || elem[0] == '[') { store_op = OP_AASTORE; is_ref = true; }
+        else if (elem == "Z" || elem == "B") { store_op = OP_BASTORE; }
+        else if (elem == "C") { store_op = OP_CASTORE; }
+        else if (elem == "S") { store_op = OP_SASTORE; }
+        else return std::nullopt;
+        e.push_int(argc);
+        if (elem.size() == 1) {  // primitive element
+          const int at = newarray_atype(elem[0]);
+          if (at < 0) return std::nullopt;
+          e.op(OP_NEWARRAY); e.u1(static_cast<std::uint8_t>(at));  // net 0
+        } else {                 // reference element
+          e.op(OP_ANEWARRAY);
+          e.u2(cw.class_ref(elem[0] == 'L' ? elem.substr(1, elem.size() - 2) : elem));
+        }
+        for (int i = 0; i < argc; ++i) {
+          e.op(OP_DUP); e.adj(+1);
+          e.push_int(i);
+          if (is_ref) e.load_a(local(arg_reg[i])); else e.load_i(local(arg_reg[i]));
+          e.op(store_op); e.adj(-3);
+        }
+        // The array is left on the stack for the following move-result-object.
+        pc += 3;
         break;
       }
       case 0x1f: {  // check-cast vAA, type@BBBB (21c)

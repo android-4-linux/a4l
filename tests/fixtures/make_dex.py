@@ -96,6 +96,12 @@ STRINGS = [
     "Ljava/lang/CharSequence;",  # 54 type: interface for invoke-interface
     "ifaceTest",             # 55 method name (invoke-interface)
     "switchTest",            # 56 method name (packed-switch)
+    "Ljava/lang/Class;",     # 57 type: for const-class
+    "ci",                    # 58 static field name (<clinit> demo)
+    "filledArray",           # 59 method name (filled-new-array)
+    "constClass",            # 60 method name (const-class)
+    "<clinit>",              # 61 static-initializer method name
+    "clinitTest",            # 62 method name (reads <clinit>-set field)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
@@ -103,7 +109,7 @@ S = {s: i for i, s in enumerate(STRINGS)}
 TYPES = ["LHelloDex;", "Ljava/lang/Object;", "V", "I", "[Ljava/lang/String;",
          "Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;",
          "LCounter;", "[I", "Ljava/lang/RuntimeException;", "Ljava/lang/Exception;",
-         "[B", "[J", "J", "Ljava/lang/CharSequence;"]
+         "[B", "[J", "J", "Ljava/lang/CharSequence;", "Ljava/lang/Class;"]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -135,8 +141,8 @@ def build_dex():
     n_strings = len(STRINGS)
     n_types = len(TYPES)
     n_protos = 5    # + (I)V for Counter.<init>/add
-    n_fields = 5    # + HelloDex.wf (static long)
-    n_methods = 33  # + CharSequence.length, ifaceTest, switchTest
+    n_fields = 6    # + HelloDex.ci (static int, <clinit> demo)
+    n_methods = 37  # + filledArray, constClass, <clinit>, clinitTest
     n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
@@ -428,17 +434,55 @@ def build_dex():
         0x0100, 0x0003, 0x0000, 0x0000,
         0x0005, 0x0000, 0x0008, 0x0000, 0x000B, 0x0000,
     ]))
+    code_filled_off = off_data + len(data)
+    # int filledArray(){ int[] a={10,20,12}; return a[0]+a[1]+a[2]; }  = 42
+    data.extend(code_item(4, 0, 3, [
+        0x0013, 0x000A,                # const/16 v0, 10
+        0x0113, 0x0014,                # const/16 v1, 20
+        0x0213, 0x000C,                # const/16 v2, 12
+        0x3024, T["[I"], 0x0210,       # filled-new-array {v0,v1,v2}, [I
+        0x030C,                        # move-result-object v3
+        0x0012, 0x0044, 0x0003,        # const/4 v0,0 ; aget v0, v3, v0   (=10)
+        0x1112, 0x0144, 0x0103,        # const/4 v1,1 ; aget v1, v3, v1   (=20)
+        0x0090, 0x0100,                # add-int v0, v0, v1               (=30)
+        0x2112, 0x0144, 0x0103,        # const/4 v1,2 ; aget v1, v3, v1   (=12)
+        0x0090, 0x0100,                # add-int v0, v0, v1               (=42)
+        0x000F,                        # return v0
+    ]))
+    code_constclass_off = off_data + len(data)
+    # int constClass(){ return (String.class instanceof Class) ? 42 : 0; }  = 42
+    data.extend(code_item(2, 0, 0, [
+        0x001C, T["Ljava/lang/String;"],  # const-class v0, String
+        0x0020, T["Ljava/lang/Class;"],   # instance-of v0, v0, Class   (=1)
+        0x0113, 0x002A,                # const/16 v1, 42
+        0x0092, 0x0100,                # mul-int v0, v0, v1              (=42)
+        0x000F,                        # return v0
+    ]))
+    code_clinit_off = off_data + len(data)
+    # static { ci = 77; }
+    data.extend(code_item(1, 0, 0, [
+        0x0013, 0x004D,                # const/16 v0, 77
+        0x0067, 0x0005,                # sput v0, HelloDex.ci (field 5)
+        0x000E,                        # return-void
+    ]))
+    code_clinittest_off = off_data + len(data)
+    # int clinitTest(){ return ci; }  = 77  (set by <clinit> at class init)
+    data.extend(code_item(1, 0, 0, [
+        0x0060, 0x0005,                # sget v0, HelloDex.ci (field 5)
+        0x000F,                        # return v0
+    ]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
-    cd += uleb128(2)  # static_fields_size (HelloDex.total, HelloDex.wf)
+    cd += uleb128(3)  # static_fields_size (HelloDex.total, HelloDex.wf, HelloDex.ci)
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(23)  # direct_methods_size
+    cd += uleb128(27)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
-    # static fields: total=f2, wf=f4 (cumulative diffs from 0)
+    # static fields: total=f2, wf=f4, ci=f5 (cumulative diffs from 0)
     cd += uleb128(2) + uleb128(0x9)                               # f2 total, public static
     cd += uleb128(2) + uleb128(0x9)                               # +2 -> f4 wf, public static
+    cd += uleb128(1) + uleb128(0x9)                               # +1 -> f5 ci, public static
     # direct methods, sorted by ascending method index; idx diffs are cumulative.
     # m0=main..m5=strlen, m7=hello, m14=arraySum, m16=tryCatch, m17=staticInt, m18=objArray.
     cd += uleb128(0) + uleb128(0x9) + uleb128(code_main_off)      # diff 0 -> idx 0
@@ -464,6 +508,10 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_insttest_off)  # diff 1 -> idx 29
     cd += uleb128(2) + uleb128(0x9) + uleb128(code_iface_off)     # diff 2 -> idx 31 (m30=CharSequence.length)
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_switch_off)    # diff 1 -> idx 32
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_filled_off)    # diff 1 -> idx 33
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_constclass_off)  # diff 1 -> idx 34
+    cd += uleb128(1) + uleb128(0x10008) + uleb128(code_clinit_off)  # diff 1 -> idx 35 (<clinit>: ACC_STATIC|ACC_CONSTRUCTOR)
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_clinittest_off)  # diff 1 -> idx 36
     data.extend(cd)
 
     # --- Counter class code items (object model demo) -----------------------
@@ -536,7 +584,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 3, type_list_main_off),
-        (0x2001, 28, code_main_off),
+        (0x2001, 32, code_main_off),
         (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -570,6 +618,7 @@ def build_dex():
     field_ids += struct.pack("<HHI", T["LHelloDex;"], T["I"], S["total"])  # f2 HelloDex.total
     field_ids += struct.pack("<HHI", T["LCounter;"], T["Ljava/lang/String;"], S["label"])  # f3
     field_ids += struct.pack("<HHI", T["LHelloDex;"], T["J"], S["wf"])  # f4 HelloDex.wf:long
+    field_ids += struct.pack("<HHI", T["LHelloDex;"], T["I"], S["ci"])  # f5 HelloDex.ci:int
 
     method_ids = b""
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 0, S["main"])
@@ -605,6 +654,10 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["Ljava/lang/CharSequence;"], 1, S["length"])  # m30 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["ifaceTest"])    # m31 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["switchTest"])   # m32 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["filledArray"])  # m33 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["constClass"])   # m34 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 3, S["<clinit>"])     # m35 ()V (proto 3)
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["clinitTest"])   # m36 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",
