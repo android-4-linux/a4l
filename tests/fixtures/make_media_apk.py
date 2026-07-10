@@ -38,6 +38,12 @@ MEDIA_ITEM = "Landroid/media/browse/MediaBrowser$MediaItem;"
 MEDIA_DESC = "Landroid/media/MediaDescription;"
 BUILDER = "Landroid/media/MediaDescription$Builder;"
 ARRAYLIST = "Ljava/util/ArrayList;"
+SESSION = "Landroid/media/session/MediaSession;"
+TOKEN = "Landroid/media/session/MediaSession$Token;"
+METADATA = "Landroid/media/MediaMetadata;"
+MMBUILDER = "Landroid/media/MediaMetadata$Builder;"
+TITLE_KEY = "android.media.metadata.TITLE"
+TITLE = "Now Playing Track"
 
 STRINGS = [
     "Lcom/aclcxx/hello/MusicService;",  # 0
@@ -72,12 +78,25 @@ STRINGS = [
     "L",                                # 29 build
     "VLI",                              # 30 MediaItem.<init>
     "VL",                               # 31 sendResult
+    SESSION,                            # 32
+    TOKEN,                              # 33
+    METADATA,                           # 34
+    MMBUILDER,                          # 35
+    "onCreate",                         # 36
+    "setMetadata",                      # 37
+    "getSessionToken",                  # 38
+    "setSessionToken",                  # 39
+    "putString",                        # 40
+    "aclcxx",                           # 41 session tag
+    TITLE_KEY,                          # 42
+    TITLE,                              # 43
+    "LLL",                              # 44 putString shorty (String,String)->Builder
 ]
 S = {s: i for i, s in enumerate(STRINGS)}  # "V" (idx 12) is the ()V / no-arg shorty
 TYPES = ["Lcom/aclcxx/hello/MusicService;", MBS, BROWSER_ROOT, RESULT,
          "Landroid/os/Bundle;", "Ljava/lang/String;", "Ljava/lang/Object;",
          "Ljava/lang/CharSequence;", ARRAYLIST, MEDIA_DESC, BUILDER, MEDIA_ITEM,
-         "V", "I", "Z"]
+         "V", "I", "Z", SESSION, TOKEN, METADATA, MMBUILDER]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -109,7 +128,7 @@ def code_item(regs, ins, outs, insns):
 def build_dex():
     header_size = 112
     n_strings = len(STRINGS)
-    n_types, n_protos, n_fields, n_methods, n_classdefs = len(TYPES), 9, 0, 12, 1
+    n_types, n_protos, n_fields, n_methods, n_classdefs = len(TYPES), 15, 0, 20, 1
 
     off_string_ids = header_size
     off_type_ids = off_string_ids + n_strings * 4
@@ -140,6 +159,10 @@ def build_dex():
     tl_object = type_list(["Ljava/lang/Object;"])
     tl_charseq = type_list(["Ljava/lang/CharSequence;"])
     tl_mediaitem = type_list([MEDIA_DESC, "I"])
+    tl_objstr = type_list(["Ljava/lang/Object;", "Ljava/lang/String;"])  # MediaSession.<init>
+    tl_metadata = type_list([METADATA])          # setMetadata
+    tl_token = type_list([TOKEN])                # setSessionToken
+    tl_2str = type_list(["Ljava/lang/String;", "Ljava/lang/String;"])  # putString
 
     # <init>()V : super(); return-void   (v0=this)
     code_init = off_data + len(data)
@@ -178,12 +201,36 @@ def build_dex():
     insns += [0x206E, 0x000B, 0x0007, 0x000E]  # sendResult (m11) {v7,v0} ; return-void
     data.extend(code_item(8, 3, 3, insns))
 
-    # class_data: 0 static, 0 instance, 1 direct (<init>), 2 virtual (onGetRoot, onLoadChildren)
+    # onCreate()V : publish a MediaSession with now-playing metadata + token.
+    #   v0=session v1=builder/metadata/token v2=key v3=value ; v5=this (registers=6, ins=1)
+    code_oncreate = off_data + len(data)
+    data.extend(code_item(6, 1, 3, [
+        0x0022, T[SESSION],       # new-instance v0, MediaSession
+        0x011A, S["aclcxx"],      # const-string v1, "aclcxx"
+        0x3070, 0x000D, 0x0150,   # invoke-direct {v0,v5,v1}, MediaSession.<init>(Object,String) (m13)
+        0x0122, T[MMBUILDER],     # new-instance v1, MediaMetadata$Builder
+        0x1070, 0x0011, 0x0001,   # invoke-direct {v1}, Builder.<init> (m17)
+        0x021A, S[TITLE_KEY],     # const-string v2, METADATA_KEY_TITLE
+        0x031A, S[TITLE],         # const-string v3, "Now Playing Track"
+        0x306E, 0x0012, 0x0321,   # invoke-virtual {v1,v2,v3}, putString (m18)
+        0x010C,                   # move-result-object v1
+        0x106E, 0x0013, 0x0001,   # invoke-virtual {v1}, build (m19)
+        0x010C,                   # move-result-object v1
+        0x206E, 0x000E, 0x0010,   # invoke-virtual {v0,v1}, setMetadata (m14)
+        0x106E, 0x000F, 0x0000,   # invoke-virtual {v0}, getSessionToken (m15)
+        0x010C,                   # move-result-object v1
+        0x206E, 0x0010, 0x0015,   # invoke-virtual {v5,v1}, setSessionToken (m16)
+        0x000E,                   # return-void
+    ]))
+
+    # class_data: 0 static, 0 instance, 1 direct (<init>), 3 virtual (by method idx:
+    #   onGetRoot m1, onLoadChildren m2, onCreate m12)
     class_data_off = off_data + len(data)
-    cd = bytearray(uleb128(0) + uleb128(0) + uleb128(1) + uleb128(2))
-    cd += uleb128(0) + uleb128(0x1) + uleb128(code_init)         # m0 <init>, public
-    cd += uleb128(1) + uleb128(0x1) + uleb128(code_getroot)      # +1 -> m1 onGetRoot
+    cd = bytearray(uleb128(0) + uleb128(0) + uleb128(1) + uleb128(3))
+    cd += uleb128(0) + uleb128(0x1) + uleb128(code_init)          # m0 <init>, public
+    cd += uleb128(1) + uleb128(0x1) + uleb128(code_getroot)       # +1 -> m1 onGetRoot
     cd += uleb128(1) + uleb128(0x1) + uleb128(code_loadchildren)  # +1 -> m2 onLoadChildren
+    cd += uleb128(10) + uleb128(0x1) + uleb128(code_oncreate)     # +10 -> m12 onCreate
     data.extend(cd)
 
     data.extend(align4(bytearray()))
@@ -192,8 +239,8 @@ def build_dex():
         (0x0000, 1, 0), (0x0001, n_strings, off_string_ids),
         (0x0002, n_types, off_type_ids), (0x0003, n_protos, off_proto_ids),
         (0x0005, n_methods, off_method_ids), (0x0006, n_classdefs, off_class_defs),
-        (0x2002, n_strings, string_data_off[0]), (0x1001, 6, tl_getroot),
-        (0x2001, 3, code_init), (0x2000, 1, class_data_off),
+        (0x2002, n_strings, string_data_off[0]), (0x1001, 10, tl_getroot),
+        (0x2001, 4, code_init), (0x2000, 1, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
     for mtype, size, off in items:
@@ -214,6 +261,12 @@ def build_dex():
     proto_ids += struct.pack("<III", S["L"], T[MEDIA_DESC], 0)                # 6 build
     proto_ids += struct.pack("<III", S["VLI"], T["V"], tl_mediaitem)          # 7 MediaItem.<init>
     proto_ids += struct.pack("<III", S["VL"], T["V"], tl_object)              # 8 sendResult
+    proto_ids += struct.pack("<III", S["VLL"], T["V"], tl_objstr)             # 9 MediaSession.<init>
+    proto_ids += struct.pack("<III", S["VL"], T["V"], tl_metadata)            # 10 setMetadata
+    proto_ids += struct.pack("<III", S["L"], T[TOKEN], 0)                     # 11 getSessionToken
+    proto_ids += struct.pack("<III", S["VL"], T["V"], tl_token)               # 12 setSessionToken
+    proto_ids += struct.pack("<III", S["LLL"], T[MMBUILDER], tl_2str)         # 13 putString
+    proto_ids += struct.pack("<III", S["L"], T[METADATA], 0)                  # 14 build (metadata)
 
     def m(cls, proto, name):
         return struct.pack("<HHI", T[cls], proto, S[name])
@@ -230,6 +283,14 @@ def build_dex():
         m(BUILDER, 6, "build"),                                 # m9
         m(MEDIA_ITEM, 7, "<init>"),                             # m10
         m(RESULT, 8, "sendResult"),                             # m11
+        m("Lcom/aclcxx/hello/MusicService;", 0, "onCreate"),    # m12
+        m(SESSION, 9, "<init>"),                                # m13
+        m(SESSION, 10, "setMetadata"),                          # m14
+        m(SESSION, 11, "getSessionToken"),                      # m15
+        m(MBS, 12, "setSessionToken"),                          # m16
+        m(MMBUILDER, 0, "<init>"),                              # m17
+        m(MMBUILDER, 13, "putString"),                          # m18
+        m(MMBUILDER, 14, "build"),                              # m19
     ])
     class_defs = struct.pack("<IIIIIIII",
                              T["Lcom/aclcxx/hello/MusicService;"], 0x1, T[MBS], 0,

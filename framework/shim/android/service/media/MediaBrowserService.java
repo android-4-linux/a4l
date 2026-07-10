@@ -13,12 +13,20 @@
 package android.service.media;
 
 import android.media.browse.MediaBrowser;
+import android.media.session.MediaSession;
 import android.os.Bundle;
 
 import java.util.List;
 
 public abstract class MediaBrowserService extends android.app.Service {
+  private MediaSession.Token sessionToken;
+
   public MediaBrowserService() {}
+
+  // The app publishes its session token here; the aclcxx host reads it to reach
+  // the MediaSession (metadata / playback state) in-process.
+  public void setSessionToken(MediaSession.Token token) { this.sessionToken = token; }
+  public MediaSession.Token getSessionToken() { return sessionToken; }
 
   // Return the browse-tree root for a connecting client, or null to reject.
   public abstract BrowserRoot onGetRoot(String clientPackageName, int clientUid,

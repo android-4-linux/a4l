@@ -198,6 +198,7 @@ class JvmVm final : public Vm {
     } else {
       log::i(kTag, "hosting MediaBrowserService {}", service_class);
       result = call_lifecycle(cls, svc, "onCreate", "()V", false);
+      if (result.is_ok()) result = read_session(cls, svc);
       if (result.is_ok()) result = browse_root(cls, svc);
       env_->DeleteLocalRef(svc);
     }
@@ -339,6 +340,55 @@ class JvmVm final : public Vm {
     env_->DeleteLocalRef(result);
     env_->DeleteLocalRef(result_cls);
     return result_err;
+  }
+
+  // After onCreate, read the published MediaSession via getSessionToken() ->
+  // Token -> MediaSession, and log its now-playing metadata + playback state
+  // (in-process, no controller/Binder). No session is not an error.
+  Error read_session(jclass cls, jobject svc) {
+    jmethodID get_token = env_->GetMethodID(
+        cls, "getSessionToken", "()Landroid/media/session/MediaSession$Token;");
+    if (get_token == nullptr) { clear_exception(); return Error::ok(); }
+    jobject token = env_->CallObjectMethod(svc, get_token);
+    if (env_->ExceptionCheck() == JNI_TRUE) return fail_with_exception("getSessionToken()");
+    if (token == nullptr) { return Error::ok(); }  // app published no session
+
+    jclass token_cls = env_->GetObjectClass(token);
+    jobject session = env_->CallObjectMethod(
+        token, env_->GetMethodID(token_cls, "aclcxxSession",
+                                 "()Landroid/media/session/MediaSession;"));
+    jclass ses_cls = session != nullptr ? env_->GetObjectClass(session) : nullptr;
+
+    std::string title = "(none)";
+    int state = -1;
+    if (session != nullptr) {
+      jobject md = env_->CallObjectMethod(
+          session, env_->GetMethodID(ses_cls, "aclcxxMetadata",
+                                     "()Landroid/media/MediaMetadata;"));
+      if (md != nullptr) {
+        jclass md_cls = env_->GetObjectClass(md);
+        jstring key = env_->NewStringUTF("android.media.metadata.TITLE");
+        auto t = static_cast<jstring>(env_->CallObjectMethod(
+            md, env_->GetMethodID(md_cls, "getString",
+                                  "(Ljava/lang/String;)Ljava/lang/String;"), key));
+        if (t != nullptr) { title = utf8(t); env_->DeleteLocalRef(t); }
+        env_->DeleteLocalRef(key); env_->DeleteLocalRef(md_cls); env_->DeleteLocalRef(md);
+      }
+      jobject ps = env_->CallObjectMethod(
+          session, env_->GetMethodID(ses_cls, "aclcxxPlaybackState",
+                                     "()Landroid/media/session/PlaybackState;"));
+      if (ps != nullptr) {
+        jclass ps_cls = env_->GetObjectClass(ps);
+        state = env_->CallIntMethod(ps, env_->GetMethodID(ps_cls, "getState", "()I"));
+        env_->DeleteLocalRef(ps_cls); env_->DeleteLocalRef(ps);
+      }
+    }
+    log::i(kTag, "media session: title='{}' state={}", title, state);
+    if (ses_cls != nullptr) env_->DeleteLocalRef(ses_cls);
+    if (session != nullptr) env_->DeleteLocalRef(session);
+    env_->DeleteLocalRef(token_cls);
+    env_->DeleteLocalRef(token);
+    return Error::ok();
   }
 
   // Invoke one lifecycle callback (found on `cls` or a superclass). `pass_bundle`

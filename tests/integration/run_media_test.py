@@ -15,6 +15,7 @@ import sys
 
 CHECKS = [
     "hosting MediaBrowserService com.aclcxx.hello.MusicService",
+    "media session: title='Now Playing Track'",  # MediaSession metadata published
     "media browse root: aclcxx_root",
     "media children of 'aclcxx_root': 2 item(s)",
     "media item: Song One",
