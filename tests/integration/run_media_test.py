@@ -4,16 +4,22 @@
 #
 # Prove the automotive media entry point: media.apk's MusicService extends
 # android.service.media.MediaBrowserService (a shim on the boot classpath). Hosted
-# via `aclcxx run --service=...`, aclcxx must instantiate it, onCreate(), then
-# onGetRoot() and read the returned BrowserRoot's id — in-process, no Views, no
-# Binder. Exercises a null (const 0 -> aconst_null) reference argument too.
+# via `aclcxx run --service=...`, aclcxx must instantiate it, onCreate(), onGetRoot()
+# for the browse root, then onLoadChildren() and enumerate the MediaItems the app
+# built (via MediaDescription.Builder) and sendResult'd — in-process, no Views, no
+# Binder. Exercises a null (const 0 -> aconst_null) argument and the Builder chain.
 #
 # Usage: run_media_test.py <aclcxx_binary> <media.apk> <framework_dir>
 import subprocess
 import sys
 
-HOSTING = "hosting MediaBrowserService com.aclcxx.hello.MusicService"
-ROOT = "media browse root: aclcxx_root"
+CHECKS = [
+    "hosting MediaBrowserService com.aclcxx.hello.MusicService",
+    "media browse root: aclcxx_root",
+    "media children of 'aclcxx_root': 2 item(s)",
+    "media item: Song One",
+    "media item: Song Two",
+]
 
 
 def main() -> int:
@@ -27,18 +33,17 @@ def main() -> int:
         capture_output=True, text=True, timeout=120)
     out = p.stdout + p.stderr
 
-    ok = True
-    if p.returncode != 0:
-        sys.stderr.write(f"FAIL: exit {p.returncode}\n"); ok = False
-    if HOSTING not in out:
-        sys.stderr.write("FAIL: MediaBrowserService was not hosted\n"); ok = False
-    if ROOT not in out:
-        sys.stderr.write("FAIL: onGetRoot did not yield the expected browse root\n"); ok = False
+    ok = p.returncode == 0
+    if not ok:
+        sys.stderr.write(f"FAIL: exit {p.returncode}\n")
+    for c in CHECKS:
+        if c not in out:
+            sys.stderr.write(f"FAIL: missing '{c}'\n"); ok = False
 
     if not ok:
         sys.stderr.write("--- captured output ---\n" + out + "\n")
         return 1
-    sys.stdout.write("OK: MediaBrowserService hosted; onCreate + onGetRoot walked\n")
+    sys.stdout.write("OK: MediaBrowserService hosted; onGetRoot + onLoadChildren walked\n")
     return 0
 
 

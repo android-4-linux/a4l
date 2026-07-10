@@ -80,6 +80,8 @@ if py3.found() and have_jni
       input : files('../../framework/shim/android/os/Bundle.java',
                     '../../framework/shim/android/app/Service.java',
                     '../../framework/shim/android/app/Activity.java',
+                    '../../framework/shim/android/media/MediaDescription.java',
+                    '../../framework/shim/android/media/browse/MediaBrowser.java',
                     '../../framework/shim/android/service/media/MediaBrowserService.java',
                     '../../framework/shim/android/util/Log.java'),
       output : 'framework-shim',

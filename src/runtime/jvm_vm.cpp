@@ -262,11 +262,83 @@ class JvmVm final : public Vm {
       const char* c = id != nullptr ? env_->GetStringUTFChars(id, nullptr) : nullptr;
       log::i(kTag, "media browse root: {}", c != nullptr ? c : "?");
       if (c != nullptr) env_->ReleaseStringUTFChars(id, c);
+      result = load_children(cls, svc, id);  // walk the root's children
       if (id != nullptr) env_->DeleteLocalRef(id);
     }
     env_->DeleteLocalRef(root_cls);
     env_->DeleteLocalRef(root);
     return result;
+  }
+
+  // Call onLoadChildren(parentId, new Result()) and enumerate the MediaItems the
+  // app sent — their titles (in-process, no Binder). A String utf8 accessor.
+  std::string utf8(jstring s) {
+    if (s == nullptr) return {};
+    const char* c = env_->GetStringUTFChars(s, nullptr);
+    std::string out(c != nullptr ? c : "");
+    if (c != nullptr) env_->ReleaseStringUTFChars(s, c);
+    return out;
+  }
+
+  Error load_children(jclass cls, jobject svc, jstring parent_id) {
+    jmethodID on_load = env_->GetMethodID(
+        cls, "onLoadChildren",
+        "(Ljava/lang/String;Landroid/service/media/MediaBrowserService$Result;)V");
+    if (on_load == nullptr) { clear_exception(); return Error::ok(); }  // optional
+
+    jclass result_cls = env_->FindClass("android/service/media/MediaBrowserService$Result");
+    jmethodID result_ctor =
+        result_cls != nullptr ? env_->GetMethodID(result_cls, "<init>", "()V") : nullptr;
+    jobject result = result_ctor != nullptr ? env_->NewObject(result_cls, result_ctor) : nullptr;
+    if (result == nullptr) { clear_exception(); return fail_with_exception("build Result"); }
+
+    env_->CallVoidMethod(svc, on_load, parent_id, result);
+    if (env_->ExceptionCheck() == JNI_TRUE) {
+      env_->DeleteLocalRef(result); env_->DeleteLocalRef(result_cls);
+      return fail_with_exception("onLoadChildren()");
+    }
+
+    // list = result.aclcxxValue()
+    jobject list = env_->CallObjectMethod(
+        result, env_->GetMethodID(result_cls, "aclcxxValue", "()Ljava/lang/Object;"));
+    Error result_err = Error::ok();
+    if (list == nullptr) {
+      log::i(kTag, "media children: (none sent)");
+    } else {
+      jclass list_cls = env_->FindClass("java/util/List");
+      jmethodID size_m = env_->GetMethodID(list_cls, "size", "()I");
+      jmethodID get_m = env_->GetMethodID(list_cls, "get", "(I)Ljava/lang/Object;");
+      const jint n = env_->CallIntMethod(list, size_m);
+      log::i(kTag, "media children of '{}': {} item(s)", utf8(parent_id), n);
+      for (jint i = 0; i < n; ++i) {
+        jobject item = env_->CallObjectMethod(list, get_m, i);  // MediaBrowser.MediaItem
+        jclass item_cls = env_->GetObjectClass(item);
+        jobject desc = env_->CallObjectMethod(
+            item, env_->GetMethodID(item_cls, "getDescription",
+                                    "()Landroid/media/MediaDescription;"));
+        jclass desc_cls = env_->GetObjectClass(desc);
+        auto title = env_->CallObjectMethod(  // CharSequence
+            desc, env_->GetMethodID(desc_cls, "getTitle", "()Ljava/lang/CharSequence;"));
+        std::string title_s = "(no title)";
+        if (title != nullptr) {  // CharSequence.toString()
+          jclass cs_cls = env_->GetObjectClass(title);
+          auto s = static_cast<jstring>(env_->CallObjectMethod(
+              title, env_->GetMethodID(cs_cls, "toString", "()Ljava/lang/String;")));
+          title_s = utf8(s);
+          if (s != nullptr) env_->DeleteLocalRef(s);
+          env_->DeleteLocalRef(cs_cls);
+          env_->DeleteLocalRef(title);
+        }
+        log::i(kTag, "  media item: {}", title_s);
+        env_->DeleteLocalRef(desc_cls); env_->DeleteLocalRef(desc);
+        env_->DeleteLocalRef(item_cls); env_->DeleteLocalRef(item);
+      }
+      env_->DeleteLocalRef(list_cls);
+      env_->DeleteLocalRef(list);
+    }
+    env_->DeleteLocalRef(result);
+    env_->DeleteLocalRef(result_cls);
+    return result_err;
   }
 
   // Invoke one lifecycle callback (found on `cls` or a superclass). `pass_bundle`

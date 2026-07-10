@@ -6,13 +6,21 @@
 # Emit an APK with a media entry point (Gate G2.e, automotive media path):
 #   package com.aclcxx.hello;
 #   public class MusicService extends android.service.media.MediaBrowserService {
-#     public BrowserRoot onGetRoot(String pkg, int uid, android.os.Bundle hints) {
+#     public BrowserRoot onGetRoot(String pkg, int uid, Bundle hints) {
 #       return new BrowserRoot("aclcxx_root", null);
 #     }
+#     public void onLoadChildren(String parentId, Result<List<MediaItem>> result) {
+#       ArrayList<MediaItem> items = new ArrayList<>();
+#       items.add(new MediaItem(new MediaDescription.Builder()
+#           .setTitle("Song One").build(), MediaItem.FLAG_PLAYABLE));
+#       items.add(new MediaItem(new MediaDescription.Builder()
+#           .setTitle("Song Two").build(), MediaItem.FLAG_PLAYABLE));
+#       result.sendResult(items);
+#     }
 #   }
-# `aclcxx run media.apk --service=com.aclcxx.hello.MusicService` hosts it in-process
-# (no Views, no Binder): onCreate() then onGetRoot() -> the browse root. Independent
-# of the C++ decoder.
+# `aclcxx run media.apk --service=...` hosts it in-process (no Views, no Binder):
+# onCreate(), onGetRoot() -> root, then onLoadChildren() -> the browse items.
+# Independent of the C++ decoder.
 #
 # Usage: make_media_apk.py <output.apk>
 import hashlib
@@ -23,25 +31,53 @@ import zlib
 
 from make_axml import build_axml
 
+MBS = "Landroid/service/media/MediaBrowserService;"
 BROWSER_ROOT = "Landroid/service/media/MediaBrowserService$BrowserRoot;"
+RESULT = "Landroid/service/media/MediaBrowserService$Result;"
+MEDIA_ITEM = "Landroid/media/browse/MediaBrowser$MediaItem;"
+MEDIA_DESC = "Landroid/media/MediaDescription;"
+BUILDER = "Landroid/media/MediaDescription$Builder;"
+ARRAYLIST = "Ljava/util/ArrayList;"
+
 STRINGS = [
-    "Lcom/aclcxx/hello/MusicService;",              # 0
-    "Landroid/service/media/MediaBrowserService;",  # 1  superclass
-    BROWSER_ROOT,                                   # 2  nested return type
-    "Landroid/os/Bundle;",                          # 3
-    "Ljava/lang/String;",                           # 4
-    "V",                                            # 5
-    "I",                                            # 6
-    "<init>",                                       # 7
-    "onGetRoot",                                    # 8
-    "aclcxx_root",                                  # 9  browse root id
-    "LLIL",                                         # 10 shorty (String,int,Bundle)->BrowserRoot
-    "VLL",                                          # 11 shorty (String,Bundle)->void
+    "Lcom/aclcxx/hello/MusicService;",  # 0
+    MBS,                                # 1
+    BROWSER_ROOT,                       # 2
+    RESULT,                             # 3
+    "Landroid/os/Bundle;",              # 4
+    "Ljava/lang/String;",              # 5
+    "Ljava/lang/Object;",              # 6
+    "Ljava/lang/CharSequence;",        # 7
+    ARRAYLIST,                          # 8
+    MEDIA_DESC,                         # 9
+    BUILDER,                            # 10
+    MEDIA_ITEM,                         # 11
+    "V",                                # 12
+    "I",                                # 13
+    "Z",                                # 14
+    "<init>",                           # 15
+    "onGetRoot",                        # 16
+    "onLoadChildren",                   # 17
+    "add",                              # 18
+    "setTitle",                         # 19
+    "build",                            # 20
+    "sendResult",                       # 21
+    "aclcxx_root",                      # 22
+    "Song One",                         # 23
+    "Song Two",                         # 24
+    "LLIL",                             # 25 onGetRoot shorty
+    "VLL",                              # 26 (String,ref)V shorty (BrowserRoot.<init>, onLoadChildren)
+    "ZL",                               # 27 add
+    "LL",                               # 28 setTitle
+    "L",                                # 29 build
+    "VLI",                              # 30 MediaItem.<init>
+    "VL",                               # 31 sendResult
 ]
-S = {s: i for i, s in enumerate(STRINGS)}
-TYPES = ["Lcom/aclcxx/hello/MusicService;",
-         "Landroid/service/media/MediaBrowserService;", BROWSER_ROOT,
-         "Landroid/os/Bundle;", "Ljava/lang/String;", "V", "I"]
+S = {s: i for i, s in enumerate(STRINGS)}  # "V" (idx 12) is the ()V / no-arg shorty
+TYPES = ["Lcom/aclcxx/hello/MusicService;", MBS, BROWSER_ROOT, RESULT,
+         "Landroid/os/Bundle;", "Ljava/lang/String;", "Ljava/lang/Object;",
+         "Ljava/lang/CharSequence;", ARRAYLIST, MEDIA_DESC, BUILDER, MEDIA_ITEM,
+         "V", "I", "Z"]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -63,11 +99,6 @@ def align4(buf):
     return buf
 
 
-def type_list(types):
-    return align4(bytearray(struct.pack("<I", len(types))
-                            + b"".join(struct.pack("<H", T[t]) for t in types)))
-
-
 def code_item(regs, ins, outs, insns):
     body = struct.pack("<HHHHII", regs, ins, outs, 0, 0, len(insns))
     for u in insns:
@@ -77,8 +108,8 @@ def code_item(regs, ins, outs, insns):
 
 def build_dex():
     header_size = 112
-    n_strings, n_types, n_protos, n_fields, n_methods, n_classdefs = \
-        len(STRINGS), len(TYPES), 3, 0, 4, 1
+    n_strings = len(STRINGS)
+    n_types, n_protos, n_fields, n_methods, n_classdefs = len(TYPES), 9, 0, 12, 1
 
     off_string_ids = header_size
     off_type_ids = off_string_ids + n_strings * 4
@@ -95,49 +126,74 @@ def build_dex():
         string_data_off.append(off_data + len(data))
         data.extend(uleb128(len(s)) + b + b"\x00")
 
-    data.extend(align4(bytearray()))
-    tl_getroot_off = off_data + len(data)         # (String, int, Bundle)
-    data.extend(type_list(["Ljava/lang/String;", "I", "Landroid/os/Bundle;"]))
-    data.extend(align4(bytearray()))
-    tl_rootctor_off = off_data + len(data)        # (String, Bundle)
-    data.extend(type_list(["Ljava/lang/String;", "Landroid/os/Bundle;"]))
+    def type_list(types):
+        nonlocal data
+        data.extend(align4(bytearray()))
+        off = off_data + len(data)
+        data.extend(align4(bytearray(
+            struct.pack("<I", len(types)) + b"".join(struct.pack("<H", T[t]) for t in types))))
+        return off
 
-    # <init>()V : super(); return-void      (v0 = this)
-    code_init_off = off_data + len(data)
+    tl_getroot = type_list(["Ljava/lang/String;", "I", "Landroid/os/Bundle;"])
+    tl_rootctor = type_list(["Ljava/lang/String;", "Landroid/os/Bundle;"])
+    tl_loadchildren = type_list(["Ljava/lang/String;", RESULT])
+    tl_object = type_list(["Ljava/lang/Object;"])
+    tl_charseq = type_list(["Ljava/lang/CharSequence;"])
+    tl_mediaitem = type_list([MEDIA_DESC, "I"])
+
+    # <init>()V : super(); return-void   (v0=this)
+    code_init = off_data + len(data)
     data.extend(code_item(1, 1, 1, [
-        0x1070, 0x0002, 0x0000,   # invoke-direct {v0}, MediaBrowserService.<init>() (m2)
-        0x000E,                   # return-void
+        0x1070, 0x0003, 0x0000,  # invoke-direct {v0}, MediaBrowserService.<init> (m3)
+        0x000E,
     ]))
-    # BrowserRoot onGetRoot(String,int,Bundle) : return new BrowserRoot("aclcxx_root", null)
-    #   this=v3, pkg=v4, uid=v5, hints=v6 ; temps v0,v1,v2
-    code_getroot_off = off_data + len(data)
+    # onGetRoot(String,int,Bundle)BrowserRoot : return new BrowserRoot("aclcxx_root", null)
+    code_getroot = off_data + len(data)
     data.extend(code_item(7, 4, 3, [
-        0x0022, 0x0002,           # new-instance v0, BrowserRoot (type 2)
-        0x011A, S["aclcxx_root"], # const-string v1, "aclcxx_root"
-        0x0212,                   # const/4 v2, 0  (null Bundle)
-        0x3070, 0x0003, 0x0210,   # invoke-direct {v0,v1,v2}, BrowserRoot.<init>(String,Bundle) (m3)
-        0x0011,                   # return-object v0
+        0x0022, T[BROWSER_ROOT],   # new-instance v0, BrowserRoot
+        0x011A, S["aclcxx_root"],  # const-string v1, "aclcxx_root"
+        0x0212,                    # const/4 v2, 0 (null Bundle)
+        0x3070, 0x0004, 0x0210,    # invoke-direct {v0,v1,v2}, BrowserRoot.<init> (m4)
+        0x0011,                    # return-object v0
     ]))
+    # onLoadChildren(String,Result)V : build two items, sendResult
+    #   v0=list v1=builder/flag v2=title v3=desc v4=item ; v5=this v6=parentId v7=result
+    def item(title):
+        return [
+            0x0122, T[BUILDER],        # new-instance v1, Builder
+            0x1070, 0x0007, 0x0001,    # invoke-direct {v1}, Builder.<init> (m7)
+            0x021A, S[title],          # const-string v2, title
+            0x206E, 0x0008, 0x0021,    # invoke-virtual {v1,v2}, setTitle (m8)
+            0x010C,                    # move-result-object v1
+            0x106E, 0x0009, 0x0001,    # invoke-virtual {v1}, build (m9)
+            0x030C,                    # move-result-object v3
+            0x0422, T[MEDIA_ITEM],     # new-instance v4, MediaItem
+            0x2112,                    # const/4 v1, 2 (FLAG_PLAYABLE)
+            0x3070, 0x000A, 0x0134,    # invoke-direct {v4,v3,v1}, MediaItem.<init> (m10)
+            0x206E, 0x0006, 0x0040,    # invoke-virtual {v0,v4}, ArrayList.add (m6)
+        ]
+    code_loadchildren = off_data + len(data)
+    insns = [0x0022, T[ARRAYLIST], 0x1070, 0x0005, 0x0000]  # new ArrayList; <init> (m5)
+    insns += item("Song One") + item("Song Two")
+    insns += [0x206E, 0x000B, 0x0007, 0x000E]  # sendResult (m11) {v7,v0} ; return-void
+    data.extend(code_item(8, 3, 3, insns))
 
+    # class_data: 0 static, 0 instance, 1 direct (<init>), 2 virtual (onGetRoot, onLoadChildren)
     class_data_off = off_data + len(data)
-    cd = bytearray(uleb128(0) + uleb128(0) + uleb128(1) + uleb128(1))
-    cd += uleb128(0) + uleb128(0x1) + uleb128(code_init_off)     # m0 <init>, public
-    cd += uleb128(1) + uleb128(0x1) + uleb128(code_getroot_off)  # +1 -> m1 onGetRoot, public
+    cd = bytearray(uleb128(0) + uleb128(0) + uleb128(1) + uleb128(2))
+    cd += uleb128(0) + uleb128(0x1) + uleb128(code_init)         # m0 <init>, public
+    cd += uleb128(1) + uleb128(0x1) + uleb128(code_getroot)      # +1 -> m1 onGetRoot
+    cd += uleb128(1) + uleb128(0x1) + uleb128(code_loadchildren)  # +1 -> m2 onLoadChildren
     data.extend(cd)
 
     data.extend(align4(bytearray()))
     map_off = off_data + len(data)
     items = [
-        (0x0000, 1, 0),
-        (0x0001, n_strings, off_string_ids),
-        (0x0002, n_types, off_type_ids),
-        (0x0003, n_protos, off_proto_ids),
-        (0x0005, n_methods, off_method_ids),
-        (0x0006, n_classdefs, off_class_defs),
-        (0x2002, n_strings, string_data_off[0]),
-        (0x1001, 2, tl_getroot_off),
-        (0x2001, 2, code_init_off),
-        (0x2000, 1, class_data_off),
+        (0x0000, 1, 0), (0x0001, n_strings, off_string_ids),
+        (0x0002, n_types, off_type_ids), (0x0003, n_protos, off_proto_ids),
+        (0x0005, n_methods, off_method_ids), (0x0006, n_classdefs, off_class_defs),
+        (0x2002, n_strings, string_data_off[0]), (0x1001, 6, tl_getroot),
+        (0x2001, 3, code_init), (0x2000, 1, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
     for mtype, size, off in items:
@@ -148,16 +204,35 @@ def build_dex():
 
     string_ids = b"".join(struct.pack("<I", o) for o in string_data_off)
     type_ids = b"".join(struct.pack("<I", S[t]) for t in TYPES)
-    proto_ids = struct.pack("<III", S["V"], T["V"], 0)                      # 0 ()V
-    proto_ids += struct.pack("<III", S["LLIL"], T[BROWSER_ROOT], tl_getroot_off)  # 1 onGetRoot
-    proto_ids += struct.pack("<III", S["VLL"], T["V"], tl_rootctor_off)     # 2 BrowserRoot.<init>
-    method_ids = struct.pack("<HHI", T["Lcom/aclcxx/hello/MusicService;"], 0, S["<init>"])     # m0
-    method_ids += struct.pack("<HHI", T["Lcom/aclcxx/hello/MusicService;"], 1, S["onGetRoot"])  # m1
-    method_ids += struct.pack("<HHI", T["Landroid/service/media/MediaBrowserService;"], 0, S["<init>"])  # m2
-    method_ids += struct.pack("<HHI", T[BROWSER_ROOT], 2, S["<init>"])       # m3 BrowserRoot.<init>
+    proto_ids = b""
+    proto_ids += struct.pack("<III", S["V"], T["V"], 0)                       # 0 ()V
+    proto_ids += struct.pack("<III", S["LLIL"], T[BROWSER_ROOT], tl_getroot)  # 1 onGetRoot
+    proto_ids += struct.pack("<III", S["VLL"], T["V"], tl_rootctor)           # 2 BrowserRoot.<init>
+    proto_ids += struct.pack("<III", S["VLL"], T["V"], tl_loadchildren)       # 3 onLoadChildren
+    proto_ids += struct.pack("<III", S["ZL"], T["Z"], tl_object)              # 4 add
+    proto_ids += struct.pack("<III", S["LL"], T[BUILDER], tl_charseq)         # 5 setTitle
+    proto_ids += struct.pack("<III", S["L"], T[MEDIA_DESC], 0)                # 6 build
+    proto_ids += struct.pack("<III", S["VLI"], T["V"], tl_mediaitem)          # 7 MediaItem.<init>
+    proto_ids += struct.pack("<III", S["VL"], T["V"], tl_object)              # 8 sendResult
+
+    def m(cls, proto, name):
+        return struct.pack("<HHI", T[cls], proto, S[name])
+    method_ids = b"".join([
+        m("Lcom/aclcxx/hello/MusicService;", 0, "<init>"),      # m0
+        m("Lcom/aclcxx/hello/MusicService;", 1, "onGetRoot"),   # m1
+        m("Lcom/aclcxx/hello/MusicService;", 3, "onLoadChildren"),  # m2
+        m(MBS, 0, "<init>"),                                    # m3
+        m(BROWSER_ROOT, 2, "<init>"),                           # m4
+        m(ARRAYLIST, 0, "<init>"),                              # m5
+        m(ARRAYLIST, 4, "add"),                                 # m6
+        m(BUILDER, 0, "<init>"),                                # m7
+        m(BUILDER, 5, "setTitle"),                              # m8
+        m(BUILDER, 6, "build"),                                 # m9
+        m(MEDIA_ITEM, 7, "<init>"),                             # m10
+        m(RESULT, 8, "sendResult"),                             # m11
+    ])
     class_defs = struct.pack("<IIIIIIII",
-                             T["Lcom/aclcxx/hello/MusicService;"], 0x1,
-                             T["Landroid/service/media/MediaBrowserService;"], 0,
+                             T["Lcom/aclcxx/hello/MusicService;"], 0x1, T[MBS], 0,
                              0xFFFFFFFF, 0, class_data_off, 0)
 
     header = bytearray(header_size)
