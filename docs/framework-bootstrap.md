@@ -100,12 +100,28 @@ mapping (plan.md §2 threading) lands with windowing (G2 proper).
 | **G2.a** ✅ | Boot-classpath seam (A1) + `--framework` + native-seam scaffold (A3) | an app resolves a class it does NOT bundle, from `--framework` (`run-apk-framework`) |
 | **G2.b** ✅ | `android.util.Log` on the boot cp (docs-derived shim, `framework/shim/`) + its native `write0` bound by aclcxx (`runtime/framework_natives`) forwarding to `aclcxx::log` | app calls `android.util.Log.i(...)` → line via `aclcxx::log` (`run-apk-log`) |
 | **G2.c** ✅ | Extraction tool (`tools/fw_extract.py`) + AOSP pin (`android-13.0.0_r84`) + closure/budget/denylist report | tool reports class count + denylist edges (`fw-extract` test); METADATA pinned |
-| **G2.d** | Lifecycle driver (A4) + minimal `Activity`/`Bundle`/`Context` subset+shims | a hand-built APK with an `Activity` subclass runs `onCreate` → observable side effect |
+| **G2.d** ✅ | Lifecycle driver (`JvmVm::call_activity_lifecycle`) + `Activity`/`Bundle` shims | `activity.apk`'s `MainActivity` subclass is instantiated and `onCreate`→`onStart`→`onResume` driven — no static `main` (`run-apk-activity`) |
 | **G2.e** | First real no-View app slice (automotive-first: media/CAL path draws no Views, plan.md §A01.3) | a redistributable no-View APK reaches `onResume` without crashing |
 
 Windowing/`Canvas`/`Looper`-fidelity (real G2 "renders and is interactive", plan.md §4 Phase 2)
 builds on G2.d; the automotive media/template path (G1.5) is preferred first because it needs no
 View stack.
+
+## Measured — the Activity closure (G2.c/G2.d, android-13.0.0_r84)
+
+`fw_extract.py` against a real sparse checkout, seeding `android.app.Activity,
+android.os.Bundle, android.content.Context`:
+
+- **535** in-tree classes in the transitive import closure (across ~40 packages);
+- **148** denylist edges — `Activity` → `IBinder`/`ServiceManager`; `ActivityManager` →
+  `Binder`/`IBinder`/`ServiceManager` **and** `com.android.server.{LocalServices,am.*,wm.*}`.
+
+This is the R-2 evidence: you cannot vendor `Activity`'s closure — it drags in SystemServer. So
+`Activity`/`Bundle`/`Context` are **shimmed** at the Manager boundary (ADR-0002), source-compatible
+from SDK docs (`framework/shim/android/app/Activity.java`, `.../os/Bundle.java`), and the aclcxx
+lifecycle driver instantiates the app's `Activity` subclass and calls `onCreate`/`onStart`/
+`onResume` directly — no Binder. `setContentView`/`Context` services stay stubbed until the View
+stack (Phase 2).
 
 ## Risks
 

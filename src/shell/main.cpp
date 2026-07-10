@@ -272,11 +272,20 @@ int cmd_run(const std::vector<std::string>& args) {
     aclcxx::log::w(kTag,
                    "no launcher activity in the manifest and no --main given; "
                    "VM started, nothing invoked");
-  } else if (r::Error e = vm->call_static_main(main_class, {})) {
-    aclcxx::log::e(kTag, "invoke {}.main failed: [{}] {}", main_class,
-                   r::status_name(e.status), e.message);
-    vm->shutdown();
-    return kRuntimeError;
+  } else {
+    // Prefer the Android Activity lifecycle; fall back to a static main() for
+    // self-contained apps (or when no framework Activity is on the boot classpath).
+    r::Error e = vm->call_activity_lifecycle(main_class);
+    if (e.status == r::Status::NotApplicable) {
+      aclcxx::log::i(kTag, "{} is not an Activity; invoking static main()", main_class);
+      e = vm->call_static_main(main_class, {});
+    }
+    if (e) {
+      aclcxx::log::e(kTag, "launch {} failed: [{}] {}", main_class,
+                     r::status_name(e.status), e.message);
+      vm->shutdown();
+      return kRuntimeError;
+    }
   }
 
   vm->shutdown();

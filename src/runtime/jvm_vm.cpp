@@ -130,6 +130,47 @@ class JvmVm final : public Vm {
     return result;
   }
 
+  Error call_activity_lifecycle(std::string_view activity_class) override {
+    if (env_ == nullptr) {
+      return Error::of(Status::NotStarted, "call_activity_lifecycle before start()");
+    }
+    const std::string name = to_jni_name(activity_class);
+    jclass cls = env_->FindClass(name.c_str());
+    if (cls == nullptr) {
+      clear_exception();
+      return Error::of(Status::NotFound, "class not found: " + std::string(activity_class));
+    }
+    // Only drive the lifecycle for real Activity subclasses; otherwise the caller
+    // falls back to a static main() (self-contained apps).
+    jclass activity_cls = env_->FindClass("android/app/Activity");
+    if (activity_cls == nullptr || env_->IsAssignableFrom(cls, activity_cls) != JNI_TRUE) {
+      clear_exception();
+      env_->DeleteLocalRef(cls);
+      if (activity_cls != nullptr) env_->DeleteLocalRef(activity_cls);
+      return Error::of(Status::NotApplicable,
+                       std::string(activity_class) + " is not an android.app.Activity");
+    }
+
+    Error result = Error::ok();
+    jmethodID ctor = env_->GetMethodID(cls, "<init>", "()V");
+    jobject activity = ctor != nullptr ? env_->NewObject(cls, ctor) : nullptr;
+    if (activity == nullptr) {
+      result = fail_with_exception("instantiate " + std::string(activity_class));
+    } else {
+      log::i(kTag, "launching Activity {}", activity_class);
+      // onCreate(null) -> onStart() -> onResume(), the documented launch order.
+      result = call_lifecycle(cls, activity, "onCreate", "(Landroid/os/Bundle;)V", true);
+      if (result.is_ok())
+        result = call_lifecycle(cls, activity, "onStart", "()V", false);
+      if (result.is_ok())
+        result = call_lifecycle(cls, activity, "onResume", "()V", false);
+      env_->DeleteLocalRef(activity);
+    }
+    env_->DeleteLocalRef(activity_cls);
+    env_->DeleteLocalRef(cls);
+    return result;
+  }
+
   Error shutdown() override {
     if (jvm_ != nullptr) {
       jvm_->DestroyJavaVM();  // blocks until non-daemon threads finish
@@ -145,6 +186,36 @@ class JvmVm final : public Vm {
     if (env_ != nullptr && env_->ExceptionCheck() == JNI_TRUE) {
       env_->ExceptionClear();
     }
+  }
+
+  // Print + clear a pending exception and return a RuntimeError describing `what`.
+  Error fail_with_exception(const std::string& what) {
+    if (env_->ExceptionCheck() == JNI_TRUE) {
+      env_->ExceptionDescribe();
+      env_->ExceptionClear();
+    }
+    return Error::of(Status::RuntimeError, "failed to " + what);
+  }
+
+  // Invoke one lifecycle callback (found on `cls` or a superclass). `pass_bundle`
+  // passes a null Bundle (a fresh launch); absence of the method is not an error
+  // (a subclass may not override every callback beyond the ones Activity defines).
+  Error call_lifecycle(jclass cls, jobject activity, const char* method,
+                       const char* sig, bool pass_bundle) {
+    jmethodID mid = env_->GetMethodID(cls, method, sig);
+    if (mid == nullptr) {  // shouldn't happen (Activity defines them), but be safe
+      clear_exception();
+      return Error::ok();
+    }
+    if (pass_bundle) {
+      env_->CallVoidMethod(activity, mid, nullptr);  // savedInstanceState = null
+    } else {
+      env_->CallVoidMethod(activity, mid);
+    }
+    if (env_->ExceptionCheck() == JNI_TRUE) {
+      return fail_with_exception(std::string(method) + "()");
+    }
+    return Error::ok();
   }
 
   jobjectArray make_string_array(const std::vector<std::string>& args) {

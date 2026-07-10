@@ -45,6 +45,7 @@ enum class Status {
   InvalidConfig,
   NotStarted,     // operation requires a started VM
   NotFound,       // class or method not found
+  NotApplicable,  // class exists but isn't the requested kind (e.g. not an Activity)
   RuntimeError,   // an exception escaped, or a VM-internal error
 };
 
@@ -76,6 +77,14 @@ class Vm {
   // headless-milestone entrypoint.
   virtual Error call_static_main(std::string_view main_class,
                                  const std::vector<std::string>& args) = 0;
+
+  // Launch `activity_class` as an Android Activity: instantiate it and drive the
+  // documented lifecycle (onCreate(null) -> onStart -> onResume). Requires
+  // android.app.Activity on the boot classpath (the vendored/shimmed framework).
+  // Returns Status::NotApplicable when the class exists but is not an Activity
+  // subclass (the caller then falls back to call_static_main), NotFound when the
+  // class is missing, RuntimeError on an escaped exception.
+  virtual Error call_activity_lifecycle(std::string_view activity_class) = 0;
 
   // Tear the VM down. Safe to call once after start(); idempotent thereafter.
   virtual Error shutdown() = 0;

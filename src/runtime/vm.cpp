@@ -66,6 +66,15 @@ class NullVm final : public Vm {
     return Error::ok();
   }
 
+  Error call_activity_lifecycle(std::string_view activity_class) override {
+    if (!started_) {
+      return Error::of(Status::NotStarted, "call_activity_lifecycle before start()");
+    }
+    // No Java runtime: report not-an-activity so the caller falls back to main().
+    log::i(kTag, "VM(null) would launch Activity {} — no Java executed", activity_class);
+    return Error::of(Status::NotApplicable, "null backend executes no Java");
+  }
+
   Error shutdown() override {
     if (started_) {
       log::i(kTag, "VM(null) shutdown");
@@ -112,6 +121,7 @@ const char* status_name(Status status) noexcept {
     case Status::InvalidConfig: return "invalid-config";
     case Status::NotStarted:    return "not-started";
     case Status::NotFound:      return "not-found";
+    case Status::NotApplicable: return "not-applicable";
     case Status::RuntimeError:  return "runtime-error";
   }
   return "?";

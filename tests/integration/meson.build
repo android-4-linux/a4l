@@ -73,9 +73,12 @@ if py3.found() and have_jni
       command : [py3, '@INPUT@', '--log', '@OUTPUT@'],
       depend_files : files('../fixtures/make_axml.py'),
     )
+    # The whole android.* shim tree, compiled together (Activity imports Bundle).
     framework_shim = custom_target(
       'framework-shim-classes',
-      input : files('../../framework/shim/android/util/Log.java'),
+      input : files('../../framework/shim/android/os/Bundle.java',
+                    '../../framework/shim/android/app/Activity.java',
+                    '../../framework/shim/android/util/Log.java'),
       output : 'framework-shim',
       command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
     )
@@ -84,6 +87,24 @@ if py3.found() and have_jni
       py3,
       args : [files('run_log_test.py'), aclcxx_exe, log_apk, framework_shim],
       depends : [aclcxx_exe, log_apk, framework_shim],
+      timeout : 120,
+    )
+
+    # Gate G2.d: the Android Activity entry point. activity.apk's launcher is
+    # MainActivity extends android.app.Activity; `aclcxx run` instantiates it and
+    # drives onCreate/onStart/onResume against the shimmed framework — no main().
+    activity_apk = custom_target(
+      'activity-apk',
+      input : files('../fixtures/make_activity_apk.py'),
+      output : 'activity.apk',
+      command : [py3, '@INPUT@', '@OUTPUT@'],
+      depend_files : files('../fixtures/make_axml.py'),
+    )
+    test(
+      'run-apk-activity',
+      py3,
+      args : [files('run_activity_test.py'), aclcxx_exe, activity_apk, framework_shim],
+      depends : [aclcxx_exe, activity_apk, framework_shim],
       timeout : 120,
     )
   else
