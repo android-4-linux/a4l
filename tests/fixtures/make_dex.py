@@ -77,6 +77,8 @@ STRINGS = [
     "objArray",              # 35 method name (aget-object/aput-object)
     "total",                 # 36 static field name
     "staticInt",             # 37 method name (sget/sput int static)
+    "label",                 # 38 Counter instance object field
+    "tagLen",                # 39 method name (iget-object/iput-object)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
@@ -115,8 +117,8 @@ def build_dex():
     n_strings = len(STRINGS)
     n_types = len(TYPES)
     n_protos = 5    # + (I)V for Counter.<init>/add
-    n_fields = 3    # System.out, Counter.value, HelloDex.total
-    n_methods = 19  # + staticInt, objArray
+    n_fields = 4    # System.out, Counter.value, HelloDex.total, Counter.label
+    n_methods = 20  # + tagLen
     n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
@@ -315,32 +317,42 @@ def build_dex():
     data.extend(code_item(3, 2, 0, [
         0x1052, 0x0001, 0x0090, 0x0200, 0x1059, 0x0001, 0x000E,
     ]))
+    code_ctag_off = off_data + len(data)
+    # int tagLen(){ label = "ab"; return label.length(); }  (2)
+    #   registers=2, ins=1: v1=this, v0=temp. label = field id 3.
+    #   const-string v0,"ab" ; iput-object v0,v1,label ; iget-object v0,v1,label ;
+    #   invoke-virtual {v0}, String.length (m6) ; move-result v0 ; return v0
+    data.extend(code_item(2, 1, 1, [
+        0x001A, S["ab"], 0x105B, 0x0003, 0x1054, 0x0003,
+        0x106E, 0x0006, 0x0000, 0x000A, 0x000F,
+    ]))
     code_ccount_off = off_data + len(data)
-    # static int useCounter(){ Counter c=new Counter(10); c.add(5); return c.get(); }
-    #   new-instance v0, Counter(type8) ; const/16 v1,10 ;
-    #   invoke-direct {v0,v1}, Counter.<init>(m10) ; const/4 v1,5 ;
-    #   invoke-virtual {v0,v1}, Counter.add(m12) ;
-    #   invoke-virtual {v0}, Counter.get(m11) ; move-result v1 ; return v1
+    # static int useCounter(){ Counter c=new Counter(10); c.add(5);
+    #                          return c.get() + c.tagLen(); }   (15 + 2 = 17)
     data.extend(code_item(2, 0, 2, [
-        0x0022, 0x0008, 0x0113, 0x000A, 0x2070, 0x000A, 0x0010,
-        0x5112, 0x206E, 0x000C, 0x0010, 0x106E, 0x000B, 0x0000,
-        0x010A, 0x010F,
+        0x0022, 0x0008, 0x0113, 0x000A, 0x2070, 0x000A, 0x0010,   # new + <init>(10)
+        0x5112, 0x206E, 0x000C, 0x0010,                          # c.add(5)
+        0x106E, 0x000B, 0x0000, 0x010A,                          # c.get(); move-result v1
+        0x106E, 0x0013, 0x0000, 0x000A,                          # c.tagLen(m19); move-result v0
+        0x0090, 0x0001, 0x000F,                                  # add-int v0,v1,v0 ; return v0
     ]))
 
     counter_class_data_off = off_data + len(data)
     ccd = bytearray()
     ccd += uleb128(0)  # static_fields_size
-    ccd += uleb128(1)  # instance_fields_size
+    ccd += uleb128(2)  # instance_fields_size (value, label)
     ccd += uleb128(2)  # direct_methods_size  (<init>, useCounter)
-    ccd += uleb128(2)  # virtual_methods_size (get, add)
-    # instance fields: value = field id 1 (diff from 0)
-    ccd += uleb128(1) + uleb128(0x1)                             # f1, public
+    ccd += uleb128(3)  # virtual_methods_size (get, add, tagLen)
+    # instance fields: value=f1, label=f3 (cumulative diffs from 0)
+    ccd += uleb128(1) + uleb128(0x1)                             # f1 value, public
+    ccd += uleb128(2) + uleb128(0x1)                             # +2 -> f3 label, public
     # direct methods: <init>=m10, useCounter=m13
     ccd += uleb128(10) + uleb128(0x1) + uleb128(code_cinit_off)  # idx 10, public
     ccd += uleb128(3) + uleb128(0x9) + uleb128(code_ccount_off)  # +3 -> idx 13, public static
-    # virtual methods: get=m11, add=m12
+    # virtual methods: get=m11, add=m12, tagLen=m19
     ccd += uleb128(11) + uleb128(0x1) + uleb128(code_cget_off)   # idx 11, public
     ccd += uleb128(1) + uleb128(0x1) + uleb128(code_cadd_off)    # +1 -> idx 12, public
+    ccd += uleb128(7) + uleb128(0x1) + uleb128(code_ctag_off)    # +7 -> idx 19, public
     data.extend(ccd)
 
     # map_list (4-aligned). Parser ignores it, but emit a valid one.
@@ -356,7 +368,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 3, type_list_main_off),
-        (0x2001, 15, code_main_off),
+        (0x2001, 16, code_main_off),
         (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -388,6 +400,7 @@ def build_dex():
                             T["Ljava/io/PrintStream;"], S["out"])     # f0 System.out
     field_ids += struct.pack("<HHI", T["LCounter;"], T["I"], S["value"])  # f1 Counter.value
     field_ids += struct.pack("<HHI", T["LHelloDex;"], T["I"], S["total"])  # f2 HelloDex.total
+    field_ids += struct.pack("<HHI", T["LCounter;"], T["Ljava/lang/String;"], S["label"])  # f3
 
     method_ids = b""
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 0, S["main"])
@@ -409,6 +422,7 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["tryCatch"])   # m16 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["staticInt"])  # m17 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["objArray"])   # m18 ()I
+    method_ids += struct.pack("<HHI", T["LCounter;"], 1, S["tagLen"])       # m19 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",

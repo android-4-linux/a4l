@@ -474,23 +474,29 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 2;
         break;
       }
-      case 0x52:    // iget vA, vB, field@CCCC (22c)  - int
-      case 0x59: {  // iput vA, vB, field@CCCC (22c)  - int
+      case 0x52:    // iget        vA, vB, field@CCCC (22c)  - int
+      case 0x54:    // iget-object vA, vB, field@CCCC (22c)
+      case 0x59:    // iput        vA, vB, field@CCCC (22c)  - int
+      case 0x5b: {  // iput-object vA, vB, field@CCCC (22c)
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
         const FieldRef* fr = dex.field_ref(in[pc + 1]);
-        if (fr == nullptr || !is_int_family_desc(fr->type_descriptor)) {
+        if (fr == nullptr) return std::nullopt;
+        const bool is_object = opcode == 0x54 || opcode == 0x5b;
+        const bool is_get = opcode == 0x52 || opcode == 0x54;
+        if (is_object ? !is_ref_desc(fr->type_descriptor)
+                      : !is_int_family_desc(fr->type_descriptor)) {
           return std::nullopt;
         }
         const std::uint16_t ref =
             cw.fieldref(fr->owner_internal, fr->name, fr->type_descriptor);
-        if (opcode == 0x52) {           // iget: vA = vB.field
+        if (is_get) {                    // vA = vB.field
           e.load_a(local(b));
           e.op(OP_GETFIELD); e.u2(ref);  // pop obj, push value (net 0)
-          e.store_i(local(a));
-        } else {                        // iput: vB.field = vA
+          if (is_object) e.store_a(local(a)); else e.store_i(local(a));
+        } else {                         // vB.field = vA
           e.load_a(local(b));
-          e.load_i(local(a));
+          if (is_object) e.load_a(local(a)); else e.load_i(local(a));
           e.op(OP_PUTFIELD); e.u2(ref); e.adj(-2);
         }
         pc += 2;

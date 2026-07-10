@@ -77,9 +77,11 @@ TEST_CASE("DexFile parses classes and method signatures", "[dex]") {
   // The object-model class: an instance field and instance methods.
   const DexClass& counter = dex->classes()[1];
   CHECK(counter.java_name == "Counter");
-  REQUIRE(counter.instance_fields.size() == 1);
+  REQUIRE(counter.instance_fields.size() == 2);
   CHECK(counter.instance_fields[0].name == "value");
   CHECK(counter.instance_fields[0].type_descriptor == "I");
+  CHECK(counter.instance_fields[1].name == "label");
+  CHECK(counter.instance_fields[1].type_descriptor == "Ljava/lang/String;");
   CHECK(find(counter.direct_methods, "<init>") != nullptr);      // constructor
   const DexMethod* get = find(counter.virtual_methods, "get");
   REQUIRE(get != nullptr);
@@ -112,7 +114,7 @@ TEST_CASE("convert emits a real .class and translates the int subset", "[dex]") 
 
   // main, answer, and loopSum (branches) translate; misc (const-string) is
   // unsupported and falls back to a bytecode stub.
-  CHECK(res.translated_methods == 14);
+  CHECK(res.translated_methods == 15);
   CHECK(res.stubbed_methods == 1);
 
   const std::filesystem::path cls =
