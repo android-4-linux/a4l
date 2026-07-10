@@ -72,6 +72,11 @@ STRINGS = [
     "Ljava/lang/RuntimeException;",  # 30 type: thrown class
     "Ljava/lang/Exception;",         # 31 type: caught class
     "tryCatch",              # 32 method name (try/throw/catch/move-exception)
+    "ab",                    # 33 const-string (object-array demo)
+    "cde",                   # 34 const-string (object-array demo)
+    "objArray",              # 35 method name (aget-object/aput-object)
+    "total",                 # 36 static field name
+    "staticInt",             # 37 method name (sget/sput int static)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
@@ -110,8 +115,8 @@ def build_dex():
     n_strings = len(STRINGS)
     n_types = len(TYPES)
     n_protos = 5    # + (I)V for Counter.<init>/add
-    n_fields = 2    # System.out, Counter.value
-    n_methods = 17  # + RuntimeException.<init>, tryCatch
+    n_fields = 3    # System.out, Counter.value, HelloDex.total
+    n_methods = 19  # + staticInt, objArray
     n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
@@ -246,16 +251,38 @@ def build_dex():
          0x000D, 0x0013, 0x0063, 0x000F],
         tries=[(5, 1, 1)],              # start=pc5, count=1, handler_off=1
         handlers_bytes=trycatch_handlers))
+    code_staticint_off = off_data + len(data)
+    # int staticInt(){ total=7; total=total+3; return total; }   (10)  field 2
+    data.extend(code_item(2, 0, 0, [
+        0x7012, 0x0067, 0x0002, 0x0060, 0x0002, 0x3112,
+        0x0090, 0x0100, 0x0067, 0x0002, 0x0060, 0x0002, 0x000F,
+    ]))
+    code_objarray_off = off_data + len(data)
+    # int objArray(){ String[] a=new String[2]; a[0]="ab"; a[1]="cde";
+    #                 return a[0].length()+a[1].length(); }   (2+3=5)
+    #   v0=array v1=index v2=elem/result v3=elem2 ; String.length = method 6
+    data.extend(code_item(4, 0, 1, [
+        0x2012, 0x0023, 0x0004,          # const/4 v0,2 ; new-array v0,v0,String[]
+        0x0112, 0x021A, S["ab"], 0x024D, 0x0100,   # v1=0; v2="ab"; a[0]=v2
+        0x1112, 0x021A, S["cde"], 0x024D, 0x0100,  # v1=1; v2="cde"; a[1]=v2
+        0x0112, 0x0246, 0x0100,          # v1=0; aget-object v2, v0, v1 (a[0])
+        0x106E, 0x0006, 0x0002, 0x020A,  # invoke-virtual {v2} length; move-result v2
+        0x1112, 0x0346, 0x0100,          # v1=1; aget-object v3, v0, v1 (a[1])
+        0x106E, 0x0006, 0x0003, 0x030A,  # invoke-virtual {v3} length; move-result v3
+        0x0090, 0x0302, 0x000F,          # add-int v0,v2,v3 ; return v0
+    ]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
-    cd += uleb128(0)  # static_fields_size
+    cd += uleb128(1)  # static_fields_size (HelloDex.total)
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(9)  # direct_methods_size
+    cd += uleb128(11)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
+    # static fields: HelloDex.total = field id 2 (diff from 0)
+    cd += uleb128(2) + uleb128(0x9)                               # f2, public static
     # direct methods, sorted by ascending method index; idx diffs are cumulative.
-    # m0=main..m5=strlen, m7=hello, m14=arraySum.
+    # m0=main..m5=strlen, m7=hello, m14=arraySum, m16=tryCatch, m17=staticInt, m18=objArray.
     cd += uleb128(0) + uleb128(0x9) + uleb128(code_main_off)      # diff 0 -> idx 0
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_answer_off)    # diff 1 -> idx 1
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_misc_off)      # diff 1 -> idx 2
@@ -265,6 +292,8 @@ def build_dex():
     cd += uleb128(2) + uleb128(0x9) + uleb128(code_hello_off)     # diff 2 -> idx 7
     cd += uleb128(7) + uleb128(0x9) + uleb128(code_arraysum_off)  # diff 7 -> idx 14
     cd += uleb128(2) + uleb128(0x9) + uleb128(code_trycatch_off)  # diff 2 -> idx 16
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_staticint_off) # diff 1 -> idx 17
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_objarray_off)  # diff 1 -> idx 18
     data.extend(cd)
 
     # --- Counter class code items (object model demo) -----------------------
@@ -327,7 +356,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 3, type_list_main_off),
-        (0x2001, 13, code_main_off),
+        (0x2001, 15, code_main_off),
         (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -358,6 +387,7 @@ def build_dex():
     field_ids = struct.pack("<HHI", T["Ljava/lang/System;"],
                             T["Ljava/io/PrintStream;"], S["out"])     # f0 System.out
     field_ids += struct.pack("<HHI", T["LCounter;"], T["I"], S["value"])  # f1 Counter.value
+    field_ids += struct.pack("<HHI", T["LHelloDex;"], T["I"], S["total"])  # f2 HelloDex.total
 
     method_ids = b""
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 0, S["main"])
@@ -377,6 +407,8 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["arraySum"])   # m14 ()I
     method_ids += struct.pack("<HHI", T["Ljava/lang/RuntimeException;"], 3, S["<init>"])  # m15 ()V
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["tryCatch"])   # m16 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["staticInt"])  # m17 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["objArray"])   # m18 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",

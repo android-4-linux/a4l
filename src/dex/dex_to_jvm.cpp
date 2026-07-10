@@ -38,6 +38,7 @@ enum : std::uint8_t {
   OP_GETSTATIC = 0xb2, OP_GETFIELD = 0xb4, OP_PUTFIELD = 0xb5,
   OP_IALOAD = 0x2e, OP_IASTORE = 0x4f, OP_NEWARRAY = 0xbc,
   OP_ANEWARRAY = 0xbd, OP_ARRAYLENGTH = 0xbe,
+  OP_AALOAD = 0x32, OP_AASTORE = 0x53, OP_PUTSTATIC = 0xb3,
 };
 
 // JVM newarray atype codes for primitive element descriptors.
@@ -376,15 +377,29 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 2;
         break;
       }
-      case 0x62: {  // sget-object vAA, field@BBBB (21c)
+      case 0x60:    // sget        vAA, field@BBBB (21c)  - int
+      case 0x62:    // sget-object vAA, field@BBBB (21c)
+      case 0x67:    // sput        vAA, field@BBBB (21c)  - int
+      case 0x69: {  // sput-object vAA, field@BBBB (21c)
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xff;
         const FieldRef* fr = dex.field_ref(in[pc + 1]);
-        if (fr == nullptr || !is_ref_desc(fr->type_descriptor)) return std::nullopt;
-        e.op(OP_GETSTATIC);
-        e.u2(cw.fieldref(fr->owner_internal, fr->name, fr->type_descriptor));
-        e.adj(+1);
-        e.store_a(local(a));
+        if (fr == nullptr) return std::nullopt;
+        const bool is_object = opcode == 0x62 || opcode == 0x69;
+        const bool is_get = opcode == 0x60 || opcode == 0x62;
+        if (is_object ? !is_ref_desc(fr->type_descriptor)
+                      : !is_int_family_desc(fr->type_descriptor)) {
+          return std::nullopt;
+        }
+        const std::uint16_t ref =
+            cw.fieldref(fr->owner_internal, fr->name, fr->type_descriptor);
+        if (is_get) {
+          e.op(OP_GETSTATIC); e.u2(ref); e.adj(+1);
+          if (is_object) e.store_a(local(a)); else e.store_i(local(a));
+        } else {
+          if (is_object) e.load_a(local(a)); else e.load_i(local(a));
+          e.op(OP_PUTSTATIC); e.u2(ref); e.adj(-1);
+        }
         pc += 2;
         break;
       }
@@ -437,19 +452,24 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 2;
         break;
       }
-      case 0x44:    // aget   vAA, vBB, vCC (23x)  - int
-      case 0x4b: {  // aput   vAA, vBB, vCC (23x)  - int
+      case 0x44:    // aget        vAA, vBB, vCC (23x)  - int
+      case 0x46:    // aget-object vAA, vBB, vCC (23x)
+      case 0x4b:    // aput        vAA, vBB, vCC (23x)  - int
+      case 0x4d: {  // aput-object vAA, vBB, vCC (23x)
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xff;
         const int bb = in[pc + 1] & 0xff;         // array
         const int cc = (in[pc + 1] >> 8) & 0xff;  // index
-        if (opcode == 0x44) {                      // aget: vAA = vBB[vCC]
+        const bool is_object = opcode == 0x46 || opcode == 0x4d;
+        const bool is_get = opcode == 0x44 || opcode == 0x46;
+        if (is_get) {                              // vAA = vBB[vCC]
           e.load_a(local(bb)); e.load_i(local(cc));
-          e.op(OP_IALOAD); e.adj(-1);              // pop array+index, push value
-          e.store_i(local(a));
-        } else {                                   // aput: vBB[vCC] = vAA
-          e.load_a(local(bb)); e.load_i(local(cc)); e.load_i(local(a));
-          e.op(OP_IASTORE); e.adj(-3);             // pop array+index+value
+          e.op(is_object ? OP_AALOAD : OP_IALOAD); e.adj(-1);
+          if (is_object) e.store_a(local(a)); else e.store_i(local(a));
+        } else {                                   // vBB[vCC] = vAA
+          e.load_a(local(bb)); e.load_i(local(cc));
+          if (is_object) e.load_a(local(a)); else e.load_i(local(a));
+          e.op(is_object ? OP_AASTORE : OP_IASTORE); e.adj(-3);
         }
         pc += 2;
         break;
