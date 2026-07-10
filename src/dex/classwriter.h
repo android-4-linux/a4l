@@ -30,6 +30,7 @@ class ClassWriter {
   std::uint16_t class_ref(std::string_view internal_name);
   std::uint16_t string_const(std::string_view s);
   std::uint16_t integer_const(std::int32_t v);
+  std::uint16_t long_const(std::int64_t v);  // occupies two cp slots
   std::uint16_t methodref(std::string_view cls, std::string_view name,
                           std::string_view desc);
   std::uint16_t fieldref(std::string_view cls, std::string_view name,

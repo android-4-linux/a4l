@@ -39,6 +39,9 @@ enum : std::uint8_t {
   OP_IALOAD = 0x2e, OP_IASTORE = 0x4f, OP_NEWARRAY = 0xbc,
   OP_ANEWARRAY = 0xbd, OP_ARRAYLENGTH = 0xbe,
   OP_AALOAD = 0x32, OP_AASTORE = 0x53, OP_PUTSTATIC = 0xb3,
+  OP_LCONST_0 = 0x09, OP_LDC2_W = 0x14, OP_LLOAD = 0x16, OP_LSTORE = 0x37,
+  OP_LADD = 0x61, OP_LSUB = 0x65, OP_LMUL = 0x69, OP_I2L = 0x85, OP_L2I = 0x88,
+  OP_LCMP = 0x94, OP_LRETURN = 0xad,
 };
 
 // JVM newarray atype codes for primitive element descriptors.
@@ -144,6 +147,15 @@ struct Emitter {
   void load_a(int slot) { op(OP_ALOAD); u1(static_cast<std::uint8_t>(slot)); adj(+1); }
   void store_a(int slot) { op(OP_ASTORE); u1(static_cast<std::uint8_t>(slot)); adj(-1); }
   void binop(std::uint8_t o) { op(o); adj(-1); }  // 2 operands -> 1 result
+  // Wide (long) helpers: a long occupies two stack/local slots.
+  void push_long(std::int64_t v) {
+    if (v == 0 || v == 1) { op(static_cast<std::uint8_t>(OP_LCONST_0 + v)); }
+    else { op(OP_LDC2_W); u2(cw.long_const(v)); }
+    adj(+2);
+  }
+  void load_l(int slot) { op(OP_LLOAD); u1(static_cast<std::uint8_t>(slot)); adj(+2); }
+  void store_l(int slot) { op(OP_LSTORE); u1(static_cast<std::uint8_t>(slot)); adj(-2); }
+  void lbinop(std::uint8_t o) { op(o); adj(-2); }  // 2 longs -> 1 long
 };
 
 struct Translated {
@@ -302,6 +314,91 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         const std::int32_t lit =
             static_cast<std::int32_t>(static_cast<std::uint32_t>(in[pc + 1]) << 16);
         e.push_int(lit); e.store_i(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x16: {  // const-wide/16 vAA, #+BBBB (21s) - long
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        e.push_long(static_cast<std::int16_t>(in[pc + 1]));
+        e.store_l(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x17: {  // const-wide/32 vAA, #+BBBBBBBB (31i) - long
+        if (pc + 2 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const std::int32_t lo32 = static_cast<std::int32_t>(
+            static_cast<std::uint32_t>(in[pc + 1]) |
+            (static_cast<std::uint32_t>(in[pc + 2]) << 16));
+        e.push_long(lo32);
+        e.store_l(local(a));
+        pc += 3;
+        break;
+      }
+      case 0x18: {  // const-wide vAA, #+BBBB...(64) (51l) - long
+        if (pc + 4 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        std::uint64_t lit = 0;
+        for (int k = 0; k < 4; ++k) {
+          lit |= static_cast<std::uint64_t>(in[pc + 1 + k]) << (16 * k);
+        }
+        e.push_long(static_cast<std::int64_t>(lit));
+        e.store_l(local(a));
+        pc += 5;
+        break;
+      }
+      case 0x19: {  // const-wide/high16 vAA, #+BBBB000000000000 (21h) - long
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        e.push_long(static_cast<std::int64_t>(in[pc + 1]) << 48);
+        e.store_l(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x04: {  // move-wide vA, vB (12x) - long
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        e.load_l(local(b)); e.store_l(local(a));
+        pc += 1;
+        break;
+      }
+      case 0x10: {  // return-wide vAA (11x) - long
+        const int a = (u >> 8) & 0xff;
+        e.load_l(local(a)); e.op(OP_LRETURN); e.adj(-2);
+        pc += 1;
+        break;
+      }
+      case 0x81: {  // int-to-long vA, vB (12x)
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        e.load_i(local(b)); e.op(OP_I2L); e.adj(+1); e.store_l(local(a));
+        pc += 1;
+        break;
+      }
+      case 0x84: {  // long-to-int vA, vB (12x)
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        e.load_l(local(b)); e.op(OP_L2I); e.adj(-1); e.store_i(local(a));
+        pc += 1;
+        break;
+      }
+      case 0x31: {  // cmp-long vAA, vBB, vCC (23x) -> int
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const int bb = in[pc + 1] & 0xff, cc = (in[pc + 1] >> 8) & 0xff;
+        e.load_l(local(bb)); e.load_l(local(cc));
+        e.op(OP_LCMP); e.adj(-3);  // 2 longs (4) -> 1 int (1)
+        e.store_i(local(a));
+        pc += 2;
+        break;
+      }
+      case 0x9b:    // add-long (23x)
+      case 0x9c:    // sub-long
+      case 0x9d: {  // mul-long
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const int bb = in[pc + 1] & 0xff, cc = (in[pc + 1] >> 8) & 0xff;
+        e.load_l(local(bb)); e.load_l(local(cc));
+        e.lbinop(opcode == 0x9b ? OP_LADD : opcode == 0x9c ? OP_LSUB : OP_LMUL);
+        e.store_l(local(a));
         pc += 2;
         break;
       }

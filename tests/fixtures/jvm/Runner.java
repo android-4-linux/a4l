@@ -19,9 +19,10 @@ public class Runner {
     Object tc = c.getMethod("tryCatch").invoke(null);   // 99 (try/catch/throw)
     Object si = c.getMethod("staticInt").invoke(null);  // 10 (sget/sput int)
     Object oa = c.getMethod("objArray").invoke(null);   // 5 (aget/aput-object)
+    Object ws = c.getMethod("wideSum").invoke(null);    // 2 (long arithmetic)
     if (args.length > 0) {
       java.nio.file.Files.write(java.nio.file.Paths.get(args[0]),
-          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr + "," + tc + "," + si + "," + oa).getBytes("UTF-8"));
+          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr + "," + tc + "," + si + "," + oa + "," + ws).getBytes("UTF-8"));
     }
   }
 }

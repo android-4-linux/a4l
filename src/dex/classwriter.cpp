@@ -11,6 +11,7 @@ namespace {
 // Constant pool tags (JVMS 4.4).
 constexpr std::uint8_t kUtf8 = 1;
 constexpr std::uint8_t kInteger = 3;
+constexpr std::uint8_t kLong = 5;
 constexpr std::uint8_t kClass = 7;
 constexpr std::uint8_t kString = 8;
 constexpr std::uint8_t kNameAndType = 12;
@@ -68,6 +69,20 @@ std::uint16_t ClassWriter::integer_const(std::int32_t v) {
   e.push_back(kInteger);
   be32(e, static_cast<std::uint32_t>(v));
   return add_entry(std::move(e), "I:" + std::to_string(v));
+}
+
+std::uint16_t ClassWriter::long_const(std::int64_t v) {
+  const std::string key = "L:" + std::to_string(v);
+  if (auto it = interned_.find(key); it != interned_.end()) return it->second;
+  std::vector<std::uint8_t> e;
+  e.push_back(kLong);
+  be32(e, static_cast<std::uint32_t>(static_cast<std::uint64_t>(v) >> 32));
+  be32(e, static_cast<std::uint32_t>(v & 0xffffffff));
+  const auto index = static_cast<std::uint16_t>(pool_.size() + 1);
+  pool_.push_back(std::move(e));
+  pool_.push_back({});  // CONSTANT_Long occupies two cp slots; second is unusable
+  interned_.emplace(key, index);
+  return index;
 }
 
 std::uint16_t ClassWriter::name_and_type(std::string_view name,
