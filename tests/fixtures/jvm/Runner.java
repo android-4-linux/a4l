@@ -21,9 +21,12 @@ public class Runner {
     Object oa = c.getMethod("objArray").invoke(null);   // 5 (aget/aput-object)
     Object ws = c.getMethod("wideSum").invoke(null);    // 2 (long arithmetic)
     Object wl = c.getMethod("wideLoop").invoke(null);   // 10 (long at frame point)
+    Object ia = c.getMethod("intArith").invoke(null);   // 10 (div/rem/bitwise)
+    Object il = c.getMethod("intLit").invoke(null);     // 10 (/2addr, /lit, neg/not)
+    Object ba = c.getMethod("byteArray").invoke(null);  // 42 (narrow byte array)
     if (args.length > 0) {
       java.nio.file.Files.write(java.nio.file.Paths.get(args[0]),
-          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr + "," + tc + "," + si + "," + oa + "," + ws + "," + wl).getBytes("UTF-8"));
+          (answer + "," + loopSum + "," + callSum + "," + strlen + "," + counter + "," + arr + "," + tc + "," + si + "," + oa + "," + ws + "," + wl + "," + ia + "," + il + "," + ba).getBytes("UTF-8"));
     }
   }
 }

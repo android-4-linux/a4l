@@ -43,7 +43,38 @@ enum : std::uint8_t {
   OP_LCONST_0 = 0x09, OP_LDC2_W = 0x14, OP_LLOAD = 0x16, OP_LSTORE = 0x37,
   OP_LADD = 0x61, OP_LSUB = 0x65, OP_LMUL = 0x69, OP_I2L = 0x85, OP_L2I = 0x88,
   OP_LCMP = 0x94, OP_LRETURN = 0xad,
+  OP_INEG = 0x74, OP_ICONST_M1 = 0x02, OP_IXOR = 0x82,
+  OP_I2B = 0x91, OP_I2C = 0x92, OP_I2S = 0x93,
+  OP_BALOAD = 0x33, OP_CALOAD = 0x34, OP_SALOAD = 0x35,
+  OP_BASTORE = 0x54, OP_CASTORE = 0x55, OP_SASTORE = 0x56,
 };
+
+// JVM opcode for a Dalvik int binary op, index in the canonical order
+// add,sub,mul,div,rem,and,or,xor,shl,shr,ushr (matches 23x 0x90.. and /2addr 0xb0..).
+std::uint8_t jvm_ibinop(int idx) {
+  static const std::uint8_t ops[] = {
+      0x60, 0x64, 0x68, 0x6c, 0x70,  // iadd isub imul idiv irem
+      0x7e, 0x80, 0x82, 0x78, 0x7a, 0x7c,  // iand ior ixor ishl ishr iushr
+  };
+  return (idx >= 0 && idx < 11) ? ops[idx] : 0;
+}
+
+// (JVM array-op, is-object) for a Dalvik aget*/aput* opcode.
+std::pair<std::uint8_t, bool> jvm_arrayop(std::uint8_t op) {
+  switch (op) {
+    case 0x44: return {0x2e, false};  // aget -> iaload
+    case 0x46: return {0x32, true};   // aget-object -> aaload
+    case 0x47: case 0x48: return {0x33, false};  // aget-boolean/byte -> baload
+    case 0x49: return {0x34, false};  // aget-char -> caload
+    case 0x4a: return {0x35, false};  // aget-short -> saload
+    case 0x4b: return {0x4f, false};  // aput -> iastore
+    case 0x4d: return {0x53, true};   // aput-object -> aastore
+    case 0x4e: case 0x4f: return {0x54, false};  // aput-boolean/byte -> bastore
+    case 0x50: return {0x55, false};  // aput-char -> castore
+    case 0x51: return {0x56, false};  // aput-short -> sastore
+    default:   return {0, false};
+  }
+}
 
 // JVM newarray atype codes for primitive element descriptors.
 int newarray_atype(char prim) {
@@ -188,22 +219,19 @@ std::string obj_internal(const std::string& desc) {
 // Number of 16-bit code units of a supported Dalvik instruction (used by the
 // stack-map forward pass, which only ever sees already-translatable opcodes).
 int dalvik_insn_units(std::uint8_t op) {
-  switch (op) {
-    case 0x18: return 5;                                        // const-wide
-    case 0x14: case 0x17: case 0x6e: case 0x70: case 0x71:      // const, cw/32, invoke
-      return 3;
-    case 0x13: case 0x15: case 0x16: case 0x19: case 0x1a:      // const/16.., const-string
-    case 0x22: case 0x23: case 0x31:                            // new-instance/array, cmp-long
-    case 0x32: case 0x33: case 0x34: case 0x35: case 0x36: case 0x37:  // if-test
-    case 0x38: case 0x39: case 0x3a: case 0x3b: case 0x3c: case 0x3d:  // if-testz
-    case 0x29: case 0x44: case 0x46: case 0x4b: case 0x4d:      // goto/16, aget/aput
-    case 0x52: case 0x54: case 0x59: case 0x5b:                 // iget/iput
-    case 0x60: case 0x62: case 0x67: case 0x69:                 // sget/sput
-    case 0x90: case 0x91: case 0x92: case 0x9b: case 0x9c: case 0x9d:  // arith
-    case 0xd0: case 0xd8:                                       // add-int/lit
-      return 2;
-    default: return 1;  // 1-unit forms (nop, move, const/4, returns, goto, etc.)
+  if (op == 0x18) return 5;                                        // const-wide
+  if (op == 0x14 || op == 0x17 || op == 0x6e || op == 0x70 || op == 0x71) {
+    return 3;  // const, const-wide/32, invoke-{virtual,direct,static}
   }
+  if (op == 0x13 || op == 0x15 || op == 0x16 || op == 0x19 || op == 0x1a ||
+      op == 0x22 || op == 0x23 || op == 0x29 || op == 0x31 ||
+      (op >= 0x32 && op <= 0x3d) ||   // if-test / if-testz
+      (op >= 0x44 && op <= 0x6d) ||   // aget/aput, iget/iput, sget/sput (all typed)
+      (op >= 0x90 && op <= 0xa5) ||   // int/long binary ops (23x)
+      (op >= 0xd0 && op <= 0xe2)) {   // int op/lit16, op/lit8
+    return 2;
+  }
+  return 1;  // moves, const/4, returns, gotos, /2addr, unary, nop, etc.
 }
 
 // Update the local-variable types for one instruction's writes.
@@ -264,13 +292,17 @@ void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod
       }
       set(L((u >> 8) & 0xff), {VType::Obj, cls}); break;
     }
-    case 0x52: case 0x60: set(L((u >> 8) & (op == 0x52 ? 0xf : 0xff)), kInt); break;  // iget/sget int
+    case 0x52: case 0x55: case 0x56: case 0x57: case 0x58:  // iget int/narrow -> int
+      set(L((u >> 8) & 0xf), kInt); break;
+    case 0x60: case 0x63: case 0x64: case 0x65: case 0x66:  // sget int/narrow -> int
+      set(L((u >> 8) & 0xff), kInt); break;
     case 0x54: case 0x62: {  // iget-object / sget-object -> Obj(field type)
       const FieldRef* fr = dex.field_ref(in[pc + 1]);
       set(L((u >> 8) & (op == 0x54 ? 0xf : 0xff)),
           {VType::Obj, fr ? obj_internal(fr->type_descriptor) : ""}); break;
     }
-    case 0x44: set(L((u >> 8) & 0xff), kInt); break;        // aget int
+    case 0x44: case 0x47: case 0x48: case 0x49: case 0x4a:  // aget int/narrow -> int
+      set(L((u >> 8) & 0xff), kInt); break;
     case 0x46: {  // aget-object -> Obj(element of the array local)
       const int bb = in[pc + 1] & 0xff;
       const VType& arr = locals[L(bb)];
@@ -283,12 +315,20 @@ void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod
     case 0x81: set_long(L((u >> 8) & 0xf)); break;          // int-to-long
     case 0x84: set(L((u >> 8) & 0xf), kInt); break;         // long-to-int
     case 0x31: set(L((u >> 8) & 0xff), kInt); break;        // cmp-long -> int
-    case 0x90: case 0x91: case 0x92:                        // add/sub/mul-int
-    case 0xd0: case 0xd8:                                   // add-int/lit
+    case 0x90: case 0x91: case 0x92: case 0x93: case 0x94:  // int binary 23x -> int
+    case 0x95: case 0x96: case 0x97: case 0x98: case 0x99: case 0x9a:
       set(L((u >> 8) & 0xff), kInt); break;
     case 0x9b: case 0x9c: case 0x9d:                        // add/sub/mul-long
       set_long(L((u >> 8) & 0xff)); break;
-    default: break;  // no local write
+    case 0x7b: case 0x7c: case 0x8d: case 0x8e: case 0x8f:  // neg/not/int-to-{b,c,s}
+      set(L((u >> 8) & 0xf), kInt); break;
+    default:
+      if (op >= 0xb0 && op <= 0xba) {                       // int op/2addr -> int
+        set(L((u >> 8) & 0xf), kInt);
+      } else if (op >= 0xd0 && op <= 0xe2) {                // int op/lit -> int
+        set(L(op >= 0xd8 ? (u >> 8) & 0xff : (u >> 8) & 0xf), kInt);
+      }
+      break;  // otherwise no local write
   }
 }
 
@@ -557,34 +597,66 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 2;
         break;
       }
-      case 0x90:    // add-int (23x)
-      case 0x91:    // sub-int
-      case 0x92: {  // mul-int
+      case 0x90: case 0x91: case 0x92: case 0x93: case 0x94:  // int binary op (23x)
+      case 0x95: case 0x96: case 0x97: case 0x98: case 0x99: case 0x9a: {
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xff;
         const int bb = in[pc + 1] & 0xff;
         const int cc = (in[pc + 1] >> 8) & 0xff;
         e.load_i(local(bb)); e.load_i(local(cc));
-        e.binop(opcode == 0x90 ? OP_IADD : opcode == 0x91 ? OP_ISUB : OP_IMUL);
+        e.binop(jvm_ibinop(opcode - 0x90));
         e.store_i(local(a));
         pc += 2;
         break;
       }
-      case 0xd8: {  // add-int/lit8 vAA, vBB, #+CC (22b)
+      case 0xb0: case 0xb1: case 0xb2: case 0xb3: case 0xb4:  // int op/2addr (12x)
+      case 0xb5: case 0xb6: case 0xb7: case 0xb8: case 0xb9: case 0xba: {
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        e.load_i(local(a)); e.load_i(local(b));
+        e.binop(jvm_ibinop(opcode - 0xb0));
+        e.store_i(local(a));
+        pc += 1;
+        break;
+      }
+      case 0xd0: case 0xd1: case 0xd2: case 0xd3:  // int op/lit16 (22s)
+      case 0xd4: case 0xd5: case 0xd6: case 0xd7:
+      case 0xd8: case 0xd9: case 0xda: case 0xdb: case 0xdc:  // int op/lit8 (22b)
+      case 0xdd: case 0xde: case 0xdf: case 0xe0: case 0xe1: case 0xe2: {
         if (pc + 1 >= in.size()) return std::nullopt;
-        const int a = (u >> 8) & 0xff;
-        const int b = in[pc + 1] & 0xff;
-        const std::int32_t lit = static_cast<std::int8_t>((in[pc + 1] >> 8) & 0xff);
-        e.load_i(local(b)); e.push_int(lit); e.binop(OP_IADD); e.store_i(local(a));
+        const bool lit8 = opcode >= 0xd8;
+        const int a = lit8 ? (u >> 8) & 0xff : (u >> 8) & 0xf;
+        const int b = lit8 ? in[pc + 1] & 0xff : (u >> 12) & 0xf;
+        const std::int32_t lit = lit8 ? static_cast<std::int8_t>((in[pc + 1] >> 8) & 0xff)
+                                      : static_cast<std::int16_t>(in[pc + 1]);
+        const int idx = lit8 ? opcode - 0xd8 : opcode - 0xd0;
+        if (idx == 1) {  // rsub: vA = lit - vB
+          e.push_int(lit); e.load_i(local(b)); e.binop(OP_ISUB);
+        } else {
+          e.load_i(local(b)); e.push_int(lit); e.binop(jvm_ibinop(idx));
+        }
+        e.store_i(local(a));
         pc += 2;
         break;
       }
-      case 0xd0: {  // add-int/lit16 vA, vB, #+CCCC (22s)
-        if (pc + 1 >= in.size()) return std::nullopt;
+      case 0x7b: {  // neg-int (12x)
         const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
-        const std::int32_t lit = static_cast<std::int16_t>(in[pc + 1]);
-        e.load_i(local(b)); e.push_int(lit); e.binop(OP_IADD); e.store_i(local(a));
-        pc += 2;
+        e.load_i(local(b)); e.op(OP_INEG); e.store_i(local(a));
+        pc += 1;
+        break;
+      }
+      case 0x7c: {  // not-int (12x): ~x = x ^ -1
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        e.load_i(local(b)); e.op(OP_ICONST_M1); e.adj(+1);
+        e.op(OP_IXOR); e.adj(-1); e.store_i(local(a));
+        pc += 1;
+        break;
+      }
+      case 0x8d: case 0x8e: case 0x8f: {  // int-to-byte/char/short (12x)
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        e.load_i(local(b));
+        e.op(opcode == 0x8d ? OP_I2B : opcode == 0x8e ? OP_I2C : OP_I2S);
+        e.store_i(local(a));
+        pc += 1;
         break;
       }
       case 0x28: {  // goto +AA (10t)
@@ -629,16 +701,16 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 2;
         break;
       }
-      case 0x60:    // sget        vAA, field@BBBB (21c)  - int
-      case 0x62:    // sget-object vAA, field@BBBB (21c)
-      case 0x67:    // sput        vAA, field@BBBB (21c)  - int
-      case 0x69: {  // sput-object vAA, field@BBBB (21c)
+      case 0x60: case 0x63: case 0x64: case 0x65: case 0x66:  // sget/-bool/byte/char/short
+      case 0x62:                                               // sget-object
+      case 0x67: case 0x6a: case 0x6b: case 0x6c: case 0x6d:  // sput/-bool/byte/char/short
+      case 0x69: {  // sput-object
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xff;
         const FieldRef* fr = dex.field_ref(in[pc + 1]);
         if (fr == nullptr) return std::nullopt;
         const bool is_object = opcode == 0x62 || opcode == 0x69;
-        const bool is_get = opcode == 0x60 || opcode == 0x62;
+        const bool is_get = opcode == 0x62 || (opcode >= 0x60 && opcode <= 0x66);
         if (is_object ? !is_ref_desc(fr->type_descriptor)
                       : !is_int_family_desc(fr->type_descriptor)) {
           return std::nullopt;
@@ -704,38 +776,36 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 2;
         break;
       }
-      case 0x44:    // aget        vAA, vBB, vCC (23x)  - int
-      case 0x46:    // aget-object vAA, vBB, vCC (23x)
-      case 0x4b:    // aput        vAA, vBB, vCC (23x)  - int
-      case 0x4d: {  // aput-object vAA, vBB, vCC (23x)
+      case 0x44: case 0x46: case 0x47: case 0x48: case 0x49: case 0x4a:  // aget*
+      case 0x4b: case 0x4d: case 0x4e: case 0x4f: case 0x50: case 0x51: {  // aput*
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xff;
         const int bb = in[pc + 1] & 0xff;         // array
         const int cc = (in[pc + 1] >> 8) & 0xff;  // index
-        const bool is_object = opcode == 0x46 || opcode == 0x4d;
-        const bool is_get = opcode == 0x44 || opcode == 0x46;
+        const bool is_get = opcode <= 0x4a;       // aget family = 0x44..0x4a
+        const auto [array_op, is_object] = jvm_arrayop(opcode);
         if (is_get) {                              // vAA = vBB[vCC]
           e.load_a(local(bb)); e.load_i(local(cc));
-          e.op(is_object ? OP_AALOAD : OP_IALOAD); e.adj(-1);
+          e.op(array_op); e.adj(-1);
           if (is_object) e.store_a(local(a)); else e.store_i(local(a));
         } else {                                   // vBB[vCC] = vAA
           e.load_a(local(bb)); e.load_i(local(cc));
           if (is_object) e.load_a(local(a)); else e.load_i(local(a));
-          e.op(is_object ? OP_AASTORE : OP_IASTORE); e.adj(-3);
+          e.op(array_op); e.adj(-3);
         }
         pc += 2;
         break;
       }
-      case 0x52:    // iget        vA, vB, field@CCCC (22c)  - int
-      case 0x54:    // iget-object vA, vB, field@CCCC (22c)
-      case 0x59:    // iput        vA, vB, field@CCCC (22c)  - int
-      case 0x5b: {  // iput-object vA, vB, field@CCCC (22c)
+      case 0x52: case 0x55: case 0x56: case 0x57: case 0x58:  // iget/-bool/byte/char/short
+      case 0x54:                                               // iget-object
+      case 0x59: case 0x5c: case 0x5d: case 0x5e: case 0x5f:  // iput/-bool/byte/char/short
+      case 0x5b: {  // iput-object
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
         const FieldRef* fr = dex.field_ref(in[pc + 1]);
         if (fr == nullptr) return std::nullopt;
         const bool is_object = opcode == 0x54 || opcode == 0x5b;
-        const bool is_get = opcode == 0x52 || opcode == 0x54;
+        const bool is_get = opcode == 0x54 || (opcode >= 0x52 && opcode <= 0x58);
         if (is_object ? !is_ref_desc(fr->type_descriptor)
                       : !is_int_family_desc(fr->type_descriptor)) {
           return std::nullopt;

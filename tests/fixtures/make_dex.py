@@ -81,13 +81,18 @@ STRINGS = [
     "tagLen",                # 39 method name (iget-object/iput-object)
     "wideSum",               # 40 method name (long arithmetic)
     "wideLoop",              # 41 method name (long at a stack-map frame point)
+    "intArith",              # 42 method name (div/rem/and/or/xor/shl-int)
+    "intLit",                # 43 method name (/2addr, /lit8, neg, not, int-to-byte)
+    "[B",                    # 44 type: byte[]
+    "byteArray",             # 45 method name (new-array byte, aput-byte, aget-byte)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
 # type_ids -> string index for each descriptor.
 TYPES = ["LHelloDex;", "Ljava/lang/Object;", "V", "I", "[Ljava/lang/String;",
          "Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;",
-         "LCounter;", "[I", "Ljava/lang/RuntimeException;", "Ljava/lang/Exception;"]
+         "LCounter;", "[I", "Ljava/lang/RuntimeException;", "Ljava/lang/Exception;",
+         "[B"]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -120,7 +125,7 @@ def build_dex():
     n_types = len(TYPES)
     n_protos = 5    # + (I)V for Counter.<init>/add
     n_fields = 4    # System.out, Counter.value, HelloDex.total, Counter.label
-    n_methods = 22  # + wideLoop
+    n_methods = 25  # + intArith, intLit, byteArray
     n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
@@ -302,13 +307,53 @@ def build_dex():
         0xF928,                        # goto :loop
         0x0084, 0x000F,                # :end long-to-int v0,v0 ; return v0
     ]))
+    code_intarith_off = off_data + len(data)
+    # int intArith(){ (((((100/7)%9)&6)|3)^2)<<1 }  = 10   (div,rem,and,or,xor,shl)
+    data.extend(code_item(4, 0, 0, [
+        0x0013, 0x0064, 0x7112,        # const/16 v0,100 ; const/4 v1,7
+        0x0293, 0x0100,                # div-int v2,v0,v1   -> 14
+        0x0313, 0x0009, 0x0294, 0x0302,  # const/16 v3,9 ; rem-int v2,v2,v3 -> 5
+        0x6312, 0x0295, 0x0302,        # const/4 v3,6 ; and-int v2,v2,v3 -> 4
+        0x3312, 0x0296, 0x0302,        # const/4 v3,3 ; or-int  v2,v2,v3 -> 7
+        0x2312, 0x0297, 0x0302,        # const/4 v3,2 ; xor-int v2,v2,v3 -> 5
+        0x1312, 0x0298, 0x0302,        # const/4 v3,1 ; shl-int v2,v2,v3 -> 10
+        0x020F,                        # return v2
+    ]))
+    code_intlit_off = off_data + len(data)
+    # int intLit(){ v=5*3; v/=3; v&=6; v=-v; v=~v; v+=7; return (byte)v; }  = 10
+    data.extend(code_item(2, 0, 0, [
+        0x5012, 0x3112,                # const/4 v0,5 ; const/4 v1,3
+        0x10B2,                        # mul-int/2addr v0,v1 -> 15
+        0x00DB, 0x0300,                # div-int/lit8 v0,v0,3 -> 5
+        0x00DD, 0x0600,                # and-int/lit8 v0,v0,6 -> 4
+        0x007B,                        # neg-int v0,v0 -> -4
+        0x007C,                        # not-int v0,v0 -> 3
+        0x00D8, 0x0700,                # add-int/lit8 v0,v0,7 -> 10
+        0x008D,                        # int-to-byte v0,v0 -> 10
+        0x000F,                        # return v0
+    ]))
+    code_bytearray_off = off_data + len(data)
+    # int byteArray(){ byte[] a=new byte[3]; a[0]=10;a[1]=20;a[2]=12;
+    #                  return a[0]+a[1]+a[2]; }  = 42   (new-array byte/aput-byte/aget-byte)
+    data.extend(code_item(3, 0, 0, [
+        0x3112, 0x1023, T["[B"],       # const/4 v1,3 ; new-array v0,v1,byte[]
+        0x0112, 0x0213, 0x000A, 0x024F, 0x0100,  # a[0]=10 (aput-byte)
+        0x1112, 0x0213, 0x0014, 0x024F, 0x0100,  # a[1]=20
+        0x2112, 0x0213, 0x000C, 0x024F, 0x0100,  # a[2]=12
+        0x0112, 0x0148, 0x0100,        # const/4 v1,0 ; aget-byte v1,v0,v1 (a[0])
+        0x1212, 0x0248, 0x0200,        # const/4 v2,1 ; aget-byte v2,v0,v2 (a[1])
+        0x0190, 0x0201,                # add-int v1,v1,v2
+        0x2212, 0x0248, 0x0200,        # const/4 v2,2 ; aget-byte v2,v0,v2 (a[2])
+        0x0190, 0x0201,                # add-int v1,v1,v2
+        0x010F,                        # return v1
+    ]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
     cd += uleb128(1)  # static_fields_size (HelloDex.total)
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(13)  # direct_methods_size
+    cd += uleb128(16)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
     # static fields: HelloDex.total = field id 2 (diff from 0)
     cd += uleb128(2) + uleb128(0x9)                               # f2, public static
@@ -327,6 +372,9 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_objarray_off)  # diff 1 -> idx 18
     cd += uleb128(2) + uleb128(0x9) + uleb128(code_widesum_off)   # diff 2 -> idx 20
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_wideloop_off)  # diff 1 -> idx 21
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_intarith_off)  # diff 1 -> idx 22
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_intlit_off)    # diff 1 -> idx 23
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_bytearray_off) # diff 1 -> idx 24
     data.extend(cd)
 
     # --- Counter class code items (object model demo) -----------------------
@@ -399,7 +447,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 3, type_list_main_off),
-        (0x2001, 18, code_main_off),
+        (0x2001, 21, code_main_off),
         (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -456,6 +504,9 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LCounter;"], 1, S["tagLen"])       # m19 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["wideSum"])      # m20 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["wideLoop"])     # m21 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["intArith"])     # m22 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["intLit"])       # m23 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["byteArray"])    # m24 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",
