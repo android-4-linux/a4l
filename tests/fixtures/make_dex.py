@@ -49,6 +49,7 @@ STRINGS = [
     "answer",                # 7  method name
     "HelloDex.java",         # 8  source file
     "misc",                  # 9  method name (untranslatable -> stubbed)
+    "loopSum",               # 10 method name (branches: sum 1..10 = 55)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
@@ -71,7 +72,7 @@ def build_dex():
     n_strings = len(STRINGS)
     n_types = len(TYPES)
     n_protos = 2
-    n_methods = 3
+    n_methods = 4
     n_classdefs = 1
 
     off_string_ids = header_size
@@ -112,19 +113,34 @@ def build_dex():
     # const-string v0, "misc" (op 0x1a, unsupported by the translator -> stubbed);
     # const/4 v0, 0 (0x0012); return v0 (0x000f). Never executed (stub throws).
     data.extend(code_item(1, 0, 0, [0x001A, S["misc"], 0x0012, 0x000F]))
+    code_loopsum_off = off_data + len(data)
+    # int loopSum() { int sum=0,i=1; while(!(i>10)){ sum+=i; i+=1; } return sum; }
+    #   pc0  const/4    v0, 0
+    #   pc1  const/4    v1, 1
+    #   pc2  const/16   v2, 10
+    #   pc4  if-gt      v1, v2, +7    ; if i>10 goto pc11
+    #   pc6  add-int    v0, v0, v1
+    #   pc8  add-int/lit8 v1, v1, 1
+    #   pc10 goto       -6            ; -> pc4
+    #   pc11 return     v0            ; 55
+    data.extend(code_item(3, 0, 0, [
+        0x0012, 0x1112, 0x0213, 0x000A, 0x2136, 0x0007,
+        0x0090, 0x0100, 0x01D8, 0x0101, 0xFA28, 0x000F,
+    ]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
     cd += uleb128(0)  # static_fields_size
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(3)  # direct_methods_size
+    cd += uleb128(4)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
     # direct methods, sorted by ascending method index; idx diffs are cumulative.
-    # m0=main (id 0), m1=answer (id 1), m2=misc (id 2).
-    cd += uleb128(0) + uleb128(0x9) + uleb128(code_main_off)     # diff 0 -> idx 0
-    cd += uleb128(1) + uleb128(0x9) + uleb128(code_answer_off)   # diff 1 -> idx 1
-    cd += uleb128(1) + uleb128(0x9) + uleb128(code_misc_off)     # diff 1 -> idx 2
+    # m0=main (id 0), m1=answer (id 1), m2=misc (id 2), m3=loopSum (id 3).
+    cd += uleb128(0) + uleb128(0x9) + uleb128(code_main_off)      # diff 0 -> idx 0
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_answer_off)    # diff 1 -> idx 1
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_misc_off)      # diff 1 -> idx 2
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_loopsum_off)   # diff 1 -> idx 3
     data.extend(cd)
 
     # map_list (4-aligned). Parser ignores it, but emit a valid one.
@@ -139,7 +155,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 1, type_list_main_off),
-        (0x2001, 3, code_main_off),
+        (0x2001, 4, code_main_off),
         (0x2000, 1, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -163,7 +179,8 @@ def build_dex():
     method_ids = b""
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 0, S["main"])
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["answer"])
-    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["misc"])  # proto ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["misc"])     # proto ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["loopSum"])  # proto ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",

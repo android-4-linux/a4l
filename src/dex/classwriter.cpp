@@ -111,7 +111,11 @@ std::vector<std::uint8_t> ClassWriter::build() const {
   std::vector<std::uint8_t> out;
   be32(out, 0xCAFEBABE);
   be16(out, 0);   // minor
-  be16(out, 52);  // major: Java 8
+  // Major 49 (Java 5): the JVM verifies these with the type-inference verifier,
+  // which needs no StackMapTable — so the translator can emit branches without
+  // computing stack-map frames. The translation keeps the operand stack empty at
+  // every instruction boundary, which that verifier accepts.
+  be16(out, 49);
 
   be16(out, static_cast<std::uint16_t>(pool_.size() + 1));  // cp count
   for (const auto& e : pool_) out.insert(out.end(), e.begin(), e.end());

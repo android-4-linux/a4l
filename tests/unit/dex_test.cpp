@@ -57,7 +57,7 @@ TEST_CASE("DexFile parses classes and method signatures", "[dex]") {
   REQUIRE(c.super_name.has_value());
   CHECK(*c.super_name == "java.lang.Object");
   CHECK(c.access_flags & kAccPublic);
-  REQUIRE(c.direct_methods.size() == 3);
+  REQUIRE(c.direct_methods.size() == 4);
 
   const DexMethod* main = find(c.direct_methods, "main");
   REQUIRE(main != nullptr);
@@ -98,9 +98,9 @@ TEST_CASE("convert emits a real .class and translates the int subset", "[dex]") 
   DexError cerr = convert(*dex, opts, res);
   REQUIRE(cerr.is_ok());
 
-  // main (return-void) and answer (const/return) translate; misc (const-string)
-  // is unsupported and falls back to a bytecode stub.
-  CHECK(res.translated_methods == 2);
+  // main, answer, and loopSum (branches) translate; misc (const-string) is
+  // unsupported and falls back to a bytecode stub.
+  CHECK(res.translated_methods == 3);
   CHECK(res.stubbed_methods == 1);
 
   const std::filesystem::path cls =

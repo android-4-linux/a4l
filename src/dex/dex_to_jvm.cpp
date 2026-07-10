@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <optional>
 #include <system_error>
 #include <utility>
@@ -31,7 +32,7 @@ enum : std::uint8_t {
   OP_LDC_W = 0x13, OP_ILOAD = 0x15, OP_ALOAD = 0x19, OP_ISTORE = 0x36,
   OP_ASTORE = 0x3a, OP_DUP = 0x59, OP_IADD = 0x60, OP_ISUB = 0x64,
   OP_IMUL = 0x68, OP_IRETURN = 0xac, OP_ARETURN = 0xb0, OP_RETURN = 0xb1,
-  OP_NEW = 0xbb, OP_INVOKESPECIAL = 0xb7, OP_ATHROW = 0xbf,
+  OP_NEW = 0xbb, OP_INVOKESPECIAL = 0xb7, OP_ATHROW = 0xbf, OP_GOTO = 0xa7,
 };
 
 std::string internal_name(const std::string& java) {
@@ -163,11 +164,28 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexMethod& m) 
     else { e.load_i(i); e.store_i(dst); }
   }
 
+  // Branch handling: record every Dalvik pc -> JVM code offset, and each branch's
+  // JVM operand site + Dalvik target, then patch relative offsets in a second
+  // pass (targets may be forward).
+  std::map<std::uint32_t, std::size_t> pc_to_jvm;
+  struct Fixup { std::size_t branch_at; std::uint32_t target_pc; };
+  std::vector<Fixup> fixups;
+  const auto branch_to = [&](std::uint8_t jvm_op, std::uint32_t target) {
+    const std::size_t at = e.code.size();
+    e.op(jvm_op);
+    e.u2(0);  // placeholder, patched below
+    fixups.push_back({at, target});
+  };
+
   const std::vector<std::uint16_t>& in = c.insns;
   std::size_t pc = 0;
   while (pc < in.size()) {
+    pc_to_jvm[static_cast<std::uint32_t>(pc)] = e.code.size();
     const std::uint16_t u = in[pc];
     const std::uint8_t opcode = u & 0xff;
+    const auto rel_target = [&](std::int64_t off) {
+      return static_cast<std::uint32_t>(static_cast<std::int64_t>(pc) + off);
+    };
     switch (opcode) {
       case 0x00:  // nop
         pc += 1;
@@ -265,9 +283,59 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexMethod& m) 
         pc += 2;
         break;
       }
+      case 0x28: {  // goto +AA (10t)
+        const std::int32_t off = static_cast<std::int8_t>((u >> 8) & 0xff);
+        branch_to(OP_GOTO, rel_target(off));
+        pc += 1;
+        break;
+      }
+      case 0x29: {  // goto/16 +AAAA (20t)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const std::int32_t off = static_cast<std::int16_t>(in[pc + 1]);
+        branch_to(OP_GOTO, rel_target(off));
+        pc += 2;
+        break;
+      }
+      case 0x32: case 0x33: case 0x34:
+      case 0x35: case 0x36: case 0x37: {  // if-test vA, vB, +CCCC (22t)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        const std::int32_t off = static_cast<std::int16_t>(in[pc + 1]);
+        e.load_i(local(a)); e.load_i(local(b));
+        // if-eq..if-le (0x32..0x37) -> if_icmpeq..if_icmple (0x9f..0xa4)
+        const std::uint8_t jvm_op = static_cast<std::uint8_t>(0x9f + (opcode - 0x32));
+        e.adj(-2);
+        branch_to(jvm_op, rel_target(off));
+        pc += 2;
+        break;
+      }
+      case 0x38: case 0x39: case 0x3a:
+      case 0x3b: case 0x3c: case 0x3d: {  // if-testz vAA, +BBBB (21t)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const std::int32_t off = static_cast<std::int16_t>(in[pc + 1]);
+        e.load_i(local(a));
+        // if-eqz..if-lez (0x38..0x3d) -> ifeq..ifle (0x99..0x9e)
+        const std::uint8_t jvm_op = static_cast<std::uint8_t>(0x99 + (opcode - 0x38));
+        e.adj(-1);
+        branch_to(jvm_op, rel_target(off));
+        pc += 2;
+        break;
+      }
       default:
         return std::nullopt;  // unsupported opcode -> stub the method
     }
+  }
+
+  // Resolve branch targets to relative JVM offsets (from the branch opcode).
+  for (const Fixup& fx : fixups) {
+    const auto it = pc_to_jvm.find(fx.target_pc);
+    if (it == pc_to_jvm.end()) return std::nullopt;  // target not an instruction
+    const std::int64_t rel =
+        static_cast<std::int64_t>(it->second) - static_cast<std::int64_t>(fx.branch_at);
+    if (rel < -32768 || rel > 32767) return std::nullopt;  // needs goto_w; stub
+    e.code[fx.branch_at + 1] = static_cast<std::uint8_t>((rel >> 8) & 0xff);
+    e.code[fx.branch_at + 2] = static_cast<std::uint8_t>(rel & 0xff);
   }
 
   return Translated{std::move(e.code), static_cast<std::uint16_t>(e.max_stack),

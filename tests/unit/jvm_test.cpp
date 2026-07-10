@@ -107,7 +107,8 @@ TEST_CASE("JVM backend executes real Java, including a DEX->JVM converted class"
     std::filesystem::remove(answer, ec);
     Error rr = vm->call_static_main("Runner", {answer.string()});
     CHECK(rr.is_ok());
-    CHECK(read_file(answer) == "42");  // translated answer() returned real 42
+    // answer()=42 (const/return); loopSum()=55 (translated loop with branches).
+    CHECK(read_file(answer) == "42,55");
     std::filesystem::remove(answer, ec);
   }
 
