@@ -27,11 +27,17 @@ public class Context {
   public String getPackageName() { return packageName; }
   public Context getApplicationContext() { return this; }
 
+  public static final int MODE_PRIVATE = 0;
+
   // The Manager boundary (ADR-2/ADR-3): return the Java Manager shim, whose natives
   // call the in-process aclcxx svc/ hub. More Managers land as apps need them.
   public Object getSystemService(String name) {
     if (AUDIO_SERVICE.equals(name)) return new android.media.AudioManager();
     return null;
+  }
+
+  public SharedPreferences getSharedPreferences(String name, int mode) {
+    return new SharedPreferences(name);
   }
   public String getSystemServiceName(Class<?> serviceClass) { return null; }
   public ClassLoader getClassLoader() { return getClass().getClassLoader(); }

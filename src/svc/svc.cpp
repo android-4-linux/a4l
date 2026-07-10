@@ -40,6 +40,43 @@ AudioService& audio() {
   return instance;
 }
 
+// --- PreferencesService --------------------------------------------------------
+namespace {
+constexpr std::string_view kPrefsTag = "aclcxx.svc.prefs";
+}  // namespace
+
+void PreferencesService::put_string(const std::string& file, const std::string& key,
+                                    const std::string& value) {
+  strings_[file][key] = value;
+  log::i(kPrefsTag, "prefs[{}] {} -> {}", file, key, value);
+}
+
+const std::string* PreferencesService::find_string(const std::string& file,
+                                                   const std::string& key) const {
+  auto f = strings_.find(file);
+  if (f == strings_.end()) return nullptr;
+  auto k = f->second.find(key);
+  return k == f->second.end() ? nullptr : &k->second;
+}
+
+void PreferencesService::put_int(const std::string& file, const std::string& key, int value) {
+  ints_[file][key] = value;
+  log::i(kPrefsTag, "prefs[{}] {} -> {}", file, key, value);
+}
+
+int PreferencesService::get_int(const std::string& file, const std::string& key,
+                                int def_value) const {
+  auto f = ints_.find(file);
+  if (f == ints_.end()) return def_value;
+  auto k = f->second.find(key);
+  return k == f->second.end() ? def_value : k->second;
+}
+
+PreferencesService& prefs() {
+  static PreferencesService instance;
+  return instance;
+}
+
 const char* module_name() noexcept { return "svc"; }
 
 }  // namespace aclcxx::svc

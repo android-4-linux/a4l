@@ -79,6 +79,7 @@ if py3.found() and have_jni
       'framework-shim-classes',
       input : files('../../framework/shim/android/content/Context.java',
                     '../../framework/shim/android/content/ContextWrapper.java',
+                    '../../framework/shim/android/content/SharedPreferences.java',
                     '../../framework/shim/android/view/ContextThemeWrapper.java',
                     '../../framework/shim/android/os/Bundle.java',
                     '../../framework/shim/android/app/Service.java',

@@ -226,13 +226,26 @@ class JvmVm final : public Vm {
     }
   }
 
-  // If `obj` is an android.content.Context (Service/Activity now are), log its
-  // package — proof the entry point functions as a Context, not just an Object.
+  // If `obj` is an android.content.Context (Service/Activity now are), inject the
+  // manifest package and log getPackageName() — proof the entry point functions as
+  // a Context carrying the app's real identity (a stand-in for attachBaseContext of
+  // a ContextImpl).
   void log_context(jobject obj) {
     jclass ctx_cls = env_->FindClass("android/content/Context");
     if (ctx_cls == nullptr) { clear_exception(); return; }
     if (env_->IsInstanceOf(obj, ctx_cls) == JNI_TRUE) {
       jclass obj_cls = env_->GetObjectClass(obj);
+      if (!config_.package_name.empty()) {
+        jmethodID setter =
+            env_->GetMethodID(obj_cls, "aclcxxSetPackage", "(Ljava/lang/String;)V");
+        if (setter != nullptr) {
+          jstring pkg = env_->NewStringUTF(config_.package_name.c_str());
+          env_->CallVoidMethod(obj, setter, pkg);
+          env_->DeleteLocalRef(pkg);
+        } else {
+          clear_exception();
+        }
+      }
       jmethodID gpn = env_->GetMethodID(obj_cls, "getPackageName", "()Ljava/lang/String;");
       if (gpn != nullptr) {
         auto p = static_cast<jstring>(env_->CallObjectMethod(obj, gpn));

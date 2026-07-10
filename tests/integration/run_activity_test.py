@@ -14,9 +14,10 @@ import subprocess
 import sys
 
 LAUNCHING = "launching Activity com.aclcxx.hello.MainActivity"  # lifecycle path taken
-CONTEXT = "entry point is a Context: getPackageName()"          # Activity extends Context
+CONTEXT = "getPackageName()=com.aclcxx.hello"  # real manifest package injected
 ONCREATE = "MainActivity.onCreate ran"                          # onCreate executed
 SVC = "set stream 3 volume -> 7"  # getSystemService(AUDIO)->AudioManager->svc hub
+PREFS = "prefs[settings] greeting -> hi"  # getSharedPreferences->edit->putString->svc
 
 
 def main() -> int:
@@ -34,11 +35,13 @@ def main() -> int:
     if LAUNCHING not in out:
         sys.stderr.write("FAIL: driver did not take the Activity-lifecycle path\n"); ok = False
     if CONTEXT not in out:
-        sys.stderr.write("FAIL: Activity is not a functioning Context\n"); ok = False
+        sys.stderr.write("FAIL: real manifest package not injected into the Context\n"); ok = False
     if ONCREATE not in out:
         sys.stderr.write("FAIL: MainActivity.onCreate did not run\n"); ok = False
     if SVC not in out:
         sys.stderr.write("FAIL: getSystemService(AUDIO) did not reach the svc hub\n"); ok = False
+    if PREFS not in out:
+        sys.stderr.write("FAIL: getSharedPreferences write did not reach the svc hub\n"); ok = False
     if "is not an Activity" in out or "invoking static main" in out:
         sys.stderr.write("FAIL: wrongly fell back to static main()\n"); ok = False
 

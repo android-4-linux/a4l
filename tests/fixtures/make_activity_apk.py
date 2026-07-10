@@ -47,13 +47,27 @@ STRINGS = [
     "setStreamVolume",                  # 19
     "LL",                               # 20 getSystemService shorty (String)->Object
     "VIII",                             # 21 setStreamVolume shorty
+    "Landroid/content/SharedPreferences;",         # 22
+    "Landroid/content/SharedPreferences$Editor;",  # 23
+    "getSharedPreferences",             # 24
+    "edit",                             # 25
+    "putString",                        # 26
+    "apply",                            # 27
+    "settings",                         # 28 prefs file
+    "greeting",                         # 29 key
+    "hi",                               # 30 value
+    "LLI",                              # 31 getSharedPreferences shorty (String,int)->SP
+    "L",                                # 32 edit shorty ()->Editor
+    "LLL",                              # 33 putString shorty (String,String)->Editor
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 AUDIO_MGR = "Landroid/media/AudioManager;"
 CONTEXT = "Landroid/content/Context;"
+SP = "Landroid/content/SharedPreferences;"
+EDITOR = "Landroid/content/SharedPreferences$Editor;"
 TYPES = ["Lcom/aclcxx/hello/MainActivity;", "Landroid/app/Activity;",
          "Landroid/os/Bundle;", "Landroid/util/Log;", "Ljava/lang/String;", "V", "I",
-         AUDIO_MGR, "Ljava/lang/Object;", CONTEXT]
+         AUDIO_MGR, "Ljava/lang/Object;", CONTEXT, SP, EDITOR]
 T = {t: i for i, t in enumerate(TYPES)}
 
 
@@ -85,7 +99,7 @@ def code_item(regs, ins, outs, insns):
 def build_dex():
     header_size = 112
     n_strings, n_types, n_protos, n_fields, n_methods, n_classdefs = \
-        len(STRINGS), len(TYPES), 5, 0, 7, 1
+        len(STRINGS), len(TYPES), 8, 0, 11, 1
 
     off_string_ids = header_size
     off_type_ids = off_string_ids + n_strings * 4
@@ -115,6 +129,9 @@ def build_dex():
     data.extend(align4(bytearray()))
     tl_3int_off = off_data + len(data)     # setStreamVolume(int,int,int)
     data.extend(align4(bytearray(struct.pack("<I", 3) + struct.pack("<H", T["I"]) * 3)))
+    data.extend(align4(bytearray()))
+    tl_stringint_off = off_data + len(data)  # getSharedPreferences(String,int)
+    data.extend(align4(bytearray(struct.pack("<I", 2) + struct.pack("<H", T["Ljava/lang/String;"]) + struct.pack("<H", T["I"]))))
 
     # <init>()V : super(); return-void      (v0 = this)
     code_init_off = off_data + len(data)
@@ -139,6 +156,17 @@ def build_dex():
         0x7212,                   # const/4 v2, 7  (index)
         0x0312,                   # const/4 v3, 0  (flags)
         0x406E, 0x0006, 0x3210,   # invoke-virtual {v0,v1,v2,v3}, setStreamVolume (m6)
+        # getSharedPreferences("settings", 0).edit().putString("greeting","hi").apply()
+        0x001A, S["settings"],    # const-string v0, "settings"
+        0x0112,                   # const/4 v1, 0  (MODE_PRIVATE)
+        0x306E, 0x0007, 0x0104,   # invoke-virtual {v4,v0,v1}, getSharedPreferences (m7)
+        0x000C,                   # move-result-object v0  (SharedPreferences)
+        0x106E, 0x0008, 0x0000,   # invoke-virtual {v0}, edit (m8)
+        0x000C,                   # move-result-object v0  (Editor)
+        0x011A, S["greeting"],    # const-string v1, "greeting"
+        0x021A, S["hi"],          # const-string v2, "hi"
+        0x306E, 0x0009, 0x0210,   # invoke-virtual {v0,v1,v2}, putString (m9) [Editor popped]
+        0x106E, 0x000A, 0x0000,   # invoke-virtual {v0}, apply (m10)
         0x000E,                   # return-void
     ]))
 
@@ -159,7 +187,7 @@ def build_dex():
         (0x0005, n_methods, off_method_ids),
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
-        (0x1001, 4, tl_bundle_off),
+        (0x1001, 5, tl_bundle_off),
         (0x2001, 2, code_init_off),
         (0x2000, 1, class_data_off),
     ]
@@ -177,6 +205,9 @@ def build_dex():
     proto_ids += struct.pack("<III", S["ILL"], T["I"], tl_2str_off)       # 2 (String,String)I
     proto_ids += struct.pack("<III", S["LL"], T["Ljava/lang/Object;"], tl_string_off)  # 3 getSystemService
     proto_ids += struct.pack("<III", S["VIII"], T["V"], tl_3int_off)      # 4 setStreamVolume
+    proto_ids += struct.pack("<III", S["LLI"], T[SP], tl_stringint_off)   # 5 getSharedPreferences
+    proto_ids += struct.pack("<III", S["L"], T[EDITOR], 0)               # 6 edit
+    proto_ids += struct.pack("<III", S["LLL"], T[EDITOR], tl_2str_off)   # 7 putString
     method_ids = struct.pack("<HHI", T["Lcom/aclcxx/hello/MainActivity;"], 0, S["<init>"])   # m0
     method_ids += struct.pack("<HHI", T["Lcom/aclcxx/hello/MainActivity;"], 1, S["onCreate"])  # m1
     method_ids += struct.pack("<HHI", T["Landroid/app/Activity;"], 0, S["<init>"])   # m2 super.<init>
@@ -184,6 +215,10 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["Landroid/util/Log;"], 2, S["i"])            # m4 Log.i
     method_ids += struct.pack("<HHI", T[CONTEXT], 3, S["getSystemService"])          # m5
     method_ids += struct.pack("<HHI", T[AUDIO_MGR], 4, S["setStreamVolume"])         # m6
+    method_ids += struct.pack("<HHI", T[CONTEXT], 5, S["getSharedPreferences"])      # m7
+    method_ids += struct.pack("<HHI", T[SP], 6, S["edit"])                           # m8
+    method_ids += struct.pack("<HHI", T[EDITOR], 7, S["putString"])                  # m9
+    method_ids += struct.pack("<HHI", T[EDITOR], 0, S["apply"])                      # m10
     class_defs = struct.pack("<IIIIIIII",
                              T["Lcom/aclcxx/hello/MainActivity;"], 0x1,
                              T["Landroid/app/Activity;"], 0, 0xFFFFFFFF, 0,

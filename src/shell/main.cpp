@@ -208,6 +208,7 @@ int cmd_run(const std::vector<std::string>& args) {
   cfg.classpath.insert(cfg.classpath.end(), extra_classpath.begin(),
                        extra_classpath.end());
   cfg.cache_dir = cache_dir;
+  cfg.package_name = manifest.package;  // injected into the entry point's Context
 
   // Boot classpath = the vendored android.* framework (Gate G2). Sources: --framework
   // then $ACLCXX_FRAMEWORK. Empty today (no framework vendored yet); the seam is live.

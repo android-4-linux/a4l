@@ -99,6 +99,24 @@ jboolean JNICALL AudioManager_isMusicActive(JNIEnv* /*e*/, jclass /*c*/) {
   return svc::audio().music_active() ? JNI_TRUE : JNI_FALSE;
 }
 
+// --- android.content.SharedPreferences(.Editor) -> aclcxx::svc::PreferencesService
+void JNICALL Prefs_nativePutString(JNIEnv* env, jclass /*c*/, jstring name, jstring key,
+                                   jstring value) {
+  svc::prefs().put_string(to_utf8(env, name), to_utf8(env, key), to_utf8(env, value));
+}
+void JNICALL Prefs_nativePutInt(JNIEnv* env, jclass /*c*/, jstring name, jstring key,
+                                jint value) {
+  svc::prefs().put_int(to_utf8(env, name), to_utf8(env, key), value);
+}
+jstring JNICALL Prefs_nativeGetString(JNIEnv* env, jclass /*c*/, jstring name, jstring key) {
+  const std::string* v = svc::prefs().find_string(to_utf8(env, name), to_utf8(env, key));
+  return v != nullptr ? env->NewStringUTF(v->c_str()) : nullptr;  // null -> shim uses default
+}
+jint JNICALL Prefs_nativeGetInt(JNIEnv* env, jclass /*c*/, jstring name, jstring key,
+                                jint def_value) {
+  return svc::prefs().get_int(to_utf8(env, name), to_utf8(env, key), def_value);
+}
+
 }  // namespace
 
 void register_framework_natives(JNIEnv* env) {
@@ -175,6 +193,39 @@ void register_framework_natives(JNIEnv* env) {
                  "framework native bound: android.media.AudioManager");
     }
     env->DeleteLocalRef(am_cls);
+  } else {
+    env->ExceptionClear();
+  }
+
+  // android.content.SharedPreferences (getters) + .Editor (putters) -> svc/ prefs.
+  if (jclass sp_cls = env->FindClass("android/content/SharedPreferences"); sp_cls != nullptr) {
+    const std::array<JNINativeMethod, 2> methods{{
+        {const_cast<char*>("nativeGetString"),
+         const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
+         reinterpret_cast<void*>(&Prefs_nativeGetString)},
+        {const_cast<char*>("nativeGetInt"),
+         const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;I)I"),
+         reinterpret_cast<void*>(&Prefs_nativeGetInt)},
+    }};
+    if (env->RegisterNatives(sp_cls, methods.data(), 2) != JNI_OK) env->ExceptionClear();
+    env->DeleteLocalRef(sp_cls);
+  } else {
+    env->ExceptionClear();
+  }
+  if (jclass ed_cls = env->FindClass("android/content/SharedPreferences$Editor");
+      ed_cls != nullptr) {
+    const std::array<JNINativeMethod, 2> methods{{
+        {const_cast<char*>("nativePutString"),
+         const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+         reinterpret_cast<void*>(&Prefs_nativePutString)},
+        {const_cast<char*>("nativePutInt"),
+         const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;I)V"),
+         reinterpret_cast<void*>(&Prefs_nativePutInt)},
+    }};
+    if (env->RegisterNatives(ed_cls, methods.data(), 2) != JNI_OK) env->ExceptionClear();
+    env->DeleteLocalRef(ed_cls);
+    log::write(log::Level::Info, "aclcxx.runtime.jvm",
+               "framework native bound: android.content.SharedPreferences");
   } else {
     env->ExceptionClear();
   }

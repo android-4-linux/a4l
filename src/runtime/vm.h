@@ -36,6 +36,7 @@ struct VmConfig {
   std::vector<std::string> boot_classpath;  // vendored framework dex/jars
   std::vector<std::string> classpath;       // app dex (extracted from the APK)
   std::string cache_dir;                     // DEX->OAT / dalvik-cache
+  std::string package_name;                  // manifest package, injected into Context
   std::vector<std::string> options;          // raw VM options (-Xmx..., -verbose:gc)
 };
 

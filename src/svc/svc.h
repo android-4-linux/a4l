@@ -11,6 +11,8 @@
 // returns the Manager shim; the shim's natives reach the service singletons here.
 
 #include <array>
+#include <map>
+#include <string>
 
 namespace aclcxx::svc {
 
@@ -35,8 +37,23 @@ class AudioService {
   AudioService();
 };
 
+// Backs android.content.SharedPreferences: named key/value stores, in-process.
+// (A real hub persists these to per-package files; in-memory for now.)
+class PreferencesService {
+ public:
+  void put_string(const std::string& file, const std::string& key, const std::string& value);
+  const std::string* find_string(const std::string& file, const std::string& key) const;
+  void put_int(const std::string& file, const std::string& key, int value);
+  int get_int(const std::string& file, const std::string& key, int def_value) const;
+
+ private:
+  std::map<std::string, std::map<std::string, std::string>> strings_;
+  std::map<std::string, std::map<std::string, int>> ints_;
+};
+
 // Process singletons for the hub's services.
 AudioService& audio();
+PreferencesService& prefs();
 
 const char* module_name() noexcept;
 
