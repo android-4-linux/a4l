@@ -105,6 +105,7 @@ STRINGS = [
     "IIIIIII",               # 63 shorty for (IIIIII)I
     "sum6",                  # 64 method name (6-int target for invoke/range)
     "rangeTest",             # 65 method name (invoke-static/range)
+    "fillData",              # 66 method name (fill-array-data)
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 
@@ -145,7 +146,7 @@ def build_dex():
     n_types = len(TYPES)
     n_protos = 6    # + (IIIIII)I for sum6
     n_fields = 6    # + HelloDex.ci (static int, <clinit> demo)
-    n_methods = 39  # + filledArray, constClass, <clinit>, clinitTest, sum6, rangeTest
+    n_methods = 40  # + filledArray, constClass, <clinit>, clinitTest, sum6, rangeTest, fillData
     n_classdefs = 2  # HelloDex, Counter
 
     off_string_ids = header_size
@@ -497,13 +498,29 @@ def build_dex():
         0x0677, 0x0025, 0x0000,        # invoke-static/range {v0..v5}, sum6 (m37)
         0x000A, 0x000F,                # move-result v0 ; return v0
     ]))
+    code_filldata_off = off_data + len(data)
+    # int fillData(){ int[] a={5,15,22}; return a[0]+a[1]+a[2]; }  = 42  (fill-array-data)
+    data.extend(code_item(4, 0, 0, [
+        0x3112,                        # pc0  const/4 v1, 3   (size)
+        0x1023, T["[I"],               # pc1  new-array v0, v1, [I
+        0x0026, 0x0011, 0x0000,        # pc3  fill-array-data v0, +17 (payload @ pc20)
+        0x0112, 0x0244, 0x0100,        # pc6  const/4 v1,0 ; aget v2, v0, v1   (=5)
+        0x1112, 0x0344, 0x0100,        # pc9  const/4 v1,1 ; aget v3, v0, v1   (=15)
+        0x0290, 0x0302,                # pc12 add-int v2, v2, v3                (=20)
+        0x2112, 0x0344, 0x0100,        # pc14 const/4 v1,2 ; aget v3, v0, v1   (=22)
+        0x0290, 0x0302,                # pc17 add-int v2, v2, v3                (=42)
+        0x020F,                        # pc19 return v2
+        # pc20 fill-array-data-payload: ident, width=4, size=3, data 5/15/22
+        0x0300, 0x0004, 0x0003, 0x0000,
+        0x0005, 0x0000, 0x000F, 0x0000, 0x0016, 0x0000,
+    ]))
 
     # class_data_item
     class_data_off = off_data + len(data)
     cd = bytearray()
     cd += uleb128(3)  # static_fields_size (HelloDex.total, HelloDex.wf, HelloDex.ci)
     cd += uleb128(0)  # instance_fields_size
-    cd += uleb128(29)  # direct_methods_size
+    cd += uleb128(30)  # direct_methods_size
     cd += uleb128(0)  # virtual_methods_size
     # static fields: total=f2, wf=f4, ci=f5 (cumulative diffs from 0)
     cd += uleb128(2) + uleb128(0x9)                               # f2 total, public static
@@ -540,6 +557,7 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_clinittest_off)  # diff 1 -> idx 36
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_sum6_off)        # diff 1 -> idx 37
     cd += uleb128(1) + uleb128(0x9) + uleb128(code_range_off)       # diff 1 -> idx 38
+    cd += uleb128(1) + uleb128(0x9) + uleb128(code_filldata_off)    # diff 1 -> idx 39
     data.extend(cd)
 
     # --- Counter class code items (object model demo) -----------------------
@@ -612,7 +630,7 @@ def build_dex():
         (0x0006, n_classdefs, off_class_defs),
         (0x2002, n_strings, string_data_off[0]),
         (0x1001, 3, type_list_main_off),
-        (0x2001, 34, code_main_off),
+        (0x2001, 35, code_main_off),
         (0x2000, 2, class_data_off),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
@@ -690,6 +708,7 @@ def build_dex():
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["clinitTest"])   # m36 ()I
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 5, S["sum6"])         # m37 (IIIIII)I (proto 5)
     method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["rangeTest"])    # m38 ()I
+    method_ids += struct.pack("<HHI", T["LHelloDex;"], 1, S["fillData"])     # m39 ()I
 
     class_defs = struct.pack(
         "<IIIIIIII",

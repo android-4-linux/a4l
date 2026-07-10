@@ -247,9 +247,9 @@ std::string obj_internal(const std::string& desc) {
 // stack-map forward pass, which only ever sees already-translatable opcodes).
 int dalvik_insn_units(std::uint8_t op) {
   if (op == 0x18) return 5;                                        // const-wide
-  if (op == 0x14 || op == 0x17 || op == 0x24 || op == 0x2b || op == 0x2c ||
-      (op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) {
-    return 3;  // const, const-wide/32, filled-new-array, packed/sparse-switch, invoke-{,/range}
+  if (op == 0x14 || op == 0x17 || op == 0x24 || op == 0x26 || op == 0x2b ||
+      op == 0x2c || (op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) {
+    return 3;  // const/32, filled-new-array, fill-array-data, switch, invoke-{,/range}
   }
   if (op == 0x13 || op == 0x15 || op == 0x16 || op == 0x19 || op == 0x1a ||
       op == 0x1c ||                  // const-class
@@ -467,6 +467,10 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
   struct SwitchFixup { std::size_t operand_at; std::uint32_t target_pc;
                        std::size_t switch_op_at; };
   std::vector<SwitchFixup> switch_fixups;
+  // Element descriptor last written to a register by new-array, so a following
+  // fill-array-data can pick the correct typed array-store opcode. Conservative:
+  // any other write to the register clears the entry (see clobber() below).
+  std::map<int, std::string> reg_array_elem;
 
   // Catch-handler entry points: the JVM enters these with the exception on the
   // operand stack, so reset the tracked height to 1 (move-exception then pops it).
@@ -479,6 +483,14 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
     // Skip inline switch/array payloads (data, not instructions).
     if (in[pc] == 0x0100) { pc += 4 + (pc + 1 < in.size() ? in[pc + 1] * 2 : 0); continue; }
     if (in[pc] == 0x0200) { pc += 2 + (pc + 1 < in.size() ? in[pc + 1] * 4 : 0); continue; }
+    if (in[pc] == 0x0300) {  // fill-array-data-payload: 4u header + ceil(size*width/2)
+      const std::uint32_t sz = pc + 3 < in.size()
+          ? (static_cast<std::uint32_t>(in[pc + 2]) |
+             (static_cast<std::uint32_t>(in[pc + 3]) << 16)) : 0;
+      const int w = pc + 1 < in.size() ? in[pc + 1] : 1;
+      pc += 4 + (static_cast<std::size_t>(sz) * w + 1) / 2;
+      continue;
+    }
     pc_to_jvm[static_cast<std::uint32_t>(pc)] = e.code.size();
     if (handler_pcs.count(static_cast<std::uint32_t>(pc))) {
       e.stack = 1;
@@ -980,7 +992,66 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         }
         // size popped, arrayref pushed (net 0 on stack); then store.
         e.store_a(local(a));
+        reg_array_elem[a] = elem;  // remember for a following fill-array-data
         pc += 2;
+        break;
+      }
+      case 0x26: {  // fill-array-data vAA, +offset (31t) - init an array from a payload
+        if (pc + 2 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const auto it = reg_array_elem.find(a);
+        if (it == reg_array_elem.end() || it->second.size() != 1) {
+          return std::nullopt;  // element type unknown / not primitive -> stub
+        }
+        const char elem = it->second[0];
+        const std::int32_t poff = static_cast<std::int32_t>(
+            static_cast<std::uint32_t>(in[pc + 1]) |
+            (static_cast<std::uint32_t>(in[pc + 2]) << 16));
+        const std::size_t ppc = static_cast<std::size_t>(
+            static_cast<std::int64_t>(pc) + poff);
+        if (ppc + 3 >= in.size() || in[ppc] != 0x0300) return std::nullopt;
+        const int width = in[ppc + 1];
+        const std::uint32_t size = static_cast<std::uint32_t>(in[ppc + 2]) |
+                                   (static_cast<std::uint32_t>(in[ppc + 3]) << 16);
+        // Element store op + how to read a value of `width` bytes from the payload.
+        std::uint8_t store_op;
+        bool wide = false;
+        switch (elem) {
+          case 'Z': case 'B': store_op = OP_BASTORE; break;
+          case 'C': store_op = OP_CASTORE; break;
+          case 'S': store_op = OP_SASTORE; break;
+          case 'I': store_op = OP_IASTORE; break;
+          case 'J': store_op = OP_LASTORE; wide = true; break;
+          default: return std::nullopt;  // F/D unsupported (no type inference yet)
+        }
+        const std::size_t data = (ppc + 4) * 2;  // payload data byte offset
+        const auto raw = [&](std::size_t byte) -> std::uint64_t {
+          const std::size_t unit = byte / 2;
+          return unit < in.size()
+                     ? (byte % 2 == 0 ? (in[unit] & 0xff) : (in[unit] >> 8)) : 0;
+        };
+        for (std::uint32_t i = 0; i < size; ++i) {
+          std::uint64_t v = 0;
+          for (int b = 0; b < width; ++b) {
+            v |= raw(data + static_cast<std::size_t>(i) * width + b) << (8 * b);
+          }
+          e.load_a(local(a));   // arrayref
+          e.push_int(static_cast<std::int32_t>(i));
+          if (wide) {
+            e.push_long(static_cast<std::int64_t>(v));  // sign of full 64-bit value
+            e.op(store_op); e.adj(-4);  // array+index+long(2) popped
+          } else {
+            // Sign-extend from the element width so byte/short literals round-trip.
+            const int bits = width * 8;
+            std::int64_t sv = static_cast<std::int64_t>(v);
+            if (bits < 64 && (v & (1ULL << (bits - 1)))) {
+              sv |= -(1LL << bits);
+            }
+            e.push_int(static_cast<std::int32_t>(sv));
+            e.op(store_op); e.adj(-3);  // array+index+value popped
+          }
+        }
+        pc += 3;
         break;
       }
       case 0x45:    // aget-wide vAA, vBB, vCC (23x) - long[] (double[] stubs elsewhere)
