@@ -83,6 +83,7 @@ if py3.found() and have_jni
                     '../../framework/shim/android/os/Bundle.java',
                     '../../framework/shim/android/app/Service.java',
                     '../../framework/shim/android/app/Activity.java',
+                    '../../framework/shim/android/media/AudioManager.java',
                     '../../framework/shim/android/media/AudioTrack.java',
                     '../../framework/shim/android/media/MediaDescription.java',
                     '../../framework/shim/android/media/MediaMetadata.java',

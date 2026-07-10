@@ -17,6 +17,7 @@
 
 #include "audio/audio.h"
 #include "log/log.h"
+#include "svc/svc.h"
 
 namespace aclcxx::runtime {
 namespace {
@@ -83,6 +84,21 @@ void JNICALL AudioTrack_nativeRelease(JNIEnv* /*env*/, jclass /*cls*/, jlong han
   }
 }
 
+// --- android.media.AudioManager -> aclcxx::svc::AudioService (in-process hub) ---
+jint JNICALL AudioManager_getStreamVolume(JNIEnv* /*e*/, jclass /*c*/, jint stream) {
+  return svc::audio().stream_volume(stream);
+}
+void JNICALL AudioManager_setStreamVolume(JNIEnv* /*e*/, jclass /*c*/, jint stream,
+                                          jint index) {
+  svc::audio().set_stream_volume(stream, index);
+}
+jint JNICALL AudioManager_getStreamMaxVolume(JNIEnv* /*e*/, jclass /*c*/, jint stream) {
+  return svc::audio().stream_max_volume(stream);
+}
+jboolean JNICALL AudioManager_isMusicActive(JNIEnv* /*e*/, jclass /*c*/) {
+  return svc::audio().music_active() ? JNI_TRUE : JNI_FALSE;
+}
+
 }  // namespace
 
 void register_framework_natives(JNIEnv* env) {
@@ -133,6 +149,32 @@ void register_framework_natives(JNIEnv* env) {
                  "framework native bound: android.media.AudioTrack");
     }
     env->DeleteLocalRef(at_cls);
+  } else {
+    env->ExceptionClear();
+  }
+
+  // android.media.AudioManager -> aclcxx::svc::AudioService (the svc/ hub boundary).
+  if (jclass am_cls = env->FindClass("android/media/AudioManager"); am_cls != nullptr) {
+    const std::array<JNINativeMethod, 4> methods{{
+        {const_cast<char*>("nativeGetStreamVolume"), const_cast<char*>("(I)I"),
+         reinterpret_cast<void*>(&AudioManager_getStreamVolume)},
+        {const_cast<char*>("nativeSetStreamVolume"), const_cast<char*>("(II)V"),
+         reinterpret_cast<void*>(&AudioManager_setStreamVolume)},
+        {const_cast<char*>("nativeGetStreamMaxVolume"), const_cast<char*>("(I)I"),
+         reinterpret_cast<void*>(&AudioManager_getStreamMaxVolume)},
+        {const_cast<char*>("nativeIsMusicActive"), const_cast<char*>("()Z"),
+         reinterpret_cast<void*>(&AudioManager_isMusicActive)},
+    }};
+    if (env->RegisterNatives(am_cls, methods.data(),
+                             static_cast<jint>(methods.size())) != JNI_OK) {
+      env->ExceptionClear();
+      log::write(log::Level::Warn, "aclcxx.runtime.jvm",
+                 "RegisterNatives(android.media.AudioManager) failed");
+    } else {
+      log::write(log::Level::Info, "aclcxx.runtime.jvm",
+                 "framework native bound: android.media.AudioManager");
+    }
+    env->DeleteLocalRef(am_cls);
   } else {
     env->ExceptionClear();
   }

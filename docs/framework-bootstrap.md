@@ -123,6 +123,18 @@ lifecycle driver instantiates the app's `Activity` subclass and calls `onCreate`
 `onResume` directly — no Binder. `setContentView`/`Context` services stay stubbed until the View
 stack (Phase 2).
 
+## The svc/ Manager hub (getSystemService — the ADR-3 seam)
+
+`Context.getSystemService(name)` returns a Java **Manager shim** whose native methods call the
+in-process `svc/` hub **directly — no Binder, no SystemServer** (ADR-3). The first Manager is
+`android.media.AudioManager` → `aclcxx::svc::AudioService` (`src/svc/svc.{h,cpp}`, per-stream volume
+state). `MainActivity.onCreate` does `((AudioManager) getSystemService("audio")).setStreamVolume(
+STREAM_MUSIC, 7, 0)` and the C++ service logs `set stream 3 volume -> 7` (`run-apk-activity`
+asserts it). This is the shim-at-Manager-boundary (ADR-2) working end-to-end: app →
+`getSystemService` → Manager shim → JNI native → aclcxx C++ service. `svc::audio` is a general
+service (present in the phone build; `svc/car` stays automotive-gated). More Managers
+(ActivityManager, WindowManager, MediaSessionManager, ...) join as the app corpus needs them.
+
 ## The Context hierarchy (unblocks real entry points)
 
 Real `Service`/`Activity` are `Context`s (`Activity` → `ContextThemeWrapper` → `ContextWrapper` →

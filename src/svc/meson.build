@@ -15,5 +15,6 @@ endif
 module_libs += static_library(
   'aclcxx_svc',
   svc_sources,
-  include_directories : config_inc,
+  include_directories : [config_inc, core_inc],
+  dependencies : [fmt_dep],   # via log/log.h
 )
