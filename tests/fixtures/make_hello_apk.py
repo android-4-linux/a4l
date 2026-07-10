@@ -1,24 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # Provenance: original test fixture generator; public Dalvik .dex format spec
 # (source.android.com/docs/core/runtime/dex-format) + AOSP androidfw binary-XML
-# layout. No GPL-3.0 sources.
+# layout (public Apache-2.0 headers). No GPL-3.0 sources.
 #
 # Emit a tiny, self-contained "hello world" APK for the end-to-end run-path test:
 # a single class com.aclcxx.hello.Main whose
-#   public static void main(String[]) { System.out.println("<MSG>"); }
+#   public static void main(String[]) { System.out.println(<MSG or Probe.tag()>); }
 # is translatable by the DEX->JVM converter and runnable on the JVM backend, plus
 # a binary AndroidManifest.xml whose launcher activity resolves to that class (so
 # `aclcxx run hello.apk` needs no --main). Independent of the C++ decoder.
 #
-# Usage: make_hello_apk.py <output.apk>
+# In --probe mode, main() instead calls com.aclcxx.fw.Probe.tag() — a class that is
+# NOT bundled in the APK, so it must be supplied via the framework boot classpath.
+# This proves the --framework / boot_classpath seam (Gate G2.a).
+#
+# Usage: make_hello_apk.py [--probe] <output.apk>
 import hashlib
 import struct
 import sys
 import zipfile
+import zlib
 
 from make_axml import build_axml
 
 MSG = "aclcxx: hello from a real APK"
+PROBE_CLASS = "com.aclcxx.fw.Probe"
 
 
 def uleb128(n):
@@ -39,33 +45,35 @@ def align4(buf):
     return buf
 
 
-# Interned strings (order arbitrary; the parser is order-independent).
-STRINGS = [
-    "Lcom/aclcxx/hello/Main;",  # 0  this class
-    "Ljava/lang/Object;",       # 1  superclass
-    "Ljava/lang/String;",       # 2  String
-    "[Ljava/lang/String;",      # 3  String[]
-    "Ljava/lang/System;",       # 4  System
-    "Ljava/io/PrintStream;",    # 5  PrintStream
-    "V",                        # 6  void
-    "VL",                       # 7  shorty (Object)->void
-    "main",                     # 8  method name
-    "out",                      # 9  field name
-    "println",                  # 10 method name
-    MSG,                        # 11 printed message
-]
-S = {s: i for i, s in enumerate(STRINGS)}
+def build_dex(probe=False):
+    # Interned strings; the Probe entities are always present but only referenced
+    # by main() in --probe mode (unused refs are valid and never resolved).
+    STRINGS = [
+        "Lcom/aclcxx/hello/Main;",   # 0  this class
+        "Ljava/lang/Object;",        # 1  superclass
+        "Ljava/lang/String;",        # 2  String
+        "[Ljava/lang/String;",       # 3  String[]
+        "Ljava/lang/System;",        # 4  System
+        "Ljava/io/PrintStream;",     # 5  PrintStream
+        "V",                         # 6  void
+        "VL",                        # 7  shorty (Object)->void
+        "L",                         # 8  shorty ()->Object
+        "main",                      # 9
+        "out",                       # 10
+        "println",                   # 11
+        "tag",                       # 12
+        "Lcom/aclcxx/fw/Probe;",     # 13 framework-supplied (not bundled)
+        MSG,                         # 14
+    ]
+    S = {s: i for i, s in enumerate(STRINGS)}
+    TYPES = ["Lcom/aclcxx/hello/Main;", "Ljava/lang/Object;", "Ljava/lang/String;",
+             "[Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;",
+             "V", "Lcom/aclcxx/fw/Probe;"]
+    T = {t: i for i, t in enumerate(TYPES)}
 
-# type_ids -> string index (kept ascending, as the format requires).
-TYPES = ["Lcom/aclcxx/hello/Main;", "Ljava/lang/Object;", "Ljava/lang/String;",
-         "[Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;", "V"]
-T = {t: i for i, t in enumerate(TYPES)}
-
-
-def build_dex():
     header_size = 112
     n_strings, n_types, n_protos, n_fields, n_methods, n_classdefs = \
-        len(STRINGS), len(TYPES), 2, 1, 2, 1
+        len(STRINGS), len(TYPES), 3, 1, 3, 1
 
     off_string_ids = header_size
     off_type_ids = off_string_ids + n_strings * 4
@@ -76,15 +84,12 @@ def build_dex():
     off_data = off_class_defs + n_classdefs * 32
 
     data = bytearray()
-
-    # string_data_items: uleb128(utf16 count) + MUTF-8 bytes + 0x00
     string_data_off = []
     for s in STRINGS:
         b = s.encode("utf-8")
         string_data_off.append(off_data + len(data))
         data.extend(uleb128(len(s)) + b + b"\x00")
 
-    # type_list for main's parameters (String[]) and println's (String).
     data.extend(align4(bytearray()))
     type_list_argv_off = off_data + len(data)
     data.extend(align4(bytearray(
@@ -94,26 +99,30 @@ def build_dex():
     data.extend(align4(bytearray(
         struct.pack("<I", 1) + struct.pack("<H", T["Ljava/lang/String;"]))))
 
-    # code for main: System.out.println(MSG)
-    #   sget-object v0, System.out ; const-string v1, MSG
-    #   invoke-virtual {v0,v1}, PrintStream.println(String)V ; return-void
     code_main_off = off_data + len(data)
-    insns = [0x0062, 0x0000,        # sget-object v0, field0 (System.out)
-             0x011A, S[MSG],        # const-string v1, MSG
-             0x206E, 0x0001, 0x0010,  # invoke-virtual {v0,v1}, method1 (println)
-             0x000E]                # return-void
-    body = struct.pack("<HHHHII", 2, 1, 2, 0, 0, len(insns))  # regs,ins,outs,tries,dbg,size
+    if probe:
+        # System.out.println(Probe.tag()) — Probe is on the boot classpath only.
+        insns = [0x0062, 0x0000,          # sget-object v0, System.out (f0)
+                 0x0071, 0x0002, 0x0000,  # invoke-static {}, Probe.tag() (m2)
+                 0x010C,                  # move-result-object v1
+                 0x206E, 0x0001, 0x0010,  # invoke-virtual {v0,v1}, println (m1)
+                 0x000E]                  # return-void
+    else:
+        # System.out.println(MSG) — fully self-contained.
+        insns = [0x0062, 0x0000,          # sget-object v0, System.out
+                 0x011A, S[MSG],          # const-string v1, MSG
+                 0x206E, 0x0001, 0x0010,  # invoke-virtual {v0,v1}, println
+                 0x000E]                  # return-void
+    body = struct.pack("<HHHHII", 2, 1, 2, 0, 0, len(insns))
     for u in insns:
         body += struct.pack("<H", u)
     data.extend(align4(bytearray(body)))
 
-    # class_data_item: 0 static, 0 instance, 1 direct (main), 0 virtual
     class_data_off = off_data + len(data)
     cd = bytearray(uleb128(0) + uleb128(0) + uleb128(1) + uleb128(0))
     cd += uleb128(0) + uleb128(0x9) + uleb128(code_main_off)  # method0 main, public static
     data.extend(cd)
 
-    # map_list (parser ignores it, but emit a valid one).
     data.extend(align4(bytearray()))
     map_off = off_data + len(data)
     items = [
@@ -136,15 +145,16 @@ def build_dex():
     data.extend(align4(map_body))
     data_size = len(data)
 
-    # fixed tables
     string_ids = b"".join(struct.pack("<I", o) for o in string_data_off)
     type_ids = b"".join(struct.pack("<I", S[t]) for t in TYPES)
     proto_ids = struct.pack("<III", S["VL"], T["V"], type_list_argv_off)   # main (String[])V
     proto_ids += struct.pack("<III", S["VL"], T["V"], type_list_str_off)   # println (String)V
+    proto_ids += struct.pack("<III", S["L"], T["Ljava/lang/String;"], 0)   # tag ()String
     field_ids = struct.pack("<HHI", T["Ljava/lang/System;"],
                             T["Ljava/io/PrintStream;"], S["out"])          # f0 System.out
-    method_ids = struct.pack("<HHI", T["Lcom/aclcxx/hello/Main;"], 0, S["main"])   # m0 main
-    method_ids += struct.pack("<HHI", T["Ljava/io/PrintStream;"], 1, S["println"])  # m1 println
+    method_ids = struct.pack("<HHI", T["Lcom/aclcxx/hello/Main;"], 0, S["main"])   # m0
+    method_ids += struct.pack("<HHI", T["Ljava/io/PrintStream;"], 1, S["println"])  # m1
+    method_ids += struct.pack("<HHI", T["Lcom/aclcxx/fw/Probe;"], 2, S["tag"])      # m2
     class_defs = struct.pack("<IIIIIIII",
                              T["Lcom/aclcxx/hello/Main;"], 0x1,
                              T["Ljava/lang/Object;"], 0, 0xFFFFFFFF, 0,
@@ -155,18 +165,13 @@ def build_dex():
     struct.pack_into("<I", header, 0x24, header_size)
     struct.pack_into("<I", header, 0x28, 0x12345678)
     struct.pack_into("<I", header, 0x34, map_off)
-    struct.pack_into("<I", header, 0x38, n_strings)
-    struct.pack_into("<I", header, 0x3C, off_string_ids)
-    struct.pack_into("<I", header, 0x40, n_types)
-    struct.pack_into("<I", header, 0x44, off_type_ids)
-    struct.pack_into("<I", header, 0x48, n_protos)
-    struct.pack_into("<I", header, 0x4C, off_proto_ids)
-    struct.pack_into("<I", header, 0x50, n_fields)
-    struct.pack_into("<I", header, 0x54, off_field_ids)
-    struct.pack_into("<I", header, 0x58, n_methods)
-    struct.pack_into("<I", header, 0x5C, off_method_ids)
-    struct.pack_into("<I", header, 0x60, n_classdefs)
-    struct.pack_into("<I", header, 0x64, off_class_defs)
+    for off, (size, val) in {
+        0x38: (n_strings, off_string_ids), 0x40: (n_types, off_type_ids),
+        0x48: (n_protos, off_proto_ids), 0x50: (n_fields, off_field_ids),
+        0x58: (n_methods, off_method_ids), 0x60: (n_classdefs, off_class_defs),
+    }.items():
+        struct.pack_into("<I", header, off, size)
+        struct.pack_into("<I", header, off + 4, val)
     struct.pack_into("<I", header, 0x68, data_size)
     struct.pack_into("<I", header, 0x6C, off_data)
 
@@ -174,30 +179,28 @@ def build_dex():
         field_ids + method_ids + class_defs + bytes(data)
     struct.pack_into("<I", dex, 0x20, len(dex))
     dex[12:32] = hashlib.sha1(bytes(dex[32:])).digest()
-    struct.pack_into("<I", dex, 0x08, zlib_adler(bytes(dex[12:])))
+    struct.pack_into("<I", dex, 0x08, zlib.adler32(bytes(dex[12:])) & 0xFFFFFFFF)
     return bytes(dex)
 
 
-def zlib_adler(b):
-    import zlib
-    return zlib.adler32(b) & 0xFFFFFFFF
-
-
-def build_apk():
+def build_apk(probe=False):
     return {
         "AndroidManifest.xml": build_axml(
             utf8=True, package="com.aclcxx.hello",
             launcher="com.aclcxx.hello.Main"),
-        "classes.dex": build_dex(),
+        "classes.dex": build_dex(probe=probe),
     }
 
 
 def main():
-    if len(sys.argv) != 2:
-        sys.stderr.write("usage: make_hello_apk.py <output.apk>\n")
+    args = sys.argv[1:]
+    probe = "--probe" in args
+    args = [a for a in args if a != "--probe"]
+    if len(args) != 1:
+        sys.stderr.write("usage: make_hello_apk.py [--probe] <output.apk>\n")
         return 2
-    with zipfile.ZipFile(sys.argv[1], "w") as z:
-        for name, blob in build_apk().items():
+    with zipfile.ZipFile(args[0], "w") as z:
+        for name, blob in build_apk(probe=probe).items():
             info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_STORED
             z.writestr(info, blob)

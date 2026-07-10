@@ -50,10 +50,15 @@ class JvmVm final : public Vm {
   Error start() override {
     if (jvm_ != nullptr) return Error::ok();
 
-    // Assemble VM options: the classpath plus any raw options from the config.
+    // Assemble VM options. A stock JVM has no separate boot classpath we can
+    // safely repopulate, so the vendored framework (boot_classpath) is prepended
+    // to java.class.path: it resolves ahead of, and independently of, app classes.
+    // The ART target (R-1) will instead build a real boot image from these entries.
+    std::vector<std::string> cp = config_.boot_classpath;
+    cp.insert(cp.end(), config_.classpath.begin(), config_.classpath.end());
+
     std::vector<std::string> option_strings;
-    option_strings.push_back("-Djava.class.path=" +
-                             join(config_.classpath, ':'));
+    option_strings.push_back("-Djava.class.path=" + join(cp, ':'));
     for (const std::string& opt : config_.options) option_strings.push_back(opt);
 
     std::vector<JavaVMOption> options;
@@ -77,7 +82,8 @@ class JvmVm final : public Vm {
                        "JNI_CreateJavaVM failed (rc=" + std::to_string(rc) + ")");
     }
     env_ = env;
-    log::i(kTag, "JVM started: classpath=[{}]", join(config_.classpath, ':'));
+    log::i(kTag, "JVM started: boot=[{}] classpath=[{}]",
+           join(config_.boot_classpath, ':'), join(config_.classpath, ':'));
     return Error::ok();
   }
 

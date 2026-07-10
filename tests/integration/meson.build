@@ -21,6 +21,36 @@ if py3.found() and have_jni
     depends : [aclcxx_exe, hello_apk],
     timeout : 120,
   )
+
+  # Gate G2.a: the framework boot-classpath seam. probe.apk's main() calls a class
+  # (com.aclcxx.fw.Probe) that is NOT bundled; it must come from --framework. Uses
+  # the javac from the SAME java_home as the detected libjvm (class-file version).
+  javac = find_program(java_home / 'bin' / 'javac', required : false)
+  if javac.found()
+    probe_apk = custom_target(
+      'probe-apk',
+      input : files('../fixtures/make_hello_apk.py'),
+      output : 'probe.apk',
+      command : [py3, '@INPUT@', '--probe', '@OUTPUT@'],
+      depend_files : files('../fixtures/make_axml.py'),
+    )
+    framework_classes = custom_target(
+      'framework-probe-classes',
+      input : files('../fixtures/framework/com/aclcxx/fw/Probe.java'),
+      output : 'framework',
+      command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
+    )
+    test(
+      'run-apk-framework',
+      py3,
+      args : [files('run_framework_test.py'), aclcxx_exe, probe_apk,
+              framework_classes],
+      depends : [aclcxx_exe, probe_apk, framework_classes],
+      timeout : 120,
+    )
+  else
+    message('javac not found; skipping run-apk-framework integration test.')
+  endif
 else
   message('python3/JDK not both available; skipping run-apk integration test.')
 endif

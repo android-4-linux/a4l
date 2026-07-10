@@ -7,6 +7,7 @@
 // they land (R-1 / ADR-0001); `--vm=null` exercises the full plumbing today.
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -14,6 +15,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <unistd.h>  // getpid, for a per-process DEX conversion work dir
 
 #include "aclcxx_config.h"
 #include "dex/dex_to_jvm.h"
@@ -58,6 +61,8 @@ void print_usage() {
       "                       by a stock JVM)\n"
       "  --convert-dex        convert the APK's DEX to JVM classes and add them to\n"
       "                       the classpath (implied by --vm=jvm)\n"
+      "  --framework=<paths>  vendored android.* framework boot classpath (colon-\n"
+      "                       separated); also read from $ACLCXX_FRAMEWORK\n"
       "  --cache=<dir>        DEX->OAT / dalvik-cache directory\n"
       "\n"
       "  -h, --help           show this help\n"
@@ -82,7 +87,19 @@ int cmd_run(const std::vector<std::string>& args) {
   std::string main_class;
   std::string cache_dir;
   std::vector<std::string> extra_classpath;
+  std::vector<std::string> framework_dirs;
   bool convert_dex = false;
+
+  // Split a colon-separated path list into `out`, skipping empties.
+  const auto split_paths = [](const std::string& v, std::vector<std::string>& out) {
+    for (std::size_t start = 0; start <= v.size();) {
+      const std::size_t colon = v.find(':', start);
+      const std::size_t end = colon == std::string::npos ? v.size() : colon;
+      if (end > start) out.push_back(v.substr(start, end - start));
+      if (colon == std::string::npos) break;
+      start = colon + 1;
+    }
+  };
 
   for (const std::string& a : args) {
     std::string v;
@@ -90,17 +107,12 @@ int cmd_run(const std::vector<std::string>& args) {
       convert_dex = true;
     } else if (match_opt(a, "--vm", v)) {
       vm_name = v;
+    } else if (match_opt(a, "--framework", v)) {
+      split_paths(v, framework_dirs);  // vendored android.* boot classpath
     } else if (match_opt(a, "--main", v)) {
       main_class = v;
     } else if (match_opt(a, "--classpath", v)) {
-      // Colon-separated, appended in order.
-      for (std::size_t start = 0; start <= v.size();) {
-        const std::size_t colon = v.find(':', start);
-        const std::size_t end = colon == std::string::npos ? v.size() : colon;
-        if (end > start) extra_classpath.push_back(v.substr(start, end - start));
-        if (colon == std::string::npos) break;
-        start = colon + 1;
-      }
+      split_paths(v, extra_classpath);  // colon-separated, appended in order
     } else if (match_opt(a, "--cache", v)) {
       cache_dir = v;
     } else if (!a.empty() && a[0] == '-') {
@@ -192,7 +204,18 @@ int cmd_run(const std::vector<std::string>& args) {
   cfg.classpath.insert(cfg.classpath.end(), extra_classpath.begin(),
                        extra_classpath.end());
   cfg.cache_dir = cache_dir;
-  // boot_classpath stays empty until the vendored framework lands.
+
+  // Boot classpath = the vendored android.* framework (Gate G2). Sources: --framework
+  // then $ACLCXX_FRAMEWORK. Empty today (no framework vendored yet); the seam is live.
+  cfg.boot_classpath = framework_dirs;
+  if (const char* env = std::getenv("ACLCXX_FRAMEWORK")) {
+    split_paths(env, cfg.boot_classpath);
+  }
+  if (!cfg.boot_classpath.empty()) {
+    aclcxx::log::i(kTag, "framework boot classpath: {} entr{}",
+                   cfg.boot_classpath.size(),
+                   cfg.boot_classpath.size() == 1 ? "y" : "ies");
+  }
 
   // DEX->JVM: convert each classes*.dex to JVM classes and add them to the
   // classpath so the backend can load DEX-derived classes. A stock JVM cannot
@@ -213,10 +236,13 @@ int cmd_run(const std::vector<std::string>& args) {
         aclcxx::log::w(kTag, "convert-dex: parse {} failed: {}", dex_name, de.message);
         continue;
       }
-      // A distinct work dir per DEX so multi-dex classes don't overwrite.
+      // A work dir unique per process AND per DEX, so concurrent `aclcxx run`
+      // invocations (and multi-dex within one) never clobber each other's classes.
       aclcxx::dex::ConvertOptions opts;
-      opts.work_dir = (std::filesystem::temp_directory_path() /
-                       ("aclcxx-dex-" + std::to_string(idx))).string();
+      opts.work_dir =
+          (std::filesystem::temp_directory_path() /
+           ("aclcxx-" + std::to_string(::getpid()) + "-dex-" + std::to_string(idx)))
+              .string();
       aclcxx::dex::ConvertResult cr;
       if (aclcxx::dex::DexError ce = aclcxx::dex::convert(*dx, opts, cr)) {
         aclcxx::log::w(kTag, "convert-dex: {} failed: {}", dex_name, ce.message);
