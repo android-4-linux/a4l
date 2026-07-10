@@ -86,6 +86,14 @@ class Vm {
   // class is missing, RuntimeError on an escaped exception.
   virtual Error call_activity_lifecycle(std::string_view activity_class) = 0;
 
+  // Host an android.service.media.MediaBrowserService (the automotive media path,
+  // no Views): instantiate it, onCreate(), then onGetRoot() to obtain the browse
+  // root — driven in-process (no Binder, ADR-3). Requires the vendored/shimmed
+  // MediaBrowserService on the boot classpath. Same status contract as
+  // call_activity_lifecycle (NotApplicable when the class isn't a
+  // MediaBrowserService).
+  virtual Error call_media_browser(std::string_view service_class) = 0;
+
   // Tear the VM down. Safe to call once after start(); idempotent thereafter.
   virtual Error shutdown() = 0;
 

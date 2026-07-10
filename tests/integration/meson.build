@@ -73,11 +73,14 @@ if py3.found() and have_jni
       command : [py3, '@INPUT@', '--log', '@OUTPUT@'],
       depend_files : files('../fixtures/make_axml.py'),
     )
-    # The whole android.* shim tree, compiled together (Activity imports Bundle).
+    # The whole android.* shim tree, compiled together (inter-shim deps: Activity
+    # imports Bundle; MediaBrowserService extends Service, imports Bundle).
     framework_shim = custom_target(
       'framework-shim-classes',
       input : files('../../framework/shim/android/os/Bundle.java',
+                    '../../framework/shim/android/app/Service.java',
                     '../../framework/shim/android/app/Activity.java',
+                    '../../framework/shim/android/service/media/MediaBrowserService.java',
                     '../../framework/shim/android/util/Log.java'),
       output : 'framework-shim',
       command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
@@ -105,6 +108,24 @@ if py3.found() and have_jni
       py3,
       args : [files('run_activity_test.py'), aclcxx_exe, activity_apk, framework_shim],
       depends : [aclcxx_exe, activity_apk, framework_shim],
+      timeout : 120,
+    )
+
+    # Gate G2.e (automotive media path): host a MediaBrowserService (no Views).
+    # media.apk's MusicService extends android.service.media.MediaBrowserService;
+    # `aclcxx run --service=...` drives onCreate + onGetRoot in-process (no Binder).
+    media_apk = custom_target(
+      'media-apk',
+      input : files('../fixtures/make_media_apk.py'),
+      output : 'media.apk',
+      command : [py3, '@INPUT@', '@OUTPUT@'],
+      depend_files : files('../fixtures/make_axml.py'),
+    )
+    test(
+      'run-apk-media',
+      py3,
+      args : [files('run_media_test.py'), aclcxx_exe, media_apk, framework_shim],
+      depends : [aclcxx_exe, media_apk, framework_shim],
       timeout : 120,
     )
   else

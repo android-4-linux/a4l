@@ -75,6 +75,15 @@ class NullVm final : public Vm {
     return Error::of(Status::NotApplicable, "null backend executes no Java");
   }
 
+  Error call_media_browser(std::string_view service_class) override {
+    if (!started_) {
+      return Error::of(Status::NotStarted, "call_media_browser before start()");
+    }
+    log::i(kTag, "VM(null) would host MediaBrowserService {} — no Java executed",
+           service_class);
+    return Error::of(Status::NotApplicable, "null backend executes no Java");
+  }
+
   Error shutdown() override {
     if (started_) {
       log::i(kTag, "VM(null) shutdown");

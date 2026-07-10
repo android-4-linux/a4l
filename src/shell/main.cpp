@@ -56,6 +56,7 @@ void print_usage() {
       "run options:\n"
       "  --vm=<art|jvm|null>  runtime backend (default: $ACLCXX_VM or art)\n"
       "  --main=<class>       static main() class to invoke\n"
+      "  --service=<class>    host a MediaBrowserService (automotive media path)\n"
       "  --classpath=<paths>  extra classpath entries (colon-separated); the JVM\n"
       "                       backend runs .class/.jar from here (DEX is not loaded\n"
       "                       by a stock JVM)\n"
@@ -85,6 +86,7 @@ int cmd_run(const std::vector<std::string>& args) {
   std::string apk_path;
   std::string vm_name;
   std::string main_class;
+  std::string service_class;
   std::string cache_dir;
   std::vector<std::string> extra_classpath;
   std::vector<std::string> framework_dirs;
@@ -109,6 +111,8 @@ int cmd_run(const std::vector<std::string>& args) {
       vm_name = v;
     } else if (match_opt(a, "--framework", v)) {
       split_paths(v, framework_dirs);  // vendored android.* boot classpath
+    } else if (match_opt(a, "--service", v)) {
+      service_class = v;
     } else if (match_opt(a, "--main", v)) {
       main_class = v;
     } else if (match_opt(a, "--classpath", v)) {
@@ -268,7 +272,15 @@ int cmd_run(const std::vector<std::string>& args) {
     return kRuntimeError;
   }
 
-  if (main_class.empty()) {
+  if (!service_class.empty()) {
+    // Automotive media path: host a MediaBrowserService (no Views, no launcher).
+    if (r::Error e = vm->call_media_browser(service_class)) {
+      aclcxx::log::e(kTag, "host service {} failed: [{}] {}", service_class,
+                     r::status_name(e.status), e.message);
+      vm->shutdown();
+      return kRuntimeError;
+    }
+  } else if (main_class.empty()) {
     aclcxx::log::w(kTag,
                    "no launcher activity in the manifest and no --main given; "
                    "VM started, nothing invoked");

@@ -171,6 +171,41 @@ class JvmVm final : public Vm {
     return result;
   }
 
+  Error call_media_browser(std::string_view service_class) override {
+    if (env_ == nullptr) {
+      return Error::of(Status::NotStarted, "call_media_browser before start()");
+    }
+    const std::string name = to_jni_name(service_class);
+    jclass cls = env_->FindClass(name.c_str());
+    if (cls == nullptr) {
+      clear_exception();
+      return Error::of(Status::NotFound, "class not found: " + std::string(service_class));
+    }
+    jclass mbs_cls = env_->FindClass("android/service/media/MediaBrowserService");
+    if (mbs_cls == nullptr || env_->IsAssignableFrom(cls, mbs_cls) != JNI_TRUE) {
+      clear_exception();
+      env_->DeleteLocalRef(cls);
+      if (mbs_cls != nullptr) env_->DeleteLocalRef(mbs_cls);
+      return Error::of(Status::NotApplicable,
+                       std::string(service_class) + " is not a MediaBrowserService");
+    }
+
+    Error result = Error::ok();
+    jmethodID ctor = env_->GetMethodID(cls, "<init>", "()V");
+    jobject svc = ctor != nullptr ? env_->NewObject(cls, ctor) : nullptr;
+    if (svc == nullptr) {
+      result = fail_with_exception("instantiate " + std::string(service_class));
+    } else {
+      log::i(kTag, "hosting MediaBrowserService {}", service_class);
+      result = call_lifecycle(cls, svc, "onCreate", "()V", false);
+      if (result.is_ok()) result = browse_root(cls, svc);
+      env_->DeleteLocalRef(svc);
+    }
+    env_->DeleteLocalRef(mbs_cls);
+    env_->DeleteLocalRef(cls);
+    return result;
+  }
+
   Error shutdown() override {
     if (jvm_ != nullptr) {
       jvm_->DestroyJavaVM();  // blocks until non-daemon threads finish
@@ -195,6 +230,43 @@ class JvmVm final : public Vm {
       env_->ExceptionClear();
     }
     return Error::of(Status::RuntimeError, "failed to " + what);
+  }
+
+  // Call MediaBrowserService.onGetRoot(pkg, uid, null) and read BrowserRoot.getRootId().
+  Error browse_root(jclass cls, jobject svc) {
+    jmethodID on_get_root = env_->GetMethodID(
+        cls, "onGetRoot",
+        "(Ljava/lang/String;ILandroid/os/Bundle;)"
+        "Landroid/service/media/MediaBrowserService$BrowserRoot;");
+    if (on_get_root == nullptr) {
+      clear_exception();
+      return Error::of(Status::NotFound, "no onGetRoot(String,int,Bundle)");
+    }
+    jstring pkg = env_->NewStringUTF("aclcxx");
+    jobject root = env_->CallObjectMethod(svc, on_get_root, pkg, static_cast<jint>(1000),
+                                          nullptr);
+    env_->DeleteLocalRef(pkg);
+    if (env_->ExceptionCheck() == JNI_TRUE) return fail_with_exception("onGetRoot()");
+    if (root == nullptr) {
+      return Error::of(Status::RuntimeError, "onGetRoot returned null (browse rejected)");
+    }
+    jclass root_cls = env_->GetObjectClass(root);
+    jmethodID get_root_id =
+        env_->GetMethodID(root_cls, "getRootId", "()Ljava/lang/String;");
+    Error result = Error::ok();
+    if (get_root_id == nullptr) {
+      clear_exception();
+      result = Error::of(Status::NotFound, "no BrowserRoot.getRootId()");
+    } else {
+      auto id = static_cast<jstring>(env_->CallObjectMethod(root, get_root_id));
+      const char* c = id != nullptr ? env_->GetStringUTFChars(id, nullptr) : nullptr;
+      log::i(kTag, "media browse root: {}", c != nullptr ? c : "?");
+      if (c != nullptr) env_->ReleaseStringUTFChars(id, c);
+      if (id != nullptr) env_->DeleteLocalRef(id);
+    }
+    env_->DeleteLocalRef(root_cls);
+    env_->DeleteLocalRef(root);
+    return result;
   }
 
   // Invoke one lifecycle callback (found on `cls` or a superclass). `pass_bundle`

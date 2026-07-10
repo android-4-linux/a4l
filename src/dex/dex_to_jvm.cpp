@@ -30,6 +30,7 @@ constexpr std::uint32_t kAccAnnotation = 0x2000;
 
 // JVM opcodes used by the translator/stub.
 enum : std::uint8_t {
+  OP_ACONST_NULL = 0x01,
   OP_ICONST_0 = 0x03, OP_BIPUSH = 0x10, OP_SIPUSH = 0x11, OP_LDC = 0x12,
   OP_LDC_W = 0x13, OP_ILOAD = 0x15, OP_ALOAD = 0x19, OP_ISTORE = 0x36,
   OP_ASTORE = 0x3a, OP_DUP = 0x59, OP_IADD = 0x60, OP_ISUB = 0x64,
@@ -462,11 +463,14 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
   // as, and flag a genuine ambiguity: Float-vs-Int or Double-vs-Long on one
   // register (the const/move opcode can't tell those apart). Int-vs-Long reuse is
   // fine (add-int vs add-long already differ).
-  constexpr int kI = 1, kF = 2, kL = 4, kD = 8;
+  // kZ: written by const-0 (null candidate). kRD: written by a ref-producing op
+  // (const-string/new-instance/...-object/...) — so its ref-ness is NOT a null.
+  constexpr int kI = 1, kF = 2, kL = 4, kD = 8, kR = 16, kZ = 32, kRD = 64;
   const auto bit = [](RKind k) {
     switch (k) {
       case RKind::Int: return kI; case RKind::Float: return kF;
       case RKind::Long: return kL; case RKind::Double: return kD;
+      case RKind::Ref: return kR;
       default: return 0;
     }
   };
@@ -484,6 +488,12 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
   const auto pin = [&](int r, RKind k) {
     if (r < 0 || r >= nregs) return;
     mask[static_cast<std::size_t>(find(r))] |= bit(k);
+  };
+  const auto pin_zero = [&](int r) {  // register written by a const whose value is 0
+    if (r >= 0 && r < nregs) mask[static_cast<std::size_t>(find(r))] |= kZ;
+  };
+  const auto pin_refdef = [&](int r) {  // register written by a ref-producing op
+    if (r >= 0 && r < nregs) mask[static_cast<std::size_t>(find(r))] |= kRD;
   };
   const auto unite = [&](int a, int b) {
     if (a < 0 || b < 0 || a >= nregs || b >= nregs) return;
@@ -537,6 +547,12 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
     else if (op >= 0xcb && op <= 0xcf) { pin(A4, RKind::Double); pin(B4, RKind::Double); }  // double /2addr
     else if (op >= 0xd0 && op <= 0xd7) { pin(A4, RKind::Int); pin(B4, RKind::Int); }    // int /lit16 (22s: nibbles)
     else if (op >= 0xd8 && op <= 0xe2) { pin(A8, RKind::Int); pin(BB, RKind::Int); }    // int /lit8 (22b: bytes)
+    // const-0: a null candidate for a ref register (const 0 -> aconst_null).
+    if (op == 0x12) { if (((u0 >> 12) & 0xf) == 0) pin_zero(A4); }
+    else if (op == 0x13 && pc + 1 < in.size()) { if (in[pc + 1] == 0) pin_zero(A8); }
+    else if (op == 0x14 && pc + 2 < in.size()) { if ((in[pc + 1] | in[pc + 2]) == 0) pin_zero(A8); }
+    else if (op == 0x15 && pc + 1 < in.size()) { if (in[pc + 1] == 0) pin_zero(A8); }
+
     // Moves unify (32-bit and 64-bit), so a const/move-linked register inherits
     // the type pinned elsewhere.
     if (op == 0x01) unite(A4, B4);                       // move
@@ -545,8 +561,25 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
     else if (op == 0x04) unite(A4, B4);                  // move-wide
     else if (op == 0x05) unite(A8, in[pc + 1]);          // move-wide/from16
     else if (op == 0x06) unite(in[pc + 1], in[pc + 2]);  // move-wide/16
+    else if (op == 0x07) unite(A4, B4);                  // move-object
+    else if (op == 0x08) unite(A8, in[pc + 1]);          // move-object/from16
+    else if (op == 0x09) unite(in[pc + 1], in[pc + 2]);  // move-object/16
+
+    // Ref-producing writes (value is a real object, never a bare null literal).
+    if (op == 0x1a || op == 0x1c || op == 0x22 || op == 0x0c || op == 0x0d) pin_refdef(A8);
+    else if (op == 0x23 || op == 0x07) pin_refdef(A4);
+    else if (op == 0x08) pin_refdef(A8);
+    else if (op == 0x09 && pc + 1 < in.size()) pin_refdef(in[pc + 1]);
 
     switch (op) {
+      case 0x11: pin(A8, RKind::Ref); break;   // return-object
+      case 0x27: pin(A8, RKind::Ref); break;   // throw
+      case 0x1f: pin(A8, RKind::Ref); pin_refdef(A8); break;   // check-cast (dst is a real ref)
+      case 0x20: pin(B4, RKind::Ref); break;   // instance-of source
+      case 0x46: pin(A8, RKind::Ref); pin_refdef(A8); break;   // aget-object dst
+      case 0x4d: pin(A8, RKind::Ref); break;   // aput-object value (a null is const 0)
+      case 0x62: pin(A8, RKind::Ref); pin_refdef(A8); break;   // sget-object dst
+      case 0x69: pin(A8, RKind::Ref); break;   // sput-object value
       case 0x7b: case 0x7c: pin(A4, RKind::Int); pin(B4, RKind::Int); break;      // neg/not-int
       case 0x7d: case 0x7e: pin(A4, RKind::Long); pin(B4, RKind::Long); break;    // neg/not-long
       case 0x7f: pin(A4, RKind::Float); pin(B4, RKind::Float); break;             // neg-float
@@ -580,31 +613,36 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
         }
         break;
       case 0x52: case 0x53: case 0x54: {  // iget / iget-wide / iget-object
+        if (op == 0x54) pin_refdef(A4);  // iget-object dst is a real ref
         const FieldRef* fr = dex.field_ref(in[pc + 1]);
         if (fr) pin(A4, fr->type_descriptor == "F" ? RKind::Float
                         : fr->type_descriptor == "D" ? RKind::Double
-                        : is_wide_desc(fr->type_descriptor) ? RKind::Long : RKind::Int);
+                        : is_wide_desc(fr->type_descriptor) ? RKind::Long
+                        : is_ref_desc(fr->type_descriptor) ? RKind::Ref : RKind::Int);
         break;
       }
       case 0x59: case 0x5a: case 0x5b: {  // iput / iput-wide / iput-object
         const FieldRef* fr = dex.field_ref(in[pc + 1]);
         if (fr) pin(A4, fr->type_descriptor == "F" ? RKind::Float
                         : fr->type_descriptor == "D" ? RKind::Double
-                        : is_wide_desc(fr->type_descriptor) ? RKind::Long : RKind::Int);
+                        : is_wide_desc(fr->type_descriptor) ? RKind::Long
+                        : is_ref_desc(fr->type_descriptor) ? RKind::Ref : RKind::Int);
         break;
       }
       case 0x60: case 0x61: {  // sget / sget-wide
         const FieldRef* fr = dex.field_ref(in[pc + 1]);
         if (fr) pin(A8, fr->type_descriptor == "F" ? RKind::Float
                         : fr->type_descriptor == "D" ? RKind::Double
-                        : is_wide_desc(fr->type_descriptor) ? RKind::Long : RKind::Int);
+                        : is_wide_desc(fr->type_descriptor) ? RKind::Long
+                        : is_ref_desc(fr->type_descriptor) ? RKind::Ref : RKind::Int);
         break;
       }
       case 0x67: case 0x68: {  // sput / sput-wide
         const FieldRef* fr = dex.field_ref(in[pc + 1]);
         if (fr) pin(A8, fr->type_descriptor == "F" ? RKind::Float
                         : fr->type_descriptor == "D" ? RKind::Double
-                        : is_wide_desc(fr->type_descriptor) ? RKind::Long : RKind::Int);
+                        : is_wide_desc(fr->type_descriptor) ? RKind::Long
+                        : is_ref_desc(fr->type_descriptor) ? RKind::Ref : RKind::Int);
         break;
       }
       case 0x44: case 0x47: case 0x48: case 0x49: case 0x4a:  // aget int/narrow: dst Int, idx Int
@@ -621,6 +659,7 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
           const std::uint16_t rw = pc + 2 < in.size() ? in[pc + 2] : 0;
           const int nib[5] = {rw & 0xf, (rw >> 4) & 0xf, (rw >> 8) & 0xf,
                               (rw >> 12) & 0xf, A8};
+          if (!is_static) pin(range ? rw : nib[0], RKind::Ref);  // receiver
           int idx = is_static ? 0 : 1;
           for (const std::string& d : this_invoke->param_descriptors) {
             const int r = range ? (rw + idx) : nib[idx];
@@ -628,6 +667,7 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
             else if (d == "D") { pin(r, RKind::Double); }
             else if (d == "J") pin(r, RKind::Long);
             else if (is_int_family_desc(d)) pin(r, RKind::Int);
+            else if (is_ref_desc(d)) pin(r, RKind::Ref);  // a null arg is const 0 -> aconst_null
             idx += is_wide_desc(d) ? 2 : 1;
             (void)argc;
           }
@@ -642,13 +682,22 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
   std::vector<RKind> out(static_cast<std::size_t>(nregs), RKind::Unknown);
   for (int i = 0; i < nregs; ++i) {
     const int mk = mask[static_cast<std::size_t>(find(i))];
-    // Genuine ambiguity a whole-method kind cannot resolve -> stub the method.
+    // Genuine ambiguity a whole-method kind cannot resolve -> stub the method: the
+    // const/move opcode can't tell Float from Int or Double from Long.
     if (((mk & kF) && (mk & kI)) || ((mk & kD) && (mk & kL)) ||
         ((mk & kF) && (mk & kD))) {
       return std::nullopt;
     }
+    // Ref only for a *pure null literal*: used as a ref, written by a const-0, and
+    // never used numerically nor written by a ref-producing op (whose const-0s
+    // would be int). This is the `f(null)` pattern; other ref/int reuse stays
+    // opcode-driven (const-string astore, aload, etc. don't consult this kind).
+    const int numeric = mk & (kI | kF | kL | kD);
     out[static_cast<std::size_t>(i)] =
-        (mk & kD) ? RKind::Double : (mk & kF) ? RKind::Float : RKind::Unknown;
+        (mk & kD) ? RKind::Double
+      : (mk & kF) ? RKind::Float
+      : ((mk & kR) && (mk & kZ) && !numeric && !(mk & kRD)) ? RKind::Ref
+                                                            : RKind::Unknown;
   }
   return out;
 }
@@ -761,12 +810,25 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
     if (islot != ins) return std::nullopt;
   }
 
-  // Const/move emit helpers: pick the float/double form when the destination
+  // Const/move emit helpers: pick the float/double/ref form when the destination
   // register's inferred kind demands it (the raw bit pattern is reinterpreted).
-  const auto emit_const32 = [&](int a, std::int32_t lit) {
-    if (rkind(a) == RKind::Float) {
-      e.push_float(static_cast<std::uint32_t>(lit)); e.store_f(local(a));
-    } else { e.push_int(lit); e.store_i(local(a)); }
+  // A const-0 into a ref register is a null reference -> aconst_null. Such a null
+  // at a StackMapTable frame point needs verification-type handling we don't do
+  // yet, so a null-const in a method with branches/handlers stubs (guard below).
+  bool emitted_null_const = false;
+  const auto emit_const32 = [&](int a, std::int32_t lit) -> bool {
+    switch (rkind(a)) {
+      case RKind::Float:
+        e.push_float(static_cast<std::uint32_t>(lit)); e.store_f(local(a));
+        return true;
+      case RKind::Ref:
+        if (lit != 0) return false;  // only null is representable via const
+        e.op(OP_ACONST_NULL); e.adj(+1); e.store_a(local(a));
+        emitted_null_const = true;
+        return true;
+      default:
+        e.push_int(lit); e.store_i(local(a)); return true;
+    }
   };
   const auto emit_const64 = [&](int a, std::int64_t lit) {
     if (rkind(a) == RKind::Double) {
@@ -844,6 +906,7 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
       case 0x01: {  // move vA, vB (12x)
         const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
         if (rkind(a) == RKind::Float) { e.load_f(local(b)); e.store_f(local(a)); }
+        else if (rkind(a) == RKind::Ref) { e.load_a(local(b)); e.store_a(local(a)); }
         else { e.load_i(local(b)); e.store_i(local(a)); }
         pc += 1;
         break;
@@ -875,28 +938,31 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         const int a = (u >> 8) & 0xf;
         int lit = (u >> 12) & 0xf;
         if (lit & 0x8) lit -= 16;  // sign-extend 4 bits
-        emit_const32(a, lit);
+        if (!emit_const32(a, lit)) return std::nullopt;
         pc += 1;
         break;
       }
       case 0x13: {  // const/16 vAA, #+BBBB (21s)
         if (pc + 1 >= in.size()) return std::nullopt;
-        emit_const32((u >> 8) & 0xff, static_cast<std::int16_t>(in[pc + 1]));
+        if (!emit_const32((u >> 8) & 0xff, static_cast<std::int16_t>(in[pc + 1])))
+          return std::nullopt;
         pc += 2;
         break;
       }
       case 0x14: {  // const vAA, #+BBBBBBBB (31i)
         if (pc + 2 >= in.size()) return std::nullopt;
-        emit_const32((u >> 8) & 0xff, static_cast<std::int32_t>(
-            static_cast<std::uint32_t>(in[pc + 1]) |
-            (static_cast<std::uint32_t>(in[pc + 2]) << 16)));
+        if (!emit_const32((u >> 8) & 0xff, static_cast<std::int32_t>(
+                static_cast<std::uint32_t>(in[pc + 1]) |
+                (static_cast<std::uint32_t>(in[pc + 2]) << 16))))
+          return std::nullopt;
         pc += 3;
         break;
       }
       case 0x15: {  // const/high16 vAA, #+BBBB0000 (21h)
         if (pc + 1 >= in.size()) return std::nullopt;
-        emit_const32((u >> 8) & 0xff,
-            static_cast<std::int32_t>(static_cast<std::uint32_t>(in[pc + 1]) << 16));
+        if (!emit_const32((u >> 8) & 0xff,
+                static_cast<std::int32_t>(static_cast<std::uint32_t>(in[pc + 1]) << 16)))
+          return std::nullopt;
         pc += 2;
         break;
       }
@@ -1679,6 +1745,14 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
       default:
         return std::nullopt;  // unsupported opcode -> stub the method
     }
+  }
+
+  // A null reference (const 0 -> aconst_null) live across a StackMapTable frame
+  // needs verification-type-info we don't compute yet; stub such methods (safe)
+  // rather than risk a class-load VerifyError. Straight-line null use is fine.
+  if (emitted_null_const &&
+      (!fixups.empty() || !switch_fixups.empty() || !c.handlers.empty())) {
+    return std::nullopt;
   }
 
   // Resolve switch offsets (4 bytes, relative to the switch opcode).
