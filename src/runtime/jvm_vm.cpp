@@ -158,6 +158,7 @@ class JvmVm final : public Vm {
       result = fail_with_exception("instantiate " + std::string(activity_class));
     } else {
       log::i(kTag, "launching Activity {}", activity_class);
+      log_context(activity);
       // onCreate(null) -> onStart() -> onResume(), the documented launch order.
       result = call_lifecycle(cls, activity, "onCreate", "(Landroid/os/Bundle;)V", true);
       if (result.is_ok())
@@ -197,6 +198,7 @@ class JvmVm final : public Vm {
       result = fail_with_exception("instantiate " + std::string(service_class));
     } else {
       log::i(kTag, "hosting MediaBrowserService {}", service_class);
+      log_context(svc);
       result = call_lifecycle(cls, svc, "onCreate", "()V", false);
       if (result.is_ok()) result = read_session(cls, svc);
       if (result.is_ok()) result = browse_root(cls, svc);
@@ -222,6 +224,25 @@ class JvmVm final : public Vm {
     if (env_ != nullptr && env_->ExceptionCheck() == JNI_TRUE) {
       env_->ExceptionClear();
     }
+  }
+
+  // If `obj` is an android.content.Context (Service/Activity now are), log its
+  // package — proof the entry point functions as a Context, not just an Object.
+  void log_context(jobject obj) {
+    jclass ctx_cls = env_->FindClass("android/content/Context");
+    if (ctx_cls == nullptr) { clear_exception(); return; }
+    if (env_->IsInstanceOf(obj, ctx_cls) == JNI_TRUE) {
+      jclass obj_cls = env_->GetObjectClass(obj);
+      jmethodID gpn = env_->GetMethodID(obj_cls, "getPackageName", "()Ljava/lang/String;");
+      if (gpn != nullptr) {
+        auto p = static_cast<jstring>(env_->CallObjectMethod(obj, gpn));
+        log::i(kTag, "entry point is a Context: getPackageName()={}",
+               p != nullptr ? utf8(p) : "?");
+        if (p != nullptr) env_->DeleteLocalRef(p);
+      }
+      env_->DeleteLocalRef(obj_cls);
+    }
+    env_->DeleteLocalRef(ctx_cls);
   }
 
   // Print + clear a pending exception and return a RuntimeError describing `what`.

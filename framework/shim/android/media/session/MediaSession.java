@@ -12,6 +12,7 @@
 // controls) lands with the next slice. Docs-derived shim, NOT vendored AOSP.
 package android.media.session;
 
+import android.content.Context;
 import android.media.MediaMetadata;
 
 public final class MediaSession {
@@ -22,7 +23,9 @@ public final class MediaSession {
   private Callback callback;
   private final Token token = new Token(this);
 
-  public MediaSession(Object context, String tag) { this.tag = tag; }
+  // Now takes a real Context (the app passes `this` — its Service/Activity, which
+  // are Contexts). Was Object before the Context hierarchy landed.
+  public MediaSession(Context context, String tag) { this.tag = tag; }
 
   public void setMetadata(MediaMetadata metadata) { this.metadata = metadata; }
   public void setPlaybackState(PlaybackState state) { this.playbackState = state; }

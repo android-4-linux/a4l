@@ -77,7 +77,10 @@ if py3.found() and have_jni
     # imports Bundle; MediaBrowserService extends Service, imports Bundle).
     framework_shim = custom_target(
       'framework-shim-classes',
-      input : files('../../framework/shim/android/os/Bundle.java',
+      input : files('../../framework/shim/android/content/Context.java',
+                    '../../framework/shim/android/content/ContextWrapper.java',
+                    '../../framework/shim/android/view/ContextThemeWrapper.java',
+                    '../../framework/shim/android/os/Bundle.java',
                     '../../framework/shim/android/app/Service.java',
                     '../../framework/shim/android/app/Activity.java',
                     '../../framework/shim/android/media/AudioTrack.java',

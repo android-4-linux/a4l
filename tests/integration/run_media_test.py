@@ -15,7 +15,8 @@ import sys
 
 CHECKS = [
     "hosting MediaBrowserService com.aclcxx.hello.MusicService",
-    "media session: title='Now Playing Track'",  # MediaSession metadata published
+    "entry point is a Context: getPackageName()",  # MusicService extends Context
+    "media session: title='Now Playing Track'",  # MediaSession(Context,...) published
     "onPlay: playback started",                   # host onPlay -> app Callback reacted
     "onPause: playback paused",                   # host onPause -> app Callback reacted
     "media browse root: aclcxx_root",

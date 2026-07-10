@@ -13,7 +13,7 @@ package android.app;
 
 import android.os.Bundle;
 
-public class Activity {
+public class Activity extends android.view.ContextThemeWrapper {
   public Activity() {}
 
   // The lifecycle callbacks the aclcxx native driver calls, in order, to launch

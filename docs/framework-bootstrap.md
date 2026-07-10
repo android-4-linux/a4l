@@ -123,6 +123,19 @@ lifecycle driver instantiates the app's `Activity` subclass and calls `onCreate`
 `onResume` directly — no Binder. `setContentView`/`Context` services stay stubbed until the View
 stack (Phase 2).
 
+## The Context hierarchy (unblocks real entry points)
+
+Real `Service`/`Activity` are `Context`s (`Activity` → `ContextThemeWrapper` → `ContextWrapper` →
+`Context`), and real constructors take a `Context` (`MediaSession(Context,…)`, `AudioTrack.Builder`,
+…). The shims now model that chain: `framework/shim/android/content/{Context,ContextWrapper}.java`
++ `android/view/ContextThemeWrapper.java`, with `Service extends ContextWrapper` and `Activity
+extends ContextThemeWrapper`. So a hosted `Service`/`Activity` *is* a `Context` (the host logs its
+`getPackageName()`), and `MediaSession(Context, String)` verifies with the app's `this`. `Context`
+is a concrete minimal shim (real is abstract w/ ~100 SystemServer-bound methods — the 535-class
+closure); `getSystemService()` returns null until the `svc/` Manager boundary is wired. Real
+package injection (attach a `ContextImpl` carrying the manifest package) is the follow-up; today it
+defaults, settable via `aclcxxSetPackage`.
+
 ## Risks
 
 - **R-2 closure explosion** — mitigate with the budget + denylist + shim boundary; measure early

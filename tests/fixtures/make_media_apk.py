@@ -102,6 +102,7 @@ STRINGS = [
     "onPlay: playback started",         # 53
     "onPause: playback paused",         # 54
     "ILL",                              # 55 Log.i shorty (String,String)->int
+    "Landroid/content/Context;",        # 56 MediaSession.<init> takes a real Context
 ]
 S = {s: i for i, s in enumerate(STRINGS)}  # "V" (idx 12) is the ()V / no-arg shorty
 TYPES = ["Lcom/aclcxx/hello/MusicService;", MBS, BROWSER_ROOT, RESULT,
@@ -109,8 +110,10 @@ TYPES = ["Lcom/aclcxx/hello/MusicService;", MBS, BROWSER_ROOT, RESULT,
          "Ljava/lang/CharSequence;", ARRAYLIST, MEDIA_DESC, BUILDER, MEDIA_ITEM,
          "V", "I", "Z", SESSION, TOKEN, METADATA, MMBUILDER,
          "Lcom/aclcxx/hello/MusicCallback;",
-         "Landroid/media/session/MediaSession$Callback;", "Landroid/util/Log;"]
+         "Landroid/media/session/MediaSession$Callback;", "Landroid/util/Log;",
+         "Landroid/content/Context;"]
 T = {t: i for i, t in enumerate(TYPES)}
+CONTEXT = "Landroid/content/Context;"
 CALLBACK = "Landroid/media/session/MediaSession$Callback;"
 MUSIC_CB = "Lcom/aclcxx/hello/MusicCallback;"
 LOG = "Landroid/util/Log;"
@@ -175,7 +178,7 @@ def build_dex():
     tl_object = type_list(["Ljava/lang/Object;"])
     tl_charseq = type_list(["Ljava/lang/CharSequence;"])
     tl_mediaitem = type_list([MEDIA_DESC, "I"])
-    tl_objstr = type_list(["Ljava/lang/Object;", "Ljava/lang/String;"])  # MediaSession.<init>
+    tl_objstr = type_list([CONTEXT, "Ljava/lang/String;"])  # MediaSession.<init>(Context,String)
     tl_metadata = type_list([METADATA])          # setMetadata
     tl_token = type_list([TOKEN])                # setSessionToken
     tl_2str = type_list(["Ljava/lang/String;", "Ljava/lang/String;"])  # putString / Log.i

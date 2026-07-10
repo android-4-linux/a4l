@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 LAUNCHING = "launching Activity com.aclcxx.hello.MainActivity"  # lifecycle path taken
+CONTEXT = "entry point is a Context: getPackageName()"          # Activity extends Context
 ONCREATE = "MainActivity.onCreate ran"                          # onCreate executed
 
 
@@ -31,6 +32,8 @@ def main() -> int:
         sys.stderr.write(f"FAIL: exit {p.returncode}\n"); ok = False
     if LAUNCHING not in out:
         sys.stderr.write("FAIL: driver did not take the Activity-lifecycle path\n"); ok = False
+    if CONTEXT not in out:
+        sys.stderr.write("FAIL: Activity is not a functioning Context\n"); ok = False
     if ONCREATE not in out:
         sys.stderr.write("FAIL: MainActivity.onCreate did not run\n"); ok = False
     if "is not an Activity" in out or "invoking static main" in out:
