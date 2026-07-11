@@ -8,7 +8,7 @@
 
 #include <fmt/format.h>
 
-namespace aclcxx::log {
+namespace acl::log {
 namespace {
 
 // Default backend: one line per record on stderr, "<L>/<tag>: <message>".
@@ -87,4 +87,4 @@ void write(Level level, std::string_view tag, std::string_view message) noexcept
   if (active) active->write(level, tag, message);
 }
 
-}  // namespace aclcxx::log
+}  // namespace acl::log

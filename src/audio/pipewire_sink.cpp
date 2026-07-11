@@ -6,7 +6,7 @@
 // The PipeWire AudioTrack backend: an OUTPUT pw_stream fed from a FIFO. The app's
 // AudioTrack.write() pushes S16 PCM into the FIFO (write()); PipeWire pulls it in
 // the realtime on_process callback. Built only when libpipewire is present
-// (ACLCXX_HAVE_PIPEWIRE); make_sink() selects it via ACLCXX_AUDIO=pipewire.
+// (ACL_HAVE_PIPEWIRE); make_sink() selects it via ACL_AUDIO=pipewire.
 
 #include <algorithm>
 #include <cstdint>
@@ -21,10 +21,10 @@
 #include "audio/audio.h"
 #include "log/log.h"
 
-namespace aclcxx::audio {
+namespace acl::audio {
 namespace {
 
-constexpr std::string_view kTag = "aclcxx.audio";
+constexpr std::string_view kTag = "acl.audio";
 
 class PipeWireSink final : public Sink {
  public:
@@ -36,7 +36,7 @@ class PipeWireSink final : public Sink {
     pw_init(nullptr, nullptr);
     inited_ = true;
 
-    loop_ = pw_thread_loop_new("aclcxx-audio", nullptr);
+    loop_ = pw_thread_loop_new("acl-audio", nullptr);
     if (loop_ == nullptr) return false;
 
     static const pw_stream_events events = [] {
@@ -48,7 +48,7 @@ class PipeWireSink final : public Sink {
 
     pw_thread_loop_lock(loop_);
     stream_ = pw_stream_new_simple(
-        pw_thread_loop_get_loop(loop_), "aclcxx-audiotrack",
+        pw_thread_loop_get_loop(loop_), "acl-audiotrack",
         pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY,
                           "Playback", PW_KEY_MEDIA_ROLE, "Music", nullptr),
         &events, this);
@@ -164,4 +164,4 @@ std::unique_ptr<Sink> make_pipewire_sink() {
   return std::make_unique<PipeWireSink>();
 }
 
-}  // namespace aclcxx::audio
+}  // namespace acl::audio

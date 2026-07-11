@@ -50,9 +50,9 @@ def main() -> int:
         sys.stderr.write("SKIP: weston not found\n")
         return SKIP
 
-    runtime_dir = "/tmp/aclcxx-wl-%d" % os.getpid()
+    runtime_dir = "/tmp/acl-wl-%d" % os.getpid()
     os.makedirs(runtime_dir, mode=0o700, exist_ok=True)
-    socket = "aclcxx-wl"
+    socket = "acl-wl"
     env = dict(os.environ)
     env["XDG_RUNTIME_DIR"] = runtime_dir
     libdir = find_weston_libdir()

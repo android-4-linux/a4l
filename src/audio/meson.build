@@ -12,7 +12,7 @@ if have_pipewire
 endif
 
 module_libs += static_library(
-  'aclcxx_audio',
+  'acl_audio',
   audio_sources,
   include_directories : [config_inc, core_inc],
   dependencies : audio_deps,

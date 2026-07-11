@@ -6,7 +6,7 @@
 # MediaSession->MPRIS bridge, over the audio slice -> PipeWire. Gate G1.5a.
 # Supports media3 first, legacy support-lib via compat shim (RA-2).
 module_libs += static_library(
-  'aclcxx_host_media',
+  'acl_host_media',
   files('media_bridge.cpp'),
   include_directories : config_inc,
 )

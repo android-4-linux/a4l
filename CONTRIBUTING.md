@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-# Contributing to aclcxx
+# Contributing to acl
 
 Before anything else, read `PROVENANCE.md` and `docs/clean-room.md`. The clean-room and
 license rules are hard constraints enforced in CI, not guidelines.

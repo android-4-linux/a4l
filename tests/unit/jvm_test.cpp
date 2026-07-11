@@ -4,7 +4,7 @@
 // Isolated JVM integration test. HotSpot permits exactly one VM per process and
 // no re-creation after DestroyJavaVM, so this lives in its own test binary and
 // starts a single VM. Skipped unless the build compiled the Java fixtures and
-// passed their directory via ACLCXX_JVM_CLASSES.
+// passed their directory via ACL_JVM_CLASSES.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -17,7 +17,7 @@
 #include "dex/dexfile.h"
 #include "runtime/vm.h"
 
-using namespace aclcxx::runtime;
+using namespace acl::runtime;
 
 namespace {
 
@@ -42,8 +42,8 @@ std::vector<std::uint8_t> read_bytes(const std::string& p) {
 
 TEST_CASE("JVM backend executes real Java, including a DEX->JVM converted class",
           "[runtime][jvm]") {
-  const std::string dir = env("ACLCXX_JVM_CLASSES");
-  if (dir.empty()) SKIP("ACLCXX_JVM_CLASSES not set (fixtures not built)");
+  const std::string dir = env("ACL_JVM_CLASSES");
+  if (dir.empty()) SKIP("ACL_JVM_CLASSES not set (fixtures not built)");
 
   VmConfig cfg;
   cfg.classpath = {dir};
@@ -52,14 +52,14 @@ TEST_CASE("JVM backend executes real Java, including a DEX->JVM converted class"
   // classpath *before* the VM starts. This exercises the whole DEX->JVM path:
   // parse -> emit stubs -> javac -> JVM class loading + method resolution.
   std::string converted_dir;
-  const std::string dex_path = env("ACLCXX_FIXTURE_DEX");
+  const std::string dex_path = env("ACL_FIXTURE_DEX");
   if (!dex_path.empty()) {
     const auto bytes = read_bytes(dex_path);
-    aclcxx::dex::DexError derr;
-    auto dex = aclcxx::dex::DexFile::parse(bytes, derr);
+    acl::dex::DexError derr;
+    auto dex = acl::dex::DexFile::parse(bytes, derr);
     REQUIRE(dex.has_value());
-    aclcxx::dex::ConvertResult cres;
-    aclcxx::dex::DexError cerr = aclcxx::dex::convert(*dex, {}, cres);
+    acl::dex::ConvertResult cres;
+    acl::dex::DexError cerr = acl::dex::convert(*dex, {}, cres);
     if (cerr) {
       WARN("dex convert skipped: " << cerr.message);
     } else {
@@ -76,14 +76,14 @@ TEST_CASE("JVM backend executes real Java, including a DEX->JVM converted class"
 
   // 1. main() actually runs: it writes a marker file we can observe.
   const std::filesystem::path marker =
-      std::filesystem::temp_directory_path() / "aclcxx_jvm_marker.txt";
+      std::filesystem::temp_directory_path() / "acl_jvm_marker.txt";
   std::error_code ec;
   std::filesystem::remove(marker, ec);
 
   Error r = vm->call_static_main("Main", {marker.string()});
   CHECK(r.is_ok());
   CHECK(std::filesystem::exists(marker));
-  CHECK(read_file(marker) == "aclcxx-jvm-ok");
+  CHECK(read_file(marker) == "acl-jvm-ok");
 
   // 2. Dotted class names are accepted (normalized to JNI form).
   CHECK(vm->call_static_main("Main", {}).is_ok());
@@ -103,7 +103,7 @@ TEST_CASE("JVM backend executes real Java, including a DEX->JVM converted class"
     CHECK(vm->call_static_main("HelloDex", {}).is_ok());  // translated return-void
 
     const std::filesystem::path answer =
-        std::filesystem::temp_directory_path() / "aclcxx_answer.txt";
+        std::filesystem::temp_directory_path() / "acl_answer.txt";
     std::filesystem::remove(answer, ec);
     Error rr = vm->call_static_main("Runner", {answer.string()});
     CHECK(rr.is_ok());

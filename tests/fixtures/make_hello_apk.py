@@ -4,13 +4,13 @@
 # layout (public Apache-2.0 headers). No GPL-3.0 sources.
 #
 # Emit a tiny, self-contained "hello world" APK for the end-to-end run-path test:
-# a single class com.aclcxx.hello.Main whose
+# a single class com.acl.hello.Main whose
 #   public static void main(String[]) { System.out.println(<MSG or Probe.tag()>); }
 # is translatable by the DEX->JVM converter and runnable on the JVM backend, plus
 # a binary AndroidManifest.xml whose launcher activity resolves to that class (so
-# `aclcxx run hello.apk` needs no --main). Independent of the C++ decoder.
+# `acl run hello.apk` needs no --main). Independent of the C++ decoder.
 #
-# In --probe mode, main() instead calls com.aclcxx.fw.Probe.tag() — a class that is
+# In --probe mode, main() instead calls com.acl.fw.Probe.tag() — a class that is
 # NOT bundled in the APK, so it must be supplied via the framework boot classpath.
 # This proves the --framework / boot_classpath seam (Gate G2.a).
 #
@@ -23,9 +23,9 @@ import zlib
 
 from make_axml import build_axml
 
-MSG = "aclcxx: hello from a real APK"
-PROBE_CLASS = "com.aclcxx.fw.Probe"
-LOG_TAG = "aclcxx.app"
+MSG = "acl: hello from a real APK"
+PROBE_CLASS = "com.acl.fw.Probe"
+LOG_TAG = "acl.app"
 LOG_MSG = "hello via android.util.Log"
 
 
@@ -52,7 +52,7 @@ def build_dex(mode="hello"):
     # referenced by main() in the matching mode (unused refs are valid and never
     # resolved).
     STRINGS = [
-        "Lcom/aclcxx/hello/Main;",   # 0  this class
+        "Lcom/acl/hello/Main;",   # 0  this class
         "Ljava/lang/Object;",        # 1  superclass
         "Ljava/lang/String;",        # 2  String
         "[Ljava/lang/String;",       # 3  String[]
@@ -65,7 +65,7 @@ def build_dex(mode="hello"):
         "out",                       # 10
         "println",                   # 11
         "tag",                       # 12
-        "Lcom/aclcxx/fw/Probe;",     # 13 framework-supplied (not bundled)
+        "Lcom/acl/fw/Probe;",     # 13 framework-supplied (not bundled)
         MSG,                         # 14
         "I",                         # 15 int (Log.i return type / shorty)
         "Landroid/util/Log;",        # 16 framework class (native underside)
@@ -75,9 +75,9 @@ def build_dex(mode="hello"):
         LOG_MSG,                     # 20
     ]
     S = {s: i for i, s in enumerate(STRINGS)}
-    TYPES = ["Lcom/aclcxx/hello/Main;", "Ljava/lang/Object;", "Ljava/lang/String;",
+    TYPES = ["Lcom/acl/hello/Main;", "Ljava/lang/Object;", "Ljava/lang/String;",
              "[Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;",
-             "V", "Lcom/aclcxx/fw/Probe;", "I", "Landroid/util/Log;"]
+             "V", "Lcom/acl/fw/Probe;", "I", "Landroid/util/Log;"]
     T = {t: i for i, t in enumerate(TYPES)}
 
     header_size = 112
@@ -122,7 +122,7 @@ def build_dex(mode="hello"):
                  0x000E]                  # return-void
     elif mode == "log":
         # android.util.Log.i(LOG_TAG, LOG_MSG) — Log is a framework class whose
-        # native underside is provided by aclcxx (result int ignored).
+        # native underside is provided by acl (result int ignored).
         insns = [0x001A, S[LOG_TAG],      # const-string v0, LOG_TAG
                  0x011A, S[LOG_MSG],      # const-string v1, LOG_MSG
                  0x2071, 0x0003, 0x0010,  # invoke-static {v0,v1}, Log.i (m3)
@@ -173,12 +173,12 @@ def build_dex(mode="hello"):
     proto_ids += struct.pack("<III", S["ILL"], T["I"], type_list_2str_off)  # (String,String)I
     field_ids = struct.pack("<HHI", T["Ljava/lang/System;"],
                             T["Ljava/io/PrintStream;"], S["out"])          # f0 System.out
-    method_ids = struct.pack("<HHI", T["Lcom/aclcxx/hello/Main;"], 0, S["main"])   # m0
+    method_ids = struct.pack("<HHI", T["Lcom/acl/hello/Main;"], 0, S["main"])   # m0
     method_ids += struct.pack("<HHI", T["Ljava/io/PrintStream;"], 1, S["println"])  # m1
-    method_ids += struct.pack("<HHI", T["Lcom/aclcxx/fw/Probe;"], 2, S["tag"])      # m2
+    method_ids += struct.pack("<HHI", T["Lcom/acl/fw/Probe;"], 2, S["tag"])      # m2
     method_ids += struct.pack("<HHI", T["Landroid/util/Log;"], 3, S["i"])           # m3 Log.i
     class_defs = struct.pack("<IIIIIIII",
-                             T["Lcom/aclcxx/hello/Main;"], 0x1,
+                             T["Lcom/acl/hello/Main;"], 0x1,
                              T["Ljava/lang/Object;"], 0, 0xFFFFFFFF, 0,
                              class_data_off, 0)
 
@@ -208,8 +208,8 @@ def build_dex(mode="hello"):
 def build_apk(mode="hello"):
     return {
         "AndroidManifest.xml": build_axml(
-            utf8=True, package="com.aclcxx.hello",
-            launcher="com.aclcxx.hello.Main"),
+            utf8=True, package="com.acl.hello",
+            launcher="com.acl.hello.Main"),
         "classes.dex": build_dex(mode=mode),
     }
 

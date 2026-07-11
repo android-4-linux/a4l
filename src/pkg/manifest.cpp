@@ -9,7 +9,7 @@
 #include <string_view>
 #include <utility>
 
-namespace aclcxx::pkg {
+namespace acl::pkg {
 namespace {
 
 // ResChunk_header.type values (androidfw ResourceTypes.h).
@@ -373,4 +373,4 @@ AxmlError parse_manifest(const std::vector<std::uint8_t>& bytes, Manifest& out) 
   return parse_manifest(bytes.data(), bytes.size(), out);
 }
 
-}  // namespace aclcxx::pkg
+}  // namespace acl::pkg

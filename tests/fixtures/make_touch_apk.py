@@ -4,12 +4,12 @@
 # layout (public Apache-2.0 headers). No GPL-3.0 sources.
 #
 # Emit an APK that reacts to touch input (Phase 2, wl_pointer -> MotionEvent):
-#   package com.aclcxx.hello;
+#   package com.acl.hello;
 #   class TouchView extends android.view.View {
 #     int touched;
 #     TouchView(Context c) { super(c); }
 #     public boolean onTouchEvent(MotionEvent e) {
-#       Log.i("aclcxx.touch", "onTouchEvent");   // proof the event arrived
+#       Log.i("acl.touch", "onTouchEvent");   // proof the event arrived
 #       touched = 1; invalidate(); return true;
 #     }
 #     protected void onDraw(Canvas c) {
@@ -19,7 +19,7 @@
 #   class MainActivity extends android.app.Activity {
 #     protected void onCreate(Bundle b) { super.onCreate(b); setContentView(new TouchView(this)); }
 #   }
-# `aclcxx run touch.apk --present-frames=0` presents until close; the compositor
+# `acl run touch.apk --present-frames=0` presents until close; the compositor
 # injects a pointer tap, the ViewRoot driver turns it into a MotionEvent and
 # dispatches it into the view, and TouchView.onTouchEvent logs + repaints green.
 #
@@ -32,8 +32,8 @@ import zlib
 
 from make_axml import build_axml
 
-MAINACT = "Lcom/aclcxx/hello/MainActivity;"
-TOUCHVIEW = "Lcom/aclcxx/hello/TouchView;"
+MAINACT = "Lcom/acl/hello/MainActivity;"
+TOUCHVIEW = "Lcom/acl/hello/TouchView;"
 ACTIVITY = "Landroid/app/Activity;"
 VIEW = "Landroid/view/View;"
 CONTEXT = "Landroid/content/Context;"
@@ -48,7 +48,7 @@ STRINGS = [
     "V", "I", "Z",
     "VL", "ZL", "VI", "ILL",
     "<init>", "onCreate", "setContentView", "onTouchEvent", "onDraw", "invalidate",
-    "i", "drawColor", "touched", "aclcxx.touch",
+    "i", "drawColor", "touched", "acl.touch",
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 TYPES = [MAINACT, TOUCHVIEW, ACTIVITY, VIEW, CONTEXT, BUNDLE, CANVAS, MOTIONEVENT,
@@ -139,7 +139,7 @@ def build_dex():
     ]))
     code_touchview_ontouch = off_data + len(data)
     data.extend(code_item(5, 2, 2, [
-        0x001A, S["aclcxx.touch"], # const-string v0, "aclcxx.touch"
+        0x001A, S["acl.touch"], # const-string v0, "acl.touch"
         0x011A, S["onTouchEvent"], # const-string v1, "onTouchEvent"
         0x2071, 0x000A, 0x0010,    # invoke-static {v0,v1}, Log.i (m10)
         0x1212,                    # const/4 v2, 1
@@ -260,8 +260,8 @@ def main():
         return 2
     entries = {
         "AndroidManifest.xml": build_axml(
-            utf8=True, package="com.aclcxx.hello",
-            launcher="com.aclcxx.hello.MainActivity"),
+            utf8=True, package="com.acl.hello",
+            launcher="com.acl.hello.MainActivity"),
         "classes.dex": build_dex(),
     }
     with zipfile.ZipFile(sys.argv[1], "w") as z:

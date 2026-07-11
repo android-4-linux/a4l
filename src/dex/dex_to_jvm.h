@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: specs/dex.md (pending), Dalvik bytecode & JVM Specification, ADR-0001.
 // No GPL-3.0 sources.
-#ifndef ACLCXX_DEX_DEX_TO_JVM_H
-#define ACLCXX_DEX_DEX_TO_JVM_H
+#ifndef ACL_DEX_DEX_TO_JVM_H
+#define ACL_DEX_DEX_TO_JVM_H
 
 // DEX -> JVM converter. A stock JVM cannot load Dalvik bytecode, so the ADR-0001
 // JVM backend runs converted classes. This emits real .class files (no javac):
@@ -17,7 +17,7 @@
 
 #include "dex/dexfile.h"
 
-namespace aclcxx::dex {
+namespace acl::dex {
 
 struct ConvertOptions {
   std::string work_dir;  // output scratch dir; a temp dir is used if empty
@@ -34,6 +34,6 @@ struct ConvertResult {
 DexError convert(const DexFile& dex, const ConvertOptions& opts,
                  ConvertResult& out);
 
-}  // namespace aclcxx::dex
+}  // namespace acl::dex
 
-#endif  // ACLCXX_DEX_DEX_TO_JVM_H
+#endif  // ACL_DEX_DEX_TO_JVM_H

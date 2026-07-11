@@ -2,6 +2,6 @@
 // Provenance: specs/input.md (pending), Android SDK MotionEvent/KeyEvent docs, wl_seat protocol, CTS. No GPL-3.0 sources.
 //
 // Phase 0 placeholder for the input subsystem.
-namespace aclcxx::input {
+namespace acl::input {
 const char* module_name() noexcept { return "input"; }
 }

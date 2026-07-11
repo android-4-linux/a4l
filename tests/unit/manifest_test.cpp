@@ -11,7 +11,7 @@
 #include "pkg/apk.h"
 #include "pkg/manifest.h"
 
-using namespace aclcxx::pkg;
+using namespace acl::pkg;
 
 namespace {
 
@@ -60,8 +60,8 @@ TEST_CASE("resolve_class_name applies Android shorthand rules", "[pkg][manifest]
 }
 
 TEST_CASE("parse a UTF-8 AXML manifest read from the APK", "[pkg][manifest]") {
-  const std::string apk = env("ACLCXX_FIXTURE_APK");
-  if (apk.empty()) SKIP("ACLCXX_FIXTURE_APK not set");
+  const std::string apk = env("ACL_FIXTURE_APK");
+  if (apk.empty()) SKIP("ACL_FIXTURE_APK not set");
 
   ZipError zerr;
   auto a = Apk::open(apk, zerr);
@@ -77,8 +77,8 @@ TEST_CASE("parse a UTF-8 AXML manifest read from the APK", "[pkg][manifest]") {
 
 TEST_CASE("parse a UTF-16 AXML manifest (exercises UTF-16 string pool)",
           "[pkg][manifest]") {
-  const std::string path = env("ACLCXX_AXML_UTF16");
-  if (path.empty()) SKIP("ACLCXX_AXML_UTF16 not set");
+  const std::string path = env("ACL_AXML_UTF16");
+  if (path.empty()) SKIP("ACL_AXML_UTF16 not set");
 
   const std::vector<std::uint8_t> bytes = read_file(path);
   REQUIRE_FALSE(bytes.empty());

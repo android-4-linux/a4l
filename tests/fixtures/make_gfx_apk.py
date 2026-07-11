@@ -4,7 +4,7 @@
 # layout (public Apache-2.0 headers). No GPL-3.0 sources.
 #
 # Emit an APK that draws (Phase 2, gfx/Canvas):
-#   package com.aclcxx.hello;
+#   package com.acl.hello;
 #   class MyView extends android.view.View {
 #     protected void onDraw(Canvas c) {
 #       c.drawColor(0xFF0000FF);                 // blue fill
@@ -18,11 +18,11 @@
 #       Bitmap b = Bitmap.createBitmap(64, 64);
 #       Canvas c = new Canvas(b);
 #       v.draw(c);               // -> onDraw(c) -> gfx raster
-#       b.aclcxxDescribe();      // logs sample pixels
+#       b.aclDescribe();      // logs sample pixels
 #     }
 #   }
-# `aclcxx run gfx.apk --framework=<shims>` runs main() (GfxApp is not an Activity ->
-# launcher falls back to static main); Canvas/Bitmap natives raster into aclcxx::gfx.
+# `acl run gfx.apk --framework=<shims>` runs main() (GfxApp is not an Activity ->
+# launcher falls back to static main); Canvas/Bitmap natives raster into acl::gfx.
 # Exercises invoke-virtual/range + float args + an int/ref-reused register.
 #
 # Usage: make_gfx_apk.py <output.apk>
@@ -34,8 +34,8 @@ import zlib
 
 from make_axml import build_axml
 
-GFXAPP = "Lcom/aclcxx/hello/GfxApp;"
-MYVIEW = "Lcom/aclcxx/hello/MyView;"
+GFXAPP = "Lcom/acl/hello/GfxApp;"
+MYVIEW = "Lcom/acl/hello/MyView;"
 VIEW = "Landroid/view/View;"
 BITMAP = "Landroid/graphics/Bitmap;"
 CANVAS = "Landroid/graphics/Canvas;"
@@ -56,7 +56,7 @@ STRINGS = [
     "<init>",                   # 12
     "createBitmap",             # 13
     "draw",                     # 14
-    "aclcxxDescribe",           # 15
+    "aclDescribe",           # 15
     "drawColor",                # 16
     "setColor",                 # 17
     "drawRect",                 # 18
@@ -143,7 +143,7 @@ def build_dex():
         0x0222, T[CANVAS],        # new-instance v2, Canvas
         0x2070, 0x0004, 0x0012,   # invoke-direct {v2,v1}, Canvas.<init>(Bitmap) (m4)
         0x206E, 0x0005, 0x0020,   # invoke-virtual {v0,v2}, View.draw(Canvas) (m5)
-        0x106E, 0x0006, 0x0001,   # invoke-virtual {v1}, Bitmap.aclcxxDescribe (m6)
+        0x106E, 0x0006, 0x0001,   # invoke-virtual {v1}, Bitmap.aclDescribe (m6)
         0x000E,                   # return-void
     ]))
     # MyView.<init>
@@ -208,7 +208,7 @@ def build_dex():
     proto_ids += struct.pack("<III", S["VL"], T["V"], tl_canvas)    # 4 (Canvas)V draw/onDraw
     proto_ids += struct.pack("<III", S["VI"], T["V"], tl_int)       # 5 (int)V drawColor/setColor
     proto_ids += struct.pack("<III", S["VFFFFL"], T["V"], tl_drawrect)  # 6 drawRect
-    # (proto for aclcxxDescribe/<init>/View.<init> is proto 1 ()V)
+    # (proto for aclDescribe/<init>/View.<init> is proto 1 ()V)
 
     def m(cls, proto, name):
         return struct.pack("<HHI", T[cls], proto, S[name])
@@ -219,7 +219,7 @@ def build_dex():
         m(BITMAP, 2, "createBitmap"),   # m3
         m(CANVAS, 3, "<init>"),         # m4 (Bitmap)V
         m(VIEW, 4, "draw"),             # m5 (Canvas)V
-        m(BITMAP, 1, "aclcxxDescribe"), # m6 ()V
+        m(BITMAP, 1, "aclDescribe"), # m6 ()V
         m(VIEW, 1, "<init>"),           # m7 ()V
         m(CANVAS, 5, "drawColor"),      # m8 (int)V
         m(PAINT, 1, "<init>"),          # m9 ()V
@@ -266,8 +266,8 @@ def main():
         return 2
     entries = {
         "AndroidManifest.xml": build_axml(
-            utf8=True, package="com.aclcxx.hello",
-            launcher="com.aclcxx.hello.GfxApp"),
+            utf8=True, package="com.acl.hello",
+            launcher="com.acl.hello.GfxApp"),
         "classes.dex": build_dex(),
     }
     with zipfile.ZipFile(sys.argv[1], "w") as z:

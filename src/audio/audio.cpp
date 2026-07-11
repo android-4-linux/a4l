@@ -13,13 +13,13 @@
 #include <cstring>
 #include <string_view>
 
-#include "aclcxx_config.h"
+#include "acl_config.h"
 #include "log/log.h"
 
-namespace aclcxx::audio {
+namespace acl::audio {
 namespace {
 
-constexpr std::string_view kTag = "aclcxx.audio";
+constexpr std::string_view kTag = "acl.audio";
 
 // Counts frames without touching a device — deterministic and always available.
 // It is the default backend and the fallback when PipeWire is unbuilt/unselected.
@@ -51,20 +51,20 @@ class NullSink final : public Sink {
 
 }  // namespace
 
-#if ACLCXX_HAVE_PIPEWIRE
+#if ACL_HAVE_PIPEWIRE
 std::unique_ptr<Sink> make_pipewire_sink();  // defined in pipewire_sink.cpp
 #endif
 
 std::unique_ptr<Sink> make_sink() {
-  const char* backend = std::getenv("ACLCXX_AUDIO");
-#if ACLCXX_HAVE_PIPEWIRE
+  const char* backend = std::getenv("ACL_AUDIO");
+#if ACL_HAVE_PIPEWIRE
   if (backend != nullptr && std::strcmp(backend, "pipewire") == 0) {
     if (auto s = make_pipewire_sink()) return s;
     log::w(kTag, "PipeWire sink unavailable; falling back to null sink");
   }
 #else
   if (backend != nullptr && std::strcmp(backend, "pipewire") == 0) {
-    log::w(kTag, "built without PipeWire (ACLCXX_HAVE_PIPEWIRE=0); using null sink");
+    log::w(kTag, "built without PipeWire (ACL_HAVE_PIPEWIRE=0); using null sink");
   }
 #endif
   return std::make_unique<NullSink>();
@@ -72,4 +72,4 @@ std::unique_ptr<Sink> make_sink() {
 
 const char* module_name() noexcept { return "audio"; }
 
-}  // namespace aclcxx::audio
+}  // namespace acl::audio

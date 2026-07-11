@@ -4,7 +4,7 @@
 // presentation), and the structure of its presentation-shm example. Wayland +
 // xdg-shell + presentation-time protocols (freedesktop, MIT). No GPL-3.0 sources.
 //
-// The real Wayland presenter (compiled only when ACLCXX_HAVE_WCS): show aclcxx::gfx
+// The real Wayland presenter (compiled only when ACL_HAVE_WCS): show acl::gfx
 // frames via wcs CRTP bindings. present_loop() runs a Choreographer-style loop —
 // each wl_surface.frame callback (the vsync tick) drives one FrameCallback, which
 // draws the next frame; wp_presentation feedback supplies the vsync-aligned frame
@@ -55,7 +55,7 @@
 
 #include "log/log.h"
 
-namespace aclcxx::wm {
+namespace acl::wm {
 namespace {
 
 using namespace wayland::client;
@@ -63,7 +63,7 @@ using namespace xdg_shell::client;
 namespace fs = fractional_scale_v1::client;
 namespace vp = viewporter::client;
 
-constexpr const char* kTag = "aclcxx.wm";
+constexpr const char* kTag = "acl.wm";
 
 std::uint64_t now_ns(clockid_t clk) noexcept {
   timespec ts{};
@@ -141,7 +141,7 @@ struct ShmMapping {
   ~ShmMapping() { Reset(); }
   bool Create(std::size_t n) noexcept {
     Reset();
-    fd = memfd_create("aclcxx-wm", 0);
+    fd = memfd_create("acl-wm", 0);
     if (fd < 0 || ftruncate(fd, static_cast<off_t>(n)) < 0) { Reset(); return false; }
     data = mmap(nullptr, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (data == MAP_FAILED) { Reset(); return false; }
@@ -616,4 +616,4 @@ bool present_surface(const gfx::Surface& surface, std::string_view title,
                       InputCallback{}, false, 1);
 }
 
-}  // namespace aclcxx::wm
+}  // namespace acl::wm

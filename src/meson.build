@@ -2,7 +2,7 @@
 # Provenance: plan.md §2, §8. No GPL-3.0 sources.
 #
 # Native core modules. Each subdir appends its static_library to module_libs
-# (shared scope via subdir). src/shell builds the `aclcxx` executable last,
+# (shared scope via subdir). src/shell builds the `acl` executable last,
 # linking everything. Order below is dependency-agnostic for the Phase 0 stubs.
 
 subdir('log')       # logging facade (fmt backend; spdlog/DLT sinks later)
@@ -16,4 +16,4 @@ subdir('audio')     # AAudio/OpenSL -> PipeWire
 subdir('media')     # MediaCodec -> V4L2 M2M, FFmpeg fallback
 subdir('svc')       # in-process service hub (+ svc/car under automotive)
 subdir('ndk')       # libandroid, ANativeWindow, ALooper (Phase 4)
-subdir('shell')     # CLI launcher + aclcxx executable
+subdir('shell')     # CLI launcher + acl executable

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: Android SDK docs (developer.android.com/reference/android/content/
 // SharedPreferences + its Editor): public API surface. The native underside is
-// aclcxx's own bridge to the svc/ PreferencesService (no Binder). No GPL-3.0 sources.
+// acl's own bridge to the svc/ PreferencesService (no Binder). No GPL-3.0 sources.
 //
 // A minimal source-compatible shim for android.content.SharedPreferences + Editor
 // (Gate G2.e, svc hub). Returned by Context.getSharedPreferences(name, mode); its
-// natives call the in-process aclcxx::svc::PreferencesService. Real SharedPreferences
+// natives call the in-process acl::svc::PreferencesService. Real SharedPreferences
 // is an interface (backed by a hidden impl over per-package XML files); this is a
 // concrete shim over the in-process store. Docs-derived shim, NOT vendored AOSP.
 package android.content;

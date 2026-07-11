@@ -5,7 +5,7 @@
 #
 # Emit an APK that ANIMATES via android.view.Choreographer (Phase 2, continuous
 # presentation):
-#   package com.aclcxx.hello;
+#   package com.acl.hello;
 #   class AnimView extends android.view.View implements Choreographer.FrameCallback {
 #     int frame;
 #     AnimView(Context c) { super(c); }
@@ -29,7 +29,7 @@
 #       Choreographer.getInstance().postFrameCallback(v);   // start the loop
 #     }
 #   }
-# `aclcxx run anim.apk --present-frames=N` drives the ViewRoot/Choreographer loop:
+# `acl run anim.apk --present-frames=N` drives the ViewRoot/Choreographer loop:
 # each Wayland frame tick fires doFrame (frame++/re-post) and re-draws, so the red
 # band moves and N distinct frames are presented.
 #
@@ -42,8 +42,8 @@ import zlib
 
 from make_axml import build_axml
 
-MAINACT = "Lcom/aclcxx/hello/MainActivity;"
-ANIMVIEW = "Lcom/aclcxx/hello/AnimView;"
+MAINACT = "Lcom/acl/hello/MainActivity;"
+ANIMVIEW = "Lcom/acl/hello/AnimView;"
 ACTIVITY = "Landroid/app/Activity;"
 VIEW = "Landroid/view/View;"
 CONTEXT = "Landroid/content/Context;"
@@ -298,8 +298,8 @@ def main():
         return 2
     entries = {
         "AndroidManifest.xml": build_axml(
-            utf8=True, package="com.aclcxx.hello",
-            launcher="com.aclcxx.hello.MainActivity"),
+            utf8=True, package="com.acl.hello",
+            launcher="com.acl.hello.MainActivity"),
         "classes.dex": build_dex(),
     }
     with zipfile.ZipFile(sys.argv[1], "w") as z:

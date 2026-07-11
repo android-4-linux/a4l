@@ -4,9 +4,9 @@
 //
 // A minimal source-compatible shim for android.view.Choreographer (Phase 2). Real
 // Choreographer schedules callbacks on the display vsync via the native
-// DisplayEventReceiver; here the aclcxx ViewRoot driver (jvm_vm) pumps the queue
+// DisplayEventReceiver; here the acl ViewRoot driver (jvm_vm) pumps the queue
 // once per Wayland frame tick (wl_surface.frame, aligned by wp_presentation) by
-// calling aclcxxDoFrame(frameTimeNanos). Callbacks are one-shot — an animation
+// calling aclDoFrame(frameTimeNanos). Callbacks are one-shot — an animation
 // re-posts itself from doFrame(), exactly as on Android. Docs-derived shim, NOT
 // vendored AOSP.
 package android.view;
@@ -31,10 +31,10 @@ public final class Choreographer {
     pending.remove(callback);
   }
 
-  // Fire and clear the queued callbacks for one frame (the aclcxx vsync tick).
+  // Fire and clear the queued callbacks for one frame (the acl vsync tick).
   // Swaps the queue first so a callback that re-posts itself lands in the NEXT
   // frame, not this one. Returns how many callbacks fired (0 => nothing animating).
-  public long aclcxxDoFrame(long frameTimeNanos) {
+  public long aclDoFrame(long frameTimeNanos) {
     ArrayList<FrameCallback> now = pending;
     pending = new ArrayList<FrameCallback>();
     for (int i = 0; i < now.size(); i++) {

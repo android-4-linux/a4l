@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: specs/runtime.md (pending), AOSP art host-embedding & JNI Invocation API
 // docs, ADR-0001. No GPL-3.0 sources.
-#ifndef ACLCXX_RUNTIME_VM_H
-#define ACLCXX_RUNTIME_VM_H
+#ifndef ACL_RUNTIME_VM_H
+#define ACL_RUNTIME_VM_H
 
 // The runtime spine: a backend-agnostic seam for embedding a Java runtime,
 // loading a boot/app classpath, and invoking a static main() — the Phase 1
@@ -17,7 +17,7 @@
 #include <string_view>
 #include <vector>
 
-namespace aclcxx::runtime {
+namespace acl::runtime {
 
 // ADR-0001: Art is the target; Jvm is the documented fallback; Null is the
 // no-Java plumbing/test backend.
@@ -29,7 +29,7 @@ const char* backend_name(Backend backend) noexcept;
 // on an unrecognized name.
 bool parse_backend(std::string_view name, Backend& out) noexcept;
 
-// Backend selected from the ACLCXX_VM environment variable, defaulting to Art.
+// Backend selected from the ACL_VM environment variable, defaulting to Art.
 Backend default_backend() noexcept;
 
 // Where the runtime finds code and caches compiled output.
@@ -115,6 +115,6 @@ class Vm {
 // both `Art` (R-1) and `Jvm` (fallback not yet wired). `Null` always succeeds.
 std::unique_ptr<Vm> create_vm(Backend backend, VmConfig config, Error& out_error);
 
-}  // namespace aclcxx::runtime
+}  // namespace acl::runtime
 
-#endif  // ACLCXX_RUNTIME_VM_H
+#endif  // ACL_RUNTIME_VM_H

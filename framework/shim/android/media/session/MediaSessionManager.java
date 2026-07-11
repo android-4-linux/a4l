@@ -8,7 +8,7 @@
 // register with the svc/ service on construction, so the active count reflects
 // them. getActiveSessions() returns MediaControllers over an enabled-listener
 // connection in real Android; controllers arrive with the controller stack, so it
-// returns empty for now while aclcxxActiveSessionCount() exposes the count.
+// returns empty for now while aclActiveSessionCount() exposes the count.
 // Docs-derived shim, NOT vendored AOSP.
 package android.media.session;
 
@@ -24,8 +24,8 @@ public class MediaSessionManager {
     return new ArrayList<>();  // controllers arrive with the controller stack
   }
 
-  // aclcxx accessor: how many MediaSessions are currently registered with svc/.
-  public int aclcxxActiveSessionCount() { return nativeActiveSessionCount(); }
+  // acl accessor: how many MediaSessions are currently registered with svc/.
+  public int aclActiveSessionCount() { return nativeActiveSessionCount(); }
 
   private static native int nativeActiveSessionCount();
 }

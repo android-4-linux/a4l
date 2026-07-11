@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: Android SDK docs (developer.android.com/reference/android/util/Log):
 // public API surface + priority constants. The native underside (write0) is
-// aclcxx's own bridge (RegisterNatives -> aclcxx::log). No GPL-3.0 sources.
+// acl's own bridge (RegisterNatives -> acl::log). No GPL-3.0 sources.
 //
 // A source-compatible shim for android.util.Log — the first android.* class on the
-// framework boot classpath with an aclcxx-implemented native method (Gate G2.b).
+// framework boot classpath with an acl-implemented native method (Gate G2.b).
 // It is a docs-derived shim, NOT the vendored AOSP file; true vendoring of real
 // frameworks/base classes lands with the AOSP mirror pin (G2.c). Apps call the
 // documented static methods; those funnel to println(), whose native write0()
-// forwards to the aclcxx native logging core.
+// forwards to the acl native logging core.
 package android.util;
 
 public final class Log {
@@ -47,7 +47,7 @@ public final class Log {
     return write0(priority, tag, msg == null ? "null" : msg);
   }
 
-  // Native underside provided by aclcxx (registered via RegisterNatives at VM
-  // start; forwards to aclcxx::log::write).
+  // Native underside provided by acl (registered via RegisterNatives at VM
+  // start; forwards to acl::log::write).
   private static native int write0(int priority, String tag, String msg);
 }

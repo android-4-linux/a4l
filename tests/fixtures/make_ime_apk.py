@@ -5,10 +5,10 @@
 #
 # Emit an APK that receives IME-committed text (Phase 2, zwp_text_input_v3 ->
 # InputConnection):
-#   package com.aclcxx.hello;
+#   package com.acl.hello;
 #   class ImeConn implements android.view.inputmethod.InputConnection {
 #     public boolean commitText(CharSequence text, int newCursorPosition) {
-#       Log.i("aclcxx.ime", "commitText");   // the compositor's IME committed text
+#       Log.i("acl.ime", "commitText");   // the compositor's IME committed text
 #       return true;
 #     }
 #   }
@@ -20,7 +20,7 @@
 #   class MainActivity extends android.app.Activity {
 #     protected void onCreate(Bundle b) { super.onCreate(b); setContentView(new ImeView(this)); }
 #   }
-# `aclcxx run ime.apk --present-frames=0`: the view returns an InputConnection, so
+# `acl run ime.apk --present-frames=0`: the view returns an InputConnection, so
 # the driver enables Wayland text-input; the compositor's IME sends commit_string,
 # which the driver routes to InputConnection.commitText -> logs "commitText".
 #
@@ -33,9 +33,9 @@ import zlib
 
 from make_axml import build_axml
 
-MAINACT = "Lcom/aclcxx/hello/MainActivity;"
-IMEVIEW = "Lcom/aclcxx/hello/ImeView;"
-IMECONN = "Lcom/aclcxx/hello/ImeConn;"
+MAINACT = "Lcom/acl/hello/MainActivity;"
+IMEVIEW = "Lcom/acl/hello/ImeView;"
+IMECONN = "Lcom/acl/hello/ImeConn;"
 ACTIVITY = "Landroid/app/Activity;"
 VIEW = "Landroid/view/View;"
 CONTEXT = "Landroid/content/Context;"
@@ -55,7 +55,7 @@ STRINGS = [
     "VL", "LL", "ZLI", "ZII", "VI", "ILL",
     "<init>", "onCreate", "setContentView", "onDraw", "onCreateInputConnection",
     "commitText", "setComposingText", "deleteSurroundingText", "drawColor", "i",
-    "aclcxx.ime",
+    "acl.ime",
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 TYPES = [MAINACT, IMEVIEW, IMECONN, ACTIVITY, VIEW, CONTEXT, BUNDLE, CANVAS, OBJECT,
@@ -163,7 +163,7 @@ def build_dex():
     ]))
     code_imeconn_commit = off_data + len(data)
     data.extend(code_item(6, 3, 2, [
-        0x001A, S["aclcxx.ime"],  # const-string v0, "aclcxx.ime"
+        0x001A, S["acl.ime"],  # const-string v0, "acl.ime"
         0x011A, S["commitText"],  # const-string v1, "commitText"
         0x2071, 0x000D, 0x0010,   # invoke-static {v0,v1}, Log.i (m13)
         0x1212,                   # const/4 v2, 1
@@ -171,7 +171,7 @@ def build_dex():
     ]))
     code_imeconn_setcomposing = off_data + len(data)
     data.extend(code_item(6, 3, 2, [
-        0x001A, S["aclcxx.ime"],       # const-string v0, "aclcxx.ime"
+        0x001A, S["acl.ime"],       # const-string v0, "acl.ime"
         0x011A, S["setComposingText"], # const-string v1, "setComposingText"
         0x2071, 0x000D, 0x0010,        # invoke-static {v0,v1}, Log.i (m13)
         0x1212,                        # const/4 v2, 1
@@ -179,7 +179,7 @@ def build_dex():
     ]))
     code_imeconn_delete = off_data + len(data)
     data.extend(code_item(6, 3, 2, [
-        0x001A, S["aclcxx.ime"],            # const-string v0, "aclcxx.ime"
+        0x001A, S["acl.ime"],            # const-string v0, "acl.ime"
         0x011A, S["deleteSurroundingText"], # const-string v1, "deleteSurroundingText"
         0x2071, 0x000D, 0x0010,             # invoke-static {v0,v1}, Log.i (m13)
         0x1212,                             # const/4 v2, 1
@@ -300,8 +300,8 @@ def main():
         return 2
     entries = {
         "AndroidManifest.xml": build_axml(
-            utf8=True, package="com.aclcxx.hello",
-            launcher="com.aclcxx.hello.MainActivity"),
+            utf8=True, package="com.acl.hello",
+            launcher="com.acl.hello.MainActivity"),
         "classes.dex": build_dex(),
     }
     with zipfile.ZipFile(sys.argv[1], "w") as z:

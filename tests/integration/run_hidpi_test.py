@@ -23,9 +23,9 @@ def main() -> int:
         return 2
     probe, compositor = sys.argv[1], sys.argv[2]
 
-    runtime_dir = "/tmp/aclcxx-wl-%d" % os.getpid()
+    runtime_dir = "/tmp/acl-wl-%d" % os.getpid()
     os.makedirs(runtime_dir, mode=0o700, exist_ok=True)
-    socket = "aclcxx-hidpi"
+    socket = "acl-hidpi"
     env = dict(os.environ)
     env["XDG_RUNTIME_DIR"] = runtime_dir
 

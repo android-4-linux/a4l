@@ -3,18 +3,18 @@
 # Gate G2.d. No GPL-3.0 sources.
 #
 # Prove the Android Activity entry point: activity.apk's launcher is
-# com.aclcxx.hello.MainActivity extends android.app.Activity (a shim on the boot
-# classpath). `aclcxx run` must resolve the launcher from the manifest, recognize
+# com.acl.hello.MainActivity extends android.app.Activity (a shim on the boot
+# classpath). `acl run` must resolve the launcher from the manifest, recognize
 # it as an Activity subclass, instantiate it, and drive onCreate -> onStart ->
 # onResume — NOT fall back to a static main() (there is none). onCreate calls
-# super.onCreate() and android.util.Log.i(), so its line surfaces via aclcxx::log.
+# super.onCreate() and android.util.Log.i(), so its line surfaces via acl::log.
 #
-# Usage: run_activity_test.py <aclcxx_binary> <activity.apk> <framework_dir>
+# Usage: run_activity_test.py <acl_binary> <activity.apk> <framework_dir>
 import subprocess
 import sys
 
-LAUNCHING = "launching Activity com.aclcxx.hello.MainActivity"  # lifecycle path taken
-CONTEXT = "getPackageName()=com.aclcxx.hello"  # real manifest package injected
+LAUNCHING = "launching Activity com.acl.hello.MainActivity"  # lifecycle path taken
+CONTEXT = "getPackageName()=com.acl.hello"  # real manifest package injected
 ONCREATE = "MainActivity.onCreate ran"                          # onCreate executed
 SVC = "set stream 3 volume -> 7"  # getSystemService(AUDIO)->AudioManager->svc hub
 PREFS = "prefs[settings] greeting -> hi"  # getSharedPreferences->edit->putString->svc
@@ -22,10 +22,10 @@ PREFS = "prefs[settings] greeting -> hi"  # getSharedPreferences->edit->putStrin
 
 def main() -> int:
     if len(sys.argv) != 4:
-        sys.stderr.write("usage: run_activity_test.py <aclcxx> <activity.apk> <fw_dir>\n")
+        sys.stderr.write("usage: run_activity_test.py <acl> <activity.apk> <fw_dir>\n")
         return 2
-    aclcxx, apk, fw = sys.argv[1], sys.argv[2], sys.argv[3]
-    p = subprocess.run([aclcxx, "run", apk, "--vm=jvm", "--framework=" + fw],
+    acl, apk, fw = sys.argv[1], sys.argv[2], sys.argv[3]
+    p = subprocess.run([acl, "run", apk, "--vm=jvm", "--framework=" + fw],
                        capture_output=True, text=True, timeout=120)
     out = p.stdout + p.stderr
 

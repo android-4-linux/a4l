@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: specs/gfx.md (pending), AOSP android.graphics Canvas/Bitmap JNI
 // surface, Skia API. No GPL-3.0 sources.
-#ifndef ACLCXX_GFX_GFX_H
-#define ACLCXX_GFX_GFX_H
+#ifndef ACL_GFX_GFX_H
+#define ACL_GFX_GFX_H
 
 // The rasterization seam: android.graphics.Canvas draws into a gfx::Surface (an
 // ARGB_8888 buffer). This build has a self-contained software rasterizer (always
@@ -15,7 +15,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace aclcxx::gfx {
+namespace acl::gfx {
 
 // ARGB_8888 raster target (premultiplied not assumed; opaque fills for now).
 class Surface {
@@ -47,6 +47,6 @@ class Surface {
 
 const char* module_name() noexcept;
 
-}  // namespace aclcxx::gfx
+}  // namespace acl::gfx
 
-#endif  // ACLCXX_GFX_GFX_H
+#endif  // ACL_GFX_GFX_H

@@ -5,7 +5,7 @@
 # via wcs canvases), text stack (Skia + HarfBuzz/ICU/fontconfig; minikin fallback).
 # Single pinned Skia shared with wcs (no ODR duplication) — see A02.2.
 gfx_lib = static_library(
-  'aclcxx_gfx',
+  'acl_gfx',
   files('gfx.cpp'),
   include_directories : [config_inc, core_inc],
 )

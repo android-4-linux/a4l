@@ -16,7 +16,7 @@
 
 #include <zlib.h>
 
-namespace aclcxx::pkg {
+namespace acl::pkg {
 namespace {
 
 // Zip signatures (little-endian on disk).
@@ -303,4 +303,4 @@ std::vector<std::string> Apk::native_abis() const {
   return {abis.begin(), abis.end()};
 }
 
-}  // namespace aclcxx::pkg
+}  // namespace acl::pkg

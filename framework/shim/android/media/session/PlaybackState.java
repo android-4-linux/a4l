@@ -5,7 +5,7 @@
 //
 // A minimal source-compatible shim for android.media.session.PlaybackState +
 // Builder (Gate G2.e, media session). Media apps publish transport state
-// (playing/paused, position, speed); the aclcxx media host reads it. Actions
+// (playing/paused, position, speed); the acl media host reads it. Actions
 // bitmask is added when transport controls land. Docs-derived shim, NOT vendored.
 package android.media.session;
 

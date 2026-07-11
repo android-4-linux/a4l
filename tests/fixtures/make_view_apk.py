@@ -5,7 +5,7 @@
 #
 # Emit an APK that exercises the Phase-2 View(Context) + measure/layout/draw
 # traversal over a real view tree:
-#   package com.aclcxx.hello;
+#   package com.acl.hello;
 #   class Tile extends android.view.View {
 #     int color;
 #     Tile(Context c, int color) { super(c); this.color = color; }
@@ -25,7 +25,7 @@
 #   class MainActivity extends android.app.Activity {
 #     protected void onCreate(Bundle b) { super.onCreate(b); setContentView(new Panel(this)); }
 #   }
-# The launcher is MainActivity (an Activity) -> `aclcxx run` drives onCreate..onResume
+# The launcher is MainActivity (an Activity) -> `acl run` drives onCreate..onResume
 # then the ViewRoot driver (jvm_vm render_content_view) measures/lays-out/draws the
 # content view into a Bitmap; the top half rasters blue, the bottom half red.
 # Exercises invoke-super/direct/virtual + invoke-virtual/range, int-to-float, instance
@@ -40,9 +40,9 @@ import zlib
 
 from make_axml import build_axml
 
-MAINACT = "Lcom/aclcxx/hello/MainActivity;"
-PANEL = "Lcom/aclcxx/hello/Panel;"
-TILE = "Lcom/aclcxx/hello/Tile;"
+MAINACT = "Lcom/acl/hello/MainActivity;"
+PANEL = "Lcom/acl/hello/Panel;"
+TILE = "Lcom/acl/hello/Tile;"
 ACTIVITY = "Landroid/app/Activity;"
 VIEWGROUP = "Landroid/view/ViewGroup;"
 VIEW = "Landroid/view/View;"
@@ -314,8 +314,8 @@ def main():
         return 2
     entries = {
         "AndroidManifest.xml": build_axml(
-            utf8=True, package="com.aclcxx.hello",
-            launcher="com.aclcxx.hello.MainActivity"),
+            utf8=True, package="com.acl.hello",
+            launcher="com.acl.hello.MainActivity"),
         "classes.dex": build_dex(),
     }
     with zipfile.ZipFile(sys.argv[1], "w") as z:

@@ -3,10 +3,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "aclcxx_config.h"
+#include "acl_config.h"
 #include "runtime/vm.h"
 
-using namespace aclcxx::runtime;
+using namespace acl::runtime;
 
 TEST_CASE("backend name parsing round-trips and is case-insensitive", "[runtime]") {
   Backend b;
@@ -34,7 +34,7 @@ TEST_CASE("ART backend reports Unavailable, not a null crash", "[runtime]") {
 TEST_CASE("JVM backend availability tracks the build", "[runtime]") {
   Error err;
   auto jvm = create_vm(Backend::Jvm, {}, err);
-#if ACLCXX_HAVE_JNI
+#if ACL_HAVE_JNI
   // Constructed but NOT started — HotSpot allows one VM per process, so the
   // shared unit binary never starts one (see the isolated jvm-invoke test).
   REQUIRE(jvm != nullptr);

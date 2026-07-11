@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Provenance: original test harness; plan.md §5 (Tier C), Addendum A02. No GPL-3.0 sources.
 #
-# Tier-C keyboard test: run `aclcxx run key.apk --present-frames=0` against the wm/
+# Tier-C keyboard test: run `acl run key.apk --present-frames=0` against the wm/
 # test compositor, which (once the window maps) advertises a keyboard and injects a
 # key press (KEY_A), then closes. The key must flow wl_keyboard -> presenter (wcs
 # KeyboardHandler) -> KeyEvent -> View.dispatchKeyEvent -> KeyView.onKeyDown, which
 # logs "onKeyDown" via android.util.Log. The test asserts that line appears (the key
-# reached the app) and that aclcxx then exits cleanly on the close.
+# reached the app) and that acl then exits cleanly on the close.
 #
-# Usage: run_key_test.py <aclcxx_binary> <key.apk> <framework_dir> <compositor>
+# Usage: run_key_test.py <acl_binary> <key.apk> <framework_dir> <compositor>
 import os
 import shutil
 import subprocess
@@ -18,13 +18,13 @@ import time
 
 def main() -> int:
     if len(sys.argv) != 5:
-        sys.stderr.write("usage: run_key_test.py <aclcxx> <key.apk> <fw_dir> <compositor>\n")
+        sys.stderr.write("usage: run_key_test.py <acl> <key.apk> <fw_dir> <compositor>\n")
         return 2
-    aclcxx, apk, fw, compositor = sys.argv[1:5]
+    acl, apk, fw, compositor = sys.argv[1:5]
 
-    runtime_dir = "/tmp/aclcxx-wl-%d" % os.getpid()
+    runtime_dir = "/tmp/acl-wl-%d" % os.getpid()
     os.makedirs(runtime_dir, mode=0o700, exist_ok=True)
-    socket = "aclcxx-key"
+    socket = "acl-key"
     env = dict(os.environ)
     env["XDG_RUNTIME_DIR"] = runtime_dir
 
@@ -44,12 +44,12 @@ def main() -> int:
         penv = dict(env)
         penv["WAYLAND_DISPLAY"] = socket
         p = subprocess.run(
-            [aclcxx, "run", apk, "--vm=jvm", "--framework=" + fw, "--present-frames=0"],
+            [acl, "run", apk, "--vm=jvm", "--framework=" + fw, "--present-frames=0"],
             env=penv, capture_output=True, text=True, timeout=60)
         out = p.stdout + p.stderr
         if (p.returncode != 0
-                or "launching Activity com.aclcxx.hello.MainActivity" not in out
-                or "aclcxx.key: onKeyDown" not in out
+                or "launching Activity com.acl.hello.MainActivity" not in out
+                or "acl.key: onKeyDown" not in out
                 or "toplevel closed" not in out):
             sys.stderr.write("FAIL: key input did not reach the app\n--- output ---\n" + out + "\n")
             return 1

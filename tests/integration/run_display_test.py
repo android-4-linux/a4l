@@ -3,12 +3,12 @@
 # (svc WindowManager/Display). No GPL-3.0 sources.
 #
 # Tier-C display-metrics test: launch the wm/ test compositor in "display" mode — it
-# advertises a wl_output whose active mode is 1280x720. aclcxx must read that mode
+# advertises a wl_output whose active mode is 1280x720. acl must read that mode
 # (wm::query_display) before onCreate and seed svc::WindowService, so the app's
 # getWindowManager()/getDefaultDisplay() reports 1280x720 instead of the built-in
 # 1080p default. Runs any Activity (touch.apk) --present and asserts the display line.
 #
-# Usage: run_display_test.py <aclcxx> <apk> <fw_dir> <compositor>
+# Usage: run_display_test.py <acl> <apk> <fw_dir> <compositor>
 import os
 import shutil
 import subprocess
@@ -18,13 +18,13 @@ import time
 
 def main() -> int:
     if len(sys.argv) != 5:
-        sys.stderr.write("usage: run_display_test.py <aclcxx> <apk> <fw_dir> <compositor>\n")
+        sys.stderr.write("usage: run_display_test.py <acl> <apk> <fw_dir> <compositor>\n")
         return 2
-    aclcxx, apk, fw, compositor = sys.argv[1:5]
+    acl, apk, fw, compositor = sys.argv[1:5]
 
-    runtime_dir = "/tmp/aclcxx-wl-%d" % os.getpid()
+    runtime_dir = "/tmp/acl-wl-%d" % os.getpid()
     os.makedirs(runtime_dir, mode=0o700, exist_ok=True)
-    socket = "aclcxx-display"
+    socket = "acl-display"
     env = dict(os.environ)
     env["XDG_RUNTIME_DIR"] = runtime_dir
 
@@ -44,7 +44,7 @@ def main() -> int:
         penv = dict(env)
         penv["WAYLAND_DISPLAY"] = socket
         p = subprocess.run(
-            [aclcxx, "run", apk, "--vm=jvm", "--framework=" + fw, "--present-frames=0"],
+            [acl, "run", apk, "--vm=jvm", "--framework=" + fw, "--present-frames=0"],
             env=penv, capture_output=True, text=True, timeout=60)
         out = p.stdout + p.stderr
         # The wl_output mode drives both the "display from wl_output" seed log and the

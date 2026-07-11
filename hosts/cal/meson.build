@@ -6,7 +6,7 @@
 # renderer optional, behind ihs_shared ABI). Tier 1 templates first (List, Grid,
 # Pane, Message, LongMessage). Gate G1.5b.
 module_libs += static_library(
-  'aclcxx_host_cal',
+  'acl_host_cal',
   files('cal.cpp'),
   include_directories : config_inc,
 )

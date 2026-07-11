@@ -4,7 +4,7 @@
 //
 // A minimal source-compatible shim for android.media.MediaDescription + its Builder
 // (Gate G2.e, automotive media path). Media apps build browse items through the
-// Builder; the aclcxx media host reads title/mediaId back. Fields beyond title +
+// Builder; the acl media host reads title/mediaId back. Fields beyond title +
 // mediaId are added as the app corpus needs them. Docs-derived shim, NOT vendored.
 package android.media;
 

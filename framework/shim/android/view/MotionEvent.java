@@ -4,7 +4,7 @@
 //
 // A minimal source-compatible shim for android.view.MotionEvent (Phase 2 input).
 // Real MotionEvent carries a batched, historical, multi-pointer sample stream from
-// the InputManager; here the aclcxx ViewRoot driver builds a single-pointer event
+// the InputManager; here the acl ViewRoot driver builds a single-pointer event
 // per wl_pointer input (button->DOWN/UP, motion->MOVE) via obtain(). Docs-derived
 // shim, NOT vendored AOSP.
 package android.view;

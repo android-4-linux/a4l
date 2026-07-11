@@ -4,7 +4,7 @@
 # layout (public Apache-2.0 headers). No GPL-3.0 sources.
 #
 # Emit an APK that plays audio (Gate G2.e, media audio):
-#   package com.aclcxx.hello;
+#   package com.acl.hello;
 #   public class AudioApp {
 #     public static void main(String[] args) {
 #       short[] pcm = new short[44100];              // 1s mono @ 44100
@@ -14,9 +14,9 @@
 #       t.play(); t.write(pcm, 0, 44100); t.stop(); t.release();
 #     }
 #   }
-# `aclcxx run audio.apk --framework=<shims>` runs main() (AudioApp is not an
+# `acl run audio.apk --framework=<shims>` runs main() (AudioApp is not an
 # Activity -> the launcher falls back to static main); AudioTrack's native side
-# forwards the PCM to aclcxx::audio (PipeWire when ACLCXX_AUDIO=pipewire, else the
+# forwards the PCM to acl::audio (PipeWire when ACL_AUDIO=pipewire, else the
 # counting sink). Independent of the C++ decoder.
 #
 # Usage: make_audio_apk.py <output.apk>
@@ -29,7 +29,7 @@ import zlib
 from make_axml import build_axml
 
 STRINGS = [
-    "Lcom/aclcxx/hello/AudioApp;",  # 0
+    "Lcom/acl/hello/AudioApp;",  # 0
     "Ljava/lang/Object;",           # 1  super
     "Landroid/media/AudioTrack;",   # 2
     "[Ljava/lang/String;",          # 3  main param
@@ -47,7 +47,7 @@ STRINGS = [
     "ILII",                         # 15 write ([S,int,int)->int
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
-TYPES = ["Lcom/aclcxx/hello/AudioApp;", "Ljava/lang/Object;",
+TYPES = ["Lcom/acl/hello/AudioApp;", "Ljava/lang/Object;",
          "Landroid/media/AudioTrack;", "[Ljava/lang/String;", "[S", "V", "I"]
 T = {t: i for i, t in enumerate(TYPES)}
 
@@ -166,7 +166,7 @@ def build_dex():
     def m(cls, proto, name):
         return struct.pack("<HHI", T[cls], proto, S[name])
     method_ids = b"".join([
-        m("Lcom/aclcxx/hello/AudioApp;", 0, "main"),          # m0
+        m("Lcom/acl/hello/AudioApp;", 0, "main"),          # m0
         m("Landroid/media/AudioTrack;", 1, "<init>"),         # m1
         m("Landroid/media/AudioTrack;", 2, "play"),           # m2
         m("Landroid/media/AudioTrack;", 3, "write"),          # m3
@@ -174,7 +174,7 @@ def build_dex():
         m("Landroid/media/AudioTrack;", 2, "release"),        # m5
     ])
     class_defs = struct.pack("<IIIIIIII",
-                             T["Lcom/aclcxx/hello/AudioApp;"], 0x1,
+                             T["Lcom/acl/hello/AudioApp;"], 0x1,
                              T["Ljava/lang/Object;"], 0, 0xFFFFFFFF, 0,
                              class_data_off, 0)
 
@@ -212,8 +212,8 @@ def main():
         return 2
     entries = {
         "AndroidManifest.xml": build_axml(
-            utf8=True, package="com.aclcxx.hello",
-            launcher="com.aclcxx.hello.AudioApp"),
+            utf8=True, package="com.acl.hello",
+            launcher="com.acl.hello.AudioApp"),
         "classes.dex": build_dex(),
     }
     with zipfile.ZipFile(sys.argv[1], "w") as z:

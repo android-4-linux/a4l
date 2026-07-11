@@ -2,15 +2,15 @@
 # Provenance: original test harness; plan.md §5 (Tier B), Phase 2 gfx/Canvas. No GPL-3.0 sources.
 #
 # Prove the Phase-2 rendering vertical: gfx.apk's main() constructs a custom
-# com.aclcxx.hello.MyView extends android.view.View, a Bitmap-backed Canvas, and
+# com.acl.hello.MyView extends android.view.View, a Bitmap-backed Canvas, and
 # calls v.draw(c). View.draw() dispatches to the overridden MyView.onDraw(Canvas),
 # which fills blue (drawColor 0xFF0000FF) then draws a red rect (drawRect 10,10,50,50
 # with a Paint set to 0xFFFF0000). The Canvas/Bitmap natives raster into an
-# aclcxx::gfx::Surface; aclcxxDescribe() reads pixels back. This exercises a custom
+# acl::gfx::Surface; aclDescribe() reads pixels back. This exercises a custom
 # View.onDraw override + invoke-virtual/range + float args through the DEX->JVM
 # translator, and verifies the resulting pixels with no compositor.
 #
-# Usage: run_gfx_test.py <aclcxx_binary> <gfx.apk> <framework_dir>
+# Usage: run_gfx_test.py <acl_binary> <gfx.apk> <framework_dir>
 import subprocess
 import sys
 
@@ -20,10 +20,10 @@ EXPECT = "bitmap 64x64 pixel(0,0)=0xff0000ff pixel(32,32)=0xffff0000"
 
 def main() -> int:
     if len(sys.argv) != 4:
-        sys.stderr.write("usage: run_gfx_test.py <aclcxx> <gfx.apk> <fw_dir>\n")
+        sys.stderr.write("usage: run_gfx_test.py <acl> <gfx.apk> <fw_dir>\n")
         return 2
-    aclcxx, apk, fw = sys.argv[1], sys.argv[2], sys.argv[3]
-    p = subprocess.run([aclcxx, "run", apk, "--vm=jvm", "--framework=" + fw],
+    acl, apk, fw = sys.argv[1], sys.argv[2], sys.argv[3]
+    p = subprocess.run([acl, "run", apk, "--vm=jvm", "--framework=" + fw],
                        capture_output=True, text=True, timeout=120)
     out = p.stdout + p.stderr
 

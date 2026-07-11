@@ -12,7 +12,7 @@ public class Runner {
     Object loopSum = c.getMethod("loopSum").invoke(null);    // 55 (branches)
     Object callSum = c.getMethod("callSum").invoke(null);    // 97 (invoke-static)
     Object strlen = c.getMethod("strlen").invoke(null);      // 5 (const-string+invoke-virtual)
-    c.getMethod("hello").invoke(null);  // prints "hello aclcxx" (sget-object+println); void
+    c.getMethod("hello").invoke(null);  // prints "hello acl" (sget-object+println); void
     // Object model: new Counter(10); c.add(5); c.get() == 15
     Object counter = Class.forName("Counter").getMethod("useCounter").invoke(null);
     Object arr = c.getMethod("arraySum").invoke(null);  // 42 (arrays)

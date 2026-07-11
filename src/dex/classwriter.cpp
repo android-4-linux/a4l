@@ -5,7 +5,7 @@
 
 #include <utility>
 
-namespace aclcxx::dex {
+namespace acl::dex {
 namespace {
 
 // Constant pool tags (JVMS 4.4).
@@ -248,4 +248,4 @@ std::vector<std::uint8_t> ClassWriter::build() const {
   return out;
 }
 
-}  // namespace aclcxx::dex
+}  // namespace acl::dex

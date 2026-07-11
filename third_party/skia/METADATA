@@ -8,11 +8,11 @@ license: "BSD-3-Clause"
 
 origin_url: "https://skia.googlesource.com/skia"
 
-# A02.2 hard rule: ONE pinned Skia build, shared by wcs and aclcxx (no ODR duplication).
+# A02.2 hard rule: ONE pinned Skia build, shared by wcs and acl (no ODR duplication).
 # Pin the milestone to the branch used by the vendored frameworks/base tag (api-33 => that
 # release's Skia m-branch), or carry a gfx/skia_compat.h shim if wcs wants a newer milestone.
 milestone: "TODO: m-branch matching third_party/aosp/METADATA skia_milestone"
 sha: "TODO"
 
 # Must agree with subprojects/skia.wrap and third_party/aosp/METADATA:skia_milestone.
-pairing_note: "wcs and aclcxx MUST link the same Skia build."
+pairing_note: "wcs and acl MUST link the same Skia build."

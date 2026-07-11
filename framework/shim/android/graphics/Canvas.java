@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: Android SDK docs (developer.android.com/reference/android/graphics/
 // Canvas): the fill/drawRect + save/translate/restore subset. Native underside ->
-// aclcxx::gfx::Surface. No GPL-3.0 sources.
+// acl::gfx::Surface. No GPL-3.0 sources.
 //
 // A minimal source-compatible shim for android.graphics.Canvas (Phase 2). Draws
 // into the gfx::Surface a Bitmap wraps; drawText/drawPath/etc. arrive with the
@@ -18,7 +18,7 @@ public class Canvas {
   private final float[] savedY = new float[32];
   private int sp;
 
-  public Canvas(Bitmap bitmap) { this.nativePtr = bitmap.aclcxxPtr(); }
+  public Canvas(Bitmap bitmap) { this.nativePtr = bitmap.aclPtr(); }
 
   public int save() {
     savedX[sp] = dx;

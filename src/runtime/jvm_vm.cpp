@@ -25,10 +25,10 @@
 #include "svc/svc.h"
 #include "wm/present.h"
 
-namespace aclcxx::runtime {
+namespace acl::runtime {
 namespace {
 
-constexpr std::string_view kTag = "aclcxx.runtime.jvm";
+constexpr std::string_view kTag = "acl.runtime.jvm";
 
 std::string join(const std::vector<std::string>& parts, char sep) {
   std::string out;
@@ -91,7 +91,7 @@ class JvmVm final : public Vm {
     env_ = env;
     log::i(kTag, "JVM started: boot=[{}] classpath=[{}]",
            join(config_.boot_classpath, ':'), join(config_.classpath, ':'));
-    // Bind aclcxx C++ to the android.* native methods on the boot classpath.
+    // Bind acl C++ to the android.* native methods on the boot classpath.
     register_framework_natives(env_);
     return Error::ok();
   }
@@ -257,7 +257,7 @@ class JvmVm final : public Vm {
       jclass obj_cls = env_->GetObjectClass(obj);
       if (!config_.package_name.empty()) {
         jmethodID setter =
-            env_->GetMethodID(obj_cls, "aclcxxSetPackage", "(Ljava/lang/String;)V");
+            env_->GetMethodID(obj_cls, "aclSetPackage", "(Ljava/lang/String;)V");
         if (setter != nullptr) {
           jstring pkg = env_->NewStringUTF(config_.package_name.c_str());
           env_->CallVoidMethod(obj, setter, pkg);
@@ -322,7 +322,7 @@ class JvmVm final : public Vm {
     }
     if (jobject msm = svc("media_session")) {
       log::i(kTag, "MediaSessionManager: activeSessions={}",
-             call_int(msm, "aclcxxActiveSessionCount"));
+             call_int(msm, "aclActiveSessionCount"));
       env_->DeleteLocalRef(msm);
     }
   }
@@ -334,7 +334,7 @@ class JvmVm final : public Vm {
   // traversal over the app's view tree renders verifiable output (no compositor).
   void render_content_view(jobject activity) {
     jclass acls = env_->GetObjectClass(activity);
-    jmethodID gcv = env_->GetMethodID(acls, "aclcxxContentView", "()Landroid/view/View;");
+    jmethodID gcv = env_->GetMethodID(acls, "aclContentView", "()Landroid/view/View;");
     env_->DeleteLocalRef(acls);
     if (gcv == nullptr) { clear_exception(); return; }
     jobject view = env_->CallObjectMethod(activity, gcv);
@@ -381,7 +381,7 @@ class JvmVm final : public Vm {
         jobject canvas = bmp != nullptr ? env_->NewObject(canvas_cls, cctor, bmp) : nullptr;
         if (canvas != nullptr) {
           env_->CallVoidMethod(view, draw, canvas);
-          jmethodID describe = env_->GetMethodID(bmp_cls, "aclcxxDescribe", "()V");
+          jmethodID describe = env_->GetMethodID(bmp_cls, "aclDescribe", "()V");
           if (describe != nullptr) env_->CallVoidMethod(bmp, describe);
           // Present the content view in a Wayland window (--present), driving a
           // Choreographer loop: each vsync tick fires the app's frame callbacks and
@@ -400,7 +400,7 @@ class JvmVm final : public Vm {
 
   // Present the content view in a Wayland window via wm/ (wcs), driven by a
   // Choreographer-style loop: on each vsync tick the ViewRoot fires the app's
-  // frame callbacks (android.view.Choreographer.aclcxxDoFrame), re-runs the View
+  // frame callbacks (android.view.Choreographer.aclDoFrame), re-runs the View
   // draw, and blits into the presenter's frame — the ViewRootImpl.performTraversals
   // + Choreographer path. A static app (no frame callbacks) shows one frame and
   // stops; an animating one runs to the frame budget (--present-frames) or close.
@@ -411,7 +411,7 @@ class JvmVm final : public Vm {
       return;
     }
     jclass bmp_cls = env_->GetObjectClass(bmp);
-    jmethodID ptr_m = env_->GetMethodID(bmp_cls, "aclcxxPtr", "()J");
+    jmethodID ptr_m = env_->GetMethodID(bmp_cls, "aclPtr", "()J");
     env_->DeleteLocalRef(bmp_cls);
     if (ptr_m == nullptr) { clear_exception(); return; }
     auto* surface = reinterpret_cast<const gfx::Surface*>(env_->CallLongMethod(bmp, ptr_m));
@@ -429,7 +429,7 @@ class JvmVm final : public Vm {
       if (jmethodID gi = env_->GetStaticMethodID(ch_cls, "getInstance",
                                                  "()Landroid/view/Choreographer;"))
         choreo = env_->CallStaticObjectMethod(ch_cls, gi);
-      do_frame = env_->GetMethodID(ch_cls, "aclcxxDoFrame", "(J)J");
+      do_frame = env_->GetMethodID(ch_cls, "aclDoFrame", "(J)J");
       env_->DeleteLocalRef(ch_cls);
     }
     // android.view.MotionEvent.obtain + the view's dispatchTouchEvent, for pointer
@@ -555,8 +555,8 @@ class JvmVm final : public Vm {
       else if (const auto* t = std::get_if<wm::TextInput>(&ev)) on_text(*t);
       else if (const auto* d = std::get_if<wm::DeleteSurroundingText>(&ev)) on_delete(*d);
     };
-    wm::present_loop(w, h, pkg.empty() ? "aclcxx" : pkg,
-                     pkg.empty() ? "org.aclcxx.app" : pkg, render, input, want_ime,
+    wm::present_loop(w, h, pkg.empty() ? "acl" : pkg,
+                     pkg.empty() ? "org.acl.app" : pkg, render, input, want_ime,
                      config_.present_frames);
     if (choreo != nullptr) env_->DeleteLocalRef(choreo);
     if (motionevent_cls != nullptr) env_->DeleteGlobalRef(motionevent_cls);
@@ -616,7 +616,7 @@ class JvmVm final : public Vm {
       clear_exception();
       return Error::of(Status::NotFound, "no onGetRoot(String,int,Bundle)");
     }
-    jstring pkg = env_->NewStringUTF("aclcxx");
+    jstring pkg = env_->NewStringUTF("acl");
     jobject root = env_->CallObjectMethod(svc, on_get_root, pkg, static_cast<jint>(1000),
                                           nullptr);
     env_->DeleteLocalRef(pkg);
@@ -672,9 +672,9 @@ class JvmVm final : public Vm {
       return fail_with_exception("onLoadChildren()");
     }
 
-    // list = result.aclcxxValue()
+    // list = result.aclValue()
     jobject list = env_->CallObjectMethod(
-        result, env_->GetMethodID(result_cls, "aclcxxValue", "()Ljava/lang/Object;"));
+        result, env_->GetMethodID(result_cls, "aclValue", "()Ljava/lang/Object;"));
     Error result_err = Error::ok();
     if (list == nullptr) {
       log::i(kTag, "media children: (none sent)");
@@ -728,7 +728,7 @@ class JvmVm final : public Vm {
 
     jclass token_cls = env_->GetObjectClass(token);
     jobject session = env_->CallObjectMethod(
-        token, env_->GetMethodID(token_cls, "aclcxxSession",
+        token, env_->GetMethodID(token_cls, "aclSession",
                                  "()Landroid/media/session/MediaSession;"));
     jclass ses_cls = session != nullptr ? env_->GetObjectClass(session) : nullptr;
 
@@ -736,7 +736,7 @@ class JvmVm final : public Vm {
     int state = -1;
     if (session != nullptr) {
       jobject md = env_->CallObjectMethod(
-          session, env_->GetMethodID(ses_cls, "aclcxxMetadata",
+          session, env_->GetMethodID(ses_cls, "aclMetadata",
                                      "()Landroid/media/MediaMetadata;"));
       if (md != nullptr) {
         jclass md_cls = env_->GetObjectClass(md);
@@ -748,7 +748,7 @@ class JvmVm final : public Vm {
         env_->DeleteLocalRef(key); env_->DeleteLocalRef(md_cls); env_->DeleteLocalRef(md);
       }
       jobject ps = env_->CallObjectMethod(
-          session, env_->GetMethodID(ses_cls, "aclcxxPlaybackState",
+          session, env_->GetMethodID(ses_cls, "aclPlaybackState",
                                      "()Landroid/media/session/PlaybackState;"));
       if (ps != nullptr) {
         jclass ps_cls = env_->GetObjectClass(ps);
@@ -769,7 +769,7 @@ class JvmVm final : public Vm {
   // then onPause() in-process (no controller/Binder) — the app's overrides react.
   void invoke_transport(jclass ses_cls, jobject session) {
     jobject cb = env_->CallObjectMethod(
-        session, env_->GetMethodID(ses_cls, "aclcxxCallback",
+        session, env_->GetMethodID(ses_cls, "aclCallback",
                                    "()Landroid/media/session/MediaSession$Callback;"));
     if (cb == nullptr) { clear_exception(); return; }  // app set no callback
     jclass cb_cls = env_->GetObjectClass(cb);
@@ -838,4 +838,4 @@ std::unique_ptr<Vm> make_jvm_vm(VmConfig config) {
   return std::make_unique<JvmVm>(std::move(config));
 }
 
-}  // namespace aclcxx::runtime
+}  // namespace acl::runtime

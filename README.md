@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-# aclcxx
+# acl
 
 A clean-room, **C++23-first** Android compatibility layer: it runs unmodified Android APKs as
 native Wayland clients on desktop and embedded Linux, comparable in function to
@@ -31,7 +31,7 @@ are consumed as prebuilt imported artifacts; the Phase 0 skeleton needs none of 
 ```sh
 meson setup build
 meson compile -C build
-./build/src/shell/aclcxx           # prints version + linked module roster
+./build/src/shell/acl           # prints version + linked module roster
 
 meson test -C build                # Tier A unit tests (needs: meson wrap install catch2)
 ```

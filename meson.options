@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Provenance: plan.md §A01.1 (ACLCXX_PROFILE_AUTOMOTIVE). No GPL-3.0 sources.
+# Provenance: plan.md §A01.1 (ACL_PROFILE_AUTOMOTIVE). No GPL-3.0 sources.
 
 option(
   'profile_automotive',

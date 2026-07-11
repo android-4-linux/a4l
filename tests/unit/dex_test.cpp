@@ -12,12 +12,12 @@
 #include "dex/dex_to_jvm.h"
 #include "dex/dexfile.h"
 
-using namespace aclcxx::dex;
+using namespace acl::dex;
 
 namespace {
 
 std::vector<std::uint8_t> load_fixture_dex() {
-  const char* p = std::getenv("ACLCXX_FIXTURE_DEX");
+  const char* p = std::getenv("ACL_FIXTURE_DEX");
   if (!p) return {};
   std::ifstream in(p, std::ios::binary);
   return std::vector<std::uint8_t>((std::istreambuf_iterator<char>(in)),
@@ -44,7 +44,7 @@ TEST_CASE("descriptor_to_java maps primitives, objects, and arrays", "[dex]") {
 
 TEST_CASE("DexFile parses classes and method signatures", "[dex]") {
   const auto bytes = load_fixture_dex();
-  if (bytes.empty()) SKIP("ACLCXX_FIXTURE_DEX not set");
+  if (bytes.empty()) SKIP("ACL_FIXTURE_DEX not set");
 
   DexError err;
   auto dex = DexFile::parse(bytes, err);
@@ -99,13 +99,13 @@ TEST_CASE("DexFile rejects non-dex input", "[dex]") {
 
 TEST_CASE("convert emits a real .class and translates the int subset", "[dex]") {
   const auto bytes = load_fixture_dex();
-  if (bytes.empty()) SKIP("ACLCXX_FIXTURE_DEX not set");
+  if (bytes.empty()) SKIP("ACL_FIXTURE_DEX not set");
   DexError err;
   auto dex = DexFile::parse(bytes, err);
   REQUIRE(dex.has_value());
 
   ConvertOptions opts;
-  opts.work_dir = (std::filesystem::temp_directory_path() / "aclcxx-dex-utest")
+  opts.work_dir = (std::filesystem::temp_directory_path() / "acl-dex-utest")
                       .string();
   std::filesystem::remove_all(opts.work_dir);
   ConvertResult res;

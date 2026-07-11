@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Provenance: original build configuration. No GPL-3.0 sources.
 project(
-  'aclcxx',
+  'acl',
   'cpp',
   'c',   # only for scanner-generated protocol glue in the wm/ test compositor
   version : '0.0.0',
@@ -104,19 +104,19 @@ if wcs_root != '' and wayland_dep.found() and wl_scanner_dep.found() and wp_dep.
 endif
 
 conf = configuration_data()
-conf.set('ACLCXX_VERSION', '"' + meson.project_version() + '"')
-conf.set10('ACLCXX_PROFILE_AUTOMOTIVE', profile_automotive)
-conf.set10('ACLCXX_HAVE_JNI', have_jni)
-conf.set10('ACLCXX_HAVE_PIPEWIRE', have_pipewire)
-conf.set10('ACLCXX_HAVE_WCS', have_wcs)
+conf.set('ACL_VERSION', '"' + meson.project_version() + '"')
+conf.set10('ACL_PROFILE_AUTOMOTIVE', profile_automotive)
+conf.set10('ACL_HAVE_JNI', have_jni)
+conf.set10('ACL_HAVE_PIPEWIRE', have_pipewire)
+conf.set10('ACL_HAVE_WCS', have_wcs)
 # javac matched to the detected libjvm (same java_home), for the DEX->JVM
 # converter. Empty when no JDK; the converter then needs an explicit path.
-conf.set('ACLCXX_JAVAC',
+conf.set('ACL_JAVAC',
          have_jni ? '"' + java_home / 'bin' / 'javac' + '"' : '""')
 
 # Public config header consumed across modules.
 configure_file(
-  output : 'aclcxx_config.h',
+  output : 'acl_config.h',
   configuration : conf,
 )
 config_inc = include_directories('.')
@@ -160,4 +160,4 @@ summary({
   'automotive profile' : profile_automotive,
   'tests'              : build_tests,
   'cpp_std'            : get_option('cpp_std'),
-}, section : 'aclcxx')
+}, section : 'acl')

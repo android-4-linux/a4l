@@ -6,12 +6,12 @@
 // run-apk-framework integration test proves an app resolves it from the boot
 // classpath — the seam the real android.* framework will use (Gate G2.a). This is
 // a plumbing probe, NOT a real framework class (hence the neutral package).
-package com.aclcxx.fw;
+package com.acl.fw;
 
 public final class Probe {
   private Probe() {}
 
   public static String tag() {
-    return "aclcxx: framework probe on boot classpath";
+    return "acl: framework probe on boot classpath";
   }
 }

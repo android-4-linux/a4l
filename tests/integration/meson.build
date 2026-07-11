@@ -2,7 +2,7 @@
 # Provenance: plan.md §5 (Tier B headless integration). No GPL-3.0 sources.
 #
 # Tier B run-path integration: build a self-contained hello-world APK and exec the
-# real `aclcxx` binary on it, asserting the whole CLI -> pkg -> manifest -> dex ->
+# real `acl` binary on it, asserting the whole CLI -> pkg -> manifest -> dex ->
 # DEX/JVM -> JVM -> app-output vertical runs. Needs python3 (fixture) and a JDK
 # (have_jni, so the jvm backend can execute); otherwise the test is skipped.
 py3 = find_program('python3', required : false)
@@ -31,13 +31,13 @@ if py3.found() and have_jni
   test(
     'run-apk',
     py3,
-    args : [files('run_apk_test.py'), aclcxx_exe, hello_apk],
-    depends : [aclcxx_exe, hello_apk],
+    args : [files('run_apk_test.py'), acl_exe, hello_apk],
+    depends : [acl_exe, hello_apk],
     timeout : 120,
   )
 
   # Gate G2.a: the framework boot-classpath seam. probe.apk's main() calls a class
-  # (com.aclcxx.fw.Probe) that is NOT bundled; it must come from --framework. Uses
+  # (com.acl.fw.Probe) that is NOT bundled; it must come from --framework. Uses
   # the javac from the SAME java_home as the detected libjvm (class-file version).
   javac = find_program(java_home / 'bin' / 'javac', required : false)
   if javac.found()
@@ -50,22 +50,22 @@ if py3.found() and have_jni
     )
     framework_classes = custom_target(
       'framework-probe-classes',
-      input : files('../fixtures/framework/com/aclcxx/fw/Probe.java'),
+      input : files('../fixtures/framework/com/acl/fw/Probe.java'),
       output : 'framework',
       command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
     )
     test(
       'run-apk-framework',
       py3,
-      args : [files('run_framework_test.py'), aclcxx_exe, probe_apk,
+      args : [files('run_framework_test.py'), acl_exe, probe_apk,
               framework_classes],
-      depends : [aclcxx_exe, probe_apk, framework_classes],
+      depends : [acl_exe, probe_apk, framework_classes],
       timeout : 120,
     )
 
     # Gate G2.b: the JNI native underside. log.apk's main() calls
     # android.util.Log.i(...); the framework Log shim's native write0() is bound by
-    # aclcxx (RegisterNatives) and forwards to aclcxx::log.
+    # acl (RegisterNatives) and forwards to acl::log.
     log_apk = custom_target(
       'log-apk',
       input : files('../fixtures/make_hello_apk.py'),
@@ -114,13 +114,13 @@ if py3.found() and have_jni
     test(
       'run-apk-log',
       py3,
-      args : [files('run_log_test.py'), aclcxx_exe, log_apk, framework_shim],
-      depends : [aclcxx_exe, log_apk, framework_shim],
+      args : [files('run_log_test.py'), acl_exe, log_apk, framework_shim],
+      depends : [acl_exe, log_apk, framework_shim],
       timeout : 120,
     )
 
     # Gate G2.d: the Android Activity entry point. activity.apk's launcher is
-    # MainActivity extends android.app.Activity; `aclcxx run` instantiates it and
+    # MainActivity extends android.app.Activity; `acl run` instantiates it and
     # drives onCreate/onStart/onResume against the shimmed framework — no main().
     activity_apk = custom_target(
       'activity-apk',
@@ -132,14 +132,14 @@ if py3.found() and have_jni
     test(
       'run-apk-activity',
       py3,
-      args : [files('run_activity_test.py'), aclcxx_exe, activity_apk, framework_shim],
-      depends : [aclcxx_exe, activity_apk, framework_shim],
+      args : [files('run_activity_test.py'), acl_exe, activity_apk, framework_shim],
+      depends : [acl_exe, activity_apk, framework_shim],
       timeout : 120,
     )
 
     # Gate G2.e (automotive media path): host a MediaBrowserService (no Views).
     # media.apk's MusicService extends android.service.media.MediaBrowserService;
-    # `aclcxx run --service=...` drives onCreate + onGetRoot in-process (no Binder).
+    # `acl run --service=...` drives onCreate + onGetRoot in-process (no Binder).
     media_apk = custom_target(
       'media-apk',
       input : files('../fixtures/make_media_apk.py'),
@@ -150,14 +150,14 @@ if py3.found() and have_jni
     test(
       'run-apk-media',
       py3,
-      args : [files('run_media_test.py'), aclcxx_exe, media_apk, framework_shim],
-      depends : [aclcxx_exe, media_apk, framework_shim],
+      args : [files('run_media_test.py'), acl_exe, media_apk, framework_shim],
+      depends : [acl_exe, media_apk, framework_shim],
       timeout : 120,
     )
 
     # Gate G2.e (media audio): an app writes PCM via android.media.AudioTrack; the
-    # aclcxx native underside forwards it to aclcxx::audio (counting sink here;
-    # ACLCXX_AUDIO=pipewire actually plays it on the daemon).
+    # acl native underside forwards it to acl::audio (counting sink here;
+    # ACL_AUDIO=pipewire actually plays it on the daemon).
     audio_apk = custom_target(
       'audio-apk',
       input : files('../fixtures/make_audio_apk.py'),
@@ -168,15 +168,15 @@ if py3.found() and have_jni
     test(
       'run-apk-audio',
       py3,
-      args : [files('run_audio_test.py'), aclcxx_exe, audio_apk, framework_shim],
-      depends : [aclcxx_exe, audio_apk, framework_shim],
+      args : [files('run_audio_test.py'), acl_exe, audio_apk, framework_shim],
+      depends : [acl_exe, audio_apk, framework_shim],
       timeout : 120,
     )
 
     # Phase 2 (gfx/Canvas): gfx.apk's main() builds a custom MyView extends
     # android.view.View; v.draw(c) -> onDraw(c) fills a Bitmap-backed Canvas blue and
-    # draws a red rect. The Canvas/Bitmap natives raster into aclcxx::gfx::Surface and
-    # aclcxxDescribe() dumps sample pixels — verifiable headlessly (no compositor).
+    # draws a red rect. The Canvas/Bitmap natives raster into acl::gfx::Surface and
+    # aclDescribe() dumps sample pixels — verifiable headlessly (no compositor).
     gfx_apk = custom_target(
       'gfx-apk',
       input : files('../fixtures/make_gfx_apk.py'),
@@ -187,8 +187,8 @@ if py3.found() and have_jni
     test(
       'run-apk-gfx',
       py3,
-      args : [files('run_gfx_test.py'), aclcxx_exe, gfx_apk, framework_shim],
-      depends : [aclcxx_exe, gfx_apk, framework_shim],
+      args : [files('run_gfx_test.py'), acl_exe, gfx_apk, framework_shim],
+      depends : [acl_exe, gfx_apk, framework_shim],
       timeout : 120,
     )
 
@@ -208,27 +208,27 @@ if py3.found() and have_jni
     test(
       'run-apk-view',
       py3,
-      args : [files('run_view_test.py'), aclcxx_exe, view_apk, framework_shim],
-      depends : [aclcxx_exe, view_apk, framework_shim],
+      args : [files('run_view_test.py'), acl_exe, view_apk, framework_shim],
+      depends : [acl_exe, view_apk, framework_shim],
       timeout : 120,
     )
 
     # Tier C (full vertical): the same app, but `--present` shows its rendered
     # content view in a real Wayland window. run_view_present_test.py launches a
-    # headless Weston and asserts aclcxx reports the frame was shown. Only when the
+    # headless Weston and asserts acl reports the frame was shown. Only when the
     # real wcs presenter is built and Weston is available; SKIPs otherwise.
     weston_prog = find_program('weston', required : false)
     if have_wcs and weston_prog.found()
       test(
         'run-apk-view-present',
         py3,
-        args : [files('run_view_present_test.py'), aclcxx_exe, view_apk, framework_shim],
-        depends : [aclcxx_exe, view_apk, framework_shim],
+        args : [files('run_view_present_test.py'), acl_exe, view_apk, framework_shim],
+        depends : [acl_exe, view_apk, framework_shim],
         timeout : 120,
       )
 
       # Tier C (continuous, JVM-driven): anim.apk's AnimView implements
-      # Choreographer.FrameCallback and re-posts itself each frame; `aclcxx run
+      # Choreographer.FrameCallback and re-posts itself each frame; `acl run
       # --present-frames=N` runs the Choreographer loop so the app redraws a moving
       # band and N distinct frames are presented to a headless Weston.
       anim_apk = custom_target(
@@ -241,8 +241,8 @@ if py3.found() and have_jni
       test(
         'run-apk-anim-present',
         py3,
-        args : [files('run_anim_present_test.py'), aclcxx_exe, anim_apk, framework_shim],
-        depends : [aclcxx_exe, anim_apk, framework_shim],
+        args : [files('run_anim_present_test.py'), acl_exe, anim_apk, framework_shim],
+        depends : [acl_exe, anim_apk, framework_shim],
         timeout : 120,
       )
     endif
@@ -263,9 +263,9 @@ if py3.found() and have_jni
       test(
         'run-apk-touch-present',
         py3,
-        args : [files('run_touch_test.py'), aclcxx_exe, touch_apk, framework_shim,
+        args : [files('run_touch_test.py'), acl_exe, touch_apk, framework_shim,
                 close_compositor],
-        depends : [aclcxx_exe, touch_apk, framework_shim, close_compositor],
+        depends : [acl_exe, touch_apk, framework_shim, close_compositor],
         timeout : 120,
       )
 
@@ -282,9 +282,9 @@ if py3.found() and have_jni
       test(
         'run-apk-key-present',
         py3,
-        args : [files('run_key_test.py'), aclcxx_exe, key_apk, framework_shim,
+        args : [files('run_key_test.py'), acl_exe, key_apk, framework_shim,
                 close_compositor],
-        depends : [aclcxx_exe, key_apk, framework_shim, close_compositor],
+        depends : [acl_exe, key_apk, framework_shim, close_compositor],
         timeout : 120,
       )
       # Key repeat: the compositor holds KEY_A with a repeat rate; the presenter's
@@ -292,9 +292,9 @@ if py3.found() and have_jni
       test(
         'run-apk-key-repeat',
         py3,
-        args : [files('run_key_repeat_test.py'), aclcxx_exe, key_apk, framework_shim,
+        args : [files('run_key_repeat_test.py'), acl_exe, key_apk, framework_shim,
                 close_compositor],
-        depends : [aclcxx_exe, key_apk, framework_shim, close_compositor],
+        depends : [acl_exe, key_apk, framework_shim, close_compositor],
         timeout : 120,
       )
 
@@ -311,9 +311,9 @@ if py3.found() and have_jni
       test(
         'run-apk-hit-present',
         py3,
-        args : [files('run_hit_test.py'), aclcxx_exe, hit_apk, framework_shim,
+        args : [files('run_hit_test.py'), acl_exe, hit_apk, framework_shim,
                 close_compositor],
-        depends : [aclcxx_exe, hit_apk, framework_shim, close_compositor],
+        depends : [acl_exe, hit_apk, framework_shim, close_compositor],
         timeout : 120,
       )
 
@@ -330,22 +330,22 @@ if py3.found() and have_jni
       test(
         'run-apk-ime-present',
         py3,
-        args : [files('run_ime_test.py'), aclcxx_exe, ime_apk, framework_shim,
+        args : [files('run_ime_test.py'), acl_exe, ime_apk, framework_shim,
                 close_compositor],
-        depends : [aclcxx_exe, ime_apk, framework_shim, close_compositor],
+        depends : [acl_exe, ime_apk, framework_shim, close_compositor],
         timeout : 120,
       )
 
       # Display metrics: the compositor advertises a wl_output whose mode is 1280x720;
-      # aclcxx must query it before onCreate and seed android.view.Display, so the
+      # acl must query it before onCreate and seed android.view.Display, so the
       # app's getWindowManager()/getDefaultDisplay() reports 1280x720 (not the 1080p
       # default). Reuses touch.apk (any Activity queries the display on launch).
       test(
         'run-apk-display',
         py3,
-        args : [files('run_display_test.py'), aclcxx_exe, touch_apk, framework_shim,
+        args : [files('run_display_test.py'), acl_exe, touch_apk, framework_shim,
                 close_compositor],
-        depends : [aclcxx_exe, touch_apk, framework_shim, close_compositor],
+        depends : [acl_exe, touch_apk, framework_shim, close_compositor],
         timeout : 120,
       )
     endif

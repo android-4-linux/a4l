@@ -4,10 +4,10 @@
 # layout (public Apache-2.0 headers). No GPL-3.0 sources.
 #
 # Emit an APK with a media entry point (Gate G2.e, automotive media path):
-#   package com.aclcxx.hello;
+#   package com.acl.hello;
 #   public class MusicService extends android.service.media.MediaBrowserService {
 #     public BrowserRoot onGetRoot(String pkg, int uid, Bundle hints) {
-#       return new BrowserRoot("aclcxx_root", null);
+#       return new BrowserRoot("acl_root", null);
 #     }
 #     public void onLoadChildren(String parentId, Result<List<MediaItem>> result) {
 #       ArrayList<MediaItem> items = new ArrayList<>();
@@ -18,7 +18,7 @@
 #       result.sendResult(items);
 #     }
 #   }
-# `aclcxx run media.apk --service=...` hosts it in-process (no Views, no Binder):
+# `acl run media.apk --service=...` hosts it in-process (no Views, no Binder):
 # onCreate(), onGetRoot() -> root, then onLoadChildren() -> the browse items.
 # Independent of the C++ decoder.
 #
@@ -46,7 +46,7 @@ TITLE_KEY = "android.media.metadata.TITLE"
 TITLE = "Now Playing Track"
 
 STRINGS = [
-    "Lcom/aclcxx/hello/MusicService;",  # 0
+    "Lcom/acl/hello/MusicService;",  # 0
     MBS,                                # 1
     BROWSER_ROOT,                       # 2
     RESULT,                             # 3
@@ -68,7 +68,7 @@ STRINGS = [
     "setTitle",                         # 19
     "build",                            # 20
     "sendResult",                       # 21
-    "aclcxx_root",                      # 22
+    "acl_root",                      # 22
     "Song One",                         # 23
     "Song Two",                         # 24
     "LLIL",                             # 25 onGetRoot shorty
@@ -87,35 +87,35 @@ STRINGS = [
     "getSessionToken",                  # 38
     "setSessionToken",                  # 39
     "putString",                        # 40
-    "aclcxx",                           # 41 session tag
+    "acl",                           # 41 session tag
     TITLE_KEY,                          # 42
     TITLE,                              # 43
     "LLL",                              # 44 putString shorty (String,String)->Builder
-    "Lcom/aclcxx/hello/MusicCallback;",             # 45 transport callback class
+    "Lcom/acl/hello/MusicCallback;",             # 45 transport callback class
     "Landroid/media/session/MediaSession$Callback;",  # 46 its superclass
     "Landroid/util/Log;",               # 47
     "onPlay",                           # 48
     "onPause",                          # 49
     "setCallback",                      # 50
     "i",                                # 51
-    "aclcxx.app",                       # 52
+    "acl.app",                       # 52
     "onPlay: playback started",         # 53
     "onPause: playback paused",         # 54
     "ILL",                              # 55 Log.i shorty (String,String)->int
     "Landroid/content/Context;",        # 56 MediaSession.<init> takes a real Context
 ]
 S = {s: i for i, s in enumerate(STRINGS)}  # "V" (idx 12) is the ()V / no-arg shorty
-TYPES = ["Lcom/aclcxx/hello/MusicService;", MBS, BROWSER_ROOT, RESULT,
+TYPES = ["Lcom/acl/hello/MusicService;", MBS, BROWSER_ROOT, RESULT,
          "Landroid/os/Bundle;", "Ljava/lang/String;", "Ljava/lang/Object;",
          "Ljava/lang/CharSequence;", ARRAYLIST, MEDIA_DESC, BUILDER, MEDIA_ITEM,
          "V", "I", "Z", SESSION, TOKEN, METADATA, MMBUILDER,
-         "Lcom/aclcxx/hello/MusicCallback;",
+         "Lcom/acl/hello/MusicCallback;",
          "Landroid/media/session/MediaSession$Callback;", "Landroid/util/Log;",
          "Landroid/content/Context;"]
 T = {t: i for i, t in enumerate(TYPES)}
 CONTEXT = "Landroid/content/Context;"
 CALLBACK = "Landroid/media/session/MediaSession$Callback;"
-MUSIC_CB = "Lcom/aclcxx/hello/MusicCallback;"
+MUSIC_CB = "Lcom/acl/hello/MusicCallback;"
 LOG = "Landroid/util/Log;"
 
 
@@ -190,11 +190,11 @@ def build_dex():
         0x1070, 0x0003, 0x0000,  # invoke-direct {v0}, MediaBrowserService.<init> (m3)
         0x000E,
     ]))
-    # onGetRoot(String,int,Bundle)BrowserRoot : return new BrowserRoot("aclcxx_root", null)
+    # onGetRoot(String,int,Bundle)BrowserRoot : return new BrowserRoot("acl_root", null)
     code_getroot = off_data + len(data)
     data.extend(code_item(7, 4, 3, [
         0x0022, T[BROWSER_ROOT],   # new-instance v0, BrowserRoot
-        0x011A, S["aclcxx_root"],  # const-string v1, "aclcxx_root"
+        0x011A, S["acl_root"],  # const-string v1, "acl_root"
         0x0212,                    # const/4 v2, 0 (null Bundle)
         0x3070, 0x0004, 0x0210,    # invoke-direct {v0,v1,v2}, BrowserRoot.<init> (m4)
         0x0011,                    # return-object v0
@@ -226,7 +226,7 @@ def build_dex():
     code_oncreate = off_data + len(data)
     data.extend(code_item(6, 1, 3, [
         0x0022, T[SESSION],       # new-instance v0, MediaSession
-        0x011A, S["aclcxx"],      # const-string v1, "aclcxx"
+        0x011A, S["acl"],      # const-string v1, "acl"
         0x3070, 0x000D, 0x0150,   # invoke-direct {v0,v5,v1}, MediaSession.<init>(Object,String) (m13)
         0x0122, T[MMBUILDER],     # new-instance v1, MediaMetadata$Builder
         0x1070, 0x0011, 0x0001,   # invoke-direct {v1}, Builder.<init> (m17)
@@ -253,12 +253,12 @@ def build_dex():
     ]))
     code_cb_play = off_data + len(data)
     data.extend(code_item(3, 1, 2, [
-        0x001A, S["aclcxx.app"], 0x011A, S["onPlay: playback started"],
+        0x001A, S["acl.app"], 0x011A, S["onPlay: playback started"],
         0x2071, 0x0019, 0x0010, 0x000E,  # invoke-static {v0,v1}, Log.i (m25); return-void
     ]))
     code_cb_pause = off_data + len(data)
     data.extend(code_item(3, 1, 2, [
-        0x001A, S["aclcxx.app"], 0x011A, S["onPause: playback paused"],
+        0x001A, S["acl.app"], 0x011A, S["onPause: playback paused"],
         0x2071, 0x0019, 0x0010, 0x000E,
     ]))
 
@@ -319,9 +319,9 @@ def build_dex():
     def m(cls, proto, name):
         return struct.pack("<HHI", T[cls], proto, S[name])
     method_ids = b"".join([
-        m("Lcom/aclcxx/hello/MusicService;", 0, "<init>"),      # m0
-        m("Lcom/aclcxx/hello/MusicService;", 1, "onGetRoot"),   # m1
-        m("Lcom/aclcxx/hello/MusicService;", 3, "onLoadChildren"),  # m2
+        m("Lcom/acl/hello/MusicService;", 0, "<init>"),      # m0
+        m("Lcom/acl/hello/MusicService;", 1, "onGetRoot"),   # m1
+        m("Lcom/acl/hello/MusicService;", 3, "onLoadChildren"),  # m2
         m(MBS, 0, "<init>"),                                    # m3
         m(BROWSER_ROOT, 2, "<init>"),                           # m4
         m(ARRAYLIST, 0, "<init>"),                              # m5
@@ -331,7 +331,7 @@ def build_dex():
         m(BUILDER, 6, "build"),                                 # m9
         m(MEDIA_ITEM, 7, "<init>"),                             # m10
         m(RESULT, 8, "sendResult"),                             # m11
-        m("Lcom/aclcxx/hello/MusicService;", 0, "onCreate"),    # m12
+        m("Lcom/acl/hello/MusicService;", 0, "onCreate"),    # m12
         m(SESSION, 9, "<init>"),                                # m13
         m(SESSION, 10, "setMetadata"),                          # m14
         m(SESSION, 11, "getSessionToken"),                      # m15
@@ -347,7 +347,7 @@ def build_dex():
         m(LOG, 16, "i"),                                        # m25 Log.i
     ])
     class_defs = struct.pack("<IIIIIIII",
-                             T["Lcom/aclcxx/hello/MusicService;"], 0x1, T[MBS], 0,
+                             T["Lcom/acl/hello/MusicService;"], 0x1, T[MBS], 0,
                              0xFFFFFFFF, 0, class_data_off, 0)
     class_defs += struct.pack("<IIIIIIII",
                               T[MUSIC_CB], 0x1, T[CALLBACK], 0,
@@ -387,8 +387,8 @@ def main():
         return 2
     entries = {
         "AndroidManifest.xml": build_axml(
-            utf8=True, package="com.aclcxx.hello",
-            launcher="com.aclcxx.hello.MusicService"),
+            utf8=True, package="com.acl.hello",
+            launcher="com.acl.hello.MusicService"),
         "classes.dex": build_dex(),
     }
     with zipfile.ZipFile(sys.argv[1], "w") as z:

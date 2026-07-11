@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Provenance: original test harness; plan.md §5 (Tier C), Addendum A02. No GPL-3.0 sources.
 #
-# Tier-C hit-testing test: run `aclcxx run hit.apk --present-frames=0` against the
+# Tier-C hit-testing test: run `acl run hit.apk --present-frames=0` against the
 # wm/ test compositor, which taps at (100,50). hit.apk's content view is a Panel
 # (ViewGroup) with two Tiles stacked vertically (top: y 0..540, bottom: 540..1080).
 # ViewGroup.dispatchTouchEvent must route the tap to the TOP tile (in its local
 # coordinates), so it logs "top" — and the bottom tile is NOT touched. Proves the
 # hit-test + coordinate offset in the View tree.
 #
-# Usage: run_hit_test.py <aclcxx_binary> <hit.apk> <framework_dir> <compositor>
+# Usage: run_hit_test.py <acl_binary> <hit.apk> <framework_dir> <compositor>
 import os
 import shutil
 import subprocess
@@ -18,13 +18,13 @@ import time
 
 def main() -> int:
     if len(sys.argv) != 5:
-        sys.stderr.write("usage: run_hit_test.py <aclcxx> <hit.apk> <fw_dir> <compositor>\n")
+        sys.stderr.write("usage: run_hit_test.py <acl> <hit.apk> <fw_dir> <compositor>\n")
         return 2
-    aclcxx, apk, fw, compositor = sys.argv[1:5]
+    acl, apk, fw, compositor = sys.argv[1:5]
 
-    runtime_dir = "/tmp/aclcxx-wl-%d" % os.getpid()
+    runtime_dir = "/tmp/acl-wl-%d" % os.getpid()
     os.makedirs(runtime_dir, mode=0o700, exist_ok=True)
-    socket = "aclcxx-hit"
+    socket = "acl-hit"
     env = dict(os.environ)
     env["XDG_RUNTIME_DIR"] = runtime_dir
 
@@ -44,13 +44,13 @@ def main() -> int:
         penv = dict(env)
         penv["WAYLAND_DISPLAY"] = socket
         p = subprocess.run(
-            [aclcxx, "run", apk, "--vm=jvm", "--framework=" + fw, "--present-frames=0"],
+            [acl, "run", apk, "--vm=jvm", "--framework=" + fw, "--present-frames=0"],
             env=penv, capture_output=True, text=True, timeout=60)
         out = p.stdout + p.stderr
         # The tap at (100,50) must reach the top tile only.
         if (p.returncode != 0
-                or "aclcxx.hit: top" not in out
-                or "aclcxx.hit: bottom" in out
+                or "acl.hit: top" not in out
+                or "acl.hit: bottom" in out
                 or "toplevel closed" not in out):
             sys.stderr.write("FAIL: ViewGroup did not route the tap to the correct child\n"
                              "--- output ---\n" + out + "\n")

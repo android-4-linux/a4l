@@ -5,8 +5,8 @@
 // A minimal source-compatible shim for android.media.session.MediaSession
 // (Gate G2.e). A media app creates a session, publishes metadata + playback
 // state, and hands its Token to the framework (setSessionToken). Real controllers
-// connect over Binder; per ADR-3 the aclcxx host reads the session in-process via
-// the Token (aclcxx* accessors, not Android API). The real ctor takes a Context;
+// connect over Binder; per ADR-3 the acl host reads the session in-process via
+// the Token (acl* accessors, not Android API). The real ctor takes a Context;
 // this shim takes Object until the Context/Service hierarchy is shimmed (the app
 // passes `this`, always assignable to Object). MediaSession.Callback (transport
 // controls) lands with the next slice. Docs-derived shim, NOT vendored AOSP.
@@ -39,20 +39,20 @@ public final class MediaSession {
   public Token getSessionToken() { return token; }
   public void release() {}
 
-  // aclcxx host accessors (in-process substitute for the controller connection).
-  public MediaMetadata aclcxxMetadata() { return metadata; }
-  public PlaybackState aclcxxPlaybackState() { return playbackState; }
-  public boolean aclcxxActive() { return active; }
-  public Callback aclcxxCallback() { return callback; }
+  // acl host accessors (in-process substitute for the controller connection).
+  public MediaMetadata aclMetadata() { return metadata; }
+  public PlaybackState aclPlaybackState() { return playbackState; }
+  public boolean aclActive() { return active; }
+  public Callback aclCallback() { return callback; }
 
   public static final class Token {
     private final MediaSession session;
     Token(MediaSession session) { this.session = session; }
-    public MediaSession aclcxxSession() { return session; }
+    public MediaSession aclSession() { return session; }
   }
 
   // Transport controls the framework/host invokes; the app overrides what it
-  // handles. In-process the aclcxx media host calls these directly (no Binder).
+  // handles. In-process the acl media host calls these directly (no Binder).
   public static class Callback {
     public Callback() {}
     public void onPlay() {}

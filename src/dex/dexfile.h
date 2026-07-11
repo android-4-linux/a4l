@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: specs/dex.md (pending), public Dalvik .dex format specification
 // (source.android.com/docs/core/runtime/dex-format). No GPL-3.0 sources.
-#ifndef ACLCXX_DEX_DEXFILE_H
-#define ACLCXX_DEX_DEXFILE_H
+#ifndef ACL_DEX_DEXFILE_H
+#define ACL_DEX_DEXFILE_H
 
 // Read-only parser for the Dalvik .dex container: header + string/type/proto/
 // method/class tables, exposing the class and method metadata the DEX->JVM
@@ -16,7 +16,7 @@
 #include <string_view>
 #include <vector>
 
-namespace aclcxx::dex {
+namespace acl::dex {
 
 enum class DexStatus {
   Ok,
@@ -158,6 +158,6 @@ class DexFile {
 // type name ("int", "void", "int[]", "com.example.Foo").
 std::string descriptor_to_java(std::string_view descriptor);
 
-}  // namespace aclcxx::dex
+}  // namespace acl::dex
 
-#endif  // ACLCXX_DEX_DEXFILE_H
+#endif  // ACL_DEX_DEXFILE_H

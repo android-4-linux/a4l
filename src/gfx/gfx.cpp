@@ -10,7 +10,7 @@
 
 #include <algorithm>
 
-namespace aclcxx::gfx {
+namespace acl::gfx {
 
 Surface::Surface(int width, int height)
     : width_(std::max(0, width)),
@@ -42,4 +42,4 @@ std::uint32_t Surface::pixel(int x, int y) const {
 
 const char* module_name() noexcept { return "gfx"; }
 
-}  // namespace aclcxx::gfx
+}  // namespace acl::gfx

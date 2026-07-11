@@ -6,7 +6,7 @@
 #include <cstring>
 #include <string_view>
 
-namespace aclcxx::dex {
+namespace acl::dex {
 namespace {
 
 constexpr std::uint32_t kNoIndex = 0xffffffffu;
@@ -418,4 +418,4 @@ std::optional<DexFile> DexFile::parse(const std::vector<std::uint8_t>& bytes,
   return parse(bytes.data(), bytes.size(), out_error);
 }
 
-}  // namespace aclcxx::dex
+}  // namespace acl::dex

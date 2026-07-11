@@ -330,7 +330,7 @@ void bind_output(wl_client* c, void*, uint32_t version, uint32_t id) {
   wl_resource* r = wl_resource_create(c, &wl_output_interface, static_cast<int>(version), id);
   wl_resource_set_implementation(r, &output_impl, nullptr, nullptr);
   wl_output_send_geometry(r, 0, 0, 340, 190 /*mm*/, WL_OUTPUT_SUBPIXEL_UNKNOWN,
-                          "aclcxx", "test", WL_OUTPUT_TRANSFORM_NORMAL);
+                          "acl", "test", WL_OUTPUT_TRANSFORM_NORMAL);
   wl_output_send_mode(r, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
                       g_output_w, g_output_h, 60000 /*mHz*/);
   if (version >= WL_OUTPUT_SCALE_SINCE_VERSION) wl_output_send_scale(r, g_output_scale);
@@ -400,7 +400,7 @@ int on_timeout(void*) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  const char* socket = argc > 1 ? argv[1] : "aclcxx-close";
+  const char* socket = argc > 1 ? argv[1] : "acl-close";
   const std::string_view mode = argc > 2 ? std::string_view(argv[2]) : std::string_view();
   g_repeat_mode = mode == "repeat";
   g_hidpi = mode == "hidpi" || mode == "dynamic";  // dynamic starts at 1.5x, then 2x

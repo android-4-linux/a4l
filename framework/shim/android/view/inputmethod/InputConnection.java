@@ -4,7 +4,7 @@
 //
 // A minimal source-compatible shim for android.view.inputmethod.InputConnection
 // (Phase 2 IME). The real interface is the ~20-method channel between an IME and
-// an editable view; here it carries the one method the aclcxx ViewRoot driver
+// an editable view; here it carries the one method the acl ViewRoot driver
 // calls when the compositor's IME (zwp_text_input_v3) commits text. Docs-derived
 // shim, NOT vendored AOSP.
 package android.view.inputmethod;

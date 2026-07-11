@@ -4,7 +4,7 @@
 # input/ — libinput/wl_seat -> MotionEvent/KeyEvent pipelines; IME via
 # zwp_text_input_v3. Event-driven dispatch, no fixed-timeout polls.
 module_libs += static_library(
-  'aclcxx_input',
+  'acl_input',
   files('input.cpp'),
   include_directories : config_inc,
 )

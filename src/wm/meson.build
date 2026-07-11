@@ -78,7 +78,7 @@ else
 endif
 
 wm_lib = static_library(
-  'aclcxx_wm',
+  'acl_wm',
   wm_sources,
   include_directories : wm_inc,
   dependencies : wm_deps,
@@ -94,7 +94,7 @@ if build_tests and have_wcs
     'wm_present_probe',
     files('present_probe_main.cpp'),
     include_directories : [config_inc, core_inc],
-    link_with : [wm_lib, gfx_lib, aclcxx_log],
+    link_with : [wm_lib, gfx_lib, acl_log],
     dependencies : wm_deps + [fmt_dep],
   )
   py3_wm = find_program('python3', required : false)

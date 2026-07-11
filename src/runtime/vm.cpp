@@ -6,17 +6,17 @@
 #include <cstdlib>
 #include <utility>
 
-#include "aclcxx_config.h"
+#include "acl_config.h"
 #include "log/log.h"
 
-#if ACLCXX_HAVE_JNI
+#if ACL_HAVE_JNI
 #include "runtime/jvm_vm.h"
 #endif
 
-namespace aclcxx::runtime {
+namespace acl::runtime {
 namespace {
 
-constexpr std::string_view kTag = "aclcxx.runtime";
+constexpr std::string_view kTag = "acl.runtime";
 
 // Case-insensitive ASCII equality for short backend names.
 bool iequals(std::string_view a, std::string_view b) noexcept {
@@ -116,7 +116,7 @@ bool parse_backend(std::string_view name, Backend& out) noexcept {
 }
 
 Backend default_backend() noexcept {
-  if (const char* env = std::getenv("ACLCXX_VM")) {
+  if (const char* env = std::getenv("ACL_VM")) {
     Backend b;
     if (parse_backend(env, b)) return b;
   }
@@ -146,27 +146,27 @@ std::unique_ptr<Vm> create_vm(Backend backend, VmConfig config, Error& out_error
       // R-1 / ADR-0001 (reaffirmed at the Gate-G1 confrontation): host ART is the
       // target, but standing up a host-ART build is out of budget so far. The seam
       // is ready — Backend::Art, VmConfig.boot_classpath, and cache_dir model what a
-      // host-ART VM consumes; ACLCXX_ART_HOME points at a prebuilt host ART. When
+      // host-ART VM consumes; ACL_ART_HOME points at a prebuilt host ART. When
       // the embedding lands (JNI_CreateJavaVM against libart.so with -Ximage=<boot
       // image>) this branch constructs it. Until then it reports precisely how to
       // enable it.
-      const char* art_home = std::getenv("ACLCXX_ART_HOME");
+      const char* art_home = std::getenv("ACL_ART_HOME");
       out_error = Error::of(
           Status::Unavailable,
           (art_home != nullptr && *art_home != '\0')
-              ? std::string("ACLCXX_ART_HOME=") + art_home +
+              ? std::string("ACL_ART_HOME=") + art_home +
                     " is set, but the host-ART embedding is not compiled into this "
                     "build (R-1). The seam is ready; see "
                     "docs/adr/ADR-0001-dex-execution-host-art.md."
               : std::string(
                     "host ART not available (R-1). Build a host ART + boot image, "
-                    "set ACLCXX_ART_HOME, or use --vm=jvm (the development/CI "
+                    "set ACL_ART_HOME, or use --vm=jvm (the development/CI "
                     "vehicle). See docs/adr/ADR-0001-dex-execution-host-art.md."));
       return nullptr;
     }
 
     case Backend::Jvm:
-#if ACLCXX_HAVE_JNI
+#if ACL_HAVE_JNI
       // ADR-0001 fallback: OpenJDK via the JNI Invocation API. Runs stock JVM
       // bytecode; DEX support (d8-reversal) is a later step.
       out_error = Error::ok();
@@ -183,4 +183,4 @@ std::unique_ptr<Vm> create_vm(Backend backend, VmConfig config, Error& out_error
   return nullptr;
 }
 
-}  // namespace aclcxx::runtime
+}  // namespace acl::runtime

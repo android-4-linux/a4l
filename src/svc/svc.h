@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: specs/svc.md (pending), Android SDK Manager APIs (AudioManager),
 // ADR-3 (single-process, Binder-less service hub). No GPL-3.0 sources.
-#ifndef ACLCXX_SVC_SVC_H
-#define ACLCXX_SVC_SVC_H
+#ifndef ACL_SVC_SVC_H
+#define ACL_SVC_SVC_H
 
 // The in-process service hub (ADR-3): the Java-visible Manager APIs
 // (android.media.AudioManager, ActivityManager, ...) are thin shims whose native
@@ -14,7 +14,7 @@
 #include <map>
 #include <string>
 
-namespace aclcxx::svc {
+namespace acl::svc {
 
 // android.media.AudioManager backing: per-stream volume state, in-process.
 class AudioService {
@@ -100,6 +100,6 @@ PreferencesService& prefs();
 
 const char* module_name() noexcept;
 
-}  // namespace aclcxx::svc
+}  // namespace acl::svc
 
-#endif  // ACLCXX_SVC_SVC_H
+#endif  // ACL_SVC_SVC_H

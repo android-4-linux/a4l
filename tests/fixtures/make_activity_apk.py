@@ -4,14 +4,14 @@
 # layout (public Apache-2.0 headers). No GPL-3.0 sources.
 #
 # Emit an APK with a real Android entry point (Gate G2.d):
-#   package com.aclcxx.hello;
+#   package com.acl.hello;
 #   public class MainActivity extends android.app.Activity {
 #     protected void onCreate(android.os.Bundle b) {
 #       super.onCreate(b);
-#       android.util.Log.i("aclcxx.app", "MainActivity.onCreate ran");
+#       android.util.Log.i("acl.app", "MainActivity.onCreate ran");
 #     }
 #   }
-# The manifest launcher resolves to it, so `aclcxx run` drives the Activity
+# The manifest launcher resolves to it, so `acl run` drives the Activity
 # lifecycle (onCreate -> onStart -> onResume) against the vendored/shimmed
 # android.app.Activity — instead of a static main(). Independent of the C++ decoder.
 #
@@ -25,10 +25,10 @@ import zlib
 from make_axml import build_axml
 
 STRINGS = [
-    "Lcom/aclcxx/hello/MainActivity;",  # 0
+    "Lcom/acl/hello/MainActivity;",  # 0
     "Landroid/app/Activity;",           # 1  superclass (framework)
     "Landroid/os/Bundle;",              # 2  onCreate param (framework)
-    "Landroid/util/Log;",               # 3  framework class w/ aclcxx native
+    "Landroid/util/Log;",               # 3  framework class w/ acl native
     "Ljava/lang/String;",               # 4
     "V",                                # 5
     "I",                                # 6
@@ -37,7 +37,7 @@ STRINGS = [
     "<init>",                           # 9
     "onCreate",                         # 10
     "i",                                # 11
-    "aclcxx.app",                       # 12
+    "acl.app",                       # 12
     "MainActivity.onCreate ran",        # 13
     "Landroid/media/AudioManager;",     # 14
     "Ljava/lang/Object;",               # 15 getSystemService return
@@ -65,7 +65,7 @@ AUDIO_MGR = "Landroid/media/AudioManager;"
 CONTEXT = "Landroid/content/Context;"
 SP = "Landroid/content/SharedPreferences;"
 EDITOR = "Landroid/content/SharedPreferences$Editor;"
-TYPES = ["Lcom/aclcxx/hello/MainActivity;", "Landroid/app/Activity;",
+TYPES = ["Lcom/acl/hello/MainActivity;", "Landroid/app/Activity;",
          "Landroid/os/Bundle;", "Landroid/util/Log;", "Ljava/lang/String;", "V", "I",
          AUDIO_MGR, "Ljava/lang/Object;", CONTEXT, SP, EDITOR]
 T = {t: i for i, t in enumerate(TYPES)}
@@ -145,7 +145,7 @@ def build_dex():
     code_oncreate_off = off_data + len(data)
     data.extend(code_item(6, 2, 4, [
         0x206F, 0x0003, 0x0054,   # invoke-super {v4,v5}, Activity.onCreate(Bundle) (m3)
-        0x001A, S["aclcxx.app"],  # const-string v0, TAG
+        0x001A, S["acl.app"],  # const-string v0, TAG
         0x011A, S["MainActivity.onCreate ran"],  # const-string v1, MSG
         0x2071, 0x0004, 0x0010,   # invoke-static {v0,v1}, Log.i (m4)
         0x001A, S["audio"],       # const-string v0, "audio"
@@ -208,8 +208,8 @@ def build_dex():
     proto_ids += struct.pack("<III", S["LLI"], T[SP], tl_stringint_off)   # 5 getSharedPreferences
     proto_ids += struct.pack("<III", S["L"], T[EDITOR], 0)               # 6 edit
     proto_ids += struct.pack("<III", S["LLL"], T[EDITOR], tl_2str_off)   # 7 putString
-    method_ids = struct.pack("<HHI", T["Lcom/aclcxx/hello/MainActivity;"], 0, S["<init>"])   # m0
-    method_ids += struct.pack("<HHI", T["Lcom/aclcxx/hello/MainActivity;"], 1, S["onCreate"])  # m1
+    method_ids = struct.pack("<HHI", T["Lcom/acl/hello/MainActivity;"], 0, S["<init>"])   # m0
+    method_ids += struct.pack("<HHI", T["Lcom/acl/hello/MainActivity;"], 1, S["onCreate"])  # m1
     method_ids += struct.pack("<HHI", T["Landroid/app/Activity;"], 0, S["<init>"])   # m2 super.<init>
     method_ids += struct.pack("<HHI", T["Landroid/app/Activity;"], 1, S["onCreate"])  # m3 super.onCreate
     method_ids += struct.pack("<HHI", T["Landroid/util/Log;"], 2, S["i"])            # m4 Log.i
@@ -220,7 +220,7 @@ def build_dex():
     method_ids += struct.pack("<HHI", T[EDITOR], 7, S["putString"])                  # m9
     method_ids += struct.pack("<HHI", T[EDITOR], 0, S["apply"])                      # m10
     class_defs = struct.pack("<IIIIIIII",
-                             T["Lcom/aclcxx/hello/MainActivity;"], 0x1,
+                             T["Lcom/acl/hello/MainActivity;"], 0x1,
                              T["Landroid/app/Activity;"], 0, 0xFFFFFFFF, 0,
                              class_data_off, 0)
 
@@ -258,8 +258,8 @@ def main():
         return 2
     entries = {
         "AndroidManifest.xml": build_axml(
-            utf8=True, package="com.aclcxx.hello",
-            launcher="com.aclcxx.hello.MainActivity"),
+            utf8=True, package="com.acl.hello",
+            launcher="com.acl.hello.MainActivity"),
         "classes.dex": build_dex(),
     }
     with zipfile.ZipFile(sys.argv[1], "w") as z:

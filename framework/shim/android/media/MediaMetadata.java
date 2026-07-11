@@ -5,7 +5,7 @@
 //
 // A minimal source-compatible shim for android.media.MediaMetadata + Builder
 // (Gate G2.e, media session). Media apps publish now-playing info (title, artist)
-// through the Builder; the aclcxx media host reads it back. String keys only for
+// through the Builder; the acl media host reads it back. String keys only for
 // now; long/rating/bitmap values are added as the app corpus needs them.
 // Docs-derived shim, NOT vendored AOSP.
 package android.media;

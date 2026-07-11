@@ -6,7 +6,7 @@
 // A minimal source-compatible shim for android.view.View (Phase 2). It carries the
 // real public traversal contract an app relies on — View(Context), MeasureSpec, the
 // measure -> onMeasure -> setMeasuredDimension pass, layout -> onLayout, and draw ->
-// onDraw -> dispatchDraw — so a custom view's overrides run under the aclcxx
+// onDraw -> dispatchDraw — so a custom view's overrides run under the acl
 // ViewRoot driver (jvm_vm render_content_view, standing in for ViewRootImpl.
 // performTraversals). The full ViewRootImpl/measure-cache/attach-info machinery and
 // Wayland presentation arrive with the window stack; this is the docs-derived
@@ -128,7 +128,7 @@ public class View {
     return false;
   }
 
-  // IME: an editable view returns an InputConnection here; the aclcxx ViewRoot
+  // IME: an editable view returns an InputConnection here; the acl ViewRoot
   // driver enables Wayland text input when it does, and routes committed text to
   // it. Non-editable views return null (no soft input).
   public InputConnection onCreateInputConnection(EditorInfo outAttrs) {

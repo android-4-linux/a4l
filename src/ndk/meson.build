@@ -5,7 +5,7 @@
 # loader bridging app .so into host glibc/Mesa. Staged to Phase 4; Java-only apps
 # ship without it.
 module_libs += static_library(
-  'aclcxx_ndk',
+  'acl_ndk',
   files('ndk.cpp'),
   include_directories : config_inc,
 )

@@ -1,13 +1,13 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Clean-room protocol
 
-Derived from `plan.md` §1.3–§1.4. This is the operating procedure that keeps aclcxx
+Derived from `plan.md` §1.3–§1.4. This is the operating procedure that keeps acl
 provably free of GPLv3 the predecessor expression. `PROVENANCE.md` is the enforced policy; this file
 is the process.
 
 ## Why
 
-aclcxx reimplements the *function* of the GPL-3.0 predecessor (the predecessor) without incorporating
+acl reimplements the *function* of the GPL-3.0 predecessor (the predecessor) without incorporating
 or deriving from the predecessor's GPL-3.0 source. Copyright reaches the predecessor's **expression** (its C source,
 hand-written Java shims, comments, file structure), not the **ideas, interface facts, or the
 Android API surface** — which we take from Apache-2.0 AOSP. The clean-room protocol makes the

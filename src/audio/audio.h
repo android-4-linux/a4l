@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: specs/audio.md (pending), Android SDK AudioTrack docs, PipeWire
 // pw_stream API. No GPL-3.0 sources.
-#ifndef ACLCXX_AUDIO_AUDIO_H
-#define ACLCXX_AUDIO_AUDIO_H
+#ifndef ACL_AUDIO_AUDIO_H
+#define ACL_AUDIO_AUDIO_H
 
 // The audio output seam: android.media.AudioTrack's native side writes 16-bit PCM
 // into a Sink. The default Sink counts frames (deterministic, no device); the
 // PipeWire backend (when built and selected) streams to the running daemon so a
-// track actually plays. Selection is by the ACLCXX_AUDIO env var.
+// track actually plays. Selection is by the ACL_AUDIO env var.
 
 #include <cstdint>
 #include <memory>
 
-namespace aclcxx::audio {
+namespace acl::audio {
 
 // Interleaved signed-16-bit PCM (S16LE), the AudioTrack ENCODING_PCM_16BIT format.
 struct Format {
@@ -33,12 +33,12 @@ class Sink {
   virtual std::uint64_t frames_written() const = 0;
 };
 
-// Create the configured sink. ACLCXX_AUDIO=pipewire selects the PipeWire backend
+// Create the configured sink. ACL_AUDIO=pipewire selects the PipeWire backend
 // (only if built with it); anything else (default) is the counting/null sink.
 std::unique_ptr<Sink> make_sink();
 
 const char* module_name() noexcept;
 
-}  // namespace aclcxx::audio
+}  // namespace acl::audio
 
-#endif  // ACLCXX_AUDIO_AUDIO_H
+#endif  // ACL_AUDIO_AUDIO_H

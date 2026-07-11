@@ -2,8 +2,8 @@
 // Provenance: specs/pkg.md (pending), AOSP androidfw ResourceTypes.h binary-XML
 // layout (ResChunk_header/ResStringPool/ResXMLTree), Android manifest semantics.
 // No GPL-3.0 sources.
-#ifndef ACLCXX_PKG_MANIFEST_H
-#define ACLCXX_PKG_MANIFEST_H
+#ifndef ACL_PKG_MANIFEST_H
+#define ACL_PKG_MANIFEST_H
 
 // Parse the compiled binary-XML AndroidManifest.xml (AXML) extracted from an APK
 // and expose the fields the runtime needs to launch: package, version, SDK
@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-namespace aclcxx::pkg {
+namespace acl::pkg {
 
 enum class AxmlStatus {
   Ok,
@@ -64,6 +64,6 @@ std::string resolve_class_name(std::string_view package, std::string_view name);
 AxmlError parse_manifest(const std::uint8_t* data, std::size_t size, Manifest& out);
 AxmlError parse_manifest(const std::vector<std::uint8_t>& bytes, Manifest& out);
 
-}  // namespace aclcxx::pkg
+}  // namespace acl::pkg
 
-#endif  // ACLCXX_PKG_MANIFEST_H
+#endif  // ACL_PKG_MANIFEST_H

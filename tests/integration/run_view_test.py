@@ -5,7 +5,7 @@
 # tree. view.apk's launcher MainActivity (an Activity) does, in onCreate:
 #   setContentView(new Panel(this));
 # where Panel extends android.view.ViewGroup and holds two Tiles (custom Views, each
-# a color). After driving onCreate->onStart->onResume, the aclcxx ViewRoot driver
+# a color). After driving onCreate->onStart->onResume, the acl ViewRoot driver
 # (jvm_vm render_content_view, standing in for ViewRootImpl.performTraversals):
 #   measure(EXACTLY W, EXACTLY H) -> layout(0,0,mw,mh) -> draw(canvas)
 # Panel.onLayout stacks the tiles vertically (top half / bottom half); each Tile.onDraw
@@ -14,11 +14,11 @@
 # the whole traversal, invoke-virtual/range + int-to-float + instance fields through
 # the DEX->JVM translator, and Canvas save/translate/restore — verified via pixels.
 #
-# Usage: run_view_test.py <aclcxx_binary> <view.apk> <framework_dir>
+# Usage: run_view_test.py <acl_binary> <view.apk> <framework_dir>
 import subprocess
 import sys
 
-LAUNCHING = "launching Activity com.aclcxx.hello.MainActivity"
+LAUNCHING = "launching Activity com.acl.hello.MainActivity"
 TRAVERSAL = "ViewRoot: performTraversals measured=1920x1080"
 # 1920x1080: (0,0) in the top (blue) tile; (960,540) is the top of the bottom (red) tile.
 PIXELS = "bitmap 1920x1080 pixel(0,0)=0xff0000ff pixel(960,540)=0xffff0000"
@@ -26,10 +26,10 @@ PIXELS = "bitmap 1920x1080 pixel(0,0)=0xff0000ff pixel(960,540)=0xffff0000"
 
 def main() -> int:
     if len(sys.argv) != 4:
-        sys.stderr.write("usage: run_view_test.py <aclcxx> <view.apk> <fw_dir>\n")
+        sys.stderr.write("usage: run_view_test.py <acl> <view.apk> <fw_dir>\n")
         return 2
-    aclcxx, apk, fw = sys.argv[1], sys.argv[2], sys.argv[3]
-    p = subprocess.run([aclcxx, "run", apk, "--vm=jvm", "--framework=" + fw],
+    acl, apk, fw = sys.argv[1], sys.argv[2], sys.argv[3]
+    p = subprocess.run([acl, "run", apk, "--vm=jvm", "--framework=" + fw],
                        capture_output=True, text=True, timeout=120)
     out = p.stdout + p.stderr
 

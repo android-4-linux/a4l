@@ -7,7 +7,7 @@ public class Main {
   public static void main(String[] args) throws Exception {
     if (args.length > 0) {
       java.nio.file.Files.write(java.nio.file.Paths.get(args[0]),
-                                "aclcxx-jvm-ok".getBytes("UTF-8"));
+                                "acl-jvm-ok".getBytes("UTF-8"));
     }
     System.out.println("Main.main ran with " + args.length + " arg(s)");
   }

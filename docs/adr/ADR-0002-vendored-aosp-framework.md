@@ -13,7 +13,7 @@ clean ancestry).
 ## Decision
 Vendor curated packages from `frameworks/base` (view, graphics, content, os, app, util, text,
 widget) at a pinned API level (**target 33 / Tiramisu**). Replace the native underside
-(`android_view_*`, `android_os_*` JNI registrations) with aclcxx C++ implementations.
+(`android_view_*`, `android_os_*` JNI registrations) with acl C++ implementations.
 
 ## Consequences
 Real AOSP internals cover most reflection/hidden-API use (R-4). Risk: subsetting pulls in

@@ -20,10 +20,10 @@
 
 namespace fs = std::filesystem;
 
-namespace aclcxx::dex {
+namespace acl::dex {
 namespace {
 
-constexpr std::string_view kTag = "aclcxx.dex";
+constexpr std::string_view kTag = "acl.dex";
 
 constexpr std::uint32_t kAccInterface = 0x0200;
 constexpr std::uint32_t kAccAnnotation = 0x2000;
@@ -1961,7 +1961,7 @@ Translated emit_stub(ClassWriter& cw, const DexMethod& m) {
   const std::uint16_t ctor = cw.methodref(
       "java/lang/UnsupportedOperationException", "<init>", "(Ljava/lang/String;)V");
   const std::uint16_t msg =
-      cw.string_const("aclcxx: DEX method not translated: " + m.name);
+      cw.string_const("acl: DEX method not translated: " + m.name);
   e.op(OP_NEW); e.u2(cls); e.adj(+1);
   e.op(OP_DUP); e.adj(+1);
   e.ldc_string(msg);
@@ -1978,7 +1978,7 @@ DexError convert(const DexFile& dex, const ConvertOptions& opts,
                  ConvertResult& out) {
   std::error_code ec;
   const fs::path work = opts.work_dir.empty()
-                            ? fs::temp_directory_path(ec) / "aclcxx-dex2jvm"
+                            ? fs::temp_directory_path(ec) / "acl-dex2jvm"
                             : fs::path(opts.work_dir);
   const fs::path classes = work / "classes";
   fs::create_directories(classes, ec);
@@ -2047,4 +2047,4 @@ DexError convert(const DexFile& dex, const ConvertOptions& opts,
   return {};
 }
 
-}  // namespace aclcxx::dex
+}  // namespace acl::dex

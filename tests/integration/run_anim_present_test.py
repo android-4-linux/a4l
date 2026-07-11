@@ -2,10 +2,10 @@
 # Provenance: original test harness; plan.md §5 (Tier C compositor matrix),
 # Addendum A02 (wcs windowing). No GPL-3.0 sources.
 #
-# Tier-C continuous, JVM-driven presentation: run `aclcxx run anim.apk
+# Tier-C continuous, JVM-driven presentation: run `acl run anim.apk
 # --present-frames=N` against a headless Weston. anim.apk's AnimView implements
 # android.view.Choreographer.FrameCallback and re-posts itself each frame; the
-# aclcxx ViewRoot loop fires doFrame + re-draws every vsync tick, so the app
+# acl ViewRoot loop fires doFrame + re-draws every vsync tick, so the app
 # animates a moving band and N distinct frames are presented. This exercises the
 # WHOLE stack — DEX->JVM (incl. an interface impl + invoke-static Choreographer),
 # Activity lifecycle, the View traversal, the Choreographer per-frame pump, and
@@ -13,7 +13,7 @@
 #
 # SKIPs (exit 77) if Weston can't start.
 #
-# Usage: run_anim_present_test.py <aclcxx_binary> <anim.apk> <framework_dir>
+# Usage: run_anim_present_test.py <acl_binary> <anim.apk> <framework_dir>
 import os
 import shutil
 import subprocess
@@ -34,17 +34,17 @@ def find_weston_libdir():
 
 def main() -> int:
     if len(sys.argv) != 4:
-        sys.stderr.write("usage: run_anim_present_test.py <aclcxx> <anim.apk> <fw_dir>\n")
+        sys.stderr.write("usage: run_anim_present_test.py <acl> <anim.apk> <fw_dir>\n")
         return 2
-    aclcxx, apk, fw = sys.argv[1], sys.argv[2], sys.argv[3]
+    acl, apk, fw = sys.argv[1], sys.argv[2], sys.argv[3]
     weston = shutil.which("weston")
     if not weston:
         sys.stderr.write("SKIP: weston not found\n")
         return SKIP
 
-    runtime_dir = "/tmp/aclcxx-wl-%d" % os.getpid()
+    runtime_dir = "/tmp/acl-wl-%d" % os.getpid()
     os.makedirs(runtime_dir, mode=0o700, exist_ok=True)
-    socket = "aclcxx-wl"
+    socket = "acl-wl"
     env = dict(os.environ)
     env["XDG_RUNTIME_DIR"] = runtime_dir
     libdir = find_weston_libdir()
@@ -71,14 +71,14 @@ def main() -> int:
         penv = dict(env)
         penv["WAYLAND_DISPLAY"] = socket
         p = subprocess.run(
-            [aclcxx, "run", apk, "--vm=jvm", "--framework=" + fw,
+            [acl, "run", apk, "--vm=jvm", "--framework=" + fw,
              "--present-frames=%d" % FRAMES],
             env=penv, capture_output=True, text=True, timeout=90)
         out = p.stdout + p.stderr
         # The Choreographer loop must present all N frames AND keep animating (each
         # frame driven by a fired frame callback => wp_presentation feedback fires).
         committed = "present loop stopped: %d frame(s) committed, %d shown" % (FRAMES, FRAMES)
-        if (p.returncode != 0 or "launching Activity com.aclcxx.hello.MainActivity" not in out
+        if (p.returncode != 0 or "launching Activity com.acl.hello.MainActivity" not in out
                 or committed not in out or "0 presentation-feedback" in out):
             sys.stderr.write("FAIL: continuous JVM-driven present\n--- output ---\n" + out + "\n")
             return 1

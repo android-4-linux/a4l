@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: Android SDK docs (developer.android.com/reference/android/media/
 // AudioTrack): public API surface + constants. The native underside (nativeOpen/
-// Write/Start/Stop/Release) is aclcxx's own bridge to the audio sink. No GPL-3.0 sources.
+// Write/Start/Stop/Release) is acl's own bridge to the audio sink. No GPL-3.0 sources.
 //
 // A minimal source-compatible shim for android.media.AudioTrack (Gate G2.e, media
-// audio). Apps write 16-bit PCM here; the aclcxx native underside forwards it to
-// an aclcxx::audio::Sink (PipeWire when built + selected, else a counting sink).
-// The 2-arg constructor is an aclcxx simplification of AudioTrack(streamType,
+// audio). Apps write 16-bit PCM here; the acl native underside forwards it to
+// an acl::audio::Sink (PipeWire when built + selected, else a counting sink).
+// The 2-arg constructor is an acl simplification of AudioTrack(streamType,
 // sampleRate, channelConfig, format, bufSize, mode) / AudioTrack.Builder — real
 // ctors arrive with the /range-invoke or Builder path. Docs-derived shim, NOT
 // vendored AOSP.
@@ -41,7 +41,7 @@ public class AudioTrack {
     return nativeWrite(nativeHandle, audioData, offsetInShorts, sizeInShorts);
   }
 
-  // aclcxx native underside (RegisterNatives -> aclcxx::audio).
+  // acl native underside (RegisterNatives -> acl::audio).
   private static native long nativeOpen(int sampleRate, int channels);
   private static native int nativeWrite(long handle, short[] data, int offset, int size);
   private static native void nativeStart(long handle);

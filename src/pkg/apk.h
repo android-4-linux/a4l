@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: specs/pkg.md (pending), PKWARE .ZIP APPNOTE (zip format), AOSP
 // libziparchive behavior docs. No GPL-3.0 sources.
-#ifndef ACLCXX_PKG_APK_H
-#define ACLCXX_PKG_APK_H
+#ifndef ACL_PKG_APK_H
+#define ACL_PKG_APK_H
 
 // A minimal read-only APK (zip) reader: enumerate central-directory entries and
 // inflate them. This is a Phase 1 placeholder for AOSP `libziparchive`; the API
@@ -15,7 +15,7 @@
 #include <string_view>
 #include <vector>
 
-namespace aclcxx::pkg {
+namespace acl::pkg {
 
 enum class ZipStatus {
   Ok,
@@ -88,6 +88,6 @@ class Apk {
   void reset() noexcept;
 };
 
-}  // namespace aclcxx::pkg
+}  // namespace acl::pkg
 
-#endif  // ACLCXX_PKG_APK_H
+#endif  // ACL_PKG_APK_H

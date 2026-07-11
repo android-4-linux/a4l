@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: specs/log.md (pending), Android SDK android.util.Log priority model,
 // ihs_shared three-layer facade design. No GPL-3.0 sources.
-#ifndef ACLCXX_LOG_LOG_H
-#define ACLCXX_LOG_LOG_H
+#ifndef ACL_LOG_LOG_H
+#define ACL_LOG_LOG_H
 
 // Three-layer logging facade (public API -> dispatch -> pluggable backend sink),
 // following the ihs_shared design. Priorities match android.util.Log so the
@@ -14,7 +14,7 @@
 
 #include <fmt/core.h>
 
-namespace aclcxx::log {
+namespace acl::log {
 
 // Values match android.util.Log priority constants exactly.
 enum class Level : int {
@@ -82,6 +82,6 @@ void e(std::string_view tag, fmt::format_string<Args...> f, Args&&... a) {
   logf(Level::Error, tag, f, std::forward<Args>(a)...);
 }
 
-}  // namespace aclcxx::log
+}  // namespace acl::log
 
-#endif  // ACLCXX_LOG_LOG_H
+#endif  // ACL_LOG_LOG_H

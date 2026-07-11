@@ -4,7 +4,7 @@
 //
 // A minimal source-compatible shim for android.view.KeyEvent (Phase 2 input). Real
 // KeyEvent carries scancodes, meta/modifier state, repeat counts and Unicode
-// composition; here the aclcxx ViewRoot driver builds a single key event per
+// composition; here the acl ViewRoot driver builds a single key event per
 // wl_keyboard key (state->ACTION_DOWN/UP, evdev->Android keycode) via obtain().
 // Docs-derived shim, NOT vendored AOSP.
 package android.view;
@@ -35,7 +35,7 @@ public class KeyEvent {
     this.keyCode = code;
   }
 
-  // The aclcxx ViewRoot driver's factory (matches the native (II)-> signature).
+  // The acl ViewRoot driver's factory (matches the native (II)-> signature).
   public static KeyEvent obtain(int action, int keyCode) {
     return new KeyEvent(action, keyCode);
   }

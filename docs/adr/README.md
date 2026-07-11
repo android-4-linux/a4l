@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Architecture Decision Records
 
-Concise records of the decisions that shape aclcxx. These summarize and point back to
+Concise records of the decisions that shape acl. These summarize and point back to
 `plan.md` (§3, A01, A02) — `plan.md` remains the long-form source of truth; ADRs are the
 quick-reference index and the place new decisions are recorded.
 

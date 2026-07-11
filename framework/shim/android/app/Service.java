@@ -6,7 +6,7 @@
 // media path). Real Service extends ContextWrapper -> Context and its bind path is
 // Binder-based; per ADR-3 (single-process, no Binder in v1) the host drives the
 // service directly, so onBind()/IBinder are omitted here. Only the lifecycle
-// callbacks the aclcxx media host invokes are present. Docs-derived shim, NOT
+// callbacks the acl media host invokes are present. Docs-derived shim, NOT
 // vendored AOSP (see docs/framework-bootstrap.md "Measured" for why the closure is
 // shimmed, not vendored).
 package android.app;

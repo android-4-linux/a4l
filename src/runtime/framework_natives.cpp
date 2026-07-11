@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: docs/framework-bootstrap.md §A3; JNI Functions docs (RegisterNatives,
 // GetStringUTFChars). android.util.Log priority model from Android SDK docs (also
-// mirrored by aclcxx::log::Level). No GPL-3.0 sources.
+// mirrored by acl::log::Level). No GPL-3.0 sources.
 //
-// The JNI "native underside": aclcxx C++ implementations of android.* native
+// The JNI "native underside": acl C++ implementations of android.* native
 // methods, registered against the vendored framework classes on the boot
-// classpath. This is the seam by which the Java framework reaches the aclcxx
+// classpath. This is the seam by which the Java framework reaches the acl
 // native core (svc/, gfx/, wm/, log/). G2.b wires the first one: android.util.Log
-// -> aclcxx::log.
+// -> acl::log.
 
 #include "runtime/framework_natives.h"
 
@@ -20,7 +20,7 @@
 #include "log/log.h"
 #include "svc/svc.h"
 
-namespace aclcxx::runtime {
+namespace acl::runtime {
 namespace {
 
 std::string to_utf8(JNIEnv* env, jstring s) {
@@ -31,8 +31,8 @@ std::string to_utf8(JNIEnv* env, jstring s) {
   return out;
 }
 
-// android.util.Log.write0(priority, tag, msg) -> aclcxx::log::write. Priorities
-// are identical between android.util.Log and aclcxx::log::Level (2..7).
+// android.util.Log.write0(priority, tag, msg) -> acl::log::write. Priorities
+// are identical between android.util.Log and acl::log::Level (2..7).
 jint JNICALL Log_write0(JNIEnv* env, jclass /*cls*/, jint priority, jstring tag,
                         jstring msg) {
   const std::string tag_s = to_utf8(env, tag);
@@ -44,7 +44,7 @@ jint JNICALL Log_write0(JNIEnv* env, jclass /*cls*/, jint priority, jstring tag,
   return static_cast<jint>(msg_s.size());
 }
 
-// --- android.media.AudioTrack: 16-bit PCM -> aclcxx::audio::Sink ---------------
+// --- android.media.AudioTrack: 16-bit PCM -> acl::audio::Sink ---------------
 // The sink pointer is carried across JNI as the AudioTrack.nativeHandle jlong.
 
 jlong JNICALL AudioTrack_nativeOpen(JNIEnv* /*env*/, jclass /*cls*/, jint sample_rate,
@@ -52,7 +52,7 @@ jlong JNICALL AudioTrack_nativeOpen(JNIEnv* /*env*/, jclass /*cls*/, jint sample
   auto sink = audio::make_sink();
   audio::Format fmt{sample_rate, channels};
   if (!sink->open(fmt)) {
-    log::write(log::Level::Warn, "aclcxx.audio", "AudioTrack open failed");
+    log::write(log::Level::Warn, "acl.audio", "AudioTrack open failed");
   }
   return reinterpret_cast<jlong>(sink.release());  // handle owns the sink
 }
@@ -85,7 +85,7 @@ void JNICALL AudioTrack_nativeRelease(JNIEnv* /*env*/, jclass /*cls*/, jlong han
   }
 }
 
-// --- android.media.AudioManager -> aclcxx::svc::AudioService (in-process hub) ---
+// --- android.media.AudioManager -> acl::svc::AudioService (in-process hub) ---
 jint JNICALL AudioManager_getStreamVolume(JNIEnv* /*e*/, jclass /*c*/, jint stream) {
   return svc::audio().stream_volume(stream);
 }
@@ -100,7 +100,7 @@ jboolean JNICALL AudioManager_isMusicActive(JNIEnv* /*e*/, jclass /*c*/) {
   return svc::audio().music_active() ? JNI_TRUE : JNI_FALSE;
 }
 
-// --- android.content.SharedPreferences(.Editor) -> aclcxx::svc::PreferencesService
+// --- android.content.SharedPreferences(.Editor) -> acl::svc::PreferencesService
 void JNICALL Prefs_nativePutString(JNIEnv* env, jclass /*c*/, jstring name, jstring key,
                                    jstring value) {
   svc::prefs().put_string(to_utf8(env, name), to_utf8(env, key), to_utf8(env, value));
@@ -133,7 +133,7 @@ jint JNICALL MediaSessionManager_activeCount(JNIEnv*, jclass) {
 }
 void JNICALL MediaSession_register(JNIEnv*, jclass) { svc::media_sessions().register_session(); }
 
-// --- android.graphics.Bitmap / Canvas -> aclcxx::gfx::Surface ------------------
+// --- android.graphics.Bitmap / Canvas -> acl::gfx::Surface ------------------
 jlong JNICALL Bitmap_nativeCreate(JNIEnv*, jclass, jint w, jint h) {
   return reinterpret_cast<jlong>(new gfx::Surface(w, h));
 }
@@ -144,7 +144,7 @@ jint JNICALL Bitmap_nativeGetPixel(JNIEnv*, jclass, jlong ptr, jint x, jint y) {
 void JNICALL Bitmap_nativeDescribe(JNIEnv*, jclass, jlong ptr) {
   auto* s = reinterpret_cast<gfx::Surface*>(ptr);
   if (s == nullptr) return;
-  log::i("aclcxx.gfx", "bitmap {}x{} pixel(0,0)={:#010x} pixel({},{})={:#010x}",
+  log::i("acl.gfx", "bitmap {}x{} pixel(0,0)={:#010x} pixel({},{})={:#010x}",
          s->width(), s->height(), s->pixel(0, 0), s->width() / 2, s->height() / 2,
          s->pixel(s->width() / 2, s->height() / 2));
 }
@@ -176,7 +176,7 @@ bool bind(JNIEnv* env, const char* name, const JNINativeMethod* methods, int n) 
 void register_framework_natives(JNIEnv* env) {
   if (env == nullptr) return;
 
-  // android.util.Log — the first vendored framework class with an aclcxx native.
+  // android.util.Log — the first vendored framework class with an acl native.
   if (jclass log_cls = env->FindClass("android/util/Log"); log_cls != nullptr) {
     const std::array<JNINativeMethod, 1> methods{{
         {const_cast<char*>("write0"),
@@ -186,10 +186,10 @@ void register_framework_natives(JNIEnv* env) {
     if (env->RegisterNatives(log_cls, methods.data(),
                              static_cast<jint>(methods.size())) != JNI_OK) {
       env->ExceptionClear();
-      log::write(log::Level::Warn, "aclcxx.runtime.jvm",
+      log::write(log::Level::Warn, "acl.runtime.jvm",
                  "RegisterNatives(android.util.Log) failed");
     } else {
-      log::write(log::Level::Info, "aclcxx.runtime.jvm",
+      log::write(log::Level::Info, "acl.runtime.jvm",
                  "framework native bound: android.util.Log");
     }
     env->DeleteLocalRef(log_cls);
@@ -197,7 +197,7 @@ void register_framework_natives(JNIEnv* env) {
     env->ExceptionClear();  // no framework on the boot classpath -> nothing to bind
   }
 
-  // android.media.AudioTrack -> aclcxx::audio (PipeWire / counting sink).
+  // android.media.AudioTrack -> acl::audio (PipeWire / counting sink).
   if (jclass at_cls = env->FindClass("android/media/AudioTrack"); at_cls != nullptr) {
     const std::array<JNINativeMethod, 5> methods{{
         {const_cast<char*>("nativeOpen"), const_cast<char*>("(II)J"),
@@ -214,10 +214,10 @@ void register_framework_natives(JNIEnv* env) {
     if (env->RegisterNatives(at_cls, methods.data(),
                              static_cast<jint>(methods.size())) != JNI_OK) {
       env->ExceptionClear();
-      log::write(log::Level::Warn, "aclcxx.runtime.jvm",
+      log::write(log::Level::Warn, "acl.runtime.jvm",
                  "RegisterNatives(android.media.AudioTrack) failed");
     } else {
-      log::write(log::Level::Info, "aclcxx.runtime.jvm",
+      log::write(log::Level::Info, "acl.runtime.jvm",
                  "framework native bound: android.media.AudioTrack");
     }
     env->DeleteLocalRef(at_cls);
@@ -225,7 +225,7 @@ void register_framework_natives(JNIEnv* env) {
     env->ExceptionClear();
   }
 
-  // android.media.AudioManager -> aclcxx::svc::AudioService (the svc/ hub boundary).
+  // android.media.AudioManager -> acl::svc::AudioService (the svc/ hub boundary).
   if (jclass am_cls = env->FindClass("android/media/AudioManager"); am_cls != nullptr) {
     const std::array<JNINativeMethod, 4> methods{{
         {const_cast<char*>("nativeGetStreamVolume"), const_cast<char*>("(I)I"),
@@ -240,10 +240,10 @@ void register_framework_natives(JNIEnv* env) {
     if (env->RegisterNatives(am_cls, methods.data(),
                              static_cast<jint>(methods.size())) != JNI_OK) {
       env->ExceptionClear();
-      log::write(log::Level::Warn, "aclcxx.runtime.jvm",
+      log::write(log::Level::Warn, "acl.runtime.jvm",
                  "RegisterNatives(android.media.AudioManager) failed");
     } else {
-      log::write(log::Level::Info, "aclcxx.runtime.jvm",
+      log::write(log::Level::Info, "acl.runtime.jvm",
                  "framework native bound: android.media.AudioManager");
     }
     env->DeleteLocalRef(am_cls);
@@ -278,7 +278,7 @@ void register_framework_natives(JNIEnv* env) {
     }};
     if (env->RegisterNatives(ed_cls, methods.data(), 2) != JNI_OK) env->ExceptionClear();
     env->DeleteLocalRef(ed_cls);
-    log::write(log::Level::Info, "aclcxx.runtime.jvm",
+    log::write(log::Level::Info, "acl.runtime.jvm",
                "framework native bound: android.content.SharedPreferences");
   } else {
     env->ExceptionClear();
@@ -311,7 +311,7 @@ void register_framework_natives(JNIEnv* env) {
        reinterpret_cast<void*>(&MediaSession_register)},
   };
   if (bind(env, "android/media/session/MediaSession", ms_m, 1)) {
-    log::write(log::Level::Info, "aclcxx.runtime.jvm",
+    log::write(log::Level::Info, "acl.runtime.jvm",
                "framework natives bound: ActivityManager, Display, MediaSession(Manager)");
   }
 
@@ -332,9 +332,9 @@ void register_framework_natives(JNIEnv* env) {
        reinterpret_cast<void*>(&Canvas_nativeDrawRect)},
   };
   if (bind(env, "android/graphics/Canvas", canvas_m, 2)) {
-    log::write(log::Level::Info, "aclcxx.runtime.jvm",
+    log::write(log::Level::Info, "acl.runtime.jvm",
                "framework natives bound: android.graphics.Canvas/Bitmap -> gfx");
   }
 }
 
-}  // namespace aclcxx::runtime
+}  // namespace acl::runtime

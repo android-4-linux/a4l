@@ -15,7 +15,7 @@ version = 1
 path = [
   "src/**",
   "hosts/**",
-  "framework/shim/**",  # aclcxx-authored android.* shims (vendored AOSP lives under third_party/)
+  "framework/shim/**",  # acl-authored android.* shims (vendored AOSP lives under third_party/)
   "tests/**",
   "tools/**",
   "scripts/**",
@@ -31,18 +31,18 @@ path = [
   "**.md",
 ]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "The aclcxx Authors"
+SPDX-FileCopyrightText = "The acl Authors"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
 path = [".gitignore", "**/.gitkeep", "**.wrap", "**.ini"]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "The aclcxx Authors"
+SPDX-FileCopyrightText = "The acl Authors"
 SPDX-License-Identifier = "Apache-2.0"
 
 # Our own bookkeeping inside third_party/ (not the vendored code itself).
 [[annotations]]
 path = ["third_party/README.md", "third_party/**/METADATA"]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "The aclcxx Authors"
+SPDX-FileCopyrightText = "The acl Authors"
 SPDX-License-Identifier = "Apache-2.0"

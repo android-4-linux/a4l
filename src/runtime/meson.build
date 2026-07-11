@@ -14,7 +14,7 @@ if have_jni
 endif
 
 module_libs += static_library(
-  'aclcxx_runtime',
+  'acl_runtime',
   runtime_sources,
   include_directories : [config_inc, core_inc],
   dependencies : runtime_deps,

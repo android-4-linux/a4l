@@ -7,7 +7,7 @@
 // constructors (MediaSession(Context,...), AudioTrack via Builder, ...) require.
 // Real Context is abstract with ~100 methods bound to SystemServer (the 535-class
 // closure fw_extract measured); this carries only what the app corpus calls,
-// returning sane defaults. getSystemService() returns null until the aclcxx svc/
+// returning sane defaults. getSystemService() returns null until the acl svc/
 // hub is wired to the Manager boundary (ADR-2/ADR-3). Docs-derived shim, NOT
 // vendored AOSP.
 package android.content;
@@ -20,7 +20,7 @@ public class Context {
   public static final String LAYOUT_INFLATER_SERVICE = "layout_inflater";
   public static final String NOTIFICATION_SERVICE = "notification";
 
-  private String packageName = "com.aclcxx.app";
+  private String packageName = "com.acl.app";
 
   public Context() {}
 
@@ -30,7 +30,7 @@ public class Context {
   public static final int MODE_PRIVATE = 0;
 
   // The Manager boundary (ADR-2/ADR-3): return the Java Manager shim, whose natives
-  // call the in-process aclcxx svc/ hub. More Managers land as apps need them.
+  // call the in-process acl svc/ hub. More Managers land as apps need them.
   public Object getSystemService(String name) {
     if (AUDIO_SERVICE.equals(name)) return new android.media.AudioManager();
     if (ACTIVITY_SERVICE.equals(name)) return new android.app.ActivityManager();
@@ -45,7 +45,7 @@ public class Context {
   public String getSystemServiceName(Class<?> serviceClass) { return null; }
   public ClassLoader getClassLoader() { return getClass().getClassLoader(); }
 
-  // aclcxx: the host sets the real manifest package after instantiating the entry
+  // acl: the host sets the real manifest package after instantiating the entry
   // point (a stand-in for attachBaseContext of a ContextImpl carrying it).
-  public void aclcxxSetPackage(String pkg) { if (pkg != null) packageName = pkg; }
+  public void aclSetPackage(String pkg) { if (pkg != null) packageName = pkg; }
 }

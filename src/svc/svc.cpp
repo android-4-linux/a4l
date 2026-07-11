@@ -13,9 +13,9 @@
 
 #include "log/log.h"
 
-namespace aclcxx::svc {
+namespace acl::svc {
 namespace {
-constexpr std::string_view kTag = "aclcxx.svc.audio";
+constexpr std::string_view kTag = "acl.svc.audio";
 }  // namespace
 
 AudioService::AudioService() {
@@ -42,7 +42,7 @@ AudioService& audio() {
 
 // --- PreferencesService --------------------------------------------------------
 namespace {
-constexpr std::string_view kPrefsTag = "aclcxx.svc.prefs";
+constexpr std::string_view kPrefsTag = "acl.svc.prefs";
 }  // namespace
 
 void PreferencesService::put_string(const std::string& file, const std::string& key,
@@ -94,4 +94,4 @@ MediaSessionService& media_sessions() {
 
 const char* module_name() noexcept { return "svc"; }
 
-}  // namespace aclcxx::svc
+}  // namespace acl::svc

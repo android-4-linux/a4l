@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: specs/dex.md (pending), JVM Specification chapter 4 (class file
 // format), public documentation. No GPL-3.0 sources.
-#ifndef ACLCXX_DEX_CLASSWRITER_H
-#define ACLCXX_DEX_CLASSWRITER_H
+#ifndef ACL_DEX_CLASSWRITER_H
+#define ACL_DEX_CLASSWRITER_H
 
 // Minimal writer for a single JVM .class file: constant pool, interfaces,
 // fields, and methods (each with a Code attribute + optional StackMapTable).
@@ -17,7 +17,7 @@
 #include <string_view>
 #include <vector>
 
-namespace aclcxx::dex {
+namespace acl::dex {
 
 class ClassWriter {
  public:
@@ -98,6 +98,6 @@ class ClassWriter {
   std::vector<Method> methods_;
 };
 
-}  // namespace aclcxx::dex
+}  // namespace acl::dex
 
-#endif  // ACLCXX_DEX_CLASSWRITER_H
+#endif  // ACL_DEX_CLASSWRITER_H

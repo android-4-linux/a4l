@@ -4,13 +4,13 @@
 # layout (public Apache-2.0 headers). No GPL-3.0 sources.
 #
 # Emit an APK that proves ViewGroup touch hit-testing (Phase 2 input routing):
-#   package com.aclcxx.hello;
+#   package com.acl.hello;
 #   class Tile extends android.view.View {
 #     int color;
 #     Tile(Context c, int color) { super(c); this.color = color; }
 #     protected void onDraw(Canvas c) { c.drawColor(color); }
 #     public boolean onTouchEvent(MotionEvent e) {
-#       Log.i("aclcxx.hit", getTop() == 0 ? "top" : "bottom");   // which child got it
+#       Log.i("acl.hit", getTop() == 0 ? "top" : "bottom");   // which child got it
 #       return true;
 #     }
 #   }
@@ -33,9 +33,9 @@ import zlib
 
 from make_axml import build_axml
 
-MAINACT = "Lcom/aclcxx/hello/MainActivity;"
-PANEL = "Lcom/aclcxx/hello/Panel;"
-TILE = "Lcom/aclcxx/hello/Tile;"
+MAINACT = "Lcom/acl/hello/MainActivity;"
+PANEL = "Lcom/acl/hello/Panel;"
+TILE = "Lcom/acl/hello/Tile;"
 ACTIVITY = "Landroid/app/Activity;"
 VIEWGROUP = "Landroid/view/ViewGroup;"
 VIEW = "Landroid/view/View;"
@@ -53,7 +53,7 @@ STRINGS = [
     "VL", "VZIIII", "LI", "VIIII", "VLI", "VI", "ZL", "ILL",
     "<init>", "onCreate", "setContentView", "onLayout", "addView", "getChildAt",
     "layout", "getTop", "onDraw", "onTouchEvent", "i", "drawColor", "color",
-    "aclcxx.hit", "top", "bottom",
+    "acl.hit", "top", "bottom",
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 TYPES = [MAINACT, PANEL, TILE, ACTIVITY, VIEWGROUP, VIEW, CONTEXT, BUNDLE, CANVAS,
@@ -184,7 +184,7 @@ def build_dex():
     data.extend(code_item(5, 2, 2, [
         0x106E, 0x000E, 0x0003,   # invoke-virtual {v3}, getTop (m14)
         0x000A,                   # move-result v0
-        0x011A, S["aclcxx.hit"],  # const-string v1, "aclcxx.hit"
+        0x011A, S["acl.hit"],  # const-string v1, "acl.hit"
         0x0038, 0x0005,           # if-eqz v0, :top (+5)   (getTop()==0 -> the top tile)
         0x021A, S["bottom"],      # const-string v2, "bottom"  (getTop() != 0)
         0x0328,                   # goto :log (+3)
@@ -313,8 +313,8 @@ def main():
         return 2
     entries = {
         "AndroidManifest.xml": build_axml(
-            utf8=True, package="com.aclcxx.hello",
-            launcher="com.aclcxx.hello.MainActivity"),
+            utf8=True, package="com.acl.hello",
+            launcher="com.acl.hello.MainActivity"),
         "classes.dex": build_dex(),
     }
     with zipfile.ZipFile(sys.argv[1], "w") as z:

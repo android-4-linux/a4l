@@ -59,7 +59,7 @@ STRINGS = [
     "Ljava/io/PrintStream;", # 17 type: PrintStream
     "out",                   # 18 field name (System.out)
     "println",               # 19 method name (PrintStream.println)
-    "hello aclcxx",          # 20 const-string value
+    "hello acl",          # 20 const-string value
     "LCounter;",             # 21 type: the object-model demo class
     "<init>",                # 22 constructor name
     "value",                 # 23 instance field name
@@ -252,13 +252,13 @@ def build_dex():
         0x001A, S["hello"], 0x106E, 0x0006, 0x0000, 0x010A, 0x010F,
     ]))
     code_hello_off = off_data + len(data)
-    # void hello() { System.out.println("hello aclcxx"); }
+    # void hello() { System.out.println("hello acl"); }
     #   sget-object    v0, System.out:PrintStream   (field 0)
-    #   const-string   v1, "hello aclcxx"
+    #   const-string   v1, "hello acl"
     #   invoke-virtual {v0, v1}, PrintStream.println(String)V  (method 8)
     #   return-void
     data.extend(code_item(2, 0, 2, [
-        0x0062, 0x0000, 0x011A, S["hello aclcxx"], 0x206E, 0x0008, 0x0010, 0x000E,
+        0x0062, 0x0000, 0x011A, S["hello acl"], 0x206E, 0x0008, 0x0010, 0x000E,
     ]))
     code_arraysum_off = off_data + len(data)
     # int arraySum() {

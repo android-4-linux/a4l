@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: specs/shell.md (pending), Android SDK launch semantics, xdg-desktop specs. No GPL-3.0 sources.
 //
-// aclcxx CLI. `aclcxx run <app.apk>` drives the Phase 1 runtime-spine vertical:
+// acl CLI. `acl run <app.apk>` drives the Phase 1 runtime-spine vertical:
 // open the APK (pkg), inspect its DEX/ABIs, configure a VM, and invoke a static
 // main() through the runtime seam. The ART/JVM backends report Unavailable until
 // they land (R-1 / ADR-0001); `--vm=null` exercises the full plumbing today.
@@ -18,7 +18,7 @@
 
 #include <unistd.h>  // getpid, for a per-process DEX conversion work dir
 
-#include "aclcxx_config.h"
+#include "acl_config.h"
 #include "dex/dex_to_jvm.h"
 #include "dex/dexfile.h"
 #include "log/log.h"
@@ -28,25 +28,25 @@
 
 namespace {
 
-constexpr std::string_view kTag = "aclcxx";
+constexpr std::string_view kTag = "acl";
 
 // Exit codes.
 enum : int { kOk = 0, kUsage = 1, kBackendUnavailable = 2, kRuntimeError = 3 };
 
-void print_version() { std::printf("aclcxx %s\n", ACLCXX_VERSION); }
+void print_version() { std::printf("acl %s\n", ACL_VERSION); }
 
 void print_roster() {
   // Phase 0 smoke: prove the native-core module link graph resolves.
-  namespace r = aclcxx::runtime;
+  namespace r = acl::runtime;
   std::printf("profile: %s\n",
-              ACLCXX_PROFILE_AUTOMOTIVE ? "automotive" : "phone");
+              ACL_PROFILE_AUTOMOTIVE ? "automotive" : "phone");
   std::printf("runtime backends: art (target), jvm (fallback), null (plumbing)\n");
   (void)r::backend_name(r::Backend::Art);
 }
 
 void print_usage() {
   std::printf(
-      "usage: aclcxx <command> [options]\n"
+      "usage: acl <command> [options]\n"
       "\n"
       "commands:\n"
       "  run <app.apk>        inspect and launch an APK\n"
@@ -54,7 +54,7 @@ void print_usage() {
       "  (no command)         print version and build profile\n"
       "\n"
       "run options:\n"
-      "  --vm=<art|jvm|null>  runtime backend (default: $ACLCXX_VM or art)\n"
+      "  --vm=<art|jvm|null>  runtime backend (default: $ACL_VM or art)\n"
       "  --main=<class>       static main() class to invoke\n"
       "  --service=<class>    host a MediaBrowserService (automotive media path)\n"
       "  --classpath=<paths>  extra classpath entries (colon-separated); the JVM\n"
@@ -63,7 +63,7 @@ void print_usage() {
       "  --convert-dex        convert the APK's DEX to JVM classes and add them to\n"
       "                       the classpath (implied by --vm=jvm)\n"
       "  --framework=<paths>  vendored android.* framework boot classpath (colon-\n"
-      "                       separated); also read from $ACLCXX_FRAMEWORK\n"
+      "                       separated); also read from $ACL_FRAMEWORK\n"
       "  --cache=<dir>        DEX->OAT / dalvik-cache directory\n"
       "  --present            show the rendered content view in a Wayland window\n"
       "                       (wcs); no-op if no compositor / built without wcs\n"
@@ -85,7 +85,7 @@ bool match_opt(std::string_view arg, std::string_view key, std::string& value) {
 }
 
 int cmd_run(const std::vector<std::string>& args) {
-  namespace r = aclcxx::runtime;
+  namespace r = acl::runtime;
 
   std::string apk_path;
   std::string vm_name;
@@ -153,11 +153,11 @@ int cmd_run(const std::vector<std::string>& args) {
   }
 
   // Open and inspect the APK.
-  aclcxx::pkg::ZipError zerr;
-  auto apk = aclcxx::pkg::Apk::open(apk_path, zerr);
+  acl::pkg::ZipError zerr;
+  auto apk = acl::pkg::Apk::open(apk_path, zerr);
   if (!apk.has_value()) {
-    aclcxx::log::e(kTag, "cannot open {}: [{}] {}", apk_path,
-                   aclcxx::pkg::zip_status_name(zerr.status), zerr.message);
+    acl::log::e(kTag, "cannot open {}: [{}] {}", apk_path,
+                   acl::pkg::zip_status_name(zerr.status), zerr.message);
     return kUsage;
   }
 
@@ -171,7 +171,7 @@ int cmd_run(const std::vector<std::string>& args) {
   }
   const std::vector<std::string> abis = apk->native_abis();
 
-  aclcxx::log::i(kTag, "opened {} ({} entries, {} dex, abis=[{}])", apk_path,
+  acl::log::i(kTag, "opened {} ({} entries, {} dex, abis=[{}])", apk_path,
                  apk->entries().size(), dex_files.size(),
                  [&] {
                    std::string s;
@@ -182,33 +182,33 @@ int cmd_run(const std::vector<std::string>& args) {
                    return s;
                  }());
   if (dex_files.empty()) {
-    aclcxx::log::w(kTag, "no classes*.dex found — nothing to execute");
+    acl::log::w(kTag, "no classes*.dex found — nothing to execute");
   }
 
   // Parse the manifest for package identity and the launch class.
-  aclcxx::pkg::Manifest manifest;
-  aclcxx::pkg::ZipError merr;
+  acl::pkg::Manifest manifest;
+  acl::pkg::ZipError merr;
   if (auto mbytes = apk->read("AndroidManifest.xml", merr)) {
-    if (aclcxx::pkg::AxmlError ae = aclcxx::pkg::parse_manifest(*mbytes, manifest)) {
-      aclcxx::log::w(kTag, "manifest parse failed: [{}] {}",
-                     aclcxx::pkg::axml_status_name(ae.status), ae.message);
+    if (acl::pkg::AxmlError ae = acl::pkg::parse_manifest(*mbytes, manifest)) {
+      acl::log::w(kTag, "manifest parse failed: [{}] {}",
+                     acl::pkg::axml_status_name(ae.status), ae.message);
     } else {
-      aclcxx::log::i(kTag, "package={} versionCode={} minSdk={} targetSdk={}",
+      acl::log::i(kTag, "package={} versionCode={} minSdk={} targetSdk={}",
                      manifest.package.empty() ? "?" : manifest.package,
                      manifest.version_code ? *manifest.version_code : 0,
                      manifest.min_sdk ? *manifest.min_sdk : -1,
                      manifest.target_sdk ? *manifest.target_sdk : -1);
     }
   } else {
-    aclcxx::log::w(kTag, "no AndroidManifest.xml: [{}] {}",
-                   aclcxx::pkg::zip_status_name(merr.status), merr.message);
+    acl::log::w(kTag, "no AndroidManifest.xml: [{}] {}",
+                   acl::pkg::zip_status_name(merr.status), merr.message);
   }
 
   // Resolve the launch class: explicit --main wins, else the manifest launcher.
   if (main_class.empty()) {
-    if (const aclcxx::pkg::Activity* launch = manifest.launcher()) {
+    if (const acl::pkg::Activity* launch = manifest.launcher()) {
       main_class = launch->name;
-      aclcxx::log::i(kTag, "launch activity: {}", main_class);
+      acl::log::i(kTag, "launch activity: {}", main_class);
     }
   }
 
@@ -224,13 +224,13 @@ int cmd_run(const std::vector<std::string>& args) {
   if (!present_frames.empty()) cfg.present_frames = std::strtoull(present_frames.c_str(), nullptr, 10);
 
   // Boot classpath = the vendored android.* framework (Gate G2). Sources: --framework
-  // then $ACLCXX_FRAMEWORK. Empty today (no framework vendored yet); the seam is live.
+  // then $ACL_FRAMEWORK. Empty today (no framework vendored yet); the seam is live.
   cfg.boot_classpath = framework_dirs;
-  if (const char* env = std::getenv("ACLCXX_FRAMEWORK")) {
+  if (const char* env = std::getenv("ACL_FRAMEWORK")) {
     split_paths(env, cfg.boot_classpath);
   }
   if (!cfg.boot_classpath.empty()) {
-    aclcxx::log::i(kTag, "framework boot classpath: {} entr{}",
+    acl::log::i(kTag, "framework boot classpath: {} entr{}",
                    cfg.boot_classpath.size(),
                    cfg.boot_classpath.size() == 1 ? "y" : "ies");
   }
@@ -245,28 +245,28 @@ int cmd_run(const std::vector<std::string>& args) {
       const int idx = dex_index++;
       auto db = apk->read(dex_name, zerr);
       if (!db) {
-        aclcxx::log::w(kTag, "convert-dex: cannot read {}", dex_name);
+        acl::log::w(kTag, "convert-dex: cannot read {}", dex_name);
         continue;
       }
-      aclcxx::dex::DexError de;
-      auto dx = aclcxx::dex::DexFile::parse(*db, de);
+      acl::dex::DexError de;
+      auto dx = acl::dex::DexFile::parse(*db, de);
       if (!dx) {
-        aclcxx::log::w(kTag, "convert-dex: parse {} failed: {}", dex_name, de.message);
+        acl::log::w(kTag, "convert-dex: parse {} failed: {}", dex_name, de.message);
         continue;
       }
-      // A work dir unique per process AND per DEX, so concurrent `aclcxx run`
+      // A work dir unique per process AND per DEX, so concurrent `acl run`
       // invocations (and multi-dex within one) never clobber each other's classes.
-      aclcxx::dex::ConvertOptions opts;
+      acl::dex::ConvertOptions opts;
       opts.work_dir =
           (std::filesystem::temp_directory_path() /
-           ("aclcxx-" + std::to_string(::getpid()) + "-dex-" + std::to_string(idx)))
+           ("acl-" + std::to_string(::getpid()) + "-dex-" + std::to_string(idx)))
               .string();
-      aclcxx::dex::ConvertResult cr;
-      if (aclcxx::dex::DexError ce = aclcxx::dex::convert(*dx, opts, cr)) {
-        aclcxx::log::w(kTag, "convert-dex: {} failed: {}", dex_name, ce.message);
+      acl::dex::ConvertResult cr;
+      if (acl::dex::DexError ce = acl::dex::convert(*dx, opts, cr)) {
+        acl::log::w(kTag, "convert-dex: {} failed: {}", dex_name, ce.message);
         continue;
       }
-      aclcxx::log::i(kTag, "convert-dex: {} -> {} ({} classes)", dex_name,
+      acl::log::i(kTag, "convert-dex: {} -> {} ({} classes)", dex_name,
                      cr.classpath_dir, cr.classes.size());
       cfg.classpath.push_back(cr.classpath_dir);
     }
@@ -275,13 +275,13 @@ int cmd_run(const std::vector<std::string>& args) {
   r::Error err;
   auto vm = r::create_vm(backend, cfg, err);
   if (vm == nullptr) {
-    aclcxx::log::e(kTag, "runtime backend '{}' unavailable: {}",
+    acl::log::e(kTag, "runtime backend '{}' unavailable: {}",
                    r::backend_name(backend), err.message);
     return kBackendUnavailable;
   }
 
   if (r::Error e = vm->start()) {
-    aclcxx::log::e(kTag, "vm start failed: [{}] {}", r::status_name(e.status),
+    acl::log::e(kTag, "vm start failed: [{}] {}", r::status_name(e.status),
                    e.message);
     return kRuntimeError;
   }
@@ -289,13 +289,13 @@ int cmd_run(const std::vector<std::string>& args) {
   if (!service_class.empty()) {
     // Automotive media path: host a MediaBrowserService (no Views, no launcher).
     if (r::Error e = vm->call_media_browser(service_class)) {
-      aclcxx::log::e(kTag, "host service {} failed: [{}] {}", service_class,
+      acl::log::e(kTag, "host service {} failed: [{}] {}", service_class,
                      r::status_name(e.status), e.message);
       vm->shutdown();
       return kRuntimeError;
     }
   } else if (main_class.empty()) {
-    aclcxx::log::w(kTag,
+    acl::log::w(kTag,
                    "no launcher activity in the manifest and no --main given; "
                    "VM started, nothing invoked");
   } else {
@@ -303,11 +303,11 @@ int cmd_run(const std::vector<std::string>& args) {
     // self-contained apps (or when no framework Activity is on the boot classpath).
     r::Error e = vm->call_activity_lifecycle(main_class);
     if (e.status == r::Status::NotApplicable) {
-      aclcxx::log::i(kTag, "{} is not an Activity; invoking static main()", main_class);
+      acl::log::i(kTag, "{} is not an Activity; invoking static main()", main_class);
       e = vm->call_static_main(main_class, {});
     }
     if (e) {
-      aclcxx::log::e(kTag, "launch {} failed: [{}] {}", main_class,
+      acl::log::e(kTag, "launch {} failed: [{}] {}", main_class,
                      r::status_name(e.status), e.message);
       vm->shutdown();
       return kRuntimeError;
@@ -318,8 +318,8 @@ int cmd_run(const std::vector<std::string>& args) {
   return kOk;
 }
 
-void dump_methods(const char* kind, const std::vector<aclcxx::dex::DexMethod>& ms) {
-  for (const aclcxx::dex::DexMethod& m : ms) {
+void dump_methods(const char* kind, const std::vector<acl::dex::DexMethod>& ms) {
+  for (const acl::dex::DexMethod& m : ms) {
     std::string params;
     for (std::size_t i = 0; i < m.param_types.size(); ++i) {
       if (i) params += ", ";
@@ -348,8 +348,8 @@ int cmd_dex(const std::vector<std::string>& args) {
   bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
   const bool is_dex = bytes.size() >= 4 && std::memcmp(bytes.data(), "dex\n", 4) == 0;
   if (!is_dex) {
-    aclcxx::pkg::ZipError zerr;
-    auto apk = aclcxx::pkg::Apk::open(path, zerr);
+    acl::pkg::ZipError zerr;
+    auto apk = acl::pkg::Apk::open(path, zerr);
     if (!apk.has_value()) {
       std::fprintf(stderr, "dex: %s is neither a dex nor a readable apk: %s\n",
                    path.c_str(), zerr.message.c_str());
@@ -363,16 +363,16 @@ int cmd_dex(const std::vector<std::string>& args) {
     bytes = std::move(*db);
   }
 
-  aclcxx::dex::DexError err;
-  auto dex = aclcxx::dex::DexFile::parse(bytes, err);
+  acl::dex::DexError err;
+  auto dex = acl::dex::DexFile::parse(bytes, err);
   if (!dex.has_value()) {
     std::fprintf(stderr, "dex: parse failed: [%s] %s\n",
-                 aclcxx::dex::dex_status_name(err.status), err.message.c_str());
+                 acl::dex::dex_status_name(err.status), err.message.c_str());
     return kRuntimeError;
   }
 
   std::printf("%zu class(es):\n", dex->classes().size());
-  for (const aclcxx::dex::DexClass& c : dex->classes()) {
+  for (const acl::dex::DexClass& c : dex->classes()) {
     std::printf("  class %s%s%s\n", c.java_name.c_str(),
                 c.super_name ? " extends " : "",
                 c.super_name ? c.super_name->c_str() : "");
@@ -409,7 +409,7 @@ int main(int argc, char** argv) {
     return cmd_dex({args.begin() + 1, args.end()});
   }
 
-  std::fprintf(stderr, "aclcxx: unknown command '%s'\n\n", cmd.c_str());
+  std::fprintf(stderr, "acl: unknown command '%s'\n\n", cmd.c_str());
   print_usage();
   return kUsage;
 }

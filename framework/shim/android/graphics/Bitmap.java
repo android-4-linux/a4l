@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: Android SDK docs (developer.android.com/reference/android/graphics/
-// Bitmap): public API subset. Native underside -> aclcxx::gfx::Surface. No GPL-3.0 sources.
+// Bitmap): public API subset. Native underside -> acl::gfx::Surface. No GPL-3.0 sources.
 //
 // A minimal source-compatible shim for android.graphics.Bitmap (Phase 2). Wraps a
 // gfx::Surface (ARGB_8888 buffer). createBitmap takes (w,h) here; the real
@@ -27,8 +27,8 @@ public class Bitmap {
   public int getHeight() { return height; }
   public int getPixel(int x, int y) { return nativeGetPixel(nativePtr, x, y); }
 
-  long aclcxxPtr() { return nativePtr; }         // for Canvas(Bitmap)
-  public void aclcxxDescribe() { nativeDescribe(nativePtr); }  // dump sample pixels
+  long aclPtr() { return nativePtr; }         // for Canvas(Bitmap)
+  public void aclDescribe() { nativeDescribe(nativePtr); }  // dump sample pixels
 
   private static native long nativeCreate(int width, int height);
   private static native int nativeGetPixel(long ptr, int x, int y);
