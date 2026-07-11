@@ -155,6 +155,10 @@ if profile_automotive
   subdir('hosts')
 endif
 
+# The android.* boot classpath (ADR-0002), staged before src/ so the shell can bake
+# in its path as the default --framework.
+subdir('framework')
+
 subdir('src')
 
 if build_tests

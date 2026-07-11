@@ -15,7 +15,7 @@ version = 1
 path = [
   "src/**",
   "hosts/**",
-  "framework/shim/**",  # acl-authored android.* shims (vendored AOSP lives under third_party/)
+  "framework/**",  # acl-authored android.* shims + boot-classpath build (vendored AOSP under third_party/)
   "tests/**",
   "tools/**",
   "scripts/**",

@@ -84,52 +84,11 @@ if py3.found() and have_jni
       command : [py3, '@INPUT@', '--log', '@OUTPUT@'],
       depend_files : files('../fixtures/make_axml.py'),
     )
-    # The whole android.* shim tree, compiled together (inter-shim deps: Activity
-    # imports Bundle; MediaBrowserService extends Service, imports Bundle).
-    framework_shim = custom_target(
-      'framework-shim-classes',
-      input : files('../../framework/shim/android/content/Context.java',
-                    '../../framework/shim/android/content/ContextWrapper.java',
-                    '../../framework/shim/android/content/SharedPreferences.java',
-                    '../../framework/shim/android/view/ContextThemeWrapper.java',
-                    '../../framework/shim/android/os/Bundle.java',
-                    '../../framework/shim/android/app/Service.java',
-                    '../../framework/shim/android/app/Activity.java',
-                    '../../framework/shim/android/app/ActivityManager.java',
-                    '../../framework/shim/android/view/Display.java',
-                    '../../framework/shim/android/view/WindowManager.java',
-                    '../../framework/shim/android/media/AudioManager.java',
-                    '../../framework/shim/android/media/AudioTrack.java',
-                    '../../framework/shim/android/media/MediaDescription.java',
-                    '../../framework/shim/android/media/MediaMetadata.java',
-                    '../../framework/shim/android/media/browse/MediaBrowser.java',
-                    '../../framework/shim/android/media/session/MediaSession.java',
-                    '../../framework/shim/android/media/session/MediaSessionManager.java',
-                    '../../framework/shim/android/media/session/PlaybackState.java',
-                    '../../framework/shim/android/service/media/MediaBrowserService.java',
-                    '../../framework/shim/android/graphics/Color.java',
-                    '../../framework/shim/android/graphics/Paint.java',
-                    '../../framework/shim/android/graphics/Bitmap.java',
-                    '../../framework/shim/android/graphics/Canvas.java',
-                    '../../framework/shim/android/view/View.java',
-                    '../../framework/shim/android/view/ViewGroup.java',
-                    '../../framework/shim/android/view/Choreographer.java',
-                    '../../framework/shim/android/view/MotionEvent.java',
-                    '../../framework/shim/android/view/KeyEvent.java',
-                    '../../framework/shim/android/view/inputmethod/EditorInfo.java',
-                    '../../framework/shim/android/view/inputmethod/InputConnection.java',
-                    '../../framework/shim/android/util/Log.java',
-                    # androidx.car.app (Gate G1.5b, CAL template host)
-                    '../../framework/shim/androidx/car/app/model/Template.java',
-                    '../../framework/shim/androidx/car/app/model/Row.java',
-                    '../../framework/shim/androidx/car/app/model/ItemList.java',
-                    '../../framework/shim/androidx/car/app/model/ListTemplate.java',
-                    '../../framework/shim/androidx/car/app/Screen.java',
-                    '../../framework/shim/androidx/car/app/Session.java',
-                    '../../framework/shim/androidx/car/app/CarAppService.java'),
-      output : 'framework-shim',
-      command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
-    )
+    # The framework boot classpath (android.* shims + vendored AOSP), built once by
+    # framework/meson.build and shared here — the same artifact `acl run` uses by
+    # default. (framework_classes is a real target under have_jni, which this block
+    # requires.)
+    framework_shim = framework_boot_classes
     test(
       'run-apk-log',
       py3,
@@ -152,6 +111,16 @@ if py3.found() and have_jni
       'run-apk-activity',
       py3,
       args : [files('run_activity_test.py'), acl_exe, activity_apk, framework_shim],
+      depends : [acl_exe, activity_apk, framework_shim],
+      timeout : 120,
+    )
+
+    # ADR-0002: the same app with NO --framework must load android.* off the staged
+    # default boot classpath baked into the binary (build/framework/classes).
+    test(
+      'run-apk-default-framework',
+      py3,
+      args : [files('run_default_framework_test.py'), acl_exe, activity_apk],
       depends : [acl_exe, activity_apk, framework_shim],
       timeout : 120,
     )

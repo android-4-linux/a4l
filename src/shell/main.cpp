@@ -238,12 +238,19 @@ int cmd_run(const std::vector<std::string>& args) {
   cfg.present = present;                 // show the rendered content view via wm/ (wcs)
   if (!present_frames.empty()) cfg.present_frames = std::strtoull(present_frames.c_str(), nullptr, 10);
 
-  // Boot classpath = the vendored android.* framework (Gate G2). Sources: --framework
-  // then $ACL_FRAMEWORK. Empty today (no framework vendored yet); the seam is live.
+  // Boot classpath = the android.* framework (ADR-0002). Precedence: --framework,
+  // then $ACL_FRAMEWORK, then the staged default (framework/ -> build/framework/classes,
+  // baked in at build time) so `acl run <apk>` resolves android.* out of the box.
   cfg.boot_classpath = framework_dirs;
   if (const char* env = std::getenv("ACL_FRAMEWORK")) {
     split_paths(env, cfg.boot_classpath);
   }
+#ifdef ACL_DEFAULT_FRAMEWORK
+  if (cfg.boot_classpath.empty() &&
+      std::filesystem::exists(ACL_DEFAULT_FRAMEWORK)) {
+    cfg.boot_classpath.push_back(ACL_DEFAULT_FRAMEWORK);  // staged framework/ classes
+  }
+#endif
   if (!cfg.boot_classpath.empty()) {
     acl::log::i(kTag, "framework boot classpath: {} entr{}",
                    cfg.boot_classpath.size(),
