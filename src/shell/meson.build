@@ -12,6 +12,9 @@ shell_cpp_args = []
 if framework_default_dir != ''
   shell_cpp_args += '-DACL_DEFAULT_FRAMEWORK="' + framework_default_dir + '"'
 endif
+if framework_android_jar != ''
+  shell_cpp_args += '-DACL_DEFAULT_ANDROID_JAR="' + framework_android_jar + '"'
+endif
 
 acl_exe = executable(
   'acl',

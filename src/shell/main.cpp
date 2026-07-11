@@ -249,6 +249,17 @@ int cmd_run(const std::vector<std::string>& args) {
   if (cfg.boot_classpath.empty() &&
       std::filesystem::exists(ACL_DEFAULT_FRAMEWORK)) {
     cfg.boot_classpath.push_back(ACL_DEFAULT_FRAMEWORK);  // staged framework/ classes
+    // The api-33 android.jar stub layer resolves AFTER our shims (so our classes with
+    // real behavior win) and fills the rest of android.* (ADR-0002). $ACL_ANDROID_JAR
+    // overrides the baked-in default.
+    std::string android_jar;
+    if (const char* j = std::getenv("ACL_ANDROID_JAR")) android_jar = j;
+#ifdef ACL_DEFAULT_ANDROID_JAR
+    if (android_jar.empty()) android_jar = ACL_DEFAULT_ANDROID_JAR;
+#endif
+    if (!android_jar.empty() && std::filesystem::exists(android_jar)) {
+      cfg.boot_classpath.push_back(android_jar);
+    }
   }
 #endif
   if (!cfg.boot_classpath.empty()) {

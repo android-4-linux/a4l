@@ -30,8 +30,8 @@ def main() -> int:
     if not ok:
         sys.stderr.write(f"FAIL: exit {p.returncode}\n")
     checks = [
-        "framework boot classpath: 1 entry",           # the default was picked up
-        "build/framework/classes",                       # ...and it is the staged dir
+        "framework boot classpath:",                     # a default was picked up
+        "build/framework/classes",                       # ...including the staged shim dir
         "launching Activity com.acl.hello.MainActivity",  # loaded (needs android.*)
         "MainActivity.onCreate ran",                     # lifecycle drove onCreate
     ]
