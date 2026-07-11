@@ -65,6 +65,8 @@ void print_usage() {
       "  --framework=<paths>  vendored android.* framework boot classpath (colon-\n"
       "                       separated); also read from $ACLCXX_FRAMEWORK\n"
       "  --cache=<dir>        DEX->OAT / dalvik-cache directory\n"
+      "  --present            show the rendered content view in a Wayland window\n"
+      "                       (wcs); no-op if no compositor / built without wcs\n"
       "\n"
       "  -h, --help           show this help\n"
       "  -v, --version        show version\n");
@@ -91,6 +93,7 @@ int cmd_run(const std::vector<std::string>& args) {
   std::vector<std::string> extra_classpath;
   std::vector<std::string> framework_dirs;
   bool convert_dex = false;
+  bool present = false;
 
   // Split a colon-separated path list into `out`, skipping empties.
   const auto split_paths = [](const std::string& v, std::vector<std::string>& out) {
@@ -107,6 +110,8 @@ int cmd_run(const std::vector<std::string>& args) {
     std::string v;
     if (a == "--convert-dex") {
       convert_dex = true;
+    } else if (a == "--present") {
+      present = true;
     } else if (match_opt(a, "--vm", v)) {
       vm_name = v;
     } else if (match_opt(a, "--framework", v)) {
@@ -209,6 +214,7 @@ int cmd_run(const std::vector<std::string>& args) {
                        extra_classpath.end());
   cfg.cache_dir = cache_dir;
   cfg.package_name = manifest.package;  // injected into the entry point's Context
+  cfg.present = present;                 // show the rendered content view via wm/ (wcs)
 
   // Boot classpath = the vendored android.* framework (Gate G2). Sources: --framework
   // then $ACLCXX_FRAMEWORK. Empty today (no framework vendored yet); the seam is live.

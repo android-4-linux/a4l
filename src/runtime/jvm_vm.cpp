@@ -16,9 +16,11 @@
 
 #include <jni.h>
 
+#include "gfx/gfx.h"
 #include "log/log.h"
 #include "runtime/framework_natives.h"
 #include "svc/svc.h"
+#include "wm/present.h"
 
 namespace aclcxx::runtime {
 namespace {
@@ -367,6 +369,10 @@ class JvmVm final : public Vm {
           env_->CallVoidMethod(view, draw, canvas);
           jmethodID describe = env_->GetMethodID(bmp_cls, "aclcxxDescribe", "()V");
           if (describe != nullptr) env_->CallVoidMethod(bmp, describe);
+          // Present the rendered frame in a Wayland window (--present). The Bitmap's
+          // native pointer IS the gfx::Surface just drawn; hand it to wm/ (wcs). No-op
+          // if no compositor is reachable or aclcxx was built without wcs.
+          if (config_.present) present_content(bmp_cls, bmp);
           env_->DeleteLocalRef(canvas);
         }
       }
@@ -376,6 +382,23 @@ class JvmVm final : public Vm {
     if (bmp_cls != nullptr) env_->DeleteLocalRef(bmp_cls);
     if (canvas_cls != nullptr) env_->DeleteLocalRef(canvas_cls);
     env_->DeleteLocalRef(view);
+  }
+
+  // Present the rendered Bitmap (a gfx::Surface behind aclcxxPtr()) in a Wayland
+  // window via wm/ (wcs). One-shot: blocks until the frame is shown or times out.
+  void present_content(jclass bmp_cls, jobject bmp) {
+    jmethodID ptr_m = env_->GetMethodID(bmp_cls, "aclcxxPtr", "()J");
+    if (ptr_m == nullptr) { clear_exception(); return; }
+    const jlong ptr = env_->CallLongMethod(bmp, ptr_m);
+    auto* surface = reinterpret_cast<const gfx::Surface*>(ptr);
+    if (surface == nullptr) return;
+    if (!wm::wayland_available()) {
+      log::i(kTag, "--present: no Wayland compositor reachable; frame not shown");
+      return;
+    }
+    const std::string& pkg = config_.package_name;
+    wm::present_surface(*surface, pkg.empty() ? "aclcxx" : pkg,
+                        pkg.empty() ? "org.aclcxx.app" : pkg);
   }
 
   // Print + clear a pending exception and return a RuntimeError describing `what`.

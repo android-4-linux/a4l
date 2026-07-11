@@ -207,6 +207,21 @@ if py3.found() and have_jni
       depends : [aclcxx_exe, view_apk, framework_shim],
       timeout : 120,
     )
+
+    # Tier C (full vertical): the same app, but `--present` shows its rendered
+    # content view in a real Wayland window. run_view_present_test.py launches a
+    # headless Weston and asserts aclcxx reports the frame was shown. Only when the
+    # real wcs presenter is built and Weston is available; SKIPs otherwise.
+    weston_prog = find_program('weston', required : false)
+    if have_wcs and weston_prog.found()
+      test(
+        'run-apk-view-present',
+        py3,
+        args : [files('run_view_present_test.py'), aclcxx_exe, view_apk, framework_shim],
+        depends : [aclcxx_exe, view_apk, framework_shim],
+        timeout : 120,
+      )
+    endif
   else
     message('javac not found; skipping run-apk-framework integration test.')
   endif

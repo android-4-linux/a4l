@@ -38,6 +38,7 @@ struct VmConfig {
   std::string cache_dir;                     // DEX->OAT / dalvik-cache
   std::string package_name;                  // manifest package, injected into Context
   std::vector<std::string> options;          // raw VM options (-Xmx..., -verbose:gc)
+  bool present = false;                       // present the rendered content view via wm/ (--present)
 };
 
 enum class Status {
