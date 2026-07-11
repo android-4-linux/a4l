@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: Apache-2.0
+// Provenance: original test harness; libwayland-server API (freedesktop, MIT);
+// xdg-shell protocol (freedesktop, MIT). No GPL-3.0 sources.
+//
+// A minimal test compositor for the presenter's close path (Tier C). It advertises
+// wl_compositor + wl_shm (via libwayland's shm helper) + xdg_wm_base, walks a client
+// through the xdg-shell handshake, and once the client maps its window (commits a
+// buffer) sends xdg_toplevel.close — the one thing headless Weston can't be told to
+// do. The presenter under test must react to close (OnToplevelClose) and exit
+// cleanly. The compositor terminates when the client disconnects (or after a safety
+// timeout), so the test can't hang.
+//
+// Only enough of each interface is implemented to reach the first buffer commit;
+// unused requests are left null (never sent by the client at these versions).
+
+#include <cstdint>
+#include <cstdio>
+
+#include <wayland-server.h>
+
+#include "xdg-shell-server-protocol.h"
+
+namespace {
+
+wl_display* g_display = nullptr;
+std::uint32_t g_serial = 0;
+void arm_shutdown();  // defined below; called after close is sent
+
+struct Surf {
+  wl_resource* xdg_surface = nullptr;
+  wl_resource* xdg_toplevel = nullptr;
+  wl_resource* frame_cb = nullptr;
+  wl_resource* pending_buffer = nullptr;
+  bool configured = false;
+  bool close_sent = false;
+};
+
+Surf* surf_of(wl_resource* r) { return static_cast<Surf*>(wl_resource_get_user_data(r)); }
+
+// ── wl_region (never exercised, but create_region must yield a live resource) ──
+void region_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+void region_add(wl_client*, wl_resource*, int32_t, int32_t, int32_t, int32_t) {}
+void region_subtract(wl_client*, wl_resource*, int32_t, int32_t, int32_t, int32_t) {}
+const struct wl_region_interface region_impl = {region_destroy, region_add, region_subtract};
+
+// ── wl_surface ────────────────────────────────────────────────────────────────
+void surface_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+void surface_attach(wl_client*, wl_resource* r, wl_resource* buffer, int32_t, int32_t) {
+  surf_of(r)->pending_buffer = buffer;
+}
+void surface_damage(wl_client*, wl_resource*, int32_t, int32_t, int32_t, int32_t) {}
+void surface_frame(wl_client* c, wl_resource* r, uint32_t callback) {
+  Surf* s = surf_of(r);
+  s->frame_cb = wl_resource_create(c, &wl_callback_interface, 1, callback);
+}
+void surface_set_opaque_region(wl_client*, wl_resource*, wl_resource*) {}
+void surface_set_input_region(wl_client*, wl_resource*, wl_resource*) {}
+void surface_commit(wl_client*, wl_resource* r) {
+  Surf* s = surf_of(r);
+  // First commit after the xdg role exists: send the initial configure.
+  if (s->xdg_surface != nullptr && !s->configured) {
+    s->configured = true;
+    xdg_surface_send_configure(s->xdg_surface, ++g_serial);
+    return;
+  }
+  // The window is now mapped (a buffer was attached) — close it.
+  if (s->xdg_toplevel != nullptr && s->pending_buffer != nullptr && !s->close_sent) {
+    if (s->frame_cb != nullptr) {
+      wl_callback_send_done(s->frame_cb, 1);
+      wl_resource_destroy(s->frame_cb);
+      s->frame_cb = nullptr;
+    }
+    wl_buffer_send_release(s->pending_buffer);
+    std::fprintf(stderr, "close-compositor: window mapped -> sending xdg_toplevel.close\n");
+    xdg_toplevel_send_close(s->xdg_toplevel);
+    s->close_sent = true;
+    arm_shutdown();
+  }
+}
+const struct wl_surface_interface surface_impl = {
+    surface_destroy, surface_attach, surface_damage, surface_frame,
+    surface_set_opaque_region, surface_set_input_region, surface_commit};
+
+void surface_res_destroy(wl_resource* r) { delete surf_of(r); }
+
+// ── wl_compositor ─────────────────────────────────────────────────────────────
+void comp_create_surface(wl_client* c, wl_resource* r, uint32_t id) {
+  auto* s = new Surf();
+  wl_resource* sr = wl_resource_create(c, &wl_surface_interface, wl_resource_get_version(r), id);
+  wl_resource_set_implementation(sr, &surface_impl, s, surface_res_destroy);
+}
+void comp_create_region(wl_client* c, wl_resource*, uint32_t id) {
+  wl_resource* rr = wl_resource_create(c, &wl_region_interface, 1, id);
+  wl_resource_set_implementation(rr, &region_impl, nullptr, nullptr);
+}
+const struct wl_compositor_interface compositor_impl = {comp_create_surface, comp_create_region};
+
+// ── xdg_positioner (never exercised) ──────────────────────────────────────────
+void positioner_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+const struct xdg_positioner_interface positioner_impl = {positioner_destroy};
+
+// ── xdg_toplevel ──────────────────────────────────────────────────────────────
+void toplevel_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+void toplevel_set_parent(wl_client*, wl_resource*, wl_resource*) {}
+void toplevel_set_title(wl_client*, wl_resource*, const char*) {}
+void toplevel_set_app_id(wl_client*, wl_resource*, const char*) {}
+const struct xdg_toplevel_interface toplevel_impl = {
+    toplevel_destroy, toplevel_set_parent, toplevel_set_title, toplevel_set_app_id};
+
+// ── xdg_surface ───────────────────────────────────────────────────────────────
+void xdgsurface_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+void xdgsurface_get_toplevel(wl_client* c, wl_resource* r, uint32_t id) {
+  wl_resource* tl = wl_resource_create(c, &xdg_toplevel_interface, wl_resource_get_version(r), id);
+  wl_resource_set_implementation(tl, &toplevel_impl, nullptr, nullptr);
+  // Link the toplevel back to the wl_surface's state (xdg_surface user_data is Surf*).
+  surf_of(r)->xdg_toplevel = tl;
+}
+void xdgsurface_get_popup(wl_client*, wl_resource*, uint32_t, wl_resource*, wl_resource*) {}
+void xdgsurface_set_window_geometry(wl_client*, wl_resource*, int32_t, int32_t, int32_t, int32_t) {}
+void xdgsurface_ack_configure(wl_client*, wl_resource*, uint32_t) {}
+const struct xdg_surface_interface xdg_surface_impl = {
+    xdgsurface_destroy, xdgsurface_get_toplevel, xdgsurface_get_popup,
+    xdgsurface_set_window_geometry, xdgsurface_ack_configure};
+
+// ── xdg_wm_base ───────────────────────────────────────────────────────────────
+void wmbase_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+void wmbase_create_positioner(wl_client* c, wl_resource*, uint32_t id) {
+  wl_resource* pr = wl_resource_create(c, &xdg_positioner_interface, 1, id);
+  wl_resource_set_implementation(pr, &positioner_impl, nullptr, nullptr);
+}
+void wmbase_get_xdg_surface(wl_client* c, wl_resource*, uint32_t id, wl_resource* surface) {
+  Surf* s = surf_of(surface);
+  wl_resource* xs = wl_resource_create(c, &xdg_surface_interface, 1, id);
+  // The xdg_surface shares the wl_surface's Surf* so commit() can see the role.
+  wl_resource_set_implementation(xs, &xdg_surface_impl, s, nullptr);
+  s->xdg_surface = xs;
+}
+void wmbase_pong(wl_client*, wl_resource*, uint32_t) {}
+const struct xdg_wm_base_interface wmbase_impl = {
+    wmbase_destroy, wmbase_create_positioner, wmbase_get_xdg_surface, wmbase_pong};
+
+// ── globals ───────────────────────────────────────────────────────────────────
+void bind_compositor(wl_client* c, void*, uint32_t version, uint32_t id) {
+  wl_resource* r = wl_resource_create(c, &wl_compositor_interface, static_cast<int>(version), id);
+  wl_resource_set_implementation(r, &compositor_impl, nullptr, nullptr);
+}
+void bind_wmbase(wl_client* c, void*, uint32_t version, uint32_t id) {
+  wl_resource* r = wl_resource_create(c, &xdg_wm_base_interface, static_cast<int>(version), id);
+  wl_resource_set_implementation(r, &wmbase_impl, nullptr, nullptr);
+}
+
+// Terminate a short moment after close is sent — enough for the client to react
+// and disconnect — so the compositor exits on its own after the interesting event.
+// (We do NOT terminate on plain client disconnect: the probe connects once just to
+// check availability and disconnects before the real presentation connection.)
+int on_shutdown(void*) { wl_display_terminate(g_display); return 0; }
+wl_event_source* g_shutdown_timer = nullptr;
+void arm_shutdown() {
+  if (g_shutdown_timer != nullptr) wl_event_source_timer_update(g_shutdown_timer, 1000);
+}
+
+int on_timeout(void*) {
+  std::fprintf(stderr, "close-compositor: safety timeout\n");
+  wl_display_terminate(g_display);
+  return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  const char* socket = argc > 1 ? argv[1] : "aclcxx-close";
+  g_display = wl_display_create();
+  if (g_display == nullptr) { std::fprintf(stderr, "close-compositor: wl_display_create failed\n"); return 1; }
+  if (wl_display_add_socket(g_display, socket) != 0) {
+    std::fprintf(stderr, "close-compositor: cannot add socket %s\n", socket);
+    return 1;
+  }
+  wl_display_init_shm(g_display);  // provides wl_shm/pool/buffer
+  wl_global_create(g_display, &wl_compositor_interface, 4, nullptr, bind_compositor);
+  wl_global_create(g_display, &xdg_wm_base_interface, 1, nullptr, bind_wmbase);
+
+  wl_event_loop* loop = wl_display_get_event_loop(g_display);
+  wl_event_source* timer = wl_event_loop_add_timer(loop, on_timeout, nullptr);
+  wl_event_source_timer_update(timer, 20000);  // 20s safety net
+  g_shutdown_timer = wl_event_loop_add_timer(loop, on_shutdown, nullptr);  // armed after close
+
+  std::fprintf(stderr, "close-compositor: ready on %s\n", socket);
+  wl_display_run(g_display);
+  wl_display_destroy(g_display);
+  return 0;
+}

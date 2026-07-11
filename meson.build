@@ -3,6 +3,7 @@
 project(
   'aclcxx',
   'cpp',
+  'c',   # only for scanner-generated protocol glue in the wm/ test compositor
   version : '0.0.0',
   license : 'Apache-2.0',
   meson_version : '>= 1.3.0',
@@ -67,6 +68,7 @@ have_wcs = false
 wcs_scanner = disabler()
 wcs_dep = declare_dependency()   # empty no-op placeholder (wl/ header include added below)
 wayland_dep = dependency('wayland-client', required : false)
+wayland_server_dep = dependency('wayland-server', required : false)  # test compositor only
 wl_scanner_dep = dependency('wayland-scanner', required : false)
 wp_dep = dependency('wayland-protocols', required : false)
 fs = import('fs')

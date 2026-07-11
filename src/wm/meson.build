@@ -85,6 +85,44 @@ if build_tests and have_wcs
       args : [files('../../tests/integration/run_present_test.py'), wm_present_probe, '30'],
       timeout : 60,
     )
+
+    # Close path: a tiny libwayland-server test compositor walks the presenter
+    # through the xdg-shell handshake and then sends xdg_toplevel.close (which
+    # headless Weston can't). The presenter (run unbounded, --frames 0) must react
+    # to close and exit cleanly. Needs wayland-server + wayland-scanner (for the
+    # xdg-shell server glue).
+    wl_scanner_prog = find_program('wayland-scanner', required : false)
+    if wayland_server_dep.found() and wl_scanner_prog.found()
+      xdg_server_hdr = custom_target(
+        'xdg-shell-server-protocol-header',
+        input : xdg_shell_xml,
+        output : 'xdg-shell-server-protocol.h',
+        command : [wl_scanner_prog, 'server-header', '@INPUT@', '@OUTPUT@'],
+      )
+      xdg_protocol_code = custom_target(
+        'xdg-shell-protocol-code',
+        input : xdg_shell_xml,
+        output : 'xdg-shell-protocol.c',
+        command : [wl_scanner_prog, 'private-code', '@INPUT@', '@OUTPUT@'],
+      )
+      close_compositor = executable(
+        'close_compositor',
+        [files('../../tests/integration/close_compositor.cpp'),
+         xdg_server_hdr, xdg_protocol_code],
+        include_directories : include_directories('.'),  # source + build src/wm (generated hdr)
+        dependencies : wayland_server_dep,
+        # The libwayland request-vtables are intentionally partial (only the requests
+        # the client sends at these versions); the rest are null by design.
+        cpp_args : ['-Wno-missing-field-initializers'],
+      )
+      test(
+        'wm-present-close',
+        py3_wm,
+        args : [files('../../tests/integration/run_close_test.py'),
+                wm_present_probe, close_compositor],
+        timeout : 60,
+      )
+    endif
   else
     message('python3/weston not both present; skipping wm-present Tier-C tests.')
   endif
