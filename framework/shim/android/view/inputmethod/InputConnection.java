@@ -11,4 +11,6 @@ package android.view.inputmethod;
 
 public interface InputConnection {
   boolean commitText(CharSequence text, int newCursorPosition);
+  // Composing (preedit) text from the IME, updated as the user types before commit.
+  boolean setComposingText(CharSequence text, int newCursorPosition);
 }

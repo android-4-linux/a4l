@@ -54,10 +54,14 @@ struct KeyInput {
   std::uint32_t keycode;  // Linux evdev (KEY_A, KEY_ENTER, …)
   std::uint32_t keysym;   // xkb keysym, or 0
 };
-// Committed text from the compositor's IME (zwp_text_input_v3.commit_string) —
-// the native side of an InputConnection.commitText.
+// Text from the compositor's IME (zwp_text_input_v3). `preedit` distinguishes a
+// composing update (preedit_string -> InputConnection.setComposingText) from a
+// final commit (commit_string -> InputConnection.commitText). `cursor` is the
+// new cursor position passed to the InputConnection call.
 struct TextInput {
   std::string text;
+  bool preedit;
+  int cursor;
 };
 using InputEvent = std::variant<PointerInput, KeyInput, TextInput>;
 // Called (on the present thread) when an input event arrives. May be empty.

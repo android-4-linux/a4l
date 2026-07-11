@@ -54,7 +54,7 @@ STRINGS = [
     "V", "I", "Z",
     "VL", "LL", "ZLI", "VI", "ILL",
     "<init>", "onCreate", "setContentView", "onDraw", "onCreateInputConnection",
-    "commitText", "drawColor", "i", "aclcxx.ime",
+    "commitText", "setComposingText", "drawColor", "i", "aclcxx.ime",
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 TYPES = [MAINACT, IMEVIEW, IMECONN, ACTIVITY, VIEW, CONTEXT, BUNDLE, CANVAS, OBJECT,
@@ -90,7 +90,7 @@ def code_item(regs, ins, outs, insns):
 def build_dex():
     header_size = 112
     n_strings = len(STRINGS)
-    n_types, n_protos, n_fields, n_methods, n_classdefs = len(TYPES), 9, 0, 14, 3
+    n_types, n_protos, n_fields, n_methods, n_classdefs = len(TYPES), 9, 0, 15, 3
 
     off_string_ids = header_size
     off_type_ids = off_string_ids + n_strings * 4
@@ -167,6 +167,14 @@ def build_dex():
         0x1212,                   # const/4 v2, 1
         0x020F,                   # return v2  (true)
     ]))
+    code_imeconn_setcomposing = off_data + len(data)
+    data.extend(code_item(6, 3, 2, [
+        0x001A, S["aclcxx.ime"],       # const-string v0, "aclcxx.ime"
+        0x011A, S["setComposingText"], # const-string v1, "setComposingText"
+        0x2071, 0x000D, 0x0010,        # invoke-static {v0,v1}, Log.i (m13)
+        0x1212,                        # const/4 v2, 1
+        0x020F,                        # return v2  (true)
+    ]))
 
     # --- class_data ---
     cd_mainact = off_data + len(data)
@@ -181,9 +189,10 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x1) + uleb128(code_imeview_createic)     # m7 onCreateInputConnection (diff 1, public)
     data.extend(cd)
     cd_imeconn = off_data + len(data)
-    cd = bytearray(uleb128(0) + uleb128(0) + uleb128(1) + uleb128(1))
+    cd = bytearray(uleb128(0) + uleb128(0) + uleb128(1) + uleb128(2))
     cd += uleb128(8) + uleb128(0x10001) + uleb128(code_imeconn_init)     # m8 <init>
-    cd += uleb128(9) + uleb128(0x1) + uleb128(code_imeconn_commit)       # m9 commitText (virtual diff 9, public)
+    cd += uleb128(9) + uleb128(0x1) + uleb128(code_imeconn_commit)       # m9 commitText (virtual diff 9)
+    cd += uleb128(5) + uleb128(0x1) + uleb128(code_imeconn_setcomposing) # m14 setComposingText (diff 5)
     data.extend(cd)
 
     data.extend(align4(bytearray()))
@@ -234,6 +243,7 @@ def build_dex():
         m(OBJECT, 0, "<init>"),                     # m11
         m(CANVAS, 7, "drawColor"),                  # m12
         m(LOG, 8, "i"),                             # m13
+        m(IMECONN, 6, "setComposingText"),          # m14
     ])
     class_defs = b""
     class_defs += struct.pack("<IIIIIIII",

@@ -300,10 +300,12 @@ class Presenter : public wl::ime::TextInputListener {
   void OnEnter() override {}
   void OnLeave() override {}
   void OnCommitString(std::string_view utf8) override {
-    if (input_ != nullptr && *input_) (*input_)(TextInput{std::string(utf8)});
+    if (input_ != nullptr && *input_) (*input_)(TextInput{std::string(utf8), false, 1});
   }
-  void OnPreeditString(std::string_view /*utf8*/, int32_t /*cursor_begin*/,
-                       int32_t /*cursor_end*/) override {}
+  void OnPreeditString(std::string_view utf8, int32_t /*cursor_begin*/,
+                       int32_t /*cursor_end*/) override {
+    if (input_ != nullptr && *input_) (*input_)(TextInput{std::string(utf8), true, 1});
+  }
   void OnDeleteSurroundingText(uint32_t /*before*/, uint32_t /*after*/) override {}
   void OnKeysym(uint32_t /*time*/, uint32_t /*sym*/, uint32_t /*state*/,
                 uint32_t /*mods*/) override {}

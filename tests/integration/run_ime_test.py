@@ -50,12 +50,14 @@ def main() -> int:
         out = p.stdout + p.stderr
         if (p.returncode != 0
                 or "launching Activity com.aclcxx.hello.MainActivity" not in out
-                or 'IME committed: "hello"' not in out       # presenter received the commit_string
-                or "aclcxx.ime: commitText" not in out       # dispatched to InputConnection.commitText
+                or 'IME preedit: "hel"' not in out           # presenter received preedit_string
+                or 'IME committed: "hello"' not in out       # ...and commit_string
+                or "aclcxx.ime: setComposingText" not in out # dispatched to setComposingText
+                or "aclcxx.ime: commitText" not in out       # ...and commitText
                 or "toplevel closed" not in out):
             sys.stderr.write("FAIL: IME text did not reach the app\n--- output ---\n" + out + "\n")
             return 1
-        sys.stdout.write("OK: compositor IME commit_string -> InputConnection.commitText, clean close\n")
+        sys.stdout.write("OK: IME preedit->setComposingText + commit->commitText, clean close\n")
         return 0
     except subprocess.TimeoutExpired:
         sys.stderr.write("FAIL: run hung\n")

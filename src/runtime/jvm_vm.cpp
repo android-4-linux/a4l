@@ -450,7 +450,7 @@ class JvmVm final : public Vm {
     // input; committed strings from the compositor's IME are delivered to it via
     // InputConnection.commitText.
     jobject input_conn = nullptr;
-    jmethodID commit_text = nullptr;
+    jmethodID commit_text = nullptr, set_composing = nullptr;
     bool want_ime = false;
     {
       jclass vc = env_->GetObjectClass(view);
@@ -466,6 +466,7 @@ class JvmVm final : public Vm {
           input_conn = env_->NewGlobalRef(ic);
           if (jclass ic_cls = env_->GetObjectClass(ic)) {
             commit_text = env_->GetMethodID(ic_cls, "commitText", "(Ljava/lang/CharSequence;I)Z");
+            set_composing = env_->GetMethodID(ic_cls, "setComposingText", "(Ljava/lang/CharSequence;I)Z");
             env_->DeleteLocalRef(ic_cls);
           }
           want_ime = commit_text != nullptr;
@@ -518,12 +519,14 @@ class JvmVm final : public Vm {
       }
       if (env_->ExceptionCheck() == JNI_TRUE) clear_exception();
     };
-    // Deliver IME-committed text through the app's InputConnection.
+    // Route IME text through the app's InputConnection: preedit -> setComposingText
+    // (composing), a final commit -> commitText.
     const auto on_text = [&, this](const wm::TextInput& ev) {
-      log::i(kTag, "IME committed: \"{}\"", ev.text);
-      if (input_conn == nullptr || commit_text == nullptr) return;
+      const jmethodID m = ev.preedit ? set_composing : commit_text;
+      log::i(kTag, "IME {}: \"{}\"", ev.preedit ? "preedit" : "committed", ev.text);
+      if (input_conn == nullptr || m == nullptr) return;
       jstring s = env_->NewStringUTF(ev.text.c_str());
-      env_->CallBooleanMethod(input_conn, commit_text, s, 1);
+      env_->CallBooleanMethod(input_conn, m, s, ev.cursor);
       if (s != nullptr) env_->DeleteLocalRef(s);
       if (env_->ExceptionCheck() == JNI_TRUE) clear_exception();
     };

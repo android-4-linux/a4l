@@ -117,9 +117,11 @@ void surface_commit(wl_client*, wl_resource* r) {
         wl_keyboard_send_key(g_keyboard, ++g_serial, 10, 30 /*KEY_A*/, WL_KEYBOARD_KEY_STATE_PRESSED);
         wl_keyboard_send_key(g_keyboard, ++g_serial, 11, 30, WL_KEYBOARD_KEY_STATE_RELEASED);
       }
-      // If the app enabled text input, act as its IME: enter + commit "hello".
+      // If the app enabled text input, act as its IME: enter, a composing preedit
+      // ("hel"), then a final commit ("hello").
       if (g_text_input != nullptr) {
         zwp_text_input_v3_send_enter(g_text_input, r);
+        zwp_text_input_v3_send_preedit_string(g_text_input, "hel", 3, 3);
         zwp_text_input_v3_send_commit_string(g_text_input, "hello");
         zwp_text_input_v3_send_done(g_text_input, ++g_serial);
       }
