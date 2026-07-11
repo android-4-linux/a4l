@@ -24,7 +24,8 @@ bool present_surface(const gfx::Surface&, std::string_view, std::string_view,
 }
 
 bool present_loop(int, int, std::string_view, std::string_view,
-                  const FrameCallback&, const InputCallback&, std::uint64_t) noexcept {
+                  const FrameCallback&, const InputCallback&, bool,
+                  std::uint64_t) noexcept {
   log::w("aclcxx.wm", kMsg);
   return false;
 }

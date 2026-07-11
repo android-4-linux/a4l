@@ -105,6 +105,8 @@ if py3.found() and have_jni
                     '../../framework/shim/android/view/Choreographer.java',
                     '../../framework/shim/android/view/MotionEvent.java',
                     '../../framework/shim/android/view/KeyEvent.java',
+                    '../../framework/shim/android/view/inputmethod/EditorInfo.java',
+                    '../../framework/shim/android/view/inputmethod/InputConnection.java',
                     '../../framework/shim/android/util/Log.java'),
       output : 'framework-shim',
       command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
@@ -312,6 +314,25 @@ if py3.found() and have_jni
         args : [files('run_hit_test.py'), aclcxx_exe, hit_apk, framework_shim,
                 close_compositor],
         depends : [aclcxx_exe, hit_apk, framework_shim, close_compositor],
+        timeout : 120,
+      )
+
+      # IME: ime.apk's ImeView returns an InputConnection, so the presenter enables
+      # text-input-v3; the compositor (acting as the IME) commits "hello", which the
+      # driver routes to InputConnection.commitText.
+      ime_apk = custom_target(
+        'ime-apk',
+        input : files('../fixtures/make_ime_apk.py'),
+        output : 'ime.apk',
+        command : [py3, '@INPUT@', '@OUTPUT@'],
+        depend_files : files('../fixtures/make_axml.py'),
+      )
+      test(
+        'run-apk-ime-present',
+        py3,
+        args : [files('run_ime_test.py'), aclcxx_exe, ime_apk, framework_shim,
+                close_compositor],
+        depends : [aclcxx_exe, ime_apk, framework_shim, close_compositor],
         timeout : 120,
       )
     endif

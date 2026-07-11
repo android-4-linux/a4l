@@ -446,6 +446,38 @@ class JvmVm final : public Vm {
     }
     clear_exception();
 
+    // IME: if the focused view produces an InputConnection, enable Wayland text
+    // input; committed strings from the compositor's IME are delivered to it via
+    // InputConnection.commitText.
+    jobject input_conn = nullptr;
+    jmethodID commit_text = nullptr;
+    bool want_ime = false;
+    {
+      jclass vc = env_->GetObjectClass(view);
+      jmethodID create_ic = vc != nullptr ? env_->GetMethodID(
+          vc, "onCreateInputConnection",
+          "(Landroid/view/inputmethod/EditorInfo;)Landroid/view/inputmethod/InputConnection;") : nullptr;
+      jclass ei_cls = env_->FindClass("android/view/inputmethod/EditorInfo");
+      if (create_ic != nullptr && ei_cls != nullptr) {
+        jmethodID ei_ctor = env_->GetMethodID(ei_cls, "<init>", "()V");
+        jobject ei = ei_ctor != nullptr ? env_->NewObject(ei_cls, ei_ctor) : nullptr;
+        jobject ic = ei != nullptr ? env_->CallObjectMethod(view, create_ic, ei) : nullptr;
+        if (ic != nullptr) {
+          input_conn = env_->NewGlobalRef(ic);
+          if (jclass ic_cls = env_->GetObjectClass(ic)) {
+            commit_text = env_->GetMethodID(ic_cls, "commitText", "(Ljava/lang/CharSequence;I)Z");
+            env_->DeleteLocalRef(ic_cls);
+          }
+          want_ime = commit_text != nullptr;
+          env_->DeleteLocalRef(ic);
+        }
+        if (ei != nullptr) env_->DeleteLocalRef(ei);
+      }
+      if (vc != nullptr) env_->DeleteLocalRef(vc);
+      if (ei_cls != nullptr) env_->DeleteLocalRef(ei_cls);
+      clear_exception();
+    }
+
     const std::string& pkg = config_.package_name;
     const auto render = [&](gfx::Surface& out, std::uint64_t frame_time_ns,
                             std::uint64_t /*idx*/) -> bool {
@@ -486,15 +518,27 @@ class JvmVm final : public Vm {
       }
       if (env_->ExceptionCheck() == JNI_TRUE) clear_exception();
     };
+    // Deliver IME-committed text through the app's InputConnection.
+    const auto on_text = [&, this](const wm::TextInput& ev) {
+      log::i(kTag, "IME committed: \"{}\"", ev.text);
+      if (input_conn == nullptr || commit_text == nullptr) return;
+      jstring s = env_->NewStringUTF(ev.text.c_str());
+      env_->CallBooleanMethod(input_conn, commit_text, s, 1);
+      if (s != nullptr) env_->DeleteLocalRef(s);
+      if (env_->ExceptionCheck() == JNI_TRUE) clear_exception();
+    };
     const wm::InputCallback input = [&](const wm::InputEvent& ev) {
       if (const auto* p = std::get_if<wm::PointerInput>(&ev)) on_pointer(*p);
       else if (const auto* k = std::get_if<wm::KeyInput>(&ev)) on_key(*k);
+      else if (const auto* t = std::get_if<wm::TextInput>(&ev)) on_text(*t);
     };
     wm::present_loop(w, h, pkg.empty() ? "aclcxx" : pkg,
-                     pkg.empty() ? "org.aclcxx.app" : pkg, render, input, config_.present_frames);
+                     pkg.empty() ? "org.aclcxx.app" : pkg, render, input, want_ime,
+                     config_.present_frames);
     if (choreo != nullptr) env_->DeleteLocalRef(choreo);
     if (motionevent_cls != nullptr) env_->DeleteGlobalRef(motionevent_cls);
     if (keyevent_cls != nullptr) env_->DeleteGlobalRef(keyevent_cls);
+    if (input_conn != nullptr) env_->DeleteGlobalRef(input_conn);
   }
 
   // Map a Linux evdev scancode to an Android KeyEvent keycode (a small practical

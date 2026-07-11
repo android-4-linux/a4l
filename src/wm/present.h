@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <string_view>
 #include <variant>
 
@@ -53,7 +54,12 @@ struct KeyInput {
   std::uint32_t keycode;  // Linux evdev (KEY_A, KEY_ENTER, …)
   std::uint32_t keysym;   // xkb keysym, or 0
 };
-using InputEvent = std::variant<PointerInput, KeyInput>;
+// Committed text from the compositor's IME (zwp_text_input_v3.commit_string) —
+// the native side of an InputConnection.commitText.
+struct TextInput {
+  std::string text;
+};
+using InputEvent = std::variant<PointerInput, KeyInput, TextInput>;
 // Called (on the present thread) when an input event arrives. May be empty.
 using InputCallback = std::function<void(const InputEvent&)>;
 
@@ -62,9 +68,13 @@ using InputCallback = std::function<void(const InputEvent&)>;
 // posting FrameCallbacks each vsync. Double-buffered. Presents until `render`
 // returns false, `max_frames` frames have been shown (0 = unbounded), or the
 // toplevel closes. Returns true on a clean stop.
+// `want_ime` requests text input (zwp_text_input_v3) on the surface — enabled when
+// the app's focused view provides an InputConnection; committed text arrives as a
+// TextInput via the input callback.
 bool present_loop(int width, int height, std::string_view title,
                   std::string_view app_id, const FrameCallback& render,
-                  const InputCallback& input, std::uint64_t max_frames = 0) noexcept;
+                  const InputCallback& input, bool want_ime = false,
+                  std::uint64_t max_frames = 0) noexcept;
 
 // Present one frame: connect to the compositor, create an xdg_toplevel titled
 // `title`/`app_id`, upload `surface`'s pixels into a wl_shm buffer, commit, and

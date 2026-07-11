@@ -26,12 +26,14 @@
 #include <wayland-server.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "text-input-unstable-v3-server-protocol.h"
 #include "xdg-shell-server-protocol.h"
 
 namespace {
 
 wl_display* g_display = nullptr;
 std::string g_keymap;  // xkb keymap text, sent so client-side key-repeat can arm
+wl_resource* g_text_input = nullptr;  // the client's zwp_text_input_v3, to commit text into
 std::uint32_t g_serial = 0;
 wl_resource* g_pointer = nullptr;   // the client's wl_pointer, for injecting a tap
 wl_resource* g_keyboard = nullptr;  // the client's wl_keyboard, for injecting a key
@@ -115,7 +117,13 @@ void surface_commit(wl_client*, wl_resource* r) {
         wl_keyboard_send_key(g_keyboard, ++g_serial, 10, 30 /*KEY_A*/, WL_KEYBOARD_KEY_STATE_PRESSED);
         wl_keyboard_send_key(g_keyboard, ++g_serial, 11, 30, WL_KEYBOARD_KEY_STATE_RELEASED);
       }
-      std::fprintf(stderr, "close-compositor: window mapped -> sent tap + key + xdg_toplevel.close\n");
+      // If the app enabled text input, act as its IME: enter + commit "hello".
+      if (g_text_input != nullptr) {
+        zwp_text_input_v3_send_enter(g_text_input, r);
+        zwp_text_input_v3_send_commit_string(g_text_input, "hello");
+        zwp_text_input_v3_send_done(g_text_input, ++g_serial);
+      }
+      std::fprintf(stderr, "close-compositor: window mapped -> sent tap + key + IME + xdg_toplevel.close\n");
       xdg_toplevel_send_close(s->xdg_toplevel);
       arm_shutdown();
     }
@@ -228,7 +236,33 @@ void seat_release(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
 const struct wl_seat_interface seat_impl = {
     seat_get_pointer, seat_get_keyboard, seat_get_touch, seat_release};
 
+// ── zwp_text_input_v3 (server side; sends commit_string to the client) ────────
+void ti_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+void ti_enable(wl_client*, wl_resource*) {}
+void ti_disable(wl_client*, wl_resource*) {}
+void ti_set_surrounding_text(wl_client*, wl_resource*, const char*, int32_t, int32_t) {}
+void ti_set_text_change_cause(wl_client*, wl_resource*, uint32_t) {}
+void ti_set_content_type(wl_client*, wl_resource*, uint32_t, uint32_t) {}
+void ti_set_cursor_rectangle(wl_client*, wl_resource*, int32_t, int32_t, int32_t, int32_t) {}
+void ti_commit(wl_client*, wl_resource*) {}  // events are sent on window map, below
+const struct zwp_text_input_v3_interface ti_impl = {
+    ti_destroy, ti_enable, ti_disable, ti_set_surrounding_text,
+    ti_set_text_change_cause, ti_set_content_type, ti_set_cursor_rectangle, ti_commit};
+void ti_res_destroy(wl_resource*) { g_text_input = nullptr; }
+
+// ── zwp_text_input_manager_v3 ─────────────────────────────────────────────────
+void tim_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+void tim_get_text_input(wl_client* c, wl_resource* r, uint32_t id, wl_resource* /*seat*/) {
+  g_text_input = wl_resource_create(c, &zwp_text_input_v3_interface, wl_resource_get_version(r), id);
+  wl_resource_set_implementation(g_text_input, &ti_impl, nullptr, ti_res_destroy);
+}
+const struct zwp_text_input_manager_v3_interface tim_impl = {tim_destroy, tim_get_text_input};
+
 // ── globals ───────────────────────────────────────────────────────────────────
+void bind_text_input_manager(wl_client* c, void*, uint32_t version, uint32_t id) {
+  wl_resource* r = wl_resource_create(c, &zwp_text_input_manager_v3_interface, static_cast<int>(version), id);
+  wl_resource_set_implementation(r, &tim_impl, nullptr, nullptr);
+}
 void bind_seat(wl_client* c, void*, uint32_t version, uint32_t id) {
   wl_resource* r = wl_resource_create(c, &wl_seat_interface, static_cast<int>(version), id);
   wl_resource_set_implementation(r, &seat_impl, nullptr, nullptr);
@@ -294,6 +328,7 @@ int main(int argc, char** argv) {
   wl_global_create(g_display, &wl_compositor_interface, 4, nullptr, bind_compositor);
   wl_global_create(g_display, &xdg_wm_base_interface, 1, nullptr, bind_wmbase);
   wl_global_create(g_display, &wl_seat_interface, 4, nullptr, bind_seat);  // v4: wl_keyboard.repeat_info
+  wl_global_create(g_display, &zwp_text_input_manager_v3_interface, 1, nullptr, bind_text_input_manager);
 
   wl_event_loop* loop = wl_display_get_event_loop(g_display);
   wl_event_source* timer = wl_event_loop_add_timer(loop, on_timeout, nullptr);

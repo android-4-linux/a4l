@@ -15,6 +15,8 @@ package android.view;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
 
 public class View {
   private Context mContext;
@@ -124,5 +126,12 @@ public class View {
   }
   public boolean onKeyUp(int keyCode, KeyEvent event) {
     return false;
+  }
+
+  // IME: an editable view returns an InputConnection here; the aclcxx ViewRoot
+  // driver enables Wayland text input when it does, and routes committed text to
+  // it. Non-editable views return null (no soft input).
+  public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
+    return null;
   }
 }

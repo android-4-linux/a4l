@@ -14,6 +14,7 @@
 wm_sources = [files('wm.cpp')]
 wm_inc = [config_inc, core_inc]
 wm_deps = []
+wm_cpp_args = []
 
 if have_wcs
   wayland_client_hpp = custom_target(
@@ -39,12 +40,23 @@ if have_wcs
     command : [wcs_scanner, '--mode=client-header', '--std=c++23',
                '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
   )
+  # text-input-v3 (IME): the wcs wl/ime/ facade includes this by a fixed name;
+  # --emit-interface-tables makes it self-contained.
+  text_input_v3_client_hpp = custom_target(
+    'wm-text-input-v3-client-header',
+    input : text_input_v3_xml,
+    output : 'text_input_v3_client.hpp',
+    command : [wcs_scanner, '--mode=client-header', '--std=c++23',
+               '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
+  )
   wm_sources += [files('wayland_presenter.cpp'), wayland_client_hpp,
-                 xdg_shell_client_hpp, presentation_time_client_hpp]
+                 xdg_shell_client_hpp, presentation_time_client_hpp,
+                 text_input_v3_client_hpp]
   # include_directories('.') resolves to BOTH src/wm (source) and build/src/wm
   # (where the generated headers land); wcs_dep supplies the wl/ framework headers.
   wm_inc += include_directories('.')
   wm_deps += [wayland_dep, wcs_dep, xkbcommon_dep]
+  wm_cpp_args = ['-DWL_IME_BACKEND_TEXT_INPUT_V3']  # select the wcs IME facade backend
 else
   wm_sources += files('present_stub.cpp')
 endif
@@ -54,6 +66,7 @@ wm_lib = static_library(
   wm_sources,
   include_directories : wm_inc,
   dependencies : wm_deps,
+  cpp_args : wm_cpp_args,
 )
 module_libs += wm_lib
 
@@ -105,10 +118,22 @@ if build_tests and have_wcs
         output : 'xdg-shell-protocol.c',
         command : [wl_scanner_prog, 'private-code', '@INPUT@', '@OUTPUT@'],
       )
+      ti_server_hdr = custom_target(
+        'text-input-v3-server-protocol-header',
+        input : text_input_v3_xml,
+        output : 'text-input-unstable-v3-server-protocol.h',
+        command : [wl_scanner_prog, 'server-header', '@INPUT@', '@OUTPUT@'],
+      )
+      ti_protocol_code = custom_target(
+        'text-input-v3-protocol-code',
+        input : text_input_v3_xml,
+        output : 'text-input-unstable-v3-protocol.c',
+        command : [wl_scanner_prog, 'private-code', '@INPUT@', '@OUTPUT@'],
+      )
       close_compositor = executable(
         'close_compositor',
         [files('../../tests/integration/close_compositor.cpp'),
-         xdg_server_hdr, xdg_protocol_code],
+         xdg_server_hdr, xdg_protocol_code, ti_server_hdr, ti_protocol_code],
         include_directories : include_directories('.'),  # source + build src/wm (generated hdr)
         dependencies : [wayland_server_dep, xkbcommon_dep],  # xkb: keymap for key-repeat test
         # The libwayland request-vtables are intentionally partial (only the requests

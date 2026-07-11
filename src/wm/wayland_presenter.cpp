@@ -35,8 +35,11 @@
 #include "wayland_client.hpp"
 #include "xdg_shell_client.hpp"
 #include "presentation_time_client.hpp"
+#include "text_input_v3_client.hpp"  // WL_IME_BACKEND_TEXT_INPUT_V3
 
 #include <wl/client_helpers.hpp>
+#include <wl/ime/backend.hpp>            // wl::ime::SelectedTextInput (text-input-v3)
+#include <wl/ime/text_input_receiver.hpp>
 #include <wl/display.hpp>
 #include <wl/keyboard.hpp>
 #include <wl/pointer.hpp>
@@ -138,21 +141,22 @@ class SeatH : public CWlSeat<SeatH> {
   }
 };
 
-class Presenter {
+class Presenter : public wl::ime::TextInputListener {
  public:
   Presenter() = default;
   Presenter(const Presenter&) = delete;
   Presenter& operator=(const Presenter&) = delete;
-  ~Presenter() { presentation_.Release(); }
+  ~Presenter() override { presentation_.Release(); }
 
   bool Run(int w, int h, std::string_view title, std::string_view app_id,
-           const FrameCallback& render, const InputCallback& input,
+           const FrameCallback& render, const InputCallback& input, bool want_ime,
            std::uint64_t max_frames) {
     w_ = w;
     h_ = h;
     if (w_ <= 0 || h_ <= 0) { log::w(kTag, "present: empty surface"); return false; }
     render_ = &render;
     input_ = &input;
+    want_ime_ = want_ime;
     max_frames_ = max_frames;
 
     if (!display_.Connect()) { log::w(kTag, "present: no Wayland display"); return false; }
@@ -164,6 +168,8 @@ class Presenter {
       else if (iface == presentation_time::client::wp_presentation_traits::interface_name)
         presentation_.Record(name, ver);
       else if (iface == wl_seat_traits::interface_name) { seat_name_ = name; seat_ver_ = ver; }
+      else if (iface == text_input_unstable_v3::client::zwp_text_input_manager_v3_traits::interface_name)
+        { ti_name_ = name; ti_ver_ = ver; }
     });
     if (!wl::RoundtripWithTimeout(display_.Get())) { log::w(kTag, "present: registry roundtrip failed"); return false; }
     if (comp_name_ == 0 || shm_name_ == 0 || xdg_name_ == 0) {
@@ -182,6 +188,12 @@ class Presenter {
       seat_.Get()->pointer_slot_ = &pointer_;    // wl_pointer created on the capabilities event
       seat_.Get()->keyboard_slot_ = &keyboard_;  // wl_keyboard created likewise
     }
+    // text-input-v3 (IME): bind the manager + per-seat text_input via the wcs facade.
+    if (want_ime_ && ti_name_ != 0 && !seat_.IsNull()) {
+      ti_.Record(ti_name_, ti_ver_);
+      ime_bound_ = ti_.Bind(registry_, this, seat_.Get()->GetProxy());
+      if (!ime_bound_) log::w(kTag, "present: text-input bind failed");
+    }
     if (!wl::RoundtripWithTimeout(display_.Get())) return false;  // shm formats + clock_id + seat caps
 
     if (!wl::SetupHandler(surface_, wl::construct<wl_surface_traits, wl_compositor_traits::Op::CreateSurface>(*comp_.Get()))) return false;
@@ -193,6 +205,11 @@ class Presenter {
     app_id_.assign(app_id);
     xdg_toplevel_.Get()->SetTitle(title_.c_str());
     xdg_toplevel_.Get()->SetAppId(app_id_.c_str());
+
+    if (ime_bound_) {  // enable text input on this surface's seat
+      ti_.SetContentType(wl::ime::ContentHint::kNone, wl::ime::ContentPurpose::kNormal);
+      ti_.Activate();
+    }
 
     if (!MakeBuffers()) { log::w(kTag, "present: shm buffer allocation failed"); return false; }
     frame_.need = &need_frame_;
@@ -231,6 +248,7 @@ class Presenter {
         log::w(kTag, "present: dispatch error"); clean = false; break;
       }
     }
+    ti_.Release();
     presentation_.Release();
     log::i(kTag,
            "present loop stopped: {} frame(s) committed, {} shown, {} presentation-feedback, {} ({})",
@@ -277,6 +295,18 @@ class Presenter {
     (*input_)(KeyInput{pressed ? KeyInput::Action::Down : KeyInput::Action::Up,
                        e.key, static_cast<std::uint32_t>(e.keysym)});
   }
+
+  // wl::ime::TextInputListener — events from the compositor's IME (text-input-v3).
+  void OnEnter() override {}
+  void OnLeave() override {}
+  void OnCommitString(std::string_view utf8) override {
+    if (input_ != nullptr && *input_) (*input_)(TextInput{std::string(utf8)});
+  }
+  void OnPreeditString(std::string_view /*utf8*/, int32_t /*cursor_begin*/,
+                       int32_t /*cursor_end*/) override {}
+  void OnDeleteSurroundingText(uint32_t /*before*/, uint32_t /*after*/) override {}
+  void OnKeysym(uint32_t /*time*/, uint32_t /*sym*/, uint32_t /*state*/,
+                uint32_t /*mods*/) override {}
 
  private:
   // The vsync-aligned time for the frame about to be drawn: the last presentation
@@ -354,6 +384,7 @@ class Presenter {
   wl::WlPtr<wl::XdgSurfaceHandler<Presenter>> xdg_surface_;
   wl::WlPtr<wl::XdgToplevelHandler<Presenter>> xdg_toplevel_;
   wl::PresentationManager<Presenter> presentation_;
+  wl::ime::SelectedTextInput ti_;  // text-input-v3 (IME)
   wl::WlPtr<SeatH> seat_;
   wl::WlPtr<wl::PointerHandler<Presenter>> pointer_;   // created on wl_seat capabilities
   wl::WlPtr<wl::KeyboardHandler<Presenter>> keyboard_;  // created on wl_seat capabilities
@@ -367,7 +398,8 @@ class Presenter {
   bool pointer_down_ = false;
 
   uint32_t comp_name_ = 0, comp_ver_ = 0, shm_name_ = 0, shm_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
-  uint32_t seat_name_ = 0, seat_ver_ = 0;
+  uint32_t seat_name_ = 0, seat_ver_ = 0, ti_name_ = 0, ti_ver_ = 0;
+  bool want_ime_ = false, ime_bound_ = false;
   int w_ = 0, h_ = 0;
   std::size_t total_bytes_ = 0;
   std::uint64_t max_frames_ = 0, frame_index_ = 0, frame_callbacks_ = 0, presented_count_ = 0;
@@ -384,9 +416,10 @@ bool wayland_available() noexcept {
 
 bool present_loop(int width, int height, std::string_view title,
                   std::string_view app_id, const FrameCallback& render,
-                  const InputCallback& input, std::uint64_t max_frames) noexcept {
+                  const InputCallback& input, bool want_ime,
+                  std::uint64_t max_frames) noexcept {
   Presenter presenter;
-  return presenter.Run(width, height, title, app_id, render, input, max_frames);
+  return presenter.Run(width, height, title, app_id, render, input, want_ime, max_frames);
 }
 
 bool present_surface(const gfx::Surface& surface, std::string_view title,
@@ -397,7 +430,8 @@ bool present_surface(const gfx::Surface& surface, std::string_view title,
     canvas.blit(surface.data());
     return true;
   };
-  return present_loop(surface.width(), surface.height(), title, app_id, one, InputCallback{}, 1);
+  return present_loop(surface.width(), surface.height(), title, app_id, one,
+                      InputCallback{}, false, 1);
 }
 
 }  // namespace aclcxx::wm
