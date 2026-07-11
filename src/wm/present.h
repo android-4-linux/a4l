@@ -12,6 +12,8 @@
 // via the stub. Continuous presentation (Choreographer on wp_presentation, damage,
 // multi-buffering) builds on this one-frame primitive.
 
+#include <cstdint>
+#include <functional>
 #include <string_view>
 
 #include "gfx/gfx.h"
@@ -21,6 +23,25 @@ namespace aclcxx::wm {
 // True if a Wayland presentation backend is compiled in AND a compositor is
 // reachable (WAYLAND_DISPLAY connects). Cheap; used to decide whether to present.
 bool wayland_available() noexcept;
+
+// A Choreographer-style frame producer. Called once per compositor frame tick
+// (wl_surface.frame) with the frame's target time on the presentation clock
+// (nanoseconds, vsync-aligned via wp_presentation feedback — the analogue of
+// Choreographer.FrameCallback's frameTimeNanos) and a monotonically increasing
+// index. Draw the frame into `surface`; return true to present it, false to end
+// the loop (like removing the frame callback).
+using FrameCallback =
+    std::function<bool(gfx::Surface& surface, std::uint64_t frame_time_ns,
+                       std::uint64_t frame_index)>;
+
+// Run a continuous present loop driven by wl_surface.frame (the vsync tick) with
+// wp_presentation timing feedback — the native analogue of Android's Choreographer
+// posting FrameCallbacks each vsync. Double-buffered. Presents until `render`
+// returns false, `max_frames` frames have been shown (0 = unbounded), or the
+// toplevel closes. Returns true on a clean stop.
+bool present_loop(int width, int height, std::string_view title,
+                  std::string_view app_id, const FrameCallback& render,
+                  std::uint64_t max_frames = 0) noexcept;
 
 // Present one frame: connect to the compositor, create an xdg_toplevel titled
 // `title`/`app_id`, upload `surface`'s pixels into a wl_shm buffer, commit, and

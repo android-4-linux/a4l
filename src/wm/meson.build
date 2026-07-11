@@ -30,7 +30,17 @@ if have_wcs
     command : [wcs_scanner, '--mode=client-header', '--std=c++23',
                '@INPUT@', '@OUTPUT@'],
   )
-  wm_sources += [files('wayland_presenter.cpp'), wayland_client_hpp, xdg_shell_client_hpp]
+  # presentation-time (wp_presentation) — no framework tables for it, so emit them
+  # inline (self-contained), like core wayland.
+  presentation_time_client_hpp = custom_target(
+    'wm-presentation-time-client-header',
+    input : presentation_time_xml,
+    output : 'presentation_time_client.hpp',
+    command : [wcs_scanner, '--mode=client-header', '--std=c++23',
+               '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
+  )
+  wm_sources += [files('wayland_presenter.cpp'), wayland_client_hpp,
+                 xdg_shell_client_hpp, presentation_time_client_hpp]
   # include_directories('.') resolves to BOTH src/wm (source) and build/src/wm
   # (where the generated headers land); wcs_dep supplies the wl/ framework headers.
   wm_inc += include_directories('.')
@@ -67,7 +77,15 @@ if build_tests and have_wcs
       args : [files('../../tests/integration/run_present_test.py'), wm_present_probe],
       timeout : 60,
     )
+    # Continuous presentation: the Choreographer-style present_loop animates 30
+    # frames, each driven by a wl_surface.frame tick with wp_presentation timing.
+    test(
+      'wm-present-loop',
+      py3_wm,
+      args : [files('../../tests/integration/run_present_test.py'), wm_present_probe, '30'],
+      timeout : 60,
+    )
   else
-    message('python3/weston not both present; skipping wm-present Tier-C test.')
+    message('python3/weston not both present; skipping wm-present Tier-C tests.')
   endif
 endif

@@ -11,6 +11,7 @@
 // same Surface when vendored. Wayland presentation of a Surface (wcs bindings,
 // wl_surface/wp_presentation) is a separate seam (wm/), not built here.
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -31,6 +32,12 @@ class Surface {
   // Row-major ARGB_8888 pixel data (width*height), for blitting into a
   // presentation buffer (wm/). Valid while the Surface is alive.
   const std::uint32_t* data() const { return pixels_.data(); }
+
+  // Overwrite all pixels from a tightly-packed width*height ARGB_8888 source
+  // (e.g. copy a rendered frame into a presenter's working surface).
+  void blit(const std::uint32_t* src) {
+    std::copy(src, src + pixels_.size(), pixels_.begin());
+  }
 
  private:
   int width_;

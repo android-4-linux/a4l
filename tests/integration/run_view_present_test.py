@@ -72,8 +72,7 @@ def main() -> int:
         # The app renders the tree AND presents it; require both the traversal and
         # the compositor-confirmed frame.
         need = ["ViewRoot: performTraversals measured=1920x1080",
-                "presented 1920x1080 to Wayland compositor",
-                "frame callback fired"]
+                "present loop stopped: 1 frame(s) committed, 1 shown"]
         missing = [s for s in need if s not in out]
         if p.returncode != 0 or missing:
             sys.stderr.write("FAIL: missing %r\n--- output ---\n%s\n" % (missing, out))

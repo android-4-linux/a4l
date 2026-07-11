@@ -11,7 +11,12 @@
 # bytes) and its install lib dir on LD_LIBRARY_PATH. If Weston can't start (missing
 # libs/backends in this environment), the test SKIPs (exit 77) rather than fails.
 #
-# Usage: run_present_test.py <wm_present_probe_binary>
+# With an optional <frames> argument it instead exercises the CONTINUOUS present
+# loop (Choreographer-style on wp_presentation): the probe animates <frames> frames,
+# and the test asserts all were committed AND shown AND that wp_presentation feedback
+# actually fired (proving the loop is vsync/timing-driven, not a static re-present).
+#
+# Usage: run_present_test.py <wm_present_probe_binary> [<frames>]
 import os
 import shutil
 import subprocess
@@ -35,10 +40,11 @@ def find_weston_libdir():
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        sys.stderr.write("usage: run_present_test.py <probe_binary>\n")
+    if len(sys.argv) not in (2, 3):
+        sys.stderr.write("usage: run_present_test.py <probe_binary> [<frames>]\n")
         return 2
     probe = sys.argv[1]
+    frames = int(sys.argv[2]) if len(sys.argv) == 3 else 0
     weston = shutil.which("weston")
     if not weston:
         sys.stderr.write("SKIP: weston not found\n")
@@ -77,8 +83,19 @@ def main() -> int:
 
         penv = dict(env)
         penv["WAYLAND_DISPLAY"] = socket
-        p = subprocess.run([probe], env=penv, capture_output=True, text=True, timeout=45)
+        cmd = [probe] + (["--frames", str(frames)] if frames else [])
+        p = subprocess.run(cmd, env=penv, capture_output=True, text=True, timeout=45)
         out = p.stdout + p.stderr
+        if frames:
+            committed = "present loop stopped: %d frame(s) committed, %d shown" % (frames, frames)
+            fed_ok = ("presentation-feedback" in out and
+                      "0 presentation-feedback" not in out)
+            if p.returncode != 0 or "LOOP-PRESENTED-OK" not in out or committed not in out or not fed_ok:
+                sys.stderr.write("FAIL: continuous present loop\n--- probe output ---\n" + out + "\n")
+                return 1
+            sys.stdout.write("OK: %d frames continuously presented to headless Weston "
+                             "(wp_presentation feedback fired)\n" % frames)
+            return 0
         if p.returncode != 0 or "PRESENTED-OK" not in out:
             sys.stderr.write("FAIL: probe did not present\n--- probe output ---\n" + out + "\n")
             return 1

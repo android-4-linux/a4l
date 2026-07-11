@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: wayland-cxx-scanner (MIT) — its scanner-generated protocol headers
-// and header-only wl/ CRTP framework (proxy_impl/registry/display/xdg_shell), and
-// the structure of its presentation-shm example. Wayland + xdg-shell protocols
-// (freedesktop, MIT). No GPL-3.0 sources.
+// and header-only wl/ CRTP framework (proxy_impl/registry/display/xdg_shell/
+// presentation), and the structure of its presentation-shm example. Wayland +
+// xdg-shell + presentation-time protocols (freedesktop, MIT). No GPL-3.0 sources.
 //
-// The real Wayland presenter (compiled only when ACLCXX_HAVE_WCS): upload an
-// aclcxx::gfx::Surface into a wl_shm buffer and show it via wcs CRTP bindings —
-// connect -> registry -> bind(wl_compositor/wl_shm/xdg_wm_base) -> wl_surface +
-// xdg_toplevel -> shm buffer -> attach/commit -> block on the wl_surface.frame
-// callback. One-shot; the surface is torn down on return.
+// The real Wayland presenter (compiled only when ACLCXX_HAVE_WCS): show aclcxx::gfx
+// frames via wcs CRTP bindings. present_loop() runs a Choreographer-style loop —
+// each wl_surface.frame callback (the vsync tick) drives one FrameCallback, which
+// draws the next frame; wp_presentation feedback supplies the vsync-aligned frame
+// time (like Choreographer.FrameCallback's frameTimeNanos). Double-buffered so the
+// compositor is never reading a buffer we're writing. present_surface() is the
+// one-frame case, delegating to present_loop(max_frames=1).
 //
 // wcs lifetime rule: handler objects must have a stable address for their bound
 // lifetime (the dispatcher is registered by address). All handlers are direct
@@ -23,17 +25,21 @@
 
 #include <poll.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <wayland-client.h>
 
-// Generated protocol headers FIRST (define traits + CRTP proxy classes), then the
-// wl/ framework headers that extend them (interface tables, xdg handlers).
+// Generated protocol headers FIRST (traits + CRTP proxy classes), then the wl/
+// framework headers that extend them (interface tables, xdg + presentation helpers).
 #include "wayland_client.hpp"
 #include "xdg_shell_client.hpp"
+#include "presentation_time_client.hpp"
 
 #include <wl/client_helpers.hpp>
 #include <wl/display.hpp>
+#include <wl/presentation.hpp>
+#include <wl/present_feedback.hpp>
 #include <wl/proxy_impl.hpp>
 #include <wl/registry.hpp>
 #include <wl/wl_ptr.hpp>
@@ -49,9 +55,15 @@ using namespace xdg_shell::client;
 
 constexpr const char* kTag = "aclcxx.wm";
 
+std::uint64_t now_ns(clockid_t clk) noexcept {
+  timespec ts{};
+  clock_gettime(clk, &ts);
+  return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull +
+         static_cast<std::uint64_t>(ts.tv_nsec);
+}
+
 // Event-less interfaces (wl_compositor, wl_shm_pool) have no generated _Dispatch,
-// so they use WlPtr::Attach; interfaces with events use _SetProxy (BindHandler /
-// SetupHandler).
+// so they use WlPtr::Attach; interfaces with events use _SetProxy.
 class CompositorH : public CWlCompositor<CompositorH> {};
 class ShmPoolH : public CWlShmPool<ShmPoolH> {};
 class ShmH : public CWlShm<ShmH> {
@@ -60,17 +72,23 @@ class ShmH : public CWlShm<ShmH> {
   void OnFormat(uint32_t f) override { if (f < 32u) formats |= (1u << f); }
 };
 class SurfaceH : public CWlSurface<SurfaceH> {};
+// One wl_buffer; its release event clears the busy flag the loop checks.
 class BufferH : public CWlBuffer<BufferH> {
  public:
-  void OnRelease() override {}
+  bool* busy = nullptr;
+  void OnRelease() override { if (busy != nullptr) *busy = false; }
 };
+// wl_surface.frame: the compositor's "ready for the next frame" tick (vsync).
 class FrameH : public CWlCallback<FrameH> {
  public:
-  bool* done = nullptr;
-  void OnDone(uint32_t) override { if (done != nullptr) *done = true; }
+  bool* need = nullptr;
+  std::uint64_t* count = nullptr;
+  void OnDone(uint32_t) override {
+    if (need != nullptr) *need = true;
+    if (count != nullptr) ++*count;
+  }
 };
 
-// A memfd-backed ARGB_8888 mapping for one wl_shm buffer.
 struct ShmMapping {
   int fd = -1;
   void* data = MAP_FAILED;
@@ -97,12 +115,15 @@ class Presenter {
   Presenter() = default;
   Presenter(const Presenter&) = delete;
   Presenter& operator=(const Presenter&) = delete;
+  ~Presenter() { presentation_.Release(); }
 
-  bool Present(const gfx::Surface& surface, std::string_view title,
-               std::string_view app_id, int timeout_ms) {
-    w_ = surface.width();
-    h_ = surface.height();
+  bool Run(int w, int h, std::string_view title, std::string_view app_id,
+           const FrameCallback& render, std::uint64_t max_frames) {
+    w_ = w;
+    h_ = h;
     if (w_ <= 0 || h_ <= 0) { log::w(kTag, "present: empty surface"); return false; }
+    render_ = &render;
+    max_frames_ = max_frames;
 
     if (!display_.Connect()) { log::w(kTag, "present: no Wayland display"); return false; }
     if (!registry_.Create(display_.Get())) { log::w(kTag, "present: wl_registry unavailable"); return false; }
@@ -110,8 +131,10 @@ class Presenter {
       if (iface == wl_compositor_traits::interface_name) { comp_name_ = name; comp_ver_ = ver; }
       else if (iface == wl_shm_traits::interface_name) { shm_name_ = name; shm_ver_ = ver; }
       else if (iface == xdg_wm_base_traits::interface_name) { xdg_name_ = name; xdg_ver_ = ver; }
+      else if (iface == presentation_time::client::wp_presentation_traits::interface_name)
+        presentation_.Record(name, ver);
     });
-    if (!wl::RoundtripWithTimeout(display_.Get(), timeout_ms)) { log::w(kTag, "present: registry roundtrip failed"); return false; }
+    if (!wl::RoundtripWithTimeout(display_.Get())) { log::w(kTag, "present: registry roundtrip failed"); return false; }
     if (comp_name_ == 0 || shm_name_ == 0 || xdg_name_ == 0) {
       log::w(kTag, "present: compositor missing wl_compositor/wl_shm/xdg_wm_base");
       return false;
@@ -122,7 +145,8 @@ class Presenter {
     else return false;
     if (!wl::BindHandler<wl_shm_traits>(registry_, shm_, shm_name_, shm_ver_)) return false;
     if (!wl::BindHandler<xdg_wm_base_traits>(registry_, xdg_wm_base_, xdg_name_, xdg_ver_)) return false;
-    if (!wl::RoundtripWithTimeout(display_.Get(), timeout_ms)) return false;  // shm formats arrive
+    if (!presentation_.Bind(registry_, this)) return false;  // wp_presentation (optional)
+    if (!wl::RoundtripWithTimeout(display_.Get())) return false;  // shm formats + clock_id
 
     if (!wl::SetupHandler(surface_, wl::construct<wl_surface_traits, wl_compositor_traits::Op::CreateSurface>(*comp_.Get()))) return false;
     if (!wl::SetupHandler(xdg_surface_, wl::construct<xdg_surface_traits, xdg_wm_base_traits::Op::GetXdgSurface>(*xdg_wm_base_.Get(), surface_.Get()->GetProxy()))) return false;
@@ -134,57 +158,114 @@ class Presenter {
     xdg_toplevel_.Get()->SetTitle(title_.c_str());
     xdg_toplevel_.Get()->SetAppId(app_id_.c_str());
 
-    if (!MakeBuffer(surface)) { log::w(kTag, "present: shm buffer allocation failed"); return false; }
+    if (!MakeBuffers()) { log::w(kTag, "present: shm buffer allocation failed"); return false; }
+    frame_.need = &need_frame_;
+    frame_.count = &frame_callbacks_;
 
-    frame_.done = &frame_done_;
-    surface_.Get()->Commit();  // trigger the configure sequence
+    gfx::Surface canvas(w_, h_);
+    surface_.Get()->Commit();  // trigger the first configure
 
     const int fd = wl_display_get_fd(display_.Get());
-    while (!(frame_done_ || closed_)) {
+    const std::uint64_t deadline = now_ns(CLOCK_MONOTONIC) + 15ull * 1000000000ull;
+    bool clean = true;
+    while (!closed_) {
+      if (now_ns(CLOCK_MONOTONIC) > deadline) { log::w(kTag, "present: loop deadline exceeded"); clean = false; break; }
+      // Render on each vsync tick, up to the frame budget.
+      if (configured_ && need_frame_ && (max_frames_ == 0 || frame_index_ < max_frames_)) {
+        need_frame_ = false;
+        if (!render_frame(canvas)) break;  // FrameCallback asked to stop
+      }
+      // All requested frames committed AND acknowledged by the compositor.
+      if (max_frames_ != 0 && frame_index_ >= max_frames_ && frame_callbacks_ >= max_frames_) break;
+
       while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
+      presentation_.Reap();
       pollfd p{fd, POLLIN, 0};
-      const int n = poll(&p, 1, timeout_ms);
-      if (n <= 0) { log::w(kTag, "present: timed out waiting for frame callback"); return false; }
-      if (wl_display_dispatch(display_.Get()) < 0) { log::w(kTag, "present: dispatch error"); return false; }
+      const int n = poll(&p, 1, 200);
+      if (n < 0) { if (errno == EINTR) continue; clean = false; break; }
+      if (n > 0 && wl_display_dispatch(display_.Get()) < 0) { log::w(kTag, "present: dispatch error"); clean = false; break; }
     }
-    if (closed_) { log::w(kTag, "present: compositor closed the toplevel"); return false; }
-    log::i(kTag, "presented {}x{} to Wayland compositor ({}); frame callback fired",
-           w_, h_, title_);
-    return true;
+    presentation_.Release();
+    log::i(kTag,
+           "present loop stopped: {} frame(s) committed, {} shown, {} presentation-feedback, {} ({})",
+           frame_index_, frame_callbacks_, presented_count_,
+           closed_ ? "toplevel closed" : "done", clean ? "clean" : "aborted");
+    return clean && !closed_ && frame_index_ > 0;
   }
 
-  // xdg callbacks (invoked by wl::XdgSurfaceHandler / XdgToplevelHandler)
-  void OnXdgSurfaceConfigure(uint32_t) {
-    if (attached_) return;
-    if (wl_proxy* raw = wl::construct<wl_callback_traits, wl_surface_traits::Op::Frame>(*surface_.Get()))
-      frame_._SetProxy(raw);
-    surface_.Get()->Attach(buffer_.Get()->GetProxy(), 0, 0);
-    surface_.Get()->Damage(0, 0, w_, h_);
-    surface_.Get()->Commit();
-    attached_ = true;
+  // wp_presentation feedback — the vsync clock that aligns the frame time.
+  void OnPresented(const wl::PresentFeedback& fb) {
+    last_present_ns_ = fb.present_ns;
+    if (fb.refresh_ns != 0) refresh_ns_ = fb.refresh_ns;
+    ++presented_count_;
   }
+  void OnDiscarded(std::uint32_t) {}
+
+  // xdg callbacks (invoked by wl::XdgSurfaceHandler / XdgToplevelHandler)
+  void OnXdgSurfaceConfigure(uint32_t) { configured_ = true; need_frame_ = true; }
   void OnToplevelConfigure(int32_t, int32_t) {}
   void OnToplevelClose() { closed_ = true; }
 
  private:
-  bool MakeBuffer(const gfx::Surface& surface) {
-    const std::size_t stride = static_cast<std::size_t>(w_) * 4u;
-    const std::size_t total = stride * static_cast<std::size_t>(h_);
-    if (!mem_.Create(total)) return false;
-    // gfx::Surface pixels are native-endian 0xAARRGGBB, which is exactly wl_shm
-    // ARGB8888 — a straight copy (surface is tightly packed, stride == w*4).
-    std::memcpy(mem_.data, surface.data(), total);
+  // The vsync-aligned time for the frame about to be drawn: the last presentation
+  // time plus one refresh interval (Choreographer.frameTimeNanos), or the raw
+  // presentation clock before any feedback has arrived.
+  std::uint64_t frame_time() const {
+    if (last_present_ns_ != 0 && refresh_ns_ != 0) return last_present_ns_ + refresh_ns_;
+    return now_ns(presentation_.Bound() ? presentation_.clock() : CLOCK_MONOTONIC);
+  }
 
-    wl_proxy* raw_pool = wl::construct<wl_shm_pool_traits, wl_shm_traits::Op::CreatePool>(*shm_.Get(), mem_.fd, static_cast<int32_t>(total));
+  void request_frame() {
+    if (wl_proxy* raw = wl::construct<wl_callback_traits, wl_surface_traits::Op::Frame>(*surface_.Get()))
+      frame_._SetProxy(raw);
+  }
+
+  bool render_frame(gfx::Surface& canvas) {
+    int b = -1;
+    for (int i = 0; i < 2; ++i) if (!bufs_[i].busy) { b = i; break; }
+    if (b < 0) { request_frame(); return true; }  // both in flight — retry next tick
+    if (!(*render_)(canvas, frame_time(), frame_index_)) return false;
+    std::memcpy(bufs_[b].pixels, canvas.data(), total_bytes_);
+    request_frame();  // ask for the next vsync tick
+    presentation_.Arm(surface_.Get()->GetProxy(), static_cast<std::uint32_t>(frame_index_));  // before commit
+    surface_.Get()->Attach(bufs_[b].buffer.Get()->GetProxy(), 0, 0);
+    surface_.Get()->Damage(0, 0, w_, h_);
+    surface_.Get()->Commit();
+    bufs_[b].busy = true;
+    ++frame_index_;
+    return true;
+  }
+
+  bool MakeBuffers() {
+    const std::size_t stride = static_cast<std::size_t>(w_) * 4u;
+    const std::size_t per = stride * static_cast<std::size_t>(h_);
+    total_bytes_ = per;
+    if (!mem_.Create(per * kBuffers)) return false;
+    wl_proxy* raw_pool = wl::construct<wl_shm_pool_traits, wl_shm_traits::Op::CreatePool>(
+        *shm_.Get(), mem_.fd, static_cast<int32_t>(per * kBuffers));
     if (raw_pool == nullptr) return false;
     pool_.Attach(raw_pool);
-    wl_proxy* raw = wl::construct<wl_buffer_traits, wl_shm_pool_traits::Op::CreateBuffer>(
-        *pool_.Get(), 0, w_, h_, static_cast<int32_t>(stride), WL_SHM_FORMAT_ARGB8888);
-    if (raw == nullptr) return false;
-    buffer_.Get()->_SetProxy(raw);
+    for (int i = 0; i < kBuffers; ++i) {
+      const auto off = static_cast<int32_t>(static_cast<std::size_t>(i) * per);
+      wl_proxy* raw = wl::construct<wl_buffer_traits, wl_shm_pool_traits::Op::CreateBuffer>(
+          *pool_.Get(), off, w_, h_, static_cast<int32_t>(stride), WL_SHM_FORMAT_ARGB8888);
+      if (raw == nullptr) return false;
+      bufs_[i].buffer.Get()->_SetProxy(raw);
+      bufs_[i].buffer.Get()->busy = &bufs_[i].busy;
+      bufs_[i].pixels = reinterpret_cast<std::uint32_t*>(
+          static_cast<char*>(mem_.data) + static_cast<std::size_t>(i) * per);
+      bufs_[i].busy = false;
+    }
     pool_.Reset();  // only needed during buffer creation
     return true;
   }
+
+  static constexpr int kBuffers = 2;
+  struct Buf {
+    wl::WlPtr<BufferH> buffer;
+    std::uint32_t* pixels = nullptr;
+    bool busy = false;
+  };
 
   wl::DisplayHandle display_;
   wl::CRegistry registry_;
@@ -195,14 +276,19 @@ class Presenter {
   wl::WlPtr<SurfaceH> surface_;
   wl::WlPtr<wl::XdgSurfaceHandler<Presenter>> xdg_surface_;
   wl::WlPtr<wl::XdgToplevelHandler<Presenter>> xdg_toplevel_;
-  wl::WlPtr<BufferH> buffer_;
+  wl::PresentationManager<Presenter> presentation_;
+  Buf bufs_[kBuffers];
   FrameH frame_;  // direct member: stable address for the dispatcher
   ShmMapping mem_;
   std::string title_, app_id_;
+  const FrameCallback* render_ = nullptr;
 
   uint32_t comp_name_ = 0, comp_ver_ = 0, shm_name_ = 0, shm_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
   int w_ = 0, h_ = 0;
-  bool attached_ = false, frame_done_ = false, closed_ = false;
+  std::size_t total_bytes_ = 0;
+  std::uint64_t max_frames_ = 0, frame_index_ = 0, frame_callbacks_ = 0, presented_count_ = 0;
+  std::uint64_t last_present_ns_ = 0, refresh_ns_ = 0;
+  bool configured_ = false, need_frame_ = false, closed_ = false;
 };
 
 }  // namespace
@@ -212,10 +298,22 @@ bool wayland_available() noexcept {
   return d.Connect();  // disconnects on destruction
 }
 
+bool present_loop(int width, int height, std::string_view title,
+                  std::string_view app_id, const FrameCallback& render,
+                  std::uint64_t max_frames) noexcept {
+  Presenter presenter;
+  return presenter.Run(width, height, title, app_id, render, max_frames);
+}
+
 bool present_surface(const gfx::Surface& surface, std::string_view title,
                      std::string_view app_id, int timeout_ms) noexcept {
-  Presenter presenter;
-  return presenter.Present(surface, title, app_id, timeout_ms);
+  (void)timeout_ms;
+  // One frame: blit the already-rendered surface into the loop's working canvas.
+  const FrameCallback one = [&surface](gfx::Surface& canvas, std::uint64_t, std::uint64_t) {
+    canvas.blit(surface.data());
+    return true;
+  };
+  return present_loop(surface.width(), surface.height(), title, app_id, one, 1);
 }
 
 }  // namespace aclcxx::wm
