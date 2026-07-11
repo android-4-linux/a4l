@@ -74,11 +74,5 @@ jobs:
         run: meson setup build-phone -Dprofile_automotive=false
       - name: Compile phone profile
         run: meson compile -C build-phone
-      - name: Automotive nm-diff gate (phone build exports zero automotive symbols)
-        run: |
-          if nm -C build-phone/src/shell/aclcxx 2>/dev/null \
-               | grep -E 'aclcxx::(svc::car|hosts::)'; then
-            echo "FAIL: automotive symbols present in phone-profile build" >&2
-            exit 1
-          fi
-          echo "OK: no automotive symbols in phone-profile build."
+      - name: Automotive nm-diff gate (symbols present when ON, absent when OFF)
+        run: scripts/check-automotive-symbols.sh build build-phone
