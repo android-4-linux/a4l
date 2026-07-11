@@ -5,8 +5,11 @@
 # publishes browse-tree snapshots + playback state (seqlock) and a
 # MediaSession->MPRIS bridge, over the audio slice -> PipeWire. Gate G1.5a.
 # Supports media3 first, legacy support-lib via compat shim (RA-2).
-module_libs += static_library(
+# Captured so src/runtime can link_with it (the runtime drives the bridge); also
+# added to module_libs so the unit-test binary links it (nm-gate probe).
+host_media_lib = static_library(
   'acl_host_media',
   files('media_bridge.cpp'),
-  include_directories : config_inc,
+  include_directories : [config_inc, core_inc],
 )
+module_libs += host_media_lib

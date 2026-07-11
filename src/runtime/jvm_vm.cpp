@@ -19,11 +19,15 @@
 
 #include <jni.h>
 
+#include "acl_config.h"
 #include "gfx/gfx.h"
 #include "log/log.h"
 #include "runtime/framework_natives.h"
 #include "svc/svc.h"
 #include "wm/present.h"
+#if ACL_PROFILE_AUTOMOTIVE
+#include "hosts/media/media_bridge.h"  // Gate G1.5a: headless media bridge (automotive)
+#endif
 
 namespace acl::runtime {
 namespace {
@@ -654,6 +658,17 @@ class JvmVm final : public Vm {
     return out;
   }
 
+  // MediaMetadata.getString(key), or `dflt` when the key is absent/null.
+  std::string metadata_string(jobject md, jmethodID get_string, const char* key,
+                              const char* dflt) {
+    jstring k = env_->NewStringUTF(key);
+    auto v = static_cast<jstring>(env_->CallObjectMethod(md, get_string, k));
+    std::string out = v != nullptr ? utf8(v) : std::string(dflt);
+    if (v != nullptr) env_->DeleteLocalRef(v);
+    env_->DeleteLocalRef(k);
+    return out;
+  }
+
   Error load_children(jclass cls, jobject svc, jstring parent_id) {
     jmethodID on_load = env_->GetMethodID(
         cls, "onLoadChildren",
@@ -683,7 +698,9 @@ class JvmVm final : public Vm {
       jmethodID size_m = env_->GetMethodID(list_cls, "size", "()I");
       jmethodID get_m = env_->GetMethodID(list_cls, "get", "(I)Ljava/lang/Object;");
       const jint n = env_->CallIntMethod(list, size_m);
-      log::i(kTag, "media children of '{}': {} item(s)", utf8(parent_id), n);
+      const std::string parent = utf8(parent_id);
+      log::i(kTag, "media children of '{}': {} item(s)", parent, n);
+      std::vector<std::string> titles;
       for (jint i = 0; i < n; ++i) {
         jobject item = env_->CallObjectMethod(list, get_m, i);  // MediaBrowser.MediaItem
         jclass item_cls = env_->GetObjectClass(item);
@@ -704,11 +721,19 @@ class JvmVm final : public Vm {
           env_->DeleteLocalRef(title);
         }
         log::i(kTag, "  media item: {}", title_s);
+        titles.push_back(title_s);
         env_->DeleteLocalRef(desc_cls); env_->DeleteLocalRef(desc);
         env_->DeleteLocalRef(item_cls); env_->DeleteLocalRef(item);
       }
       env_->DeleteLocalRef(list_cls);
       env_->DeleteLocalRef(list);
+#if ACL_PROFILE_AUTOMOTIVE
+      // Publish the browse tree snapshot northbound (Gate G1.5a).
+      auto& bridge = hosts::media::MediaBridge::instance();
+      bridge.publish_browse(parent, titles);
+      log::i(kTag, "MediaBridge: browse snapshot root='{}' {} item(s)",
+             bridge.browse_root(), bridge.browse_items().size());
+#endif
     }
     env_->DeleteLocalRef(result);
     env_->DeleteLocalRef(result_cls);
@@ -733,6 +758,7 @@ class JvmVm final : public Vm {
     jclass ses_cls = session != nullptr ? env_->GetObjectClass(session) : nullptr;
 
     std::string title = "(none)";
+    std::string artist;
     int state = -1;
     if (session != nullptr) {
       jobject md = env_->CallObjectMethod(
@@ -740,12 +766,11 @@ class JvmVm final : public Vm {
                                      "()Landroid/media/MediaMetadata;"));
       if (md != nullptr) {
         jclass md_cls = env_->GetObjectClass(md);
-        jstring key = env_->NewStringUTF("android.media.metadata.TITLE");
-        auto t = static_cast<jstring>(env_->CallObjectMethod(
-            md, env_->GetMethodID(md_cls, "getString",
-                                  "(Ljava/lang/String;)Ljava/lang/String;"), key));
-        if (t != nullptr) { title = utf8(t); env_->DeleteLocalRef(t); }
-        env_->DeleteLocalRef(key); env_->DeleteLocalRef(md_cls); env_->DeleteLocalRef(md);
+        jmethodID get_string = env_->GetMethodID(
+            md_cls, "getString", "(Ljava/lang/String;)Ljava/lang/String;");
+        title = metadata_string(md, get_string, "android.media.metadata.TITLE", "(none)");
+        artist = metadata_string(md, get_string, "android.media.metadata.ARTIST", "");
+        env_->DeleteLocalRef(md_cls); env_->DeleteLocalRef(md);
       }
       jobject ps = env_->CallObjectMethod(
           session, env_->GetMethodID(ses_cls, "aclPlaybackState",
@@ -757,6 +782,21 @@ class JvmVm final : public Vm {
       }
     }
     log::i(kTag, "media session: title='{}' state={}", title, state);
+#if ACL_PROFILE_AUTOMOTIVE
+    // Publish northbound into the media bridge (Gate G1.5a) and report the MPRIS
+    // projection a Linux desktop / OEM shell controller would consume.
+    {
+      auto& bridge = hosts::media::MediaBridge::instance();
+      hosts::media::NowPlaying np;
+      np.title = title;
+      np.artist = artist;
+      np.state = hosts::media::playback_from_state(state);
+      bridge.publish(std::move(np));
+      const auto m = bridge.mpris();
+      log::i(kTag, "MediaBridge: published now-playing gen={} MPRIS PlaybackStatus={} title='{}'",
+             bridge.generation(), m.playback_status, m.title);
+    }
+#endif
     if (session != nullptr) invoke_transport(ses_cls, session);
     if (ses_cls != nullptr) env_->DeleteLocalRef(ses_cls);
     if (session != nullptr) env_->DeleteLocalRef(session);
@@ -765,24 +805,41 @@ class JvmVm final : public Vm {
     return Error::ok();
   }
 
-  // Drive transport controls: fetch the session's Callback and invoke onPlay()
-  // then onPause() in-process (no controller/Binder) — the app's overrides react.
+  // Invoke one MediaSession.Callback transport method by name (no-op if absent).
+  void dispatch_callback(jobject cb, jclass cb_cls, const char* method) {
+    jmethodID m = env_->GetMethodID(cb_cls, method, "()V");
+    if (m == nullptr) { clear_exception(); return; }
+    env_->CallVoidMethod(cb, m);
+    if (env_->ExceptionCheck() == JNI_TRUE) {
+      env_->ExceptionDescribe();
+      env_->ExceptionClear();
+    }
+  }
+
+  // Drive transport controls in-process (no controller/Binder). Under the automotive
+  // profile a controller (MPRIS / OEM shell) posts commands into the media bridge;
+  // we drain that channel and dispatch each to the app's MediaSession.Callback —
+  // the app's overrides react. Otherwise a fixed Play/Pause pair is invoked directly.
   void invoke_transport(jclass ses_cls, jobject session) {
     jobject cb = env_->CallObjectMethod(
         session, env_->GetMethodID(ses_cls, "aclCallback",
                                    "()Landroid/media/session/MediaSession$Callback;"));
     if (cb == nullptr) { clear_exception(); return; }  // app set no callback
     jclass cb_cls = env_->GetObjectClass(cb);
-    for (const char* action : {"onPlay", "onPause"}) {
-      jmethodID m = env_->GetMethodID(cb_cls, action, "()V");
-      if (m == nullptr) { clear_exception(); continue; }
-      log::i(kTag, "media transport: {}", action);
-      env_->CallVoidMethod(cb, m);
-      if (env_->ExceptionCheck() == JNI_TRUE) {
-        env_->ExceptionDescribe();
-        env_->ExceptionClear();
-      }
+#if ACL_PROFILE_AUTOMOTIVE
+    auto& bridge = hosts::media::MediaBridge::instance();
+    bridge.post_command(hosts::media::Command::Play);   // as an MPRIS controller would
+    bridge.post_command(hosts::media::Command::Pause);
+    hosts::media::Command c;
+    while (bridge.next_command(c)) {
+      const char* method = hosts::media::command_callback(c);
+      log::i(kTag, "MediaBridge: dispatching command {} -> {}",
+             hosts::media::command_name(c), method);
+      dispatch_callback(cb, cb_cls, method);
     }
+#else
+    for (const char* action : {"onPlay", "onPause"}) dispatch_callback(cb, cb_cls, action);
+#endif
     env_->DeleteLocalRef(cb_cls);
     env_->DeleteLocalRef(cb);
   }

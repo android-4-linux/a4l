@@ -18,12 +18,18 @@ CHECKS = [
     "entry point is a Context: getPackageName()",  # MusicService extends Context
     "media session: title='Now Playing Track'",  # MediaSession(Context,...) published
     "MediaSessionManager: activeSessions=1",  # the app's session surfaces in the svc hub
-    "onPlay: playback started",                   # host onPlay -> app Callback reacted
-    "onPause: playback paused",                   # host onPause -> app Callback reacted
+    # G1.5a media bridge: now-playing published northbound + MPRIS projection.
+    "MediaBridge: published now-playing gen=1 MPRIS PlaybackStatus=Stopped title='Now Playing Track'",
+    # Transport commands routed through the bridge's command channel to the app.
+    "MediaBridge: dispatching command Play -> onPlay",
+    "onPlay: playback started",                   # app Callback reacted
+    "MediaBridge: dispatching command Pause -> onPause",
+    "onPause: playback paused",                   # app Callback reacted
     "media browse root: acl_root",
     "media children of 'acl_root': 2 item(s)",
     "media item: Song One",
     "media item: Song Two",
+    "MediaBridge: browse snapshot root='acl_root' 2 item(s)",  # browse tree published
 ]
 
 

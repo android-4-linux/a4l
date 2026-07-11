@@ -13,9 +13,14 @@ if have_jni
   runtime_deps += jni_dep
 endif
 
+# Under the automotive profile the runtime drives the media bridge (Gate G1.5a),
+# so it link_withs the host lib (built earlier); phone builds #if it out.
+runtime_link = profile_automotive ? [host_media_lib] : []
+
 module_libs += static_library(
   'acl_runtime',
   runtime_sources,
   include_directories : [config_inc, core_inc],
   dependencies : runtime_deps,
+  link_with : runtime_link,
 )

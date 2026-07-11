@@ -19,6 +19,12 @@ unit_test_sources = files(
   'dex_test.cpp',
 )
 
+# Automotive-only: the media bridge (hosts/media) is compiled out under the phone
+# profile, so its unit tests only build when the profile is ON.
+if profile_automotive
+  unit_test_sources += files('media_bridge_test.cpp')
+endif
+
 # Build-time fixtures for the pkg/ reader tests (no binaries committed to git).
 # If python3 is unavailable the pkg tests SKIP at runtime (env var unset).
 python3 = find_program('python3', required : false)

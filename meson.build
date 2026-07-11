@@ -146,11 +146,16 @@ module_libs = []
 # deps live) but consumed by tests/ (which runs later); a disabler default keeps
 # the variable defined when it isn't built. Tests using it are guarded to match.
 close_compositor = disabler()
-subdir('src')
-
+# Automotive hosts build BEFORE src so their libs (e.g. host_media_lib) exist when
+# src/runtime links against them and when src/shell links module_libs. Under the
+# phone profile these are absent and the runtime's uses are #if'd out.
+host_media_lib = []
+host_cal_lib = []
 if profile_automotive
   subdir('hosts')
 endif
+
+subdir('src')
 
 if build_tests
   subdir('tests')
