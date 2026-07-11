@@ -295,6 +295,25 @@ if py3.found() and have_jni
         depends : [aclcxx_exe, key_apk, framework_shim, close_compositor],
         timeout : 120,
       )
+
+      # Hit-testing: hit.apk's content view is a Panel (ViewGroup) with two stacked
+      # Tiles. The compositor taps at (100,50) -> ViewGroup.dispatchTouchEvent must
+      # route it to the top tile (which logs "top"), not the bottom one.
+      hit_apk = custom_target(
+        'hit-apk',
+        input : files('../fixtures/make_hit_apk.py'),
+        output : 'hit.apk',
+        command : [py3, '@INPUT@', '@OUTPUT@'],
+        depend_files : files('../fixtures/make_axml.py'),
+      )
+      test(
+        'run-apk-hit-present',
+        py3,
+        args : [files('run_hit_test.py'), aclcxx_exe, hit_apk, framework_shim,
+                close_compositor],
+        depends : [aclcxx_exe, hit_apk, framework_shim, close_compositor],
+        timeout : 120,
+      )
     endif
   else
     message('javac not found; skipping run-apk-framework integration test.')

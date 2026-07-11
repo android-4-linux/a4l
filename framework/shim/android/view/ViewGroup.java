@@ -49,4 +49,24 @@ public class ViewGroup extends View {
 
   @Override
   protected void onLayout(boolean changed, int l, int t, int r, int b) {}
+
+  // Route a touch to the top-most child whose laid-out bounds contain the point,
+  // in the child's local coordinates. Real dispatch has capture/intercept and
+  // multi-pointer split; this is the hit-test + coordinate-offset core.
+  @Override
+  public boolean dispatchTouchEvent(MotionEvent event) {
+    final float x = event.getX();
+    final float y = event.getY();
+    for (int i = children.size() - 1; i >= 0; i--) {  // top-most (last-added) first
+      View child = children.get(i);
+      if (x >= child.getLeft() && x < child.getRight()
+          && y >= child.getTop() && y < child.getBottom()) {
+        event.offsetLocation(-child.getLeft(), -child.getTop());
+        boolean handled = child.dispatchTouchEvent(event);
+        event.offsetLocation(child.getLeft(), child.getTop());  // restore for the next child
+        if (handled) return true;
+      }
+    }
+    return onTouchEvent(event);  // no child consumed it
+  }
 }

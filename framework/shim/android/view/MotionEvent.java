@@ -45,5 +45,12 @@ public final class MotionEvent {
   public long getEventTime() { return eventTime; }
   public int getMetaState() { return metaState; }
 
+  // Shift the reported location — used by ViewGroup.dispatchTouchEvent to convert
+  // to a child's local coordinate space.
+  public void offsetLocation(float dx, float dy) {
+    x += dx;
+    y += dy;
+  }
+
   public void recycle() {}  // no pool yet; kept for source compatibility
 }
