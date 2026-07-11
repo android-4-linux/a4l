@@ -151,6 +151,26 @@ if py3.found() and have_jni
       timeout : 120,
     )
 
+    # ADR-0002 android.jar layer: an app references android.util.SparseArray (NOT a
+    # shim); it must resolve from the staged android.jar stub layer. Only when
+    # android.jar was found + staged (framework_android_jar); skipped otherwise.
+    if framework_android_jar != ''
+      stub_apk = custom_target(
+        'stub-apk',
+        input : files('../fixtures/make_hello_apk.py'),
+        output : 'stub.apk',
+        command : [py3, '@INPUT@', '--stub', '@OUTPUT@'],
+        depend_files : files('../fixtures/make_axml.py'),
+      )
+      test(
+        'run-apk-android-jar',
+        py3,
+        args : [files('run_android_jar_test.py'), acl_exe, stub_apk],
+        depends : [acl_exe, stub_apk],
+        timeout : 120,
+      )
+    endif
+
     # Gate G2.e (automotive media path): host a MediaBrowserService (no Views).
     # media.apk's MusicService extends android.service.media.MediaBrowserService;
     # `acl run --service=...` drives onCreate + onGetRoot in-process (no Binder).

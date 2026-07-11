@@ -73,16 +73,20 @@ def build_dex(mode="hello"):
         "ILL",                       # 18 shorty (String,String)->int
         LOG_TAG,                     # 19
         LOG_MSG,                     # 20
+        "Ljava/lang/Class;",         # 21
+        "Landroid/util/SparseArray;",  # 22  NOT shimmed -> resolves from android.jar
+        "getName",                   # 23
     ]
     S = {s: i for i, s in enumerate(STRINGS)}
     TYPES = ["Lcom/acl/hello/Main;", "Ljava/lang/Object;", "Ljava/lang/String;",
              "[Ljava/lang/String;", "Ljava/lang/System;", "Ljava/io/PrintStream;",
-             "V", "Lcom/acl/fw/Probe;", "I", "Landroid/util/Log;"]
+             "V", "Lcom/acl/fw/Probe;", "I", "Landroid/util/Log;",
+             "Ljava/lang/Class;", "Landroid/util/SparseArray;"]
     T = {t: i for i, t in enumerate(TYPES)}
 
     header_size = 112
     n_strings, n_types, n_protos, n_fields, n_methods, n_classdefs = \
-        len(STRINGS), len(TYPES), 4, 1, 4, 1
+        len(STRINGS), len(TYPES), 4, 1, 5, 1
 
     off_string_ids = header_size
     off_type_ids = off_string_ids + n_strings * 4
@@ -126,6 +130,17 @@ def build_dex(mode="hello"):
         insns = [0x001A, S[LOG_TAG],      # const-string v0, LOG_TAG
                  0x011A, S[LOG_MSG],      # const-string v1, LOG_MSG
                  0x2071, 0x0003, 0x0010,  # invoke-static {v0,v1}, Log.i (m3)
+                 0x000E]                  # return-void
+    elif mode == "stub":
+        # System.out.println(SparseArray.class.getName()) — SparseArray is NOT one of
+        # the acl shims, so the class must resolve from the android.jar stub layer.
+        # const-class loads it (no instantiation -> no "Stub!"), getName() is a real
+        # java.lang.Class method.
+        insns = [0x011C, T["Landroid/util/SparseArray;"],  # const-class v1, SparseArray
+                 0x106E, 0x0004, 0x0001,  # invoke-virtual {v1}, Class.getName (m4)
+                 0x010C,                  # move-result-object v1
+                 0x0062, 0x0000,          # sget-object v0, System.out (f0)
+                 0x206E, 0x0001, 0x0010,  # invoke-virtual {v0,v1}, println (m1)
                  0x000E]                  # return-void
     else:
         # System.out.println(MSG) — fully self-contained.
@@ -177,6 +192,7 @@ def build_dex(mode="hello"):
     method_ids += struct.pack("<HHI", T["Ljava/io/PrintStream;"], 1, S["println"])  # m1
     method_ids += struct.pack("<HHI", T["Lcom/acl/fw/Probe;"], 2, S["tag"])      # m2
     method_ids += struct.pack("<HHI", T["Landroid/util/Log;"], 3, S["i"])           # m3 Log.i
+    method_ids += struct.pack("<HHI", T["Ljava/lang/Class;"], 2, S["getName"])       # m4 Class.getName ()String
     class_defs = struct.pack("<IIIIIIII",
                              T["Lcom/acl/hello/Main;"], 0x1,
                              T["Ljava/lang/Object;"], 0, 0xFFFFFFFF, 0,
@@ -221,7 +237,9 @@ def main():
         mode = "probe"
     elif "--log" in args:
         mode = "log"
-    args = [a for a in args if a not in ("--probe", "--log")]
+    elif "--stub" in args:
+        mode = "stub"
+    args = [a for a in args if a not in ("--probe", "--log", "--stub")]
     if len(args) != 1:
         sys.stderr.write("usage: make_hello_apk.py [--probe|--log] <output.apk>\n")
         return 2
