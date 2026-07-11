@@ -29,6 +29,26 @@ if py3.found()
     depends : [acl_exe],
     timeout : 30,
   )
+
+  # ADR-0002 vendoring orchestrator (tools/vendor_framework.py): size + vendor +
+  # MANIFEST logic verified against the synthetic AOSP fixture (no real checkout).
+  test(
+    'vendor-framework',
+    py3,
+    args : [files('vendor_framework_test.py'), files('../../tools/vendor_framework.py'),
+            meson.current_source_dir() / '../fixtures/fwsrc',
+            meson.current_build_dir() / 'vendor-tmp'],
+    timeout : 60,
+  )
+
+  # Push-button: size the AOSP frameworks/base subset for a seed against the real
+  # checkout ($ACL_AOSP_ROOT, default /home/joel/aosp). Manual (not a gating test):
+  #   ninja -C build framework-size            # default seed (android.util)
+  #   tools/vendor_framework.py size --seed android.app,android.os --budget 400
+  run_target(
+    'framework-size',
+    command : [py3, files('../../tools/vendor_framework.py'), 'size'],
+  )
 endif
 
 if py3.found() and have_jni

@@ -14,7 +14,7 @@ while IFS= read -r -d '' f; do
   fi
 done < <(find src hosts tests tools scripts . -maxdepth 99 \
            \( -path './.git/*' -o -path './build*/*' -o -path './builddir/*' \
-              -o -path './subprojects/*/*' \) -prune -o \
+              -o -path './subprojects/*/*' -o -path './third_party/*' \) -prune -o \
            -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \
               -o -name '*.h' -o -name '*.hpp' -o -name '*.c' \
               -o -name 'meson.build' -o -name 'meson.options' -o -name '*.sh' \) -print0 \

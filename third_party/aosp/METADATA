@@ -17,7 +17,10 @@ platform:
   manifest_url: "https://android.googlesource.com/platform/manifest"
   branch: "android-13.0.0_r84"
   manifest_sha: "05bc4f23cd577692d879cb1ab7ec1c0a583d2f83"
-  # Local checkout the extraction tool runs against (repo init -b <branch> -u <url>):
+  # Local checkout the extraction/vendoring tooling runs against. Configurable via
+  # $ACL_AOSP_ROOT; tools/vendor_framework.py defaults to this path.
+  local_checkout: "/home/joel/aosp"
+  # Create it (repo init -b <branch> -u <url>, then a partial sync of the java trees):
   #   repo init -u https://android.googlesource.com/platform/manifest -b android-13.0.0_r84
   #   repo sync platform/frameworks/base platform/external/skia   # (partial sync)
 
