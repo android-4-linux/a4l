@@ -49,9 +49,25 @@ if have_wcs
     command : [wcs_scanner, '--mode=client-header', '--std=c++23',
                '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
   )
+  # fractional-scale + viewporter (HiDPI): buffer-at-physical, viewport-to-logical.
+  fractional_scale_client_hpp = custom_target(
+    'wm-fractional-scale-client-header',
+    input : fractional_scale_xml,
+    output : 'fractional_scale_v1_client.hpp',
+    command : [wcs_scanner, '--mode=client-header', '--std=c++23',
+               '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
+  )
+  viewporter_client_hpp = custom_target(
+    'wm-viewporter-client-header',
+    input : viewporter_xml,
+    output : 'viewporter_client.hpp',
+    command : [wcs_scanner, '--mode=client-header', '--std=c++23',
+               '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
+  )
   wm_sources += [files('wayland_presenter.cpp'), wayland_client_hpp,
                  xdg_shell_client_hpp, presentation_time_client_hpp,
-                 text_input_v3_client_hpp]
+                 text_input_v3_client_hpp, fractional_scale_client_hpp,
+                 viewporter_client_hpp]
   # include_directories('.') resolves to BOTH src/wm (source) and build/src/wm
   # (where the generated headers land); wcs_dep supplies the wl/ framework headers.
   wm_inc += include_directories('.')
@@ -130,10 +146,35 @@ if build_tests and have_wcs
         output : 'text-input-unstable-v3-protocol.c',
         command : [wl_scanner_prog, 'private-code', '@INPUT@', '@OUTPUT@'],
       )
+      fs_server_hdr = custom_target(
+        'fractional-scale-server-protocol-header',
+        input : fractional_scale_xml,
+        output : 'fractional-scale-v1-server-protocol.h',
+        command : [wl_scanner_prog, 'server-header', '@INPUT@', '@OUTPUT@'],
+      )
+      fs_protocol_code = custom_target(
+        'fractional-scale-protocol-code',
+        input : fractional_scale_xml,
+        output : 'fractional-scale-v1-protocol.c',
+        command : [wl_scanner_prog, 'private-code', '@INPUT@', '@OUTPUT@'],
+      )
+      vp_server_hdr = custom_target(
+        'viewporter-server-protocol-header',
+        input : viewporter_xml,
+        output : 'viewporter-server-protocol.h',
+        command : [wl_scanner_prog, 'server-header', '@INPUT@', '@OUTPUT@'],
+      )
+      vp_protocol_code = custom_target(
+        'viewporter-protocol-code',
+        input : viewporter_xml,
+        output : 'viewporter-protocol.c',
+        command : [wl_scanner_prog, 'private-code', '@INPUT@', '@OUTPUT@'],
+      )
       close_compositor = executable(
         'close_compositor',
         [files('../../tests/integration/close_compositor.cpp'),
-         xdg_server_hdr, xdg_protocol_code, ti_server_hdr, ti_protocol_code],
+         xdg_server_hdr, xdg_protocol_code, ti_server_hdr, ti_protocol_code,
+         fs_server_hdr, fs_protocol_code, vp_server_hdr, vp_protocol_code],
         include_directories : include_directories('.'),  # source + build src/wm (generated hdr)
         dependencies : [wayland_server_dep, xkbcommon_dep],  # xkb: keymap for key-repeat test
         # The libwayland request-vtables are intentionally partial (only the requests
@@ -144,6 +185,15 @@ if build_tests and have_wcs
         'wm-present-close',
         py3_wm,
         args : [files('../../tests/integration/run_close_test.py'),
+                wm_present_probe, close_compositor],
+        timeout : 60,
+      )
+      # HiDPI: the compositor sends a 1.5x fractional scale; the presenter renders a
+      # physical-size buffer and maps it to logical via wp_viewport.
+      test(
+        'wm-present-hidpi',
+        py3_wm,
+        args : [files('../../tests/integration/run_hidpi_test.py'),
                 wm_present_probe, close_compositor],
         timeout : 60,
       )

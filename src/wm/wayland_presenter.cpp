@@ -36,10 +36,13 @@
 #include "xdg_shell_client.hpp"
 #include "presentation_time_client.hpp"
 #include "text_input_v3_client.hpp"  // WL_IME_BACKEND_TEXT_INPUT_V3
+#include "fractional_scale_v1_client.hpp"
+#include "viewporter_client.hpp"
 
 #include <wl/client_helpers.hpp>
 #include <wl/ime/backend.hpp>            // wl::ime::SelectedTextInput (text-input-v3)
 #include <wl/ime/text_input_receiver.hpp>
+#include <wl/scale_policy.hpp>           // wl::ScalePolicy (buffer-at-physical math)
 #include <wl/display.hpp>
 #include <wl/keyboard.hpp>
 #include <wl/pointer.hpp>
@@ -57,6 +60,8 @@ namespace {
 
 using namespace wayland::client;
 using namespace xdg_shell::client;
+namespace fs = fractional_scale_v1::client;
+namespace vp = viewporter::client;
 
 constexpr const char* kTag = "aclcxx.wm";
 
@@ -91,6 +96,20 @@ class FrameH : public CWlCallback<FrameH> {
   void OnDone(uint32_t) override {
     if (need != nullptr) *need = true;
     if (count != nullptr) ++*count;
+  }
+};
+// fractional-scale + viewporter (HiDPI). Managers/viewport have no events (Attach);
+// wp_fractional_scale_v1 carries preferred_scale.
+class FracScaleMgrH : public fs::CWpFractionalScaleManagerV1<FracScaleMgrH> {};
+class ViewporterH : public vp::CWpViewporter<ViewporterH> {};
+class ViewportH : public vp::CWpViewport<ViewportH> {};
+class FracScaleH : public fs::CWpFractionalScaleV1<FracScaleH> {
+ public:
+  std::int32_t* scale_120 = nullptr;
+  bool* dirty = nullptr;
+  void OnPreferredScale(uint32_t scale) override {
+    if (scale_120 != nullptr) *scale_120 = static_cast<std::int32_t>(scale);
+    if (dirty != nullptr) *dirty = true;
   }
 };
 
@@ -170,6 +189,10 @@ class Presenter : public wl::ime::TextInputListener {
       else if (iface == wl_seat_traits::interface_name) { seat_name_ = name; seat_ver_ = ver; }
       else if (iface == text_input_unstable_v3::client::zwp_text_input_manager_v3_traits::interface_name)
         { ti_name_ = name; ti_ver_ = ver; }
+      else if (iface == fs::wp_fractional_scale_manager_v1_traits::interface_name)
+        { fsm_name_ = name; fsm_ver_ = ver; }
+      else if (iface == vp::wp_viewporter_traits::interface_name)
+        { vpr_name_ = name; vpr_ver_ = ver; }
     });
     if (!wl::RoundtripWithTimeout(display_.Get())) { log::w(kTag, "present: registry roundtrip failed"); return false; }
     if (comp_name_ == 0 || shm_name_ == 0 || xdg_name_ == 0) {
@@ -194,6 +217,13 @@ class Presenter : public wl::ime::TextInputListener {
       ime_bound_ = ti_.Bind(registry_, this, seat_.Get()->GetProxy());
       if (!ime_bound_) log::w(kTag, "present: text-input bind failed");
     }
+    // fractional-scale + viewporter managers (HiDPI); event-less -> Attach.
+    if (fsm_name_ != 0)
+      if (wl_proxy* raw = registry_.Bind<fs::wp_fractional_scale_manager_v1_traits>(fsm_name_, std::min(fsm_ver_, fs::wp_fractional_scale_manager_v1_traits::version)))
+        frac_mgr_.Attach(raw);
+    if (vpr_name_ != 0)
+      if (wl_proxy* raw = registry_.Bind<vp::wp_viewporter_traits>(vpr_name_, std::min(vpr_ver_, vp::wp_viewporter_traits::version)))
+        viewporter_.Attach(raw);
     if (!wl::RoundtripWithTimeout(display_.Get())) return false;  // shm formats + clock_id + seat caps
 
     if (!wl::SetupHandler(surface_, wl::construct<wl_surface_traits, wl_compositor_traits::Op::CreateSurface>(*comp_.Get()))) return false;
@@ -210,13 +240,29 @@ class Presenter : public wl::ime::TextInputListener {
       ti_.SetContentType(wl::ime::ContentHint::kNone, wl::ime::ContentPurpose::kNormal);
       ti_.Activate();
     }
+    // Per-surface fractional_scale (preferred_scale event) + viewport (dst=logical).
+    if (!frac_mgr_.IsNull() &&
+        wl::SetupHandler(frac_scale_, wl::construct<fs::wp_fractional_scale_v1_traits,
+            fs::wp_fractional_scale_manager_v1_traits::Op::GetFractionalScale>(
+                *frac_mgr_.Get(), surface_.Get()->GetProxy()))) {
+      frac_scale_.Get()->scale_120 = &scale_120_;
+      frac_scale_.Get()->dirty = &scale_dirty_;
+    }
+    if (!viewporter_.IsNull())
+      if (wl_proxy* raw = wl::construct<vp::wp_viewport_traits, vp::wp_viewporter_traits::Op::GetViewport>(
+              *viewporter_.Get(), surface_.Get()->GetProxy()))
+        viewport_.Attach(raw);
 
-    if (!MakeBuffers()) { log::w(kTag, "present: shm buffer allocation failed"); return false; }
     frame_.need = &need_frame_;
     frame_.count = &frame_callbacks_;
 
     gfx::Surface canvas(w_, h_);
-    surface_.Get()->Commit();  // trigger the first configure
+    // Commit (no buffer) to elicit configure + preferred_scale, then size the buffer
+    // physically for the reported scale and map it back to logical via the viewport.
+    surface_.Get()->Commit();
+    (void)wl::RoundtripWithTimeout(display_.Get());
+    apply_scale();
+    if (!MakeBuffers()) { log::w(kTag, "present: shm buffer allocation failed"); return false; }
 
     const int fd = wl_display_get_fd(display_.Get());
     // A bounded run (a test / fixed frame count) gets a safety deadline so it can't
@@ -336,7 +382,7 @@ class Presenter : public wl::ime::TextInputListener {
     for (int i = 0; i < 2; ++i) if (!bufs_[i].busy) { b = i; break; }
     if (b < 0) { request_frame(); return true; }  // both in flight — retry next tick
     if (!(*render_)(canvas, frame_time(), frame_index_)) return false;
-    std::memcpy(bufs_[b].pixels, canvas.data(), total_bytes_);
+    blit_to_buffer(canvas, bufs_[b].pixels);
     request_frame();  // ask for the next vsync tick
     presentation_.Arm(surface_.Get()->GetProxy(), static_cast<std::uint32_t>(frame_index_));  // before commit
     surface_.Get()->Attach(bufs_[b].buffer.Get()->GetProxy(), 0, 0);
@@ -347,9 +393,43 @@ class Presenter : public wl::ime::TextInputListener {
     return true;
   }
 
+  // Physical buffer size for the current fractional scale; sets the viewport dst to
+  // the logical size so the compositor maps the physical buffer back down.
+  void apply_scale() {
+    scale_dirty_ = false;
+    if (!viewport_.IsNull() && scale_120_ != wl::ScalePolicy::kUnityScale120) {
+      pw_ = wl::ScalePolicy::ScaledDim(w_, scale_120_);
+      ph_ = wl::ScalePolicy::ScaledDim(h_, scale_120_);
+      if (pw_ <= 0) pw_ = w_;
+      if (ph_ <= 0) ph_ = h_;
+      viewport_.Get()->SetDestination(w_, h_);
+      log::i(kTag, "fractional scale {}/120: buffer {}x{} -> viewport {}x{}",
+             scale_120_, pw_, ph_, w_, h_);
+    } else {
+      pw_ = w_;
+      ph_ = h_;
+    }
+  }
+
+  // Copy the logical-size render into the physical buffer (memcpy at unity scale,
+  // else a nearest-neighbor upscale).
+  void blit_to_buffer(const gfx::Surface& canvas, std::uint32_t* dst) {
+    const std::uint32_t* src = canvas.data();
+    if (pw_ == w_ && ph_ == h_) {
+      std::memcpy(dst, src, static_cast<std::size_t>(w_) * static_cast<std::size_t>(h_) * 4u);
+      return;
+    }
+    for (int y = 0; y < ph_; ++y) {
+      const int sy = y * h_ / ph_;
+      const std::uint32_t* srow = src + static_cast<std::size_t>(sy) * w_;
+      std::uint32_t* drow = dst + static_cast<std::size_t>(y) * pw_;
+      for (int x = 0; x < pw_; ++x) drow[x] = srow[x * w_ / pw_];
+    }
+  }
+
   bool MakeBuffers() {
-    const std::size_t stride = static_cast<std::size_t>(w_) * 4u;
-    const std::size_t per = stride * static_cast<std::size_t>(h_);
+    const std::size_t stride = static_cast<std::size_t>(pw_) * 4u;
+    const std::size_t per = stride * static_cast<std::size_t>(ph_);
     total_bytes_ = per;
     if (!mem_.Create(per * kBuffers)) return false;
     wl_proxy* raw_pool = wl::construct<wl_shm_pool_traits, wl_shm_traits::Op::CreatePool>(
@@ -359,7 +439,7 @@ class Presenter : public wl::ime::TextInputListener {
     for (int i = 0; i < kBuffers; ++i) {
       const auto off = static_cast<int32_t>(static_cast<std::size_t>(i) * per);
       wl_proxy* raw = wl::construct<wl_buffer_traits, wl_shm_pool_traits::Op::CreateBuffer>(
-          *pool_.Get(), off, w_, h_, static_cast<int32_t>(stride), WL_SHM_FORMAT_ARGB8888);
+          *pool_.Get(), off, pw_, ph_, static_cast<int32_t>(stride), WL_SHM_FORMAT_ARGB8888);
       if (raw == nullptr) return false;
       bufs_[i].buffer.Get()->_SetProxy(raw);
       bufs_[i].buffer.Get()->busy = &bufs_[i].busy;
@@ -389,6 +469,10 @@ class Presenter : public wl::ime::TextInputListener {
   wl::WlPtr<wl::XdgToplevelHandler<Presenter>> xdg_toplevel_;
   wl::PresentationManager<Presenter> presentation_;
   wl::ime::SelectedTextInput ti_;  // text-input-v3 (IME)
+  wl::WlPtr<FracScaleMgrH> frac_mgr_;
+  wl::WlPtr<FracScaleH> frac_scale_;   // per-surface; preferred_scale event
+  wl::WlPtr<ViewporterH> viewporter_;
+  wl::WlPtr<ViewportH> viewport_;
   wl::WlPtr<SeatH> seat_;
   wl::WlPtr<wl::PointerHandler<Presenter>> pointer_;   // created on wl_seat capabilities
   wl::WlPtr<wl::KeyboardHandler<Presenter>> keyboard_;  // created on wl_seat capabilities
@@ -403,6 +487,9 @@ class Presenter : public wl::ime::TextInputListener {
 
   uint32_t comp_name_ = 0, comp_ver_ = 0, shm_name_ = 0, shm_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
   uint32_t seat_name_ = 0, seat_ver_ = 0, ti_name_ = 0, ti_ver_ = 0;
+  uint32_t fsm_name_ = 0, fsm_ver_ = 0, vpr_name_ = 0, vpr_ver_ = 0;
+  std::int32_t scale_120_ = 120, pw_ = 0, ph_ = 0;
+  bool scale_dirty_ = false;
   bool want_ime_ = false, ime_bound_ = false;
   int w_ = 0, h_ = 0;
   std::size_t total_bytes_ = 0;

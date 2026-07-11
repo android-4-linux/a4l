@@ -26,7 +26,9 @@
 #include <wayland-server.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "fractional-scale-v1-server-protocol.h"
 #include "text-input-unstable-v3-server-protocol.h"
+#include "viewporter-server-protocol.h"
 #include "xdg-shell-server-protocol.h"
 
 namespace {
@@ -34,6 +36,7 @@ namespace {
 wl_display* g_display = nullptr;
 std::string g_keymap;  // xkb keymap text, sent so client-side key-repeat can arm
 wl_resource* g_text_input = nullptr;  // the client's zwp_text_input_v3, to commit text into
+bool g_hidpi = false;  // advertise a 1.5x fractional scale (else unity)
 std::uint32_t g_serial = 0;
 wl_resource* g_pointer = nullptr;   // the client's wl_pointer, for injecting a tap
 wl_resource* g_keyboard = nullptr;  // the client's wl_keyboard, for injecting a key
@@ -261,7 +264,38 @@ void tim_get_text_input(wl_client* c, wl_resource* r, uint32_t id, wl_resource* 
 }
 const struct zwp_text_input_manager_v3_interface tim_impl = {tim_destroy, tim_get_text_input};
 
+// ── wp_fractional_scale_v1 + manager (send preferred_scale) ───────────────────
+void fscale_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+const struct wp_fractional_scale_v1_interface fscale_impl = {fscale_destroy};
+void fsmgr_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+void fsmgr_get_fractional_scale(wl_client* c, wl_resource* r, uint32_t id, wl_resource* /*surface*/) {
+  wl_resource* fsr = wl_resource_create(c, &wp_fractional_scale_v1_interface, wl_resource_get_version(r), id);
+  wl_resource_set_implementation(fsr, &fscale_impl, nullptr, nullptr);
+  wp_fractional_scale_v1_send_preferred_scale(fsr, g_hidpi ? 180 : 120);  // 180/120 = 1.5x
+}
+const struct wp_fractional_scale_manager_v1_interface fsmgr_impl = {fsmgr_destroy, fsmgr_get_fractional_scale};
+
+// ── wp_viewport + viewporter (accept set_destination) ─────────────────────────
+void viewport_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+void viewport_set_source(wl_client*, wl_resource*, wl_fixed_t, wl_fixed_t, wl_fixed_t, wl_fixed_t) {}
+void viewport_set_destination(wl_client*, wl_resource*, int32_t, int32_t) {}
+const struct wp_viewport_interface viewport_impl = {viewport_destroy, viewport_set_source, viewport_set_destination};
+void viewporter_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+void viewporter_get_viewport(wl_client* c, wl_resource* r, uint32_t id, wl_resource* /*surface*/) {
+  wl_resource* v = wl_resource_create(c, &wp_viewport_interface, wl_resource_get_version(r), id);
+  wl_resource_set_implementation(v, &viewport_impl, nullptr, nullptr);
+}
+const struct wp_viewporter_interface viewporter_impl = {viewporter_destroy, viewporter_get_viewport};
+
 // ── globals ───────────────────────────────────────────────────────────────────
+void bind_fs_manager(wl_client* c, void*, uint32_t version, uint32_t id) {
+  wl_resource* r = wl_resource_create(c, &wp_fractional_scale_manager_v1_interface, static_cast<int>(version), id);
+  wl_resource_set_implementation(r, &fsmgr_impl, nullptr, nullptr);
+}
+void bind_viewporter(wl_client* c, void*, uint32_t version, uint32_t id) {
+  wl_resource* r = wl_resource_create(c, &wp_viewporter_interface, static_cast<int>(version), id);
+  wl_resource_set_implementation(r, &viewporter_impl, nullptr, nullptr);
+}
 void bind_text_input_manager(wl_client* c, void*, uint32_t version, uint32_t id) {
   wl_resource* r = wl_resource_create(c, &zwp_text_input_manager_v3_interface, static_cast<int>(version), id);
   wl_resource_set_implementation(r, &tim_impl, nullptr, nullptr);
@@ -308,6 +342,7 @@ int on_timeout(void*) {
 int main(int argc, char** argv) {
   const char* socket = argc > 1 ? argv[1] : "aclcxx-close";
   g_repeat_mode = argc > 2 && std::string_view(argv[2]) == "repeat";
+  g_hidpi = argc > 2 && std::string_view(argv[2]) == "hidpi";
 
   // Compile the default (RMLVO) xkb keymap once, to send to clients.
   if (xkb_context* ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS)) {
@@ -332,6 +367,8 @@ int main(int argc, char** argv) {
   wl_global_create(g_display, &xdg_wm_base_interface, 1, nullptr, bind_wmbase);
   wl_global_create(g_display, &wl_seat_interface, 4, nullptr, bind_seat);  // v4: wl_keyboard.repeat_info
   wl_global_create(g_display, &zwp_text_input_manager_v3_interface, 1, nullptr, bind_text_input_manager);
+  wl_global_create(g_display, &wp_fractional_scale_manager_v1_interface, 1, nullptr, bind_fs_manager);
+  wl_global_create(g_display, &wp_viewporter_interface, 1, nullptr, bind_viewporter);
 
   wl_event_loop* loop = wl_display_get_event_loop(g_display);
   wl_event_source* timer = wl_event_loop_add_timer(loop, on_timeout, nullptr);
