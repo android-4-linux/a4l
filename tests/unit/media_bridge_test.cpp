@@ -90,6 +90,40 @@ TEST_CASE("commands map to names and MediaSession.Callback methods", "[media][au
   CHECK(std::string(command_callback(Command::Previous)) == "onSkipToPrevious");
 }
 
+namespace {
+// A fake device route that records the track it was asked to play.
+class FakeRoute : public AudioRoute {
+ public:
+  std::uint64_t play(const NowPlaying& now) override {
+    played_title = now.title;
+    ++calls;
+    return 4410;  // pretend frames
+  }
+  std::string played_title;
+  int calls = 0;
+};
+}  // namespace
+
+TEST_CASE("audio route is driven with the current now-playing", "[media][automotive]") {
+  MediaBridge b;
+  CHECK(b.route_now_playing() == 0);  // no route installed -> nothing played
+
+  FakeRoute route;
+  b.set_audio_route(&route);
+  NowPlaying np;
+  np.title = "Now Playing Track";
+  np.state = Playback::Playing;
+  b.publish(np);
+
+  CHECK(b.route_now_playing() == 4410);
+  CHECK(route.calls == 1);
+  CHECK(route.played_title == "Now Playing Track");  // the published track
+
+  b.set_audio_route(nullptr);  // clearing the route stops playback routing
+  CHECK(b.route_now_playing() == 0);
+  CHECK(route.calls == 1);
+}
+
 TEST_CASE("browse-tree snapshot round-trips", "[media][automotive]") {
   MediaBridge b;
   CHECK(b.browse_root().empty());

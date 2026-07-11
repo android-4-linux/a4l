@@ -83,6 +83,23 @@ MprisMetadata MediaBridge::mpris() const {
   return m;
 }
 
+void MediaBridge::set_audio_route(AudioRoute* route) {
+  std::lock_guard<std::mutex> lk(mu_);
+  audio_ = route;
+}
+
+std::uint64_t MediaBridge::route_now_playing() {
+  AudioRoute* route = nullptr;
+  NowPlaying now;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    route = audio_;
+    now = now_;
+  }
+  // Call the route outside the lock — play() may block for the playback duration.
+  return route != nullptr ? route->play(now) : 0;
+}
+
 void MediaBridge::publish_browse(std::string root_id, std::vector<std::string> items) {
   std::lock_guard<std::mutex> lk(mu_);
   browse_root_ = std::move(root_id);

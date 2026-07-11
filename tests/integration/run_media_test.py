@@ -10,6 +10,7 @@
 # Binder. Exercises a null (const 0 -> aconst_null) argument and the Builder chain.
 #
 # Usage: run_media_test.py <acl_binary> <media.apk> <framework_dir>
+import os
 import subprocess
 import sys
 
@@ -23,6 +24,9 @@ CHECKS = [
     # Transport commands routed through the bridge's command channel to the app.
     "MediaBridge: dispatching command Play -> onPlay",
     "onPlay: playback started",                   # app Callback reacted
+    # Playback started -> the bridge routes the now-playing audio to acl::audio.
+    # (Run with ACL_AUDIO=null below, so the null sink counts frames silently.)
+    "MediaBridge: routing now-playing 'Now Playing Track' to PipeWire",
     "MediaBridge: dispatching command Pause -> onPause",
     "onPause: playback paused",                   # app Callback reacted
     "media browse root: acl_root",
@@ -38,10 +42,13 @@ def main() -> int:
         sys.stderr.write("usage: run_media_test.py <acl> <media.apk> <fw_dir>\n")
         return 2
     acl, apk, fw = sys.argv[1], sys.argv[2], sys.argv[3]
+    env = dict(os.environ)
+    env["ACL_AUDIO"] = "null"  # silent + deterministic: the bridge's audio route
+                               # exercises the null sink (no device dependency in CI)
     p = subprocess.run(
         [acl, "run", apk, "--vm=jvm", "--framework=" + fw,
          "--service=com.acl.hello.MusicService"],
-        capture_output=True, text=True, timeout=120)
+        env=env, capture_output=True, text=True, timeout=120)
     out = p.stdout + p.stderr
 
     ok = p.returncode == 0

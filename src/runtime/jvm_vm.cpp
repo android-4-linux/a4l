@@ -20,6 +20,7 @@
 #include <jni.h>
 
 #include "acl_config.h"
+#include "audio/audio.h"
 #include "gfx/gfx.h"
 #include "log/log.h"
 #include "runtime/framework_natives.h"
@@ -34,6 +35,23 @@ namespace acl::runtime {
 namespace {
 
 constexpr std::string_view kTag = "acl.runtime.jvm";
+
+#if ACL_PROFILE_AUTOMOTIVE
+// The composition-root audio route for the media bridge: renders the now-playing
+// track to acl::audio -> PipeWire. The demo MediaBrowserService publishes no PCM
+// stream (real apps feed decoded PCM via AudioTrack, which already routes to
+// acl::audio), so this plays a short representative tone — audible with
+// ACL_AUDIO=pipewire, silent/deterministic with ACL_AUDIO=null.
+class ToneAudioRoute : public hosts::media::AudioRoute {
+ public:
+  std::uint64_t play(const hosts::media::NowPlaying& now) override {
+    audio::ToneSpec spec;
+    spec.seconds = 0.4;
+    spec.freq_hz = now.state == hosts::media::Playback::Playing ? 523 : 440;  // C5/A4
+    return audio::play_tone(spec);
+  }
+};
+#endif
 
 std::string join(const std::vector<std::string>& parts, char sep) {
   std::string out;
@@ -223,6 +241,9 @@ class JvmVm final : public Vm {
     } else {
       log::i(kTag, "hosting MediaBrowserService {}", service_class);
       log_context(svc);
+#if ACL_PROFILE_AUTOMOTIVE
+      hosts::media::MediaBridge::instance().set_audio_route(&audio_route_);
+#endif
       result = call_lifecycle(cls, svc, "onCreate", "()V", false);
       if (result.is_ok()) probe_managers(svc);  // the app's MediaSession now shows up
       if (result.is_ok()) result = read_session(cls, svc);
@@ -968,6 +989,12 @@ class JvmVm final : public Vm {
       log::i(kTag, "MediaBridge: dispatching command {} -> {}",
              hosts::media::command_name(c), method);
       dispatch_callback(cb, cb_cls, method);
+      if (c == hosts::media::Command::Play) {
+        // Playback started: the bridge routes the now-playing audio to the device.
+        const std::uint64_t frames = bridge.route_now_playing();
+        log::i(kTag, "MediaBridge: routing now-playing '{}' to PipeWire ({} frames)",
+               bridge.snapshot().title, frames);
+      }
     }
 #else
     for (const char* action : {"onPlay", "onPause"}) dispatch_callback(cb, cb_cls, action);
@@ -1019,6 +1046,9 @@ class JvmVm final : public Vm {
   VmConfig config_;
   JavaVM* jvm_ = nullptr;
   JNIEnv* env_ = nullptr;
+#if ACL_PROFILE_AUTOMOTIVE
+  ToneAudioRoute audio_route_;  // media bridge -> acl::audio -> PipeWire
+#endif
 };
 
 }  // namespace

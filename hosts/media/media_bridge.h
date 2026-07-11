@@ -55,6 +55,18 @@ struct MprisMetadata {
   std::string artist;           // xesam:artist
 };
 
+// The device audio route for the bridge's now-playing audio. The concrete backend
+// (acl::audio -> PipeWire) is injected by the composition root (the runtime), so
+// hosts/media stays independent of the audio module and its build order. Real media
+// apps feed decoded PCM via AudioTrack (which already routes to acl::audio); this is
+// the seam by which the bridge itself drives playback to the device.
+class AudioRoute {
+ public:
+  virtual ~AudioRoute() = default;
+  // Play the current track; returns frames written (0 if nothing was played).
+  virtual std::uint64_t play(const NowPlaying& now) = 0;
+};
+
 class MediaBridge {
  public:
   // Northbound publication (hosted app -> bridge). Assigns the next generation.
@@ -62,6 +74,12 @@ class MediaBridge {
   NowPlaying snapshot() const;
   MprisMetadata mpris() const;
   std::uint64_t generation() const;
+
+  // Install (or clear, with nullptr) the device audio route.
+  void set_audio_route(AudioRoute* route);
+  // Route the current now-playing audio to the device; returns frames written
+  // (0 when no route is installed). Used when playback starts.
+  std::uint64_t route_now_playing();
 
   // The app's browse tree (root id + child titles), published after onLoadChildren.
   void publish_browse(std::string root_id, std::vector<std::string> items);
@@ -84,6 +102,7 @@ class MediaBridge {
   std::vector<std::string> browse_items_;
   std::deque<Command> commands_;
   std::uint64_t gen_ = 0;
+  AudioRoute* audio_ = nullptr;
 };
 
 const char* module_name() noexcept;
