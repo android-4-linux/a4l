@@ -58,8 +58,8 @@ STRINGS = [
     "V", "I", "J", "F",
     "VL", "VJ", "L", "VI", "VFFFFL",
     "<init>", "onCreate", "setContentView", "doFrame", "onDraw", "invalidate",
-    "getWidth", "getInstance", "postFrameCallback", "setColor", "drawColor",
-    "drawRect", "frame",
+    "getWidth", "getHeight", "getInstance", "postFrameCallback", "setColor",
+    "drawColor", "drawRect", "frame",
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 TYPES = [MAINACT, ANIMVIEW, ACTIVITY, VIEW, CONTEXT, BUNDLE, CANVAS, PAINT, CHOREO,
@@ -95,7 +95,7 @@ def code_item(regs, ins, outs, insns):
 def build_dex():
     header_size = 112
     n_strings = len(STRINGS)
-    n_types, n_protos, n_fields, n_methods, n_classdefs = len(TYPES), 11, 1, 17, 2
+    n_types, n_protos, n_fields, n_methods, n_classdefs = len(TYPES), 11, 1, 18, 2
 
     off_string_ids = header_size
     off_type_ids = off_string_ids + n_strings * 4
@@ -174,9 +174,12 @@ def build_dex():
         0xB007,                   # move-object v0, v11 (canvas)
         0x0114, 0x0000, 0x0000,   # const v1, 0.0f
         0xA652, 0x0000,           # iget v6, v10, frame (f0)
-        0x07DA, 0x0806,           # mul-int/lit8 v7, v6, 8   (y)
+        0x07DA, 0x1806,           # mul-int/lit8 v7, v6, 24  (y0 = frame*24)
+        0x106E, 0x0011, 0x000A,   # invoke-virtual {v10}, getHeight (m17)
+        0x090A,                   # move-result v9           (height)
+        0x0794, 0x0907,           # rem-int v7, v7, v9       (y = y0 % height -> loops)
         0x7282,                   # int-to-float v2, v7      (yf)
-        0x08D8, 0x1807,           # add-int/lit8 v8, v7, 24  (yb)
+        0x08D8, 0x3007,           # add-int/lit8 v8, v7, 48  (yb = y+48)
         0x8482,                   # int-to-float v4, v8      (ybf)
         0x106E, 0x000A, 0x000A,   # invoke-virtual {v10}, getWidth (m10)
         0x060A,                   # move-result v6
@@ -253,6 +256,7 @@ def build_dex():
         m(PAINT, 9, "setColor"),           # m14
         m(CANVAS, 9, "drawColor"),         # m15
         m(CANVAS, 10, "drawRect"),         # m16
+        m(VIEW, 6, "getHeight"),           # m17
     ])
     class_defs = b""
     class_defs += struct.pack("<IIIIIIII",

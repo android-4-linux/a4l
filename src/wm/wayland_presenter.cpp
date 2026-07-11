@@ -166,10 +166,14 @@ class Presenter {
     surface_.Get()->Commit();  // trigger the first configure
 
     const int fd = wl_display_get_fd(display_.Get());
+    // A bounded run (a test / fixed frame count) gets a safety deadline so it can't
+    // hang; an unbounded run (--present-frames=0) presents until the user closes the
+    // window, so it has no deadline.
+    const bool bounded = max_frames_ != 0;
     const std::uint64_t deadline = now_ns(CLOCK_MONOTONIC) + 15ull * 1000000000ull;
     bool clean = true;
     while (!closed_) {
-      if (now_ns(CLOCK_MONOTONIC) > deadline) { log::w(kTag, "present: loop deadline exceeded"); clean = false; break; }
+      if (bounded && now_ns(CLOCK_MONOTONIC) > deadline) { log::w(kTag, "present: loop deadline exceeded"); clean = false; break; }
       // Render on each vsync tick, up to the frame budget.
       if (configured_ && need_frame_ && (max_frames_ == 0 || frame_index_ < max_frames_)) {
         need_frame_ = false;
@@ -190,7 +194,8 @@ class Presenter {
            "present loop stopped: {} frame(s) committed, {} shown, {} presentation-feedback, {} ({})",
            frame_index_, frame_callbacks_, presented_count_,
            closed_ ? "toplevel closed" : "done", clean ? "clean" : "aborted");
-    return clean && !closed_ && frame_index_ > 0;
+    // A user-initiated close is a clean, successful exit (not an abort).
+    return clean && frame_index_ > 0;
   }
 
   // wp_presentation feedback — the vsync clock that aligns the frame time.
