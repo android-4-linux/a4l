@@ -24,7 +24,8 @@ namespace {
 
 wl_display* g_display = nullptr;
 std::uint32_t g_serial = 0;
-wl_resource* g_pointer = nullptr;  // the client's wl_pointer, for injecting a tap
+wl_resource* g_pointer = nullptr;   // the client's wl_pointer, for injecting a tap
+wl_resource* g_keyboard = nullptr;  // the client's wl_keyboard, for injecting a key
 void arm_shutdown();  // defined below; called after close is sent
 
 struct Surf {
@@ -79,7 +80,17 @@ void surface_commit(wl_client*, wl_resource* r) {
       wl_pointer_send_button(g_pointer, ++g_serial, 1, 0x110 /*BTN_LEFT*/, WL_POINTER_BUTTON_STATE_PRESSED);
       wl_pointer_send_button(g_pointer, ++g_serial, 2, 0x110, WL_POINTER_BUTTON_STATE_RELEASED);
     }
-    std::fprintf(stderr, "close-compositor: window mapped -> sent pointer tap + xdg_toplevel.close\n");
+    // Inject a key press+release (KEY_A) — no keymap sent, so the client sees the
+    // evdev keycode (the ViewRoot driver maps it to an Android keycode).
+    if (g_keyboard != nullptr) {
+      wl_array keys;
+      wl_array_init(&keys);
+      wl_keyboard_send_enter(g_keyboard, ++g_serial, r, &keys);
+      wl_array_release(&keys);
+      wl_keyboard_send_key(g_keyboard, ++g_serial, 10, 30 /*KEY_A*/, WL_KEYBOARD_KEY_STATE_PRESSED);
+      wl_keyboard_send_key(g_keyboard, ++g_serial, 11, 30, WL_KEYBOARD_KEY_STATE_RELEASED);
+    }
+    std::fprintf(stderr, "close-compositor: window mapped -> sent pointer tap + key + xdg_toplevel.close\n");
     xdg_toplevel_send_close(s->xdg_toplevel);
     s->close_sent = true;
     arm_shutdown();
@@ -153,12 +164,20 @@ void pointer_release(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
 const struct wl_pointer_interface pointer_impl = {pointer_set_cursor, pointer_release};
 void pointer_res_destroy(wl_resource*) { g_pointer = nullptr; }
 
+// ── wl_keyboard (server side; sends key events to the client) ─────────────────
+void keyboard_release(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+const struct wl_keyboard_interface keyboard_impl = {keyboard_release};
+void keyboard_res_destroy(wl_resource*) { g_keyboard = nullptr; }
+
 // ── wl_seat ───────────────────────────────────────────────────────────────────
 void seat_get_pointer(wl_client* c, wl_resource* r, uint32_t id) {
   g_pointer = wl_resource_create(c, &wl_pointer_interface, wl_resource_get_version(r), id);
   wl_resource_set_implementation(g_pointer, &pointer_impl, nullptr, pointer_res_destroy);
 }
-void seat_get_keyboard(wl_client*, wl_resource*, uint32_t) {}  // client never requests these
+void seat_get_keyboard(wl_client* c, wl_resource* r, uint32_t id) {
+  g_keyboard = wl_resource_create(c, &wl_keyboard_interface, wl_resource_get_version(r), id);
+  wl_resource_set_implementation(g_keyboard, &keyboard_impl, nullptr, keyboard_res_destroy);
+}
 void seat_get_touch(wl_client*, wl_resource*, uint32_t) {}
 void seat_release(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
 const struct wl_seat_interface seat_impl = {
@@ -168,7 +187,7 @@ const struct wl_seat_interface seat_impl = {
 void bind_seat(wl_client* c, void*, uint32_t version, uint32_t id) {
   wl_resource* r = wl_resource_create(c, &wl_seat_interface, static_cast<int>(version), id);
   wl_resource_set_implementation(r, &seat_impl, nullptr, nullptr);
-  wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_POINTER);
+  wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
 }
 void bind_compositor(wl_client* c, void*, uint32_t version, uint32_t id) {
   wl_resource* r = wl_resource_create(c, &wl_compositor_interface, static_cast<int>(version), id);

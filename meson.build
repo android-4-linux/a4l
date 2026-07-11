@@ -69,6 +69,7 @@ wcs_scanner = disabler()
 wcs_dep = declare_dependency()   # empty no-op placeholder (wl/ header include added below)
 wayland_dep = dependency('wayland-client', required : false)
 wayland_server_dep = dependency('wayland-server', required : false)  # test compositor only
+xkbcommon_dep = dependency('xkbcommon', required : false)  # wcs KeyboardHandler (keymap + keysyms)
 wl_scanner_dep = dependency('wayland-scanner', required : false)
 wp_dep = dependency('wayland-protocols', required : false)
 fs = import('fs')
@@ -80,7 +81,7 @@ if wcs_root == ''
     wcs_root = cand
   endif
 endif
-if wcs_root != '' and wayland_dep.found() and wl_scanner_dep.found() and wp_dep.found()
+if wcs_root != '' and wayland_dep.found() and wl_scanner_dep.found() and wp_dep.found() and xkbcommon_dep.found()
   wcs_scanner_bin = wcs_root / 'build' / 'src' / 'wayland-cxx-scanner'
   if fs.exists(wcs_scanner_bin) and fs.exists(wcs_root / 'include' / 'wl' / 'proxy_impl.hpp')
     wcs_scanner = find_program(wcs_scanner_bin, required : false)

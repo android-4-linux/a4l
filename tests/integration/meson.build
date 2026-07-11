@@ -104,6 +104,7 @@ if py3.found() and have_jni
                     '../../framework/shim/android/view/ViewGroup.java',
                     '../../framework/shim/android/view/Choreographer.java',
                     '../../framework/shim/android/view/MotionEvent.java',
+                    '../../framework/shim/android/view/KeyEvent.java',
                     '../../framework/shim/android/util/Log.java'),
       output : 'framework-shim',
       command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
@@ -263,6 +264,25 @@ if py3.found() and have_jni
         args : [files('run_touch_test.py'), aclcxx_exe, touch_apk, framework_shim,
                 close_compositor],
         depends : [aclcxx_exe, touch_apk, framework_shim, close_compositor],
+        timeout : 120,
+      )
+
+      # Tier C (keyboard): key.apk's KeyView.onKeyDown logs. The same test compositor
+      # advertises a keyboard and injects a key press (KEY_A), which the ViewRoot
+      # driver turns into a KeyEvent (evdev->Android keycode) and dispatches.
+      key_apk = custom_target(
+        'key-apk',
+        input : files('../fixtures/make_key_apk.py'),
+        output : 'key.apk',
+        command : [py3, '@INPUT@', '@OUTPUT@'],
+        depend_files : files('../fixtures/make_axml.py'),
+      )
+      test(
+        'run-apk-key-present',
+        py3,
+        args : [files('run_key_test.py'), aclcxx_exe, key_apk, framework_shim,
+                close_compositor],
+        depends : [aclcxx_exe, key_apk, framework_shim, close_compositor],
         timeout : 120,
       )
     endif

@@ -12,6 +12,7 @@
 
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <ctime>
@@ -430,8 +431,17 @@ class JvmVm final : public Vm {
       motionevent_cls = env_->NewGlobalRef(mecls);
       env_->DeleteLocalRef(mecls);
     }
+    // android.view.KeyEvent.obtain + the view's dispatchKeyEvent, for key input.
+    jobject keyevent_cls = nullptr;
+    jmethodID ke_obtain = nullptr, dispatch_key = nullptr;
+    if (jclass kecls = env_->FindClass("android/view/KeyEvent")) {
+      ke_obtain = env_->GetStaticMethodID(kecls, "obtain", "(II)Landroid/view/KeyEvent;");
+      keyevent_cls = env_->NewGlobalRef(kecls);
+      env_->DeleteLocalRef(kecls);
+    }
     if (jclass vc = env_->GetObjectClass(view)) {
       dispatch_touch = env_->GetMethodID(vc, "dispatchTouchEvent", "(Landroid/view/MotionEvent;)Z");
+      dispatch_key = env_->GetMethodID(vc, "dispatchKeyEvent", "(Landroid/view/KeyEvent;)Z");
       env_->DeleteLocalRef(vc);
     }
     clear_exception();
@@ -447,9 +457,9 @@ class JvmVm final : public Vm {
       out.blit(surface->data());
       return true;  // present until the frame budget / window close
     };
-    // Deliver a pointer input as a MotionEvent into the content view.
+    // Deliver a pointer as a MotionEvent and a key as a KeyEvent into the content view.
     std::uint64_t down_time = 0;
-    const auto input = [&, this](const wm::PointerInput& ev) {
+    const auto on_pointer = [&, this](const wm::PointerInput& ev) {
       if (motionevent_cls == nullptr || me_obtain == nullptr || dispatch_touch == nullptr) return;
       const jint action = ev.action == wm::PointerInput::Action::Down ? 0
                         : ev.action == wm::PointerInput::Action::Up   ? 1 : 2;  // DOWN/UP/MOVE
@@ -465,10 +475,51 @@ class JvmVm final : public Vm {
       }
       if (env_->ExceptionCheck() == JNI_TRUE) clear_exception();
     };
+    const auto on_key = [&, this](const wm::KeyInput& ev) {
+      if (keyevent_cls == nullptr || ke_obtain == nullptr || dispatch_key == nullptr) return;
+      const jint action = ev.action == wm::KeyInput::Action::Down ? 0 : 1;  // ACTION_DOWN/UP
+      jobject ke = env_->CallStaticObjectMethod(static_cast<jclass>(keyevent_cls), ke_obtain,
+                                                action, android_keycode(ev.keycode));
+      if (ke != nullptr) {
+        env_->CallBooleanMethod(view, dispatch_key, ke);
+        env_->DeleteLocalRef(ke);
+      }
+      if (env_->ExceptionCheck() == JNI_TRUE) clear_exception();
+    };
+    const wm::InputCallback input = [&](const wm::InputEvent& ev) {
+      if (const auto* p = std::get_if<wm::PointerInput>(&ev)) on_pointer(*p);
+      else if (const auto* k = std::get_if<wm::KeyInput>(&ev)) on_key(*k);
+    };
     wm::present_loop(w, h, pkg.empty() ? "aclcxx" : pkg,
                      pkg.empty() ? "org.aclcxx.app" : pkg, render, input, config_.present_frames);
     if (choreo != nullptr) env_->DeleteLocalRef(choreo);
     if (motionevent_cls != nullptr) env_->DeleteGlobalRef(motionevent_cls);
+    if (keyevent_cls != nullptr) env_->DeleteGlobalRef(keyevent_cls);
+  }
+
+  // Map a Linux evdev scancode to an Android KeyEvent keycode (a small practical
+  // subset; unmapped keys become KEYCODE_UNKNOWN=0). Mirrors Android's Generic.kl.
+  static jint android_keycode(std::uint32_t evdev) {
+    switch (evdev) {
+      case 30: return 29;  case 48: return 30;  case 46: return 31;  case 32: return 32;  // A B C D
+      case 18: return 33;  case 33: return 34;  case 34: return 35;  case 35: return 36;  // E F G H
+      case 23: return 37;  case 36: return 38;  case 37: return 39;  case 38: return 40;  // I J K L
+      case 50: return 41;  case 49: return 42;  case 24: return 43;  case 25: return 44;  // M N O P
+      case 16: return 45;  case 19: return 46;  case 31: return 47;  case 20: return 48;  // Q R S T
+      case 22: return 49;  case 47: return 50;  case 17: return 51;  case 45: return 52;  // U V W X
+      case 21: return 53;  case 44: return 54;                                            // Y Z
+      case 2: return 8;   case 3: return 9;   case 4: return 10;  case 5: return 11;       // 1 2 3 4
+      case 6: return 12;  case 7: return 13;  case 8: return 14;  case 9: return 15;       // 5 6 7 8
+      case 10: return 16; case 11: return 7;                                               // 9 0
+      case 28: return 66;  // ENTER
+      case 57: return 62;  // SPACE
+      case 1: return 111;  // ESC -> KEYCODE_ESCAPE
+      case 14: return 67;  // BACKSPACE -> KEYCODE_DEL
+      case 15: return 61;  // TAB
+      case 105: return 21; case 106: return 22;  // LEFT RIGHT
+      case 103: return 19; case 108: return 20;  // UP DOWN
+      default: return 0;   // KEYCODE_UNKNOWN
+    }
   }
 
   // A monotonic timestamp (ms-ish) for MotionEvent times; wall-clock isn't needed.

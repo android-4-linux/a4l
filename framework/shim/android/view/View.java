@@ -109,4 +109,20 @@ public class View {
   public boolean onTouchEvent(MotionEvent event) {
     return false;
   }
+
+  // Keyboard: the driver delivers a KeyEvent here; dispatch routes it to the
+  // action-specific hooks a view overrides. Real dispatch runs through the focus
+  // chain / IME; this is the leaf contract.
+  public boolean dispatchKeyEvent(KeyEvent event) {
+    if (event.getAction() == KeyEvent.ACTION_DOWN) {
+      return onKeyDown(event.getKeyCode(), event);
+    }
+    return onKeyUp(event.getKeyCode(), event);
+  }
+  public boolean onKeyDown(int keyCode, KeyEvent event) {
+    return false;
+  }
+  public boolean onKeyUp(int keyCode, KeyEvent event) {
+    return false;
+  }
 }

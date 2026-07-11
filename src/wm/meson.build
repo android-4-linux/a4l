@@ -44,7 +44,7 @@ if have_wcs
   # include_directories('.') resolves to BOTH src/wm (source) and build/src/wm
   # (where the generated headers land); wcs_dep supplies the wl/ framework headers.
   wm_inc += include_directories('.')
-  wm_deps += [wayland_dep, wcs_dep]
+  wm_deps += [wayland_dep, wcs_dep, xkbcommon_dep]
 else
   wm_sources += files('present_stub.cpp')
 endif

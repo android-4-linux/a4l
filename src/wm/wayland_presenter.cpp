@@ -38,6 +38,7 @@
 
 #include <wl/client_helpers.hpp>
 #include <wl/display.hpp>
+#include <wl/keyboard.hpp>
 #include <wl/pointer.hpp>
 #include <wl/presentation.hpp>
 #include <wl/present_feedback.hpp>
@@ -120,12 +121,19 @@ class SeatH : public CWlSeat<SeatH> {
  public:
   Presenter* app_ = nullptr;
   wl::WlPtr<wl::PointerHandler<Presenter>>* pointer_slot_ = nullptr;
+  wl::WlPtr<wl::KeyboardHandler<Presenter>>* keyboard_slot_ = nullptr;
   void OnCapabilities(uint32_t caps) override {
     if ((caps & WL_SEAT_CAPABILITY_POINTER) != 0u && pointer_slot_ != nullptr &&
         pointer_slot_->IsNull()) {
       if (wl::SetupHandler(*pointer_slot_,
               wl::construct<wl_pointer_traits, wl_seat_traits::Op::GetPointer>(*this)))
         pointer_slot_->Get()->app_ = app_;
+    }
+    if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) != 0u && keyboard_slot_ != nullptr &&
+        keyboard_slot_->IsNull()) {
+      if (wl::SetupHandler(*keyboard_slot_,
+              wl::construct<wl_keyboard_traits, wl_seat_traits::Op::GetKeyboard>(*this)))
+        keyboard_slot_->Get()->app_ = app_;
     }
   }
 };
@@ -171,7 +179,8 @@ class Presenter {
     if (!presentation_.Bind(registry_, this)) return false;  // wp_presentation (optional)
     if (seat_name_ != 0 && wl::BindHandler<wl_seat_traits>(registry_, seat_, seat_name_, seat_ver_)) {
       seat_.Get()->app_ = this;
-      seat_.Get()->pointer_slot_ = &pointer_;  // wl_pointer created on the capabilities event
+      seat_.Get()->pointer_slot_ = &pointer_;    // wl_pointer created on the capabilities event
+      seat_.Get()->keyboard_slot_ = &keyboard_;  // wl_keyboard created likewise
     }
     if (!wl::RoundtripWithTimeout(display_.Get())) return false;  // shm formats + clock_id + seat caps
 
@@ -254,6 +263,16 @@ class Presenter {
     deliver(pressed ? PointerInput::Action::Down : PointerInput::Action::Up);
   }
 
+  // wl_keyboard -> app input (the native side of a KeyEvent). Repeat ticks are
+  // ignored for now (no repeat-fd in the loop); press/release deliver Down/Up.
+  void OnKey(const wl::KeyEvent& e) {
+    if (e.repeat) return;
+    if (input_ == nullptr || !*input_) return;
+    const bool pressed = e.state == WL_KEYBOARD_KEY_STATE_PRESSED;
+    (*input_)(KeyInput{pressed ? KeyInput::Action::Down : KeyInput::Action::Up,
+                       e.key, static_cast<std::uint32_t>(e.keysym)});
+  }
+
  private:
   // The vsync-aligned time for the frame about to be drawn: the last presentation
   // time plus one refresh interval (Choreographer.frameTimeNanos), or the raw
@@ -331,7 +350,8 @@ class Presenter {
   wl::WlPtr<wl::XdgToplevelHandler<Presenter>> xdg_toplevel_;
   wl::PresentationManager<Presenter> presentation_;
   wl::WlPtr<SeatH> seat_;
-  wl::WlPtr<wl::PointerHandler<Presenter>> pointer_;  // created on wl_seat capabilities
+  wl::WlPtr<wl::PointerHandler<Presenter>> pointer_;   // created on wl_seat capabilities
+  wl::WlPtr<wl::KeyboardHandler<Presenter>> keyboard_;  // created on wl_seat capabilities
   Buf bufs_[kBuffers];
   FrameH frame_;  // direct member: stable address for the dispatcher
   ShmMapping mem_;

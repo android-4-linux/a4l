@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <string_view>
+#include <variant>
 
 #include "gfx/gfx.h"
 
@@ -43,8 +44,18 @@ struct PointerInput {
   float x;
   float y;
 };
-// Called (on the present thread) when a pointer input arrives. May be empty.
-using InputCallback = std::function<void(const PointerInput&)>;
+// A key from the compositor (wl_keyboard), delivered as the native side of an
+// android.view.KeyEvent. `keycode` is the Linux evdev scancode; `keysym` is the
+// xkb keysym (0 if no keymap). The app-facing Android keycode is mapped downstream.
+struct KeyInput {
+  enum class Action { Down, Up };
+  Action action;
+  std::uint32_t keycode;  // Linux evdev (KEY_A, KEY_ENTER, …)
+  std::uint32_t keysym;   // xkb keysym, or 0
+};
+using InputEvent = std::variant<PointerInput, KeyInput>;
+// Called (on the present thread) when an input event arrives. May be empty.
+using InputCallback = std::function<void(const InputEvent&)>;
 
 // Run a continuous present loop driven by wl_surface.frame (the vsync tick) with
 // wp_presentation timing feedback — the native analogue of Android's Choreographer
