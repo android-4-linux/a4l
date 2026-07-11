@@ -4,8 +4,9 @@
 # gfx/ — Skia-backed Canvas/Surface/Paint/Bitmap JNI (skia-shm/egl/vulkan-dmabuf
 # via wcs canvases), text stack (Skia + HarfBuzz/ICU/fontconfig; minikin fallback).
 # Single pinned Skia shared with wcs (no ODR duplication) — see A02.2.
-module_libs += static_library(
+gfx_lib = static_library(
   'aclcxx_gfx',
   files('gfx.cpp'),
   include_directories : [config_inc, core_inc],
 )
+module_libs += gfx_lib

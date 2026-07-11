@@ -28,6 +28,10 @@ class Surface {
   int width() const { return width_; }
   int height() const { return height_; }
 
+  // Row-major ARGB_8888 pixel data (width*height), for blitting into a
+  // presentation buffer (wm/). Valid while the Surface is alive.
+  const std::uint32_t* data() const { return pixels_.data(); }
+
  private:
   int width_;
   int height_;

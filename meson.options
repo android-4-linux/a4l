@@ -14,3 +14,10 @@ option(
   value : true,
   description : 'Build the Tier A unit tests and test harnesses under tests/.',
 )
+
+option(
+  'wcs_root',
+  type : 'string',
+  value : '',
+  description : 'Path to the wayland-cxx-scanner (wcs) checkout providing the CRTP Wayland bindings (scanner tool + wl/ header framework). Empty auto-detects a sibling checkout. When wcs + wayland-client are found, wm/ builds the real Wayland presenter; otherwise wm/ is a stub. Consumed as a prebuilt artifact per plan.md Addendum A02.',
+)

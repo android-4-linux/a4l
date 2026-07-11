@@ -57,11 +57,51 @@ endif
 pw_dep = dependency('libpipewire-0.3', required : false)
 have_pipewire = pw_dep.found()
 
+# wm/ windowing backend: wayland-cxx-scanner (wcs) CRTP bindings over wayland-client
+# (plan.md Addendum A02). wcs is consumed as a prebuilt artifact: its scanner tool
+# generates C++ protocol headers and its header-only wl/ framework provides the CRTP
+# proxy classes + xdg-shell tables. When wcs + wayland-client + wayland-protocols are
+# all present, wm/ builds the real Wayland shm presenter; otherwise wm/ is a stub and
+# the Tier-C presentation test is skipped.
+have_wcs = false
+wcs_scanner = disabler()
+wcs_dep = declare_dependency()   # empty no-op placeholder (wl/ header include added below)
+wayland_dep = dependency('wayland-client', required : false)
+wl_scanner_dep = dependency('wayland-scanner', required : false)
+wp_dep = dependency('wayland-protocols', required : false)
+fs = import('fs')
+wcs_root = get_option('wcs_root')
+if wcs_root == ''
+  # Auto-detect a sibling checkout next to this repo.
+  cand = meson.project_source_root() / '..' / 'wayland-cxx-scanner'
+  if fs.exists(cand / 'include' / 'wl' / 'proxy_impl.hpp')
+    wcs_root = cand
+  endif
+endif
+if wcs_root != '' and wayland_dep.found() and wl_scanner_dep.found() and wp_dep.found()
+  wcs_scanner_bin = wcs_root / 'build' / 'src' / 'wayland-cxx-scanner'
+  if fs.exists(wcs_scanner_bin) and fs.exists(wcs_root / 'include' / 'wl' / 'proxy_impl.hpp')
+    wcs_scanner = find_program(wcs_scanner_bin, required : false)
+    if wcs_scanner.found()
+      have_wcs = true
+      # wcs is an external sibling checkout; pass its header-only wl/ framework
+      # include dir as a -I compile arg (like jni_dep for the external JDK) — an
+      # absolute out-of-tree path can't go through include_directories().
+      wcs_dep = declare_dependency(compile_args : ['-I' + wcs_root / 'include'])
+      wl_proto_dir = wp_dep.get_variable('pkgdatadir')
+      wl_core_xml = wl_scanner_dep.get_variable('pkgdatadir') / 'wayland.xml'
+      xdg_shell_xml = wl_proto_dir / 'stable' / 'xdg-shell' / 'xdg-shell.xml'
+      message('wm/ Wayland presenter enabled: wcs at ' + wcs_root)
+    endif
+  endif
+endif
+
 conf = configuration_data()
 conf.set('ACLCXX_VERSION', '"' + meson.project_version() + '"')
 conf.set10('ACLCXX_PROFILE_AUTOMOTIVE', profile_automotive)
 conf.set10('ACLCXX_HAVE_JNI', have_jni)
 conf.set10('ACLCXX_HAVE_PIPEWIRE', have_pipewire)
+conf.set10('ACLCXX_HAVE_WCS', have_wcs)
 # javac matched to the detected libjvm (same java_home), for the DEX->JVM
 # converter. Empty when no JDK; the converter then needs an explicit path.
 conf.set('ACLCXX_JAVAC',

@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: Apache-2.0
+// Provenance: plan.md §2, ADR-6, Addendum A02. No GPL-3.0 sources.
+//
+// Fallback wm/ presenter, compiled when wcs + wayland-client are NOT available
+// (ACLCXX_HAVE_WCS off). Presentation reports as unavailable; the rest of aclcxx
+// (View traversal, gfx raster, headless pixel verification) is unaffected.
+
+#include "wm/present.h"
+
+#include "log/log.h"
+
+namespace aclcxx::wm {
+
+bool wayland_available() noexcept { return false; }
+
+bool present_surface(const gfx::Surface&, std::string_view, std::string_view,
+                     int) noexcept {
+  log::w("aclcxx.wm",
+         "Wayland presentation unavailable: built without wcs/wayland-client "
+         "(-Dwcs_root=<path>); the frame was rendered but not shown");
+  return false;
+}
+
+}  // namespace aclcxx::wm
