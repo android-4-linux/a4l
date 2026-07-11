@@ -98,4 +98,15 @@ public class View {
   protected void dispatchDraw(Canvas canvas) {}
 
   public void invalidate() {}
+
+  // Input: the ViewRoot driver delivers a pointer as a MotionEvent here; a leaf
+  // view handles it in onTouchEvent. Real dispatch hit-tests and walks the tree
+  // (ViewGroup.dispatchTouchEvent) and includes gesture/focus machinery — that
+  // arrives with the input pipeline; this is the leaf contract an app overrides.
+  public boolean dispatchTouchEvent(MotionEvent event) {
+    return onTouchEvent(event);
+  }
+  public boolean onTouchEvent(MotionEvent event) {
+    return false;
+  }
 }

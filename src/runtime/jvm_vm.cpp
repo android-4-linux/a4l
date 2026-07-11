@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include <ctime>
+
 #include <jni.h>
 
 #include "gfx/gfx.h"
@@ -418,23 +420,63 @@ class JvmVm final : public Vm {
       do_frame = env_->GetMethodID(ch_cls, "aclcxxDoFrame", "(J)J");
       env_->DeleteLocalRef(ch_cls);
     }
+    // android.view.MotionEvent.obtain + the view's dispatchTouchEvent, for pointer
+    // input. Optional: absent shims => input is simply not delivered.
+    jobject motionevent_cls = nullptr;
+    jmethodID me_obtain = nullptr, me_recycle = nullptr, dispatch_touch = nullptr;
+    if (jclass mecls = env_->FindClass("android/view/MotionEvent")) {
+      me_obtain = env_->GetStaticMethodID(mecls, "obtain", "(JJIFFI)Landroid/view/MotionEvent;");
+      me_recycle = env_->GetMethodID(mecls, "recycle", "()V");
+      motionevent_cls = env_->NewGlobalRef(mecls);
+      env_->DeleteLocalRef(mecls);
+    }
+    if (jclass vc = env_->GetObjectClass(view)) {
+      dispatch_touch = env_->GetMethodID(vc, "dispatchTouchEvent", "(Landroid/view/MotionEvent;)Z");
+      env_->DeleteLocalRef(vc);
+    }
     clear_exception();
 
     const std::string& pkg = config_.package_name;
     const auto render = [&](gfx::Surface& out, std::uint64_t frame_time_ns,
-                            std::uint64_t idx) -> bool {
-      jlong fired = 0;
+                            std::uint64_t /*idx*/) -> bool {
       if (choreo != nullptr && do_frame != nullptr)
-        fired = env_->CallLongMethod(choreo, do_frame, static_cast<jlong>(frame_time_ns));
+        env_->CallLongMethod(choreo, do_frame, static_cast<jlong>(frame_time_ns));
       if (env_->ExceptionCheck() == JNI_TRUE) { fail_with_exception("Choreographer.doFrame"); return false; }
       if (draw != nullptr) env_->CallVoidMethod(view, draw, canvas);  // re-draw with updated state
       if (env_->ExceptionCheck() == JNI_TRUE) { fail_with_exception("View.draw"); return false; }
       out.blit(surface->data());
-      return !(fired == 0 && idx > 0);  // static app: present frame 0, then stop
+      return true;  // present until the frame budget / window close
+    };
+    // Deliver a pointer input as a MotionEvent into the content view.
+    std::uint64_t down_time = 0;
+    const auto input = [&, this](const wm::PointerInput& ev) {
+      if (motionevent_cls == nullptr || me_obtain == nullptr || dispatch_touch == nullptr) return;
+      const jint action = ev.action == wm::PointerInput::Action::Down ? 0
+                        : ev.action == wm::PointerInput::Action::Up   ? 1 : 2;  // DOWN/UP/MOVE
+      if (action == 0) down_time = frame_index_now();
+      const jlong t = static_cast<jlong>(frame_index_now());
+      jobject me = env_->CallStaticObjectMethod(
+          static_cast<jclass>(motionevent_cls), me_obtain, static_cast<jlong>(down_time), t,
+          action, static_cast<jfloat>(ev.x), static_cast<jfloat>(ev.y), 0);
+      if (me != nullptr) {
+        env_->CallBooleanMethod(view, dispatch_touch, me);
+        if (me_recycle != nullptr) env_->CallVoidMethod(me, me_recycle);
+        env_->DeleteLocalRef(me);
+      }
+      if (env_->ExceptionCheck() == JNI_TRUE) clear_exception();
     };
     wm::present_loop(w, h, pkg.empty() ? "aclcxx" : pkg,
-                     pkg.empty() ? "org.aclcxx.app" : pkg, render, config_.present_frames);
+                     pkg.empty() ? "org.aclcxx.app" : pkg, render, input, config_.present_frames);
     if (choreo != nullptr) env_->DeleteLocalRef(choreo);
+    if (motionevent_cls != nullptr) env_->DeleteGlobalRef(motionevent_cls);
+  }
+
+  // A monotonic timestamp (ms-ish) for MotionEvent times; wall-clock isn't needed.
+  static std::uint64_t frame_index_now() {
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<std::uint64_t>(ts.tv_sec) * 1000ull +
+           static_cast<std::uint64_t>(ts.tv_nsec) / 1000000ull;
   }
 
   // Print + clear a pending exception and return a RuntimeError describing `what`.

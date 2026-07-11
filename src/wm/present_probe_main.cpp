@@ -41,7 +41,8 @@ int present_animated(std::uint64_t frames) {
         return true;  // keep going; the loop stops at max_frames
       };
   const bool ok = aclcxx::wm::present_loop(kW, kH, "aclcxx present loop",
-                                           "com.aclcxx.present.loop", render, frames);
+                                           "com.aclcxx.present.loop", render,
+                                           aclcxx::wm::InputCallback{}, frames);
   std::fprintf(stderr, "wm-present-probe: %s\n", ok ? "LOOP-PRESENTED-OK" : "LOOP-FAILED");
   return ok ? 0 : 1;
 }

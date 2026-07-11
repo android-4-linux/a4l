@@ -138,6 +138,10 @@ zlib_dep = dependency('zlib')     # APK (zip) inflate in pkg/
 # Each module subdir appends its static_library to `module_libs`, which the
 # shell executable links. subdir() shares this scope, so the appends propagate.
 module_libs = []
+# The wm/ test compositor is built under src/wm (where the wcs/wayland-server
+# deps live) but consumed by tests/ (which runs later); a disabler default keeps
+# the variable defined when it isn't built. Tests using it are guarded to match.
+close_compositor = disabler()
 subdir('src')
 
 if profile_automotive

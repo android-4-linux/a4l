@@ -103,6 +103,7 @@ if py3.found() and have_jni
                     '../../framework/shim/android/view/View.java',
                     '../../framework/shim/android/view/ViewGroup.java',
                     '../../framework/shim/android/view/Choreographer.java',
+                    '../../framework/shim/android/view/MotionEvent.java',
                     '../../framework/shim/android/util/Log.java'),
       output : 'framework-shim',
       command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
@@ -239,6 +240,29 @@ if py3.found() and have_jni
         py3,
         args : [files('run_anim_present_test.py'), aclcxx_exe, anim_apk, framework_shim],
         depends : [aclcxx_exe, anim_apk, framework_shim],
+        timeout : 120,
+      )
+    endif
+
+    # Tier C (input): touch.apk's TouchView.onTouchEvent logs + repaints. The wm/
+    # test compositor (close_compositor, built under src/wm when wayland-server +
+    # wayland-scanner are present) injects a pointer tap, which the ViewRoot driver
+    # turns into a MotionEvent and dispatches into the view. Uses the compositor,
+    # not Weston (headless Weston has no input to inject).
+    if have_wcs and wayland_server_dep.found() and find_program('wayland-scanner', required : false).found()
+      touch_apk = custom_target(
+        'touch-apk',
+        input : files('../fixtures/make_touch_apk.py'),
+        output : 'touch.apk',
+        command : [py3, '@INPUT@', '@OUTPUT@'],
+        depend_files : files('../fixtures/make_axml.py'),
+      )
+      test(
+        'run-apk-touch-present',
+        py3,
+        args : [files('run_touch_test.py'), aclcxx_exe, touch_apk, framework_shim,
+                close_compositor],
+        depends : [aclcxx_exe, touch_apk, framework_shim, close_compositor],
         timeout : 120,
       )
     endif

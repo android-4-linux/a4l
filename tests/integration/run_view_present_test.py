@@ -66,7 +66,7 @@ def main() -> int:
 
         penv = dict(env)
         penv["WAYLAND_DISPLAY"] = socket
-        p = subprocess.run([aclcxx, "run", apk, "--vm=jvm", "--framework=" + fw, "--present"],
+        p = subprocess.run([aclcxx, "run", apk, "--vm=jvm", "--framework=" + fw, "--present-frames=1"],
                            env=penv, capture_output=True, text=True, timeout=60)
         out = p.stdout + p.stderr
         # The app renders the tree AND presents it; require both the traversal and

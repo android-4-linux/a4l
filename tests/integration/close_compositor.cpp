@@ -24,6 +24,7 @@ namespace {
 
 wl_display* g_display = nullptr;
 std::uint32_t g_serial = 0;
+wl_resource* g_pointer = nullptr;  // the client's wl_pointer, for injecting a tap
 void arm_shutdown();  // defined below; called after close is sent
 
 struct Surf {
@@ -71,7 +72,14 @@ void surface_commit(wl_client*, wl_resource* r) {
       s->frame_cb = nullptr;
     }
     wl_buffer_send_release(s->pending_buffer);
-    std::fprintf(stderr, "close-compositor: window mapped -> sending xdg_toplevel.close\n");
+    // Inject a pointer tap (down+up at 100,50) so an app's onTouchEvent runs, then
+    // close. Ordered before close so the client dispatches the tap first.
+    if (g_pointer != nullptr) {
+      wl_pointer_send_enter(g_pointer, ++g_serial, r, wl_fixed_from_int(100), wl_fixed_from_int(50));
+      wl_pointer_send_button(g_pointer, ++g_serial, 1, 0x110 /*BTN_LEFT*/, WL_POINTER_BUTTON_STATE_PRESSED);
+      wl_pointer_send_button(g_pointer, ++g_serial, 2, 0x110, WL_POINTER_BUTTON_STATE_RELEASED);
+    }
+    std::fprintf(stderr, "close-compositor: window mapped -> sent pointer tap + xdg_toplevel.close\n");
     xdg_toplevel_send_close(s->xdg_toplevel);
     s->close_sent = true;
     arm_shutdown();
@@ -139,7 +147,29 @@ void wmbase_pong(wl_client*, wl_resource*, uint32_t) {}
 const struct xdg_wm_base_interface wmbase_impl = {
     wmbase_destroy, wmbase_create_positioner, wmbase_get_xdg_surface, wmbase_pong};
 
+// ── wl_pointer (server side; sends enter/button to the client) ────────────────
+void pointer_set_cursor(wl_client*, wl_resource*, uint32_t, wl_resource*, int32_t, int32_t) {}
+void pointer_release(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+const struct wl_pointer_interface pointer_impl = {pointer_set_cursor, pointer_release};
+void pointer_res_destroy(wl_resource*) { g_pointer = nullptr; }
+
+// ── wl_seat ───────────────────────────────────────────────────────────────────
+void seat_get_pointer(wl_client* c, wl_resource* r, uint32_t id) {
+  g_pointer = wl_resource_create(c, &wl_pointer_interface, wl_resource_get_version(r), id);
+  wl_resource_set_implementation(g_pointer, &pointer_impl, nullptr, pointer_res_destroy);
+}
+void seat_get_keyboard(wl_client*, wl_resource*, uint32_t) {}  // client never requests these
+void seat_get_touch(wl_client*, wl_resource*, uint32_t) {}
+void seat_release(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+const struct wl_seat_interface seat_impl = {
+    seat_get_pointer, seat_get_keyboard, seat_get_touch, seat_release};
+
 // ── globals ───────────────────────────────────────────────────────────────────
+void bind_seat(wl_client* c, void*, uint32_t version, uint32_t id) {
+  wl_resource* r = wl_resource_create(c, &wl_seat_interface, static_cast<int>(version), id);
+  wl_resource_set_implementation(r, &seat_impl, nullptr, nullptr);
+  wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_POINTER);
+}
 void bind_compositor(wl_client* c, void*, uint32_t version, uint32_t id) {
   wl_resource* r = wl_resource_create(c, &wl_compositor_interface, static_cast<int>(version), id);
   wl_resource_set_implementation(r, &compositor_impl, nullptr, nullptr);
@@ -178,6 +208,7 @@ int main(int argc, char** argv) {
   wl_display_init_shm(g_display);  // provides wl_shm/pool/buffer
   wl_global_create(g_display, &wl_compositor_interface, 4, nullptr, bind_compositor);
   wl_global_create(g_display, &xdg_wm_base_interface, 1, nullptr, bind_wmbase);
+  wl_global_create(g_display, &wl_seat_interface, 1, nullptr, bind_seat);
 
   wl_event_loop* loop = wl_display_get_event_loop(g_display);
   wl_event_source* timer = wl_event_loop_add_timer(loop, on_timeout, nullptr);

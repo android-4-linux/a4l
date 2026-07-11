@@ -38,6 +38,7 @@
 
 #include <wl/client_helpers.hpp>
 #include <wl/display.hpp>
+#include <wl/pointer.hpp>
 #include <wl/presentation.hpp>
 #include <wl/present_feedback.hpp>
 #include <wl/proxy_impl.hpp>
@@ -110,6 +111,25 @@ struct ShmMapping {
   }
 };
 
+class Presenter;
+
+// wl_seat: on the capabilities event, create the wl_pointer and point its handler
+// at the Presenter. Only uses Presenter as a pointer, so a forward declaration is
+// enough (kept above Presenter because Presenter owns a WlPtr<SeatH>).
+class SeatH : public CWlSeat<SeatH> {
+ public:
+  Presenter* app_ = nullptr;
+  wl::WlPtr<wl::PointerHandler<Presenter>>* pointer_slot_ = nullptr;
+  void OnCapabilities(uint32_t caps) override {
+    if ((caps & WL_SEAT_CAPABILITY_POINTER) != 0u && pointer_slot_ != nullptr &&
+        pointer_slot_->IsNull()) {
+      if (wl::SetupHandler(*pointer_slot_,
+              wl::construct<wl_pointer_traits, wl_seat_traits::Op::GetPointer>(*this)))
+        pointer_slot_->Get()->app_ = app_;
+    }
+  }
+};
+
 class Presenter {
  public:
   Presenter() = default;
@@ -118,11 +138,13 @@ class Presenter {
   ~Presenter() { presentation_.Release(); }
 
   bool Run(int w, int h, std::string_view title, std::string_view app_id,
-           const FrameCallback& render, std::uint64_t max_frames) {
+           const FrameCallback& render, const InputCallback& input,
+           std::uint64_t max_frames) {
     w_ = w;
     h_ = h;
     if (w_ <= 0 || h_ <= 0) { log::w(kTag, "present: empty surface"); return false; }
     render_ = &render;
+    input_ = &input;
     max_frames_ = max_frames;
 
     if (!display_.Connect()) { log::w(kTag, "present: no Wayland display"); return false; }
@@ -133,6 +155,7 @@ class Presenter {
       else if (iface == xdg_wm_base_traits::interface_name) { xdg_name_ = name; xdg_ver_ = ver; }
       else if (iface == presentation_time::client::wp_presentation_traits::interface_name)
         presentation_.Record(name, ver);
+      else if (iface == wl_seat_traits::interface_name) { seat_name_ = name; seat_ver_ = ver; }
     });
     if (!wl::RoundtripWithTimeout(display_.Get())) { log::w(kTag, "present: registry roundtrip failed"); return false; }
     if (comp_name_ == 0 || shm_name_ == 0 || xdg_name_ == 0) {
@@ -146,7 +169,11 @@ class Presenter {
     if (!wl::BindHandler<wl_shm_traits>(registry_, shm_, shm_name_, shm_ver_)) return false;
     if (!wl::BindHandler<xdg_wm_base_traits>(registry_, xdg_wm_base_, xdg_name_, xdg_ver_)) return false;
     if (!presentation_.Bind(registry_, this)) return false;  // wp_presentation (optional)
-    if (!wl::RoundtripWithTimeout(display_.Get())) return false;  // shm formats + clock_id
+    if (seat_name_ != 0 && wl::BindHandler<wl_seat_traits>(registry_, seat_, seat_name_, seat_ver_)) {
+      seat_.Get()->app_ = this;
+      seat_.Get()->pointer_slot_ = &pointer_;  // wl_pointer created on the capabilities event
+    }
+    if (!wl::RoundtripWithTimeout(display_.Get())) return false;  // shm formats + clock_id + seat caps
 
     if (!wl::SetupHandler(surface_, wl::construct<wl_surface_traits, wl_compositor_traits::Op::CreateSurface>(*comp_.Get()))) return false;
     if (!wl::SetupHandler(xdg_surface_, wl::construct<xdg_surface_traits, xdg_wm_base_traits::Op::GetXdgSurface>(*xdg_wm_base_.Get(), surface_.Get()->GetProxy()))) return false;
@@ -211,6 +238,22 @@ class Presenter {
   void OnToplevelConfigure(int32_t, int32_t) {}
   void OnToplevelClose() { closed_ = true; }
 
+  // wl_pointer -> app input (the native side of a MotionEvent). A left-button
+  // press/release maps to a touch Down/Up; motion while pressed maps to Move.
+  void OnPointerEnter(const wl::PointerEvent& e) { px_ = e.x; py_ = e.y; }
+  void OnPointerLeave() {}
+  void OnPointerMotion(const wl::PointerEvent& e) {
+    px_ = e.x; py_ = e.y;
+    if (pointer_down_) deliver(PointerInput::Action::Move);
+  }
+  void OnPointerButton(const wl::PointerButtonEvent& e) {
+    px_ = e.x; py_ = e.y;
+    const bool pressed = e.state == WL_POINTER_BUTTON_STATE_PRESSED;
+    if (pressed == pointer_down_) return;  // only edges
+    pointer_down_ = pressed;
+    deliver(pressed ? PointerInput::Action::Down : PointerInput::Action::Up);
+  }
+
  private:
   // The vsync-aligned time for the frame about to be drawn: the last presentation
   // time plus one refresh interval (Choreographer.frameTimeNanos), or the raw
@@ -223,6 +266,11 @@ class Presenter {
   void request_frame() {
     if (wl_proxy* raw = wl::construct<wl_callback_traits, wl_surface_traits::Op::Frame>(*surface_.Get()))
       frame_._SetProxy(raw);
+  }
+
+  void deliver(PointerInput::Action a) {
+    if (input_ != nullptr && *input_)
+      (*input_)(PointerInput{a, static_cast<float>(px_), static_cast<float>(py_)});
   }
 
   bool render_frame(gfx::Surface& canvas) {
@@ -282,13 +330,19 @@ class Presenter {
   wl::WlPtr<wl::XdgSurfaceHandler<Presenter>> xdg_surface_;
   wl::WlPtr<wl::XdgToplevelHandler<Presenter>> xdg_toplevel_;
   wl::PresentationManager<Presenter> presentation_;
+  wl::WlPtr<SeatH> seat_;
+  wl::WlPtr<wl::PointerHandler<Presenter>> pointer_;  // created on wl_seat capabilities
   Buf bufs_[kBuffers];
   FrameH frame_;  // direct member: stable address for the dispatcher
   ShmMapping mem_;
   std::string title_, app_id_;
   const FrameCallback* render_ = nullptr;
+  const InputCallback* input_ = nullptr;
+  double px_ = 0.0, py_ = 0.0;
+  bool pointer_down_ = false;
 
   uint32_t comp_name_ = 0, comp_ver_ = 0, shm_name_ = 0, shm_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
+  uint32_t seat_name_ = 0, seat_ver_ = 0;
   int w_ = 0, h_ = 0;
   std::size_t total_bytes_ = 0;
   std::uint64_t max_frames_ = 0, frame_index_ = 0, frame_callbacks_ = 0, presented_count_ = 0;
@@ -305,9 +359,9 @@ bool wayland_available() noexcept {
 
 bool present_loop(int width, int height, std::string_view title,
                   std::string_view app_id, const FrameCallback& render,
-                  std::uint64_t max_frames) noexcept {
+                  const InputCallback& input, std::uint64_t max_frames) noexcept {
   Presenter presenter;
-  return presenter.Run(width, height, title, app_id, render, max_frames);
+  return presenter.Run(width, height, title, app_id, render, input, max_frames);
 }
 
 bool present_surface(const gfx::Surface& surface, std::string_view title,
@@ -318,7 +372,7 @@ bool present_surface(const gfx::Surface& surface, std::string_view title,
     canvas.blit(surface.data());
     return true;
   };
-  return present_loop(surface.width(), surface.height(), title, app_id, one, 1);
+  return present_loop(surface.width(), surface.height(), title, app_id, one, InputCallback{}, 1);
 }
 
 }  // namespace aclcxx::wm

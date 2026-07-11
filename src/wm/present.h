@@ -34,6 +34,18 @@ using FrameCallback =
     std::function<bool(gfx::Surface& surface, std::uint64_t frame_time_ns,
                        std::uint64_t frame_index)>;
 
+// A pointer/touch input from the compositor (wl_pointer), delivered to the app as
+// the native side of an android.view.MotionEvent. Coordinates are surface-local
+// logical pixels. Down = button pressed, Up = released, Move = motion while down.
+struct PointerInput {
+  enum class Action { Down, Move, Up };
+  Action action;
+  float x;
+  float y;
+};
+// Called (on the present thread) when a pointer input arrives. May be empty.
+using InputCallback = std::function<void(const PointerInput&)>;
+
 // Run a continuous present loop driven by wl_surface.frame (the vsync tick) with
 // wp_presentation timing feedback — the native analogue of Android's Choreographer
 // posting FrameCallbacks each vsync. Double-buffered. Presents until `render`
@@ -41,7 +53,7 @@ using FrameCallback =
 // toplevel closes. Returns true on a clean stop.
 bool present_loop(int width, int height, std::string_view title,
                   std::string_view app_id, const FrameCallback& render,
-                  std::uint64_t max_frames = 0) noexcept;
+                  const InputCallback& input, std::uint64_t max_frames = 0) noexcept;
 
 // Present one frame: connect to the compositor, create an xdg_toplevel titled
 // `title`/`app_id`, upload `surface`'s pixels into a wl_shm buffer, commit, and
