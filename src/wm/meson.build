@@ -110,7 +110,7 @@ if build_tests and have_wcs
         [files('../../tests/integration/close_compositor.cpp'),
          xdg_server_hdr, xdg_protocol_code],
         include_directories : include_directories('.'),  # source + build src/wm (generated hdr)
-        dependencies : wayland_server_dep,
+        dependencies : [wayland_server_dep, xkbcommon_dep],  # xkb: keymap for key-repeat test
         # The libwayland request-vtables are intentionally partial (only the requests
         # the client sends at these versions); the rest are null by design.
         cpp_args : ['-Wno-missing-field-initializers'],

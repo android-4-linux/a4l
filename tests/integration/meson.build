@@ -285,6 +285,16 @@ if py3.found() and have_jni
         depends : [aclcxx_exe, key_apk, framework_shim, close_compositor],
         timeout : 120,
       )
+      # Key repeat: the compositor holds KEY_A with a repeat rate; the presenter's
+      # loop polls the wcs KeyboardHandler repeat timerfd, so onKeyDown fires >1x.
+      test(
+        'run-apk-key-repeat',
+        py3,
+        args : [files('run_key_repeat_test.py'), aclcxx_exe, key_apk, framework_shim,
+                close_compositor],
+        depends : [aclcxx_exe, key_apk, framework_shim, close_compositor],
+        timeout : 120,
+      )
     endif
   else
     message('javac not found; skipping run-apk-framework integration test.')

@@ -220,10 +220,16 @@ class Presenter {
 
       while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
       presentation_.Reap();
-      pollfd p{fd, POLLIN, 0};
-      const int n = poll(&p, 1, 200);
+      // Poll the wl fd and the keyboard repeat timerfd (wcs KeyboardHandler): when
+      // the latter is readable, a held key repeats. fd<0 slots are ignored by poll.
+      const int rfd = keyboard_.IsNull() ? -1 : keyboard_.Get()->GetRepeatFd();
+      pollfd pfds[2] = {{fd, POLLIN, 0}, {rfd, POLLIN, 0}};
+      const int n = poll(pfds, 2, 200);
       if (n < 0) { if (errno == EINTR) continue; clean = false; break; }
-      if (n > 0 && wl_display_dispatch(display_.Get()) < 0) { log::w(kTag, "present: dispatch error"); clean = false; break; }
+      if ((pfds[1].revents & POLLIN) != 0) keyboard_.Get()->DispatchRepeat();
+      if ((pfds[0].revents & POLLIN) != 0 && wl_display_dispatch(display_.Get()) < 0) {
+        log::w(kTag, "present: dispatch error"); clean = false; break;
+      }
     }
     presentation_.Release();
     log::i(kTag,
@@ -263,10 +269,9 @@ class Presenter {
     deliver(pressed ? PointerInput::Action::Down : PointerInput::Action::Up);
   }
 
-  // wl_keyboard -> app input (the native side of a KeyEvent). Repeat ticks are
-  // ignored for now (no repeat-fd in the loop); press/release deliver Down/Up.
+  // wl_keyboard -> app input (the native side of a KeyEvent). Press/release and
+  // repeat (timerfd- or server-driven, ev.repeat) all deliver as Down/Up.
   void OnKey(const wl::KeyEvent& e) {
-    if (e.repeat) return;
     if (input_ == nullptr || !*input_) return;
     const bool pressed = e.state == WL_KEYBOARD_KEY_STATE_PRESSED;
     (*input_)(KeyInput{pressed ? KeyInput::Action::Down : KeyInput::Action::Up,

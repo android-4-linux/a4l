@@ -15,17 +15,29 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <string_view>
+
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include <wayland-server.h>
+#include <xkbcommon/xkbcommon.h>
 
 #include "xdg-shell-server-protocol.h"
 
 namespace {
 
 wl_display* g_display = nullptr;
+std::string g_keymap;  // xkb keymap text, sent so client-side key-repeat can arm
 std::uint32_t g_serial = 0;
 wl_resource* g_pointer = nullptr;   // the client's wl_pointer, for injecting a tap
 wl_resource* g_keyboard = nullptr;  // the client's wl_keyboard, for injecting a key
+wl_resource* g_toplevel = nullptr;  // the mapped xdg_toplevel (for a delayed close)
+bool g_repeat_mode = false;         // hold a key (repeat_info) and delay the close
+wl_event_source* g_close_timer = nullptr;
 void arm_shutdown();  // defined below; called after close is sent
 
 struct Surf {
@@ -65,35 +77,48 @@ void surface_commit(wl_client*, wl_resource* r) {
     xdg_surface_send_configure(s->xdg_surface, ++g_serial);
     return;
   }
-  // The window is now mapped (a buffer was attached) — close it.
+  // The window is now mapped (a buffer was attached) — inject input, then close.
   if (s->xdg_toplevel != nullptr && s->pending_buffer != nullptr && !s->close_sent) {
+    s->close_sent = true;
+    g_toplevel = s->xdg_toplevel;
     if (s->frame_cb != nullptr) {
       wl_callback_send_done(s->frame_cb, 1);
       wl_resource_destroy(s->frame_cb);
       s->frame_cb = nullptr;
     }
     wl_buffer_send_release(s->pending_buffer);
-    // Inject a pointer tap (down+up at 100,50) so an app's onTouchEvent runs, then
-    // close. Ordered before close so the client dispatches the tap first.
-    if (g_pointer != nullptr) {
-      wl_pointer_send_enter(g_pointer, ++g_serial, r, wl_fixed_from_int(100), wl_fixed_from_int(50));
-      wl_pointer_send_button(g_pointer, ++g_serial, 1, 0x110 /*BTN_LEFT*/, WL_POINTER_BUTTON_STATE_PRESSED);
-      wl_pointer_send_button(g_pointer, ++g_serial, 2, 0x110, WL_POINTER_BUTTON_STATE_RELEASED);
-    }
-    // Inject a key press+release (KEY_A) — no keymap sent, so the client sees the
-    // evdev keycode (the ViewRoot driver maps it to an Android keycode).
     if (g_keyboard != nullptr) {
       wl_array keys;
       wl_array_init(&keys);
       wl_keyboard_send_enter(g_keyboard, ++g_serial, r, &keys);
       wl_array_release(&keys);
-      wl_keyboard_send_key(g_keyboard, ++g_serial, 10, 30 /*KEY_A*/, WL_KEYBOARD_KEY_STATE_PRESSED);
-      wl_keyboard_send_key(g_keyboard, ++g_serial, 11, 30, WL_KEYBOARD_KEY_STATE_RELEASED);
     }
-    std::fprintf(stderr, "close-compositor: window mapped -> sent pointer tap + key + xdg_toplevel.close\n");
-    xdg_toplevel_send_close(s->xdg_toplevel);
-    s->close_sent = true;
-    arm_shutdown();
+    if (g_repeat_mode) {
+      // Hold KEY_A with a repeat rate so the client's repeat timerfd fires; close
+      // after a delay so several repeats accumulate.
+      if (g_keyboard != nullptr && wl_resource_get_version(g_keyboard) >= 4) {
+        wl_keyboard_send_repeat_info(g_keyboard, 40 /*keys/s*/, 40 /*delay ms*/);
+        wl_keyboard_send_key(g_keyboard, ++g_serial, 10, 30 /*KEY_A held*/,
+                             WL_KEYBOARD_KEY_STATE_PRESSED);
+      }
+      std::fprintf(stderr, "close-compositor: repeat mode -> held key, delayed close\n");
+      wl_event_source_timer_update(g_close_timer, 500);
+    } else {
+      // Inject a pointer tap (onTouchEvent) and a single key press+release
+      // (onKeyDown/onKeyUp), then close immediately.
+      if (g_pointer != nullptr) {
+        wl_pointer_send_enter(g_pointer, ++g_serial, r, wl_fixed_from_int(100), wl_fixed_from_int(50));
+        wl_pointer_send_button(g_pointer, ++g_serial, 1, 0x110 /*BTN_LEFT*/, WL_POINTER_BUTTON_STATE_PRESSED);
+        wl_pointer_send_button(g_pointer, ++g_serial, 2, 0x110, WL_POINTER_BUTTON_STATE_RELEASED);
+      }
+      if (g_keyboard != nullptr) {
+        wl_keyboard_send_key(g_keyboard, ++g_serial, 10, 30 /*KEY_A*/, WL_KEYBOARD_KEY_STATE_PRESSED);
+        wl_keyboard_send_key(g_keyboard, ++g_serial, 11, 30, WL_KEYBOARD_KEY_STATE_RELEASED);
+      }
+      std::fprintf(stderr, "close-compositor: window mapped -> sent tap + key + xdg_toplevel.close\n");
+      xdg_toplevel_send_close(s->xdg_toplevel);
+      arm_shutdown();
+    }
   }
 }
 const struct wl_surface_interface surface_impl = {
@@ -174,9 +199,29 @@ void seat_get_pointer(wl_client* c, wl_resource* r, uint32_t id) {
   g_pointer = wl_resource_create(c, &wl_pointer_interface, wl_resource_get_version(r), id);
   wl_resource_set_implementation(g_pointer, &pointer_impl, nullptr, pointer_res_destroy);
 }
+// Send the xkb keymap so the client's KeyboardHandler can arm client-side repeat
+// (which only fires once a keymap is known).
+void send_keymap(wl_resource* kbd) {
+  if (g_keymap.empty()) return;
+  const std::size_t size = g_keymap.size() + 1;
+  int fd = memfd_create("keymap", MFD_CLOEXEC);
+  if (fd < 0) return;
+  if (ftruncate(fd, static_cast<off_t>(size)) == 0) {
+    void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (p != MAP_FAILED) {
+      std::memcpy(p, g_keymap.c_str(), size);
+      munmap(p, size);
+      wl_keyboard_send_keymap(kbd, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd,
+                              static_cast<uint32_t>(size));
+    }
+  }
+  close(fd);
+}
+
 void seat_get_keyboard(wl_client* c, wl_resource* r, uint32_t id) {
   g_keyboard = wl_resource_create(c, &wl_keyboard_interface, wl_resource_get_version(r), id);
   wl_resource_set_implementation(g_keyboard, &keyboard_impl, nullptr, keyboard_res_destroy);
+  send_keymap(g_keyboard);
 }
 void seat_get_touch(wl_client*, wl_resource*, uint32_t) {}
 void seat_release(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
@@ -208,6 +253,13 @@ void arm_shutdown() {
   if (g_shutdown_timer != nullptr) wl_event_source_timer_update(g_shutdown_timer, 1000);
 }
 
+// Repeat mode: after holding a key long enough for repeats to fire, close.
+int on_delayed_close(void*) {
+  if (g_toplevel != nullptr) xdg_toplevel_send_close(g_toplevel);
+  arm_shutdown();
+  return 0;
+}
+
 int on_timeout(void*) {
   std::fprintf(stderr, "close-compositor: safety timeout\n");
   wl_display_terminate(g_display);
@@ -218,6 +270,20 @@ int on_timeout(void*) {
 
 int main(int argc, char** argv) {
   const char* socket = argc > 1 ? argv[1] : "aclcxx-close";
+  g_repeat_mode = argc > 2 && std::string_view(argv[2]) == "repeat";
+
+  // Compile the default (RMLVO) xkb keymap once, to send to clients.
+  if (xkb_context* ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS)) {
+    if (xkb_keymap* km = xkb_keymap_new_from_names(ctx, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS)) {
+      if (char* s = xkb_keymap_get_as_string(km, XKB_KEYMAP_FORMAT_TEXT_V1)) {
+        g_keymap = s;
+        std::free(s);
+      }
+      xkb_keymap_unref(km);
+    }
+    xkb_context_unref(ctx);
+  }
+
   g_display = wl_display_create();
   if (g_display == nullptr) { std::fprintf(stderr, "close-compositor: wl_display_create failed\n"); return 1; }
   if (wl_display_add_socket(g_display, socket) != 0) {
@@ -227,12 +293,13 @@ int main(int argc, char** argv) {
   wl_display_init_shm(g_display);  // provides wl_shm/pool/buffer
   wl_global_create(g_display, &wl_compositor_interface, 4, nullptr, bind_compositor);
   wl_global_create(g_display, &xdg_wm_base_interface, 1, nullptr, bind_wmbase);
-  wl_global_create(g_display, &wl_seat_interface, 1, nullptr, bind_seat);
+  wl_global_create(g_display, &wl_seat_interface, 4, nullptr, bind_seat);  // v4: wl_keyboard.repeat_info
 
   wl_event_loop* loop = wl_display_get_event_loop(g_display);
   wl_event_source* timer = wl_event_loop_add_timer(loop, on_timeout, nullptr);
   wl_event_source_timer_update(timer, 20000);  // 20s safety net
   g_shutdown_timer = wl_event_loop_add_timer(loop, on_shutdown, nullptr);  // armed after close
+  g_close_timer = wl_event_loop_add_timer(loop, on_delayed_close, nullptr);  // repeat mode
 
   std::fprintf(stderr, "close-compositor: ready on %s\n", socket);
   wl_display_run(g_display);
