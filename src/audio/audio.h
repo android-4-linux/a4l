@@ -41,6 +41,20 @@ std::unique_ptr<Sink> make_sink();
 // selected device backend (e.g. PipeWire with no reachable daemon) fails to open.
 std::unique_ptr<Sink> make_null_sink();
 
+// A manual audio-check tone. Generates a clean sine (short fades to avoid clicks)
+// and plays it through the PipeWire device sink so it is actually audible — falling
+// back to the silent null sink if PipeWire is unbuilt or no daemon is reachable.
+// Paces writes to real time when streaming so any duration plays fully. Returns the
+// number of frames written. Backs `acl tone`.
+struct ToneSpec {
+  int freq_hz = 440;        // A4
+  double seconds = 2.0;
+  int sample_rate = 48000;
+  int channels = 2;
+  double amplitude = 0.6;   // 0..1 of full scale
+};
+std::uint64_t play_tone(const ToneSpec& spec);
+
 const char* module_name() noexcept;
 
 }  // namespace acl::audio

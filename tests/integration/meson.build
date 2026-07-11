@@ -18,6 +18,17 @@ if py3.found()
             meson.current_source_dir() / '../fixtures/fwsrc'],
     timeout : 60,
   )
+
+  # `acl tone` manual audio-check command: run silent (ACL_AUDIO=null) so it is
+  # deterministic and device-independent; asserts generation + frame accounting and
+  # that it never hangs. Needs only the binary.
+  test(
+    'tone-cli',
+    py3,
+    args : [files('run_tone_test.py'), acl_exe],
+    depends : [acl_exe],
+    timeout : 30,
+  )
 endif
 
 if py3.found() and have_jni

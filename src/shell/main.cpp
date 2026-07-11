@@ -6,6 +6,7 @@
 // main() through the runtime seam. The ART/JVM backends report Unavailable until
 // they land (R-1 / ADR-0001); `--vm=null` exercises the full plumbing today.
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -19,6 +20,7 @@
 #include <unistd.h>  // getpid, for a per-process DEX conversion work dir
 
 #include "acl_config.h"
+#include "audio/audio.h"
 #include "dex/dex_to_jvm.h"
 #include "dex/dexfile.h"
 #include "log/log.h"
@@ -51,6 +53,8 @@ void print_usage() {
       "commands:\n"
       "  run <app.apk>        inspect and launch an APK\n"
       "  dex <file>           dump classes/methods of a .dex or .apk\n"
+      "  tone [options]       play a test tone through the audio backend (manual\n"
+      "                       audio check); streams to PipeWire, else silent null sink\n"
       "  (no command)         print version and build profile\n"
       "\n"
       "run options:\n"
@@ -70,6 +74,13 @@ void print_usage() {
       "                       (wcs); no-op if no compositor / built without wcs\n"
       "  --present-frames=<n> present continuously for n frames via a Choreographer\n"
       "                       loop (implies --present; 0 = until the window closes)\n"
+      "\n"
+      "tone options:\n"
+      "  --freq=<hz>          tone frequency (default 440)\n"
+      "  --seconds=<s>        duration (default 2)\n"
+      "  --rate=<hz>          sample rate (default 48000)\n"
+      "  --channels=<n>       channel count (default 2)\n"
+      "  --amplitude=<0..1>   volume, fraction of full scale (default 0.6)\n"
       "\n"
       "  -h, --help           show this help\n"
       "  -v, --version        show version\n");
@@ -396,6 +407,25 @@ int cmd_dex(const std::vector<std::string>& args) {
 
 }  // namespace
 
+int cmd_tone(const std::vector<std::string>& args) {
+  acl::audio::ToneSpec spec;
+  std::string v;
+  for (const std::string& a : args) {
+    if (match_opt(a, "--freq", v)) spec.freq_hz = std::atoi(v.c_str());
+    else if (match_opt(a, "--seconds", v)) spec.seconds = std::atof(v.c_str());
+    else if (match_opt(a, "--rate", v)) spec.sample_rate = std::atoi(v.c_str());
+    else if (match_opt(a, "--channels", v)) spec.channels = std::atoi(v.c_str());
+    else if (match_opt(a, "--amplitude", v)) spec.amplitude = std::atof(v.c_str());
+    else {
+      std::fprintf(stderr, "acl tone: unknown option '%s'\n", a.c_str());
+      return kUsage;
+    }
+  }
+  const std::uint64_t frames = acl::audio::play_tone(spec);
+  acl::log::i(kTag, "tone: done, {} frames written", frames);
+  return kOk;
+}
+
 int main(int argc, char** argv) {
   std::vector<std::string> args(argv + (argc > 0 ? 1 : 0), argv + argc);
 
@@ -419,6 +449,9 @@ int main(int argc, char** argv) {
   }
   if (cmd == "dex") {
     return cmd_dex({args.begin() + 1, args.end()});
+  }
+  if (cmd == "tone") {
+    return cmd_tone({args.begin() + 1, args.end()});
   }
 
   std::fprintf(stderr, "acl: unknown command '%s'\n\n", cmd.c_str());
