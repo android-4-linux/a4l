@@ -167,10 +167,6 @@ int arg_slots(const DexMethod& m) {
   return n;
 }
 
-bool skippable_class(const DexClass& c) {
-  return (c.access_flags & (kAccInterface | kAccAnnotation)) != 0;
-}
-
 bool emittable_method(const DexMethod& m) {
   if (m.access_flags & (kAccAbstract | kAccNative)) return false;
   if (m.name == "<clinit>") return true;    // static initializer: valid JVM method name
@@ -1985,10 +1981,21 @@ DexError convert(const DexFile& dex, const ConvertOptions& opts,
   if (ec) return {DexStatus::Unsupported, "cannot create work dir: " + ec.message()};
 
   for (const DexClass& cls : dex.classes()) {
-    if (skippable_class(cls)) continue;
     const std::string super =
         cls.super_name ? internal_name(*cls.super_name) : "java/lang/Object";
     ClassWriter cw(internal_name(cls.java_name), super);
+    // Class access flags. Interfaces/annotations must NOT set ACC_SUPER and MUST set
+    // ACC_INTERFACE|ACC_ABSTRACT — without this the converter dropped every interface,
+    // so any class implementing one failed to load (NoClassDefFoundError).
+    const bool is_interface = (cls.access_flags & kAccInterface) != 0;
+    std::uint16_t class_flags = 0x0001;  // ACC_PUBLIC
+    if (is_interface) {
+      class_flags |= 0x0200 | 0x0400;                      // ACC_INTERFACE|ACC_ABSTRACT
+      if (cls.access_flags & kAccAnnotation) class_flags |= 0x2000;  // ACC_ANNOTATION
+    } else {
+      class_flags |= 0x0020;                               // ACC_SUPER
+    }
+    cw.set_access_flags(class_flags);
     for (const std::string& iface : cls.interfaces) cw.add_interface(internal_name(iface));
 
     for (const DexField& f : cls.static_fields) {
@@ -2002,9 +2009,19 @@ DexError convert(const DexFile& dex, const ConvertOptions& opts,
 
     const auto emit_all = [&](const std::vector<DexMethod>& ms) {
       for (const DexMethod& m : ms) {
-        if (!emittable_method(m)) continue;
         const std::uint16_t access =
             0x0001 | (m.is_static() ? 0x0008 : 0);  // public [static]
+        // Abstract/native methods (incl. interface methods) are declarations only —
+        // emit them with no Code so the interface/abstract class is complete and its
+        // methods resolve (invoke-interface / invoke-virtual).
+        if (m.access_flags & (kAccAbstract | kAccNative)) {
+          const std::uint16_t abstract_flag =
+              (m.access_flags & kAccAbstract) ? 0x0400 : 0x0100;
+          cw.add_abstract_method(static_cast<std::uint16_t>(access | abstract_flag),
+                                 m.name, m.jvm_descriptor());
+          continue;
+        }
+        if (!emittable_method(m)) continue;
         if (auto t = translate_method(cw, dex, m, internal_name(cls.java_name))) {
           cw.add_method(access, m.name, m.jvm_descriptor(), t->max_stack,
                         t->max_locals, std::move(t->code), std::move(t->exceptions),

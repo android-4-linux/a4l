@@ -187,6 +187,13 @@ void ClassWriter::add_method(std::uint16_t access_flags, std::string_view name,
                       std::move(stackmaptable)});
 }
 
+void ClassWriter::add_abstract_method(std::uint16_t access_flags,
+                                      std::string_view name,
+                                      std::string_view descriptor) {
+  // No Code attribute: empty code + the ACC_ABSTRACT/ACC_NATIVE flag tells build().
+  methods_.push_back({access_flags, utf8(name), utf8(descriptor), 0, 0, {}, {}, {}});
+}
+
 std::vector<std::uint8_t> ClassWriter::build() const {
   std::vector<std::uint8_t> out;
   be32(out, 0xCAFEBABE);
@@ -198,7 +205,7 @@ std::vector<std::uint8_t> ClassWriter::build() const {
   be16(out, static_cast<std::uint16_t>(pool_.size() + 1));  // cp count
   for (const auto& e : pool_) out.insert(out.end(), e.begin(), e.end());
 
-  be16(out, 0x0021);  // ACC_PUBLIC | ACC_SUPER
+  be16(out, access_flags_);  // ACC_PUBLIC|ACC_SUPER, or interface/annotation flags
   be16(out, this_class_);
   be16(out, super_class_);
   be16(out, static_cast<std::uint16_t>(interfaces_.size()));  // interfaces_count
@@ -214,9 +221,15 @@ std::vector<std::uint8_t> ClassWriter::build() const {
 
   be16(out, static_cast<std::uint16_t>(methods_.size()));
   for (const Method& m : methods_) {
+    // Abstract/native methods (0x0400/0x0100) carry no Code attribute.
+    const bool no_code = (m.access_flags & 0x0500u) != 0;
     be16(out, m.access_flags);
     be16(out, m.name_index);
     be16(out, m.descriptor_index);
+    if (no_code) {
+      be16(out, 0);  // attributes_count: none
+      continue;
+    }
     be16(out, 1);  // attributes_count: just Code
     be16(out, code_attr_name_);
     const bool has_smt = !m.stackmaptable.empty();
