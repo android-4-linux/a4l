@@ -121,6 +121,7 @@ void surface_commit(wl_client*, wl_resource* r) {
       // ("hel"), then a final commit ("hello").
       if (g_text_input != nullptr) {
         zwp_text_input_v3_send_enter(g_text_input, r);
+        zwp_text_input_v3_send_delete_surrounding_text(g_text_input, 1, 0);
         zwp_text_input_v3_send_preedit_string(g_text_input, "hel", 3, 3);
         zwp_text_input_v3_send_commit_string(g_text_input, "hello");
         zwp_text_input_v3_send_done(g_text_input, ++g_serial);

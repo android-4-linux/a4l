@@ -52,9 +52,10 @@ STRINGS = [
     MAINACT, IMEVIEW, IMECONN, ACTIVITY, VIEW, CONTEXT, BUNDLE, CANVAS, OBJECT,
     INPUTCONN, EDITORINFO, CHARSEQ, LOG, STRING,
     "V", "I", "Z",
-    "VL", "LL", "ZLI", "VI", "ILL",
+    "VL", "LL", "ZLI", "ZII", "VI", "ILL",
     "<init>", "onCreate", "setContentView", "onDraw", "onCreateInputConnection",
-    "commitText", "setComposingText", "drawColor", "i", "aclcxx.ime",
+    "commitText", "setComposingText", "deleteSurroundingText", "drawColor", "i",
+    "aclcxx.ime",
 ]
 S = {s: i for i, s in enumerate(STRINGS)}
 TYPES = [MAINACT, IMEVIEW, IMECONN, ACTIVITY, VIEW, CONTEXT, BUNDLE, CANVAS, OBJECT,
@@ -90,7 +91,7 @@ def code_item(regs, ins, outs, insns):
 def build_dex():
     header_size = 112
     n_strings = len(STRINGS)
-    n_types, n_protos, n_fields, n_methods, n_classdefs = len(TYPES), 9, 0, 15, 3
+    n_types, n_protos, n_fields, n_methods, n_classdefs = len(TYPES), 10, 0, 16, 3
 
     off_string_ids = header_size
     off_type_ids = off_string_ids + n_strings * 4
@@ -121,6 +122,7 @@ def build_dex():
     tl_canvas = type_list([CANVAS])
     tl_editorinfo = type_list([EDITORINFO])
     tl_charseq_i = type_list([CHARSEQ, "I"])
+    tl_ii = type_list(["I", "I"])
     tl_i = type_list(["I"])
     tl_strstr = type_list([STRING, STRING])
     tl_inputconn = type_list([INPUTCONN])   # ImeConn's interfaces list
@@ -175,6 +177,14 @@ def build_dex():
         0x1212,                        # const/4 v2, 1
         0x020F,                        # return v2  (true)
     ]))
+    code_imeconn_delete = off_data + len(data)
+    data.extend(code_item(6, 3, 2, [
+        0x001A, S["aclcxx.ime"],            # const-string v0, "aclcxx.ime"
+        0x011A, S["deleteSurroundingText"], # const-string v1, "deleteSurroundingText"
+        0x2071, 0x000D, 0x0010,             # invoke-static {v0,v1}, Log.i (m13)
+        0x1212,                             # const/4 v2, 1
+        0x020F,                             # return v2  (true)
+    ]))
 
     # --- class_data ---
     cd_mainact = off_data + len(data)
@@ -189,10 +199,11 @@ def build_dex():
     cd += uleb128(1) + uleb128(0x1) + uleb128(code_imeview_createic)     # m7 onCreateInputConnection (diff 1, public)
     data.extend(cd)
     cd_imeconn = off_data + len(data)
-    cd = bytearray(uleb128(0) + uleb128(0) + uleb128(1) + uleb128(2))
+    cd = bytearray(uleb128(0) + uleb128(0) + uleb128(1) + uleb128(3))    # 1 direct, 3 virtual
     cd += uleb128(8) + uleb128(0x10001) + uleb128(code_imeconn_init)     # m8 <init>
     cd += uleb128(9) + uleb128(0x1) + uleb128(code_imeconn_commit)       # m9 commitText (virtual diff 9)
     cd += uleb128(5) + uleb128(0x1) + uleb128(code_imeconn_setcomposing) # m14 setComposingText (diff 5)
+    cd += uleb128(1) + uleb128(0x1) + uleb128(code_imeconn_delete)       # m15 deleteSurroundingText (diff 1)
     data.extend(cd)
 
     data.extend(align4(bytearray()))
@@ -201,8 +212,8 @@ def build_dex():
         (0x0000, 1, 0), (0x0001, n_strings, off_string_ids),
         (0x0002, n_types, off_type_ids), (0x0003, n_protos, off_proto_ids),
         (0x0005, n_methods, off_method_ids), (0x0006, n_classdefs, off_class_defs),
-        (0x2002, n_strings, string_data_off[0]), (0x1001, 9, first_tl),
-        (0x2001, 7, first_code), (0x2000, 3, cd_mainact),
+        (0x2002, n_strings, string_data_off[0]), (0x1001, 10, first_tl),
+        (0x2001, 9, first_code), (0x2000, 3, cd_mainact),
     ]
     map_body = bytearray(struct.pack("<I", len(items) + 1))
     for mtype, size, off in items:
@@ -223,6 +234,7 @@ def build_dex():
     proto_ids += struct.pack("<III", S["ZLI"], T["Z"], tl_charseq_i)      # 6 (CharSequence,int)Z
     proto_ids += struct.pack("<III", S["VI"], T["V"], tl_i)              # 7 (int)V
     proto_ids += struct.pack("<III", S["ILL"], T["I"], tl_strstr)         # 8 (String,String)I
+    proto_ids += struct.pack("<III", S["ZII"], T["Z"], tl_ii)             # 9 (int,int)Z
 
     field_ids = b""
 
@@ -244,6 +256,7 @@ def build_dex():
         m(CANVAS, 7, "drawColor"),                  # m12
         m(LOG, 8, "i"),                             # m13
         m(IMECONN, 6, "setComposingText"),          # m14
+        m(IMECONN, 9, "deleteSurroundingText"),     # m15
     ])
     class_defs = b""
     class_defs += struct.pack("<IIIIIIII",

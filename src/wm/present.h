@@ -63,7 +63,13 @@ struct TextInput {
   bool preedit;
   int cursor;
 };
-using InputEvent = std::variant<PointerInput, KeyInput, TextInput>;
+// The IME requests deletion of text around the cursor
+// (zwp_text_input_v3.delete_surrounding_text -> InputConnection.deleteSurroundingText).
+struct DeleteSurroundingText {
+  std::uint32_t before;  // bytes before the cursor
+  std::uint32_t after;   // bytes after the cursor
+};
+using InputEvent = std::variant<PointerInput, KeyInput, TextInput, DeleteSurroundingText>;
 // Called (on the present thread) when an input event arrives. May be empty.
 using InputCallback = std::function<void(const InputEvent&)>;
 

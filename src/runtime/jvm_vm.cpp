@@ -450,7 +450,7 @@ class JvmVm final : public Vm {
     // input; committed strings from the compositor's IME are delivered to it via
     // InputConnection.commitText.
     jobject input_conn = nullptr;
-    jmethodID commit_text = nullptr, set_composing = nullptr;
+    jmethodID commit_text = nullptr, set_composing = nullptr, delete_surrounding = nullptr;
     bool want_ime = false;
     {
       jclass vc = env_->GetObjectClass(view);
@@ -467,6 +467,7 @@ class JvmVm final : public Vm {
           if (jclass ic_cls = env_->GetObjectClass(ic)) {
             commit_text = env_->GetMethodID(ic_cls, "commitText", "(Ljava/lang/CharSequence;I)Z");
             set_composing = env_->GetMethodID(ic_cls, "setComposingText", "(Ljava/lang/CharSequence;I)Z");
+            delete_surrounding = env_->GetMethodID(ic_cls, "deleteSurroundingText", "(II)Z");
             env_->DeleteLocalRef(ic_cls);
           }
           want_ime = commit_text != nullptr;
@@ -530,10 +531,18 @@ class JvmVm final : public Vm {
       if (s != nullptr) env_->DeleteLocalRef(s);
       if (env_->ExceptionCheck() == JNI_TRUE) clear_exception();
     };
+    const auto on_delete = [&, this](const wm::DeleteSurroundingText& ev) {
+      log::i(kTag, "IME delete-surrounding: before={} after={}", ev.before, ev.after);
+      if (input_conn == nullptr || delete_surrounding == nullptr) return;
+      env_->CallBooleanMethod(input_conn, delete_surrounding,
+                              static_cast<jint>(ev.before), static_cast<jint>(ev.after));
+      if (env_->ExceptionCheck() == JNI_TRUE) clear_exception();
+    };
     const wm::InputCallback input = [&](const wm::InputEvent& ev) {
       if (const auto* p = std::get_if<wm::PointerInput>(&ev)) on_pointer(*p);
       else if (const auto* k = std::get_if<wm::KeyInput>(&ev)) on_key(*k);
       else if (const auto* t = std::get_if<wm::TextInput>(&ev)) on_text(*t);
+      else if (const auto* d = std::get_if<wm::DeleteSurroundingText>(&ev)) on_delete(*d);
     };
     wm::present_loop(w, h, pkg.empty() ? "aclcxx" : pkg,
                      pkg.empty() ? "org.aclcxx.app" : pkg, render, input, want_ime,

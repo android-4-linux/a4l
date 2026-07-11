@@ -306,7 +306,9 @@ class Presenter : public wl::ime::TextInputListener {
                        int32_t /*cursor_end*/) override {
     if (input_ != nullptr && *input_) (*input_)(TextInput{std::string(utf8), true, 1});
   }
-  void OnDeleteSurroundingText(uint32_t /*before*/, uint32_t /*after*/) override {}
+  void OnDeleteSurroundingText(uint32_t before, uint32_t after) override {
+    if (input_ != nullptr && *input_) (*input_)(DeleteSurroundingText{before, after});
+  }
   void OnKeysym(uint32_t /*time*/, uint32_t /*sym*/, uint32_t /*state*/,
                 uint32_t /*mods*/) override {}
 

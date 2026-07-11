@@ -13,4 +13,6 @@ public interface InputConnection {
   boolean commitText(CharSequence text, int newCursorPosition);
   // Composing (preedit) text from the IME, updated as the user types before commit.
   boolean setComposingText(CharSequence text, int newCursorPosition);
+  // Delete text around the cursor (e.g. the IME replacing surrounding text).
+  boolean deleteSurroundingText(int beforeLength, int afterLength);
 }
