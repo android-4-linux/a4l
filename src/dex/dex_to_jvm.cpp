@@ -325,6 +325,10 @@ void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod
   const auto set = [&](int slot, VType t) {
     if (slot >= 0 && slot < static_cast<int>(locals.size())) locals[slot] = t;
   };
+  const auto get = [&](int slot) -> VType {  // bounds-safe read (out-of-range -> Top)
+    return (slot >= 0 && slot < static_cast<int>(locals.size()))
+               ? locals[static_cast<std::size_t>(slot)] : VType{VType::Top, {}};
+  };
   const auto set_long = [&](int slot) {
     set(slot, {VType::Long, {}});
     set(slot + 1, {VType::LongHi, {}});
@@ -341,7 +345,7 @@ void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod
       set(L((u >> 8) & 0xff), {VType::Obj, "java/lang/String"}); break;
     case 0x01: case 0x07: {  // move / move-object: copy
       const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
-      set(L(a), locals[L(b)]); break;
+      set(L(a), get(L(b))); break;
     }
     case 0x04: {  // move-wide
       const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
@@ -394,7 +398,7 @@ void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod
       set(L((u >> 8) & 0xff), kInt); break;
     case 0x46: {  // aget-object -> Obj(element of the array local)
       const int bb = in[pc + 1] & 0xff;
-      const VType& arr = locals[L(bb)];
+      const VType arr = get(L(bb));
       std::string cls;
       if (arr.kind == VType::Obj && !arr.cls.empty() && arr.cls.front() == '[') {
         cls = obj_internal(arr.cls.substr(1));
@@ -876,6 +880,94 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
   for (const DexTryHandler& h : c.handlers) handler_pcs.insert(h.handler_addr);
 
   const std::vector<std::uint16_t>& in = c.insns;
+
+  // --- Pass 1: per-pc JVM local types (StackMapTable VType) --------------------
+  // Computed BEFORE emission (a worklist fixpoint over the Dalvik control flow) so
+  // the emission can pick the reference-vs-int form of a type-ambiguous op from the
+  // ACTUAL per-pc type, not a whole-method register kind — Dalvik reuses one register
+  // as different types at different pcs. Only entry_locals + the Dalvik code are
+  // needed here; the JVM frame offsets (pc_to_jvm) are applied later at frame emit.
+  std::map<std::uint32_t, std::vector<VType>> in_state;
+  {
+    const std::size_t nloc = static_cast<std::size_t>(max_locals);
+    const auto merge1 = [](VType a, VType b) -> VType {
+      if (a == b) return a;
+      return {VType::Top, {}};  // no supertype lattice: disagreement -> Top
+    };
+    in_state[0] = entry_locals;  // incoming param types (see prologue)
+    const auto merge_into = [&](std::uint32_t pc, const std::vector<VType>& s) -> bool {
+      auto it = in_state.find(pc);
+      if (it == in_state.end()) { in_state[pc] = s; return true; }
+      bool changed = false;
+      for (std::size_t i = 0; i < nloc; ++i) {
+        VType mg = merge1(it->second[i], s[i]);
+        if (!(mg == it->second[i])) { it->second[i] = mg; changed = true; }
+      }
+      return changed;
+    };
+    std::deque<std::uint32_t> work{0};
+    while (!work.empty()) {
+      const std::uint32_t pc = work.front(); work.pop_front();
+      if (pc >= in.size()) continue;
+      std::vector<VType> out = in_state[pc];
+      sm_transfer(out, dex, m, in, pc, ins);
+      const std::uint8_t op = in[pc] & 0xff;
+      const bool ends = op == 0x0e || op == 0x0f || op == 0x11 || op == 0x10 ||
+                        op == 0x27;  // return* / throw
+      std::vector<std::uint32_t> succ;
+      if (op == 0x28) {  // goto
+        succ.push_back(static_cast<std::uint32_t>(
+            static_cast<std::int64_t>(pc) + static_cast<std::int8_t>((in[pc] >> 8) & 0xff)));
+      } else if (op == 0x29) {  // goto/16
+        succ.push_back(static_cast<std::uint32_t>(
+            static_cast<std::int64_t>(pc) + static_cast<std::int16_t>(in[pc + 1])));
+      } else if (op == 0x2b || op == 0x2c) {  // packed/sparse-switch
+        succ.push_back(pc + 3);  // default = fall-through
+        const std::int32_t poff = static_cast<std::int32_t>(
+            static_cast<std::uint32_t>(in[pc + 1]) |
+            (static_cast<std::uint32_t>(in[pc + 2]) << 16));
+        const std::size_t ppc =
+            static_cast<std::size_t>(static_cast<std::int64_t>(pc) + poff);
+        if (ppc + 1 < in.size()) {
+          const int size = in[ppc + 1];
+          const auto s4 = [&](std::size_t p) {
+            return static_cast<std::int32_t>(static_cast<std::uint32_t>(in[p]) |
+                                             (static_cast<std::uint32_t>(in[p + 1]) << 16));
+          };
+          for (int i = 0; i < size; ++i) {
+            const std::size_t toff =
+                op == 0x2b ? ppc + 4 + 2 * i : ppc + 2 + 2 * size + 2 * i;
+            if (toff + 1 < in.size())
+              succ.push_back(static_cast<std::uint32_t>(
+                  static_cast<std::int64_t>(pc) + s4(toff)));
+          }
+        }
+      } else if (!ends) {
+        succ.push_back(pc + dalvik_insn_units(op));  // fall-through
+        if ((op >= 0x32 && op <= 0x37) || (op >= 0x38 && op <= 0x3d)) {  // if-*
+          succ.push_back(static_cast<std::uint32_t>(
+              static_cast<std::int64_t>(pc) + static_cast<std::int16_t>(in[pc + 1])));
+        }
+      }
+      for (std::uint32_t s : succ) {
+        if (merge_into(s, out)) work.push_back(s);
+      }
+      for (const DexTryHandler& h : c.handlers) {
+        if (pc >= h.start_addr && pc < h.end_addr) {
+          if (merge_into(h.handler_addr, in_state[pc])) work.push_back(h.handler_addr);
+        }
+      }
+    }
+  }
+  // The JVM local VType of a Dalvik register at a given pc (Obj => a reference).
+  const auto pc_local = [&](std::uint32_t pc, int reg) -> VType {
+    auto it = in_state.find(pc);
+    const int slot = ins + reg;
+    if (it == in_state.end() || slot < 0 || slot >= static_cast<int>(it->second.size()))
+      return {VType::Top, {}};
+    return it->second[static_cast<std::size_t>(slot)];
+  };
+
   // Per-register type recorded by new-instance, used to fix <init> calls: Dalvik's
   // `new-instance vX, N; invoke-direct M.<init>` (N inherits M's constructor) must
   // become JVM `new N; invokespecial N.<init>` — the invokespecial class must match
@@ -1703,13 +1795,29 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         pc += 3;
         break;
       }
-      case 0x38: case 0x39: case 0x3a:
-      case 0x3b: case 0x3c: case 0x3d: {  // if-testz vAA, +BBBB (21t)
+      case 0x38: case 0x39: {  // if-eqz/if-nez: int (== 0) OR ref (== null / != null)
+        if (pc + 1 >= in.size()) return std::nullopt;
+        const int a = (u >> 8) & 0xff;
+        const std::int32_t off = static_cast<std::int16_t>(in[pc + 1]);
+        if (pc_local(static_cast<std::uint32_t>(pc), a).kind == VType::Obj) {
+          // Null check on an object: aload + ifnull(0xc6)/ifnonnull(0xc7). Emitting
+          // iload+ifeq here would be an "iload on object slot" VerifyError.
+          e.load_a(local(a));
+          e.adj(-1);
+          branch_to(opcode == 0x38 ? 0xc6 : 0xc7, rel_target(off));
+        } else {
+          e.load_i(local(a));
+          e.adj(-1);
+          branch_to(opcode == 0x38 ? 0x99 : 0x9a, rel_target(off));  // ifeq / ifne
+        }
+        pc += 2;
+        break;
+      }
+      case 0x3a: case 0x3b: case 0x3c: case 0x3d: {  // if-ltz/gez/gtz/lez: int only
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xff;
         const std::int32_t off = static_cast<std::int16_t>(in[pc + 1]);
         e.load_i(local(a));
-        // if-eqz..if-lez (0x38..0x3d) -> ifeq..ifle (0x99..0x9e)
         const std::uint8_t jvm_op = static_cast<std::uint8_t>(0x99 + (opcode - 0x38));
         e.adj(-1);
         branch_to(jvm_op, rel_target(off));
@@ -1858,75 +1966,7 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
 
   std::vector<std::uint8_t> stackmap;
   if (!frame_stack.empty()) {
-    const std::size_t nloc = static_cast<std::size_t>(max_locals);
-    const auto merge1 = [](VType a, VType b) -> VType {
-      if (a == b) return a;
-      return {VType::Top, {}};  // no supertype lattice: disagreement -> Top
-    };
-    // Worklist fixpoint: in-state (JVM local types) at each Dalvik pc.
-    std::map<std::uint32_t, std::vector<VType>> in_state;
-    in_state[0] = entry_locals;  // seeded with incoming param types (see prologue)
-    const auto merge_into = [&](std::uint32_t pc, const std::vector<VType>& s) -> bool {
-      auto it = in_state.find(pc);
-      if (it == in_state.end()) { in_state[pc] = s; return true; }
-      bool changed = false;
-      for (std::size_t i = 0; i < nloc; ++i) {
-        VType mg = merge1(it->second[i], s[i]);
-        if (!(mg == it->second[i])) { it->second[i] = mg; changed = true; }
-      }
-      return changed;
-    };
-    std::deque<std::uint32_t> work{0};
-    while (!work.empty()) {
-      const std::uint32_t pc = work.front(); work.pop_front();
-      if (pc >= in.size()) continue;
-      std::vector<VType> out = in_state[pc];
-      sm_transfer(out, dex, m, in, pc, ins);
-      const std::uint8_t op = in[pc] & 0xff;
-      const bool ends = op == 0x0e || op == 0x0f || op == 0x11 || op == 0x10 ||
-                        op == 0x27;  // return* / throw
-      std::vector<std::uint32_t> succ;
-      if (op == 0x28) {  // goto
-        succ.push_back(static_cast<std::uint32_t>(
-            static_cast<std::int64_t>(pc) + static_cast<std::int8_t>((in[pc] >> 8) & 0xff)));
-      } else if (op == 0x29) {  // goto/16
-        succ.push_back(static_cast<std::uint32_t>(
-            static_cast<std::int64_t>(pc) + static_cast<std::int16_t>(in[pc + 1])));
-      } else if (op == 0x2b || op == 0x2c) {  // packed/sparse-switch
-        succ.push_back(pc + 3);  // default = fall-through
-        const std::int32_t poff = static_cast<std::int32_t>(
-            static_cast<std::uint32_t>(in[pc + 1]) |
-            (static_cast<std::uint32_t>(in[pc + 2]) << 16));
-        const std::size_t ppc =
-            static_cast<std::size_t>(static_cast<std::int64_t>(pc) + poff);
-        const int size = in[ppc + 1];
-        const auto s4 = [&](std::size_t p) {
-          return static_cast<std::int32_t>(static_cast<std::uint32_t>(in[p]) |
-                                           (static_cast<std::uint32_t>(in[p + 1]) << 16));
-        };
-        for (int i = 0; i < size; ++i) {
-          const std::size_t toff =
-              op == 0x2b ? ppc + 4 + 2 * i : ppc + 2 + 2 * size + 2 * i;
-          succ.push_back(static_cast<std::uint32_t>(
-              static_cast<std::int64_t>(pc) + s4(toff)));
-        }
-      } else if (!ends) {
-        succ.push_back(pc + dalvik_insn_units(op));  // fall-through
-        if ((op >= 0x32 && op <= 0x37) || (op >= 0x38 && op <= 0x3d)) {  // if-*
-          succ.push_back(static_cast<std::uint32_t>(
-              static_cast<std::int64_t>(pc) + static_cast<std::int16_t>(in[pc + 1])));
-        }
-      }
-      for (std::uint32_t s : succ) {
-        if (merge_into(s, out)) work.push_back(s);
-      }
-      for (const DexTryHandler& h : c.handlers) {
-        if (pc >= h.start_addr && pc < h.end_addr) {
-          if (merge_into(h.handler_addr, in_state[pc])) work.push_back(h.handler_addr);
-        }
-      }
-    }
-
+    // in_state (per-pc JVM local types) was computed in pass 1, above.
     struct Frame { std::uint32_t off; std::vector<VType> locals; std::vector<VType> stack; };
     std::vector<Frame> frames;
     for (const auto& [dpc, stk] : frame_stack) {
