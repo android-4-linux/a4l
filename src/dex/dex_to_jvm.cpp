@@ -876,6 +876,11 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
   for (const DexTryHandler& h : c.handlers) handler_pcs.insert(h.handler_addr);
 
   const std::vector<std::uint16_t>& in = c.insns;
+  // Per-register type recorded by new-instance, used to fix <init> calls: Dalvik's
+  // `new-instance vX, N; invoke-direct M.<init>` (N inherits M's constructor) must
+  // become JVM `new N; invokespecial N.<init>` — the invokespecial class must match
+  // the new type, not the constructor's declaring class (else VerifyError).
+  std::map<int, std::string> reg_new_type;
   std::size_t pc = 0;
   while (pc < in.size()) {
     // Skip inline switch/array payloads (data, not instructions).
@@ -1339,6 +1344,7 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         e.u2(cw.class_ref(td->substr(1, td->size() - 2)));
         e.adj(+1);
         e.store_a(local(a));
+        reg_new_type[a] = td->substr(1, td->size() - 2);  // for the <init> owner fix
         pc += 2;
         break;
       }
@@ -1672,8 +1678,20 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
           e.u1(static_cast<std::uint8_t>(argc));  // outgoing arg word count
           e.u1(0);
         } else {
+          // For a constructor call on a freshly new'd object, the invokespecial class
+          // must be the new type (not the constructor's declaring superclass) — the
+          // Dalvik inherited-constructor pattern. super()/this() on uninitialized-this
+          // has no recorded new-type and keeps the ref's owner.
+          std::string owner = mr->owner_internal;
+          if (kind == 0x70 && mr->name == "<init>" && has_receiver) {
+            auto it = reg_new_type.find(arg_reg(0));
+            if (it != reg_new_type.end()) {
+              owner = it->second;
+              reg_new_type.erase(it);  // initialized now
+            }
+          }
           e.op(invoke_op);
-          e.u2(cw.methodref(mr->owner_internal, mr->name, mr->descriptor));
+          e.u2(cw.methodref(owner, mr->name, mr->descriptor));
         }
         e.adj(-argc + retw);  // pops receiver+params, pushes return
         // Discard the result if not captured by a following move-result{,-wide}.
