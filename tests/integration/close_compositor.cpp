@@ -37,12 +37,16 @@ wl_display* g_display = nullptr;
 std::string g_keymap;  // xkb keymap text, sent so client-side key-repeat can arm
 wl_resource* g_text_input = nullptr;  // the client's zwp_text_input_v3, to commit text into
 bool g_hidpi = false;  // advertise a 1.5x fractional scale (else unity)
+bool g_dynamic = false;  // change the fractional scale mid-run (180 -> 240)
 std::uint32_t g_serial = 0;
 wl_resource* g_pointer = nullptr;   // the client's wl_pointer, for injecting a tap
 wl_resource* g_keyboard = nullptr;  // the client's wl_keyboard, for injecting a key
 wl_resource* g_toplevel = nullptr;  // the mapped xdg_toplevel (for a delayed close)
+wl_resource* g_fractional_scale = nullptr;  // the client's wp_fractional_scale_v1
 bool g_repeat_mode = false;         // hold a key (repeat_info) and delay the close
+int g_output_w = 1920, g_output_h = 1080, g_output_scale = 1;  // wl_output mode + scale
 wl_event_source* g_close_timer = nullptr;
+wl_event_source* g_scale_timer = nullptr;  // dynamic mode: fire the mid-run scale change
 void arm_shutdown();  // defined below; called after close is sent
 
 struct Surf {
@@ -82,8 +86,31 @@ void surface_commit(wl_client*, wl_resource* r) {
     xdg_surface_send_configure(s->xdg_surface, ++g_serial);
     return;
   }
+  if (s->xdg_toplevel == nullptr || s->pending_buffer == nullptr) return;
+
+  // Dynamic-scale mode: keep the loop ticking (ack every frame, release every
+  // buffer) so the presenter stays live to process a mid-run preferred_scale change,
+  // which timers drive: send scale 240 (from the initial 180), then close.
+  if (g_dynamic) {
+    if (s->frame_cb != nullptr) {
+      wl_callback_send_done(s->frame_cb, ++g_serial);
+      wl_resource_destroy(s->frame_cb);
+      s->frame_cb = nullptr;
+    }
+    wl_buffer_send_release(s->pending_buffer);
+    s->pending_buffer = nullptr;
+    if (!s->close_sent) {
+      s->close_sent = true;
+      g_toplevel = s->xdg_toplevel;
+      wl_event_source_timer_update(g_scale_timer, 150);  // -> preferred_scale 240
+      wl_event_source_timer_update(g_close_timer, 600);  // then close
+      std::fprintf(stderr, "close-compositor: dynamic mode -> mid-run scale change then close\n");
+    }
+    return;
+  }
+
   // The window is now mapped (a buffer was attached) — inject input, then close.
-  if (s->xdg_toplevel != nullptr && s->pending_buffer != nullptr && !s->close_sent) {
+  if (!s->close_sent) {
     s->close_sent = true;
     g_toplevel = s->xdg_toplevel;
     if (s->frame_cb != nullptr) {
@@ -135,9 +162,17 @@ void surface_commit(wl_client*, wl_resource* r) {
     }
   }
 }
+// v3+ requests the presenter now uses (set_buffer_scale for integer HiDPI); leaving
+// their vtable slots null would crash libwayland's opcode dispatch, so stub them.
+void surface_set_buffer_transform(wl_client*, wl_resource*, int32_t) {}
+void surface_set_buffer_scale(wl_client*, wl_resource*, int32_t) {}
+void surface_damage_buffer(wl_client*, wl_resource*, int32_t, int32_t, int32_t, int32_t) {}
+void surface_offset(wl_client*, wl_resource*, int32_t, int32_t) {}
 const struct wl_surface_interface surface_impl = {
     surface_destroy, surface_attach, surface_damage, surface_frame,
-    surface_set_opaque_region, surface_set_input_region, surface_commit};
+    surface_set_opaque_region, surface_set_input_region, surface_commit,
+    surface_set_buffer_transform, surface_set_buffer_scale,
+    surface_damage_buffer, surface_offset};
 
 void surface_res_destroy(wl_resource* r) { delete surf_of(r); }
 
@@ -271,6 +306,7 @@ void fsmgr_destroy(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
 void fsmgr_get_fractional_scale(wl_client* c, wl_resource* r, uint32_t id, wl_resource* /*surface*/) {
   wl_resource* fsr = wl_resource_create(c, &wp_fractional_scale_v1_interface, wl_resource_get_version(r), id);
   wl_resource_set_implementation(fsr, &fscale_impl, nullptr, nullptr);
+  g_fractional_scale = fsr;  // dynamic mode sends a second preferred_scale later
   wp_fractional_scale_v1_send_preferred_scale(fsr, g_hidpi ? 180 : 120);  // 180/120 = 1.5x
 }
 const struct wp_fractional_scale_manager_v1_interface fsmgr_impl = {fsmgr_destroy, fsmgr_get_fractional_scale};
@@ -286,6 +322,20 @@ void viewporter_get_viewport(wl_client* c, wl_resource* r, uint32_t id, wl_resou
   wl_resource_set_implementation(v, &viewport_impl, nullptr, nullptr);
 }
 const struct wp_viewporter_interface viewporter_impl = {viewporter_destroy, viewporter_get_viewport};
+
+// ── wl_output (advertises the display mode + integer scale) ───────────────────
+void output_release(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
+const struct wl_output_interface output_impl = {output_release};
+void bind_output(wl_client* c, void*, uint32_t version, uint32_t id) {
+  wl_resource* r = wl_resource_create(c, &wl_output_interface, static_cast<int>(version), id);
+  wl_resource_set_implementation(r, &output_impl, nullptr, nullptr);
+  wl_output_send_geometry(r, 0, 0, 340, 190 /*mm*/, WL_OUTPUT_SUBPIXEL_UNKNOWN,
+                          "aclcxx", "test", WL_OUTPUT_TRANSFORM_NORMAL);
+  wl_output_send_mode(r, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
+                      g_output_w, g_output_h, 60000 /*mHz*/);
+  if (version >= WL_OUTPUT_SCALE_SINCE_VERSION) wl_output_send_scale(r, g_output_scale);
+  if (version >= WL_OUTPUT_DONE_SINCE_VERSION) wl_output_send_done(r);
+}
 
 // ── globals ───────────────────────────────────────────────────────────────────
 void bind_fs_manager(wl_client* c, void*, uint32_t version, uint32_t id) {
@@ -324,6 +374,16 @@ void arm_shutdown() {
   if (g_shutdown_timer != nullptr) wl_event_source_timer_update(g_shutdown_timer, 1000);
 }
 
+// Dynamic mode: send a second preferred_scale (240/120 = 2x) so the presenter must
+// re-create its buffers at the new physical size while the loop is running.
+int on_scale_change(void*) {
+  if (g_fractional_scale != nullptr) {
+    wp_fractional_scale_v1_send_preferred_scale(g_fractional_scale, 240);
+    std::fprintf(stderr, "close-compositor: sent mid-run preferred_scale 240\n");
+  }
+  return 0;
+}
+
 // Repeat mode: after holding a key long enough for repeats to fire, close.
 int on_delayed_close(void*) {
   if (g_toplevel != nullptr) xdg_toplevel_send_close(g_toplevel);
@@ -341,8 +401,12 @@ int on_timeout(void*) {
 
 int main(int argc, char** argv) {
   const char* socket = argc > 1 ? argv[1] : "aclcxx-close";
-  g_repeat_mode = argc > 2 && std::string_view(argv[2]) == "repeat";
-  g_hidpi = argc > 2 && std::string_view(argv[2]) == "hidpi";
+  const std::string_view mode = argc > 2 ? std::string_view(argv[2]) : std::string_view();
+  g_repeat_mode = mode == "repeat";
+  g_hidpi = mode == "hidpi" || mode == "dynamic";  // dynamic starts at 1.5x, then 2x
+  g_dynamic = mode == "dynamic";
+  g_output_scale = mode == "outputscale" ? 2 : 1;  // integer HiDPI via wl_output.scale
+  if (mode == "display") { g_output_w = 1280; g_output_h = 720; }  // distinct display metrics
 
   // Compile the default (RMLVO) xkb keymap once, to send to clients.
   if (xkb_context* ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS)) {
@@ -369,12 +433,14 @@ int main(int argc, char** argv) {
   wl_global_create(g_display, &zwp_text_input_manager_v3_interface, 1, nullptr, bind_text_input_manager);
   wl_global_create(g_display, &wp_fractional_scale_manager_v1_interface, 1, nullptr, bind_fs_manager);
   wl_global_create(g_display, &wp_viewporter_interface, 1, nullptr, bind_viewporter);
+  wl_global_create(g_display, &wl_output_interface, 3, nullptr, bind_output);  // v3: scale + done + release
 
   wl_event_loop* loop = wl_display_get_event_loop(g_display);
   wl_event_source* timer = wl_event_loop_add_timer(loop, on_timeout, nullptr);
   wl_event_source_timer_update(timer, 20000);  // 20s safety net
   g_shutdown_timer = wl_event_loop_add_timer(loop, on_shutdown, nullptr);  // armed after close
-  g_close_timer = wl_event_loop_add_timer(loop, on_delayed_close, nullptr);  // repeat mode
+  g_close_timer = wl_event_loop_add_timer(loop, on_delayed_close, nullptr);  // repeat/dynamic mode
+  g_scale_timer = wl_event_loop_add_timer(loop, on_scale_change, nullptr);  // dynamic mode
 
   std::fprintf(stderr, "close-compositor: ready on %s\n", socket);
   wl_display_run(g_display);

@@ -44,13 +44,25 @@ class ActivityService {
   bool low_ram_device() const { return false; }
 };
 
-// Backs android.view.WindowManager / Display: display metrics. A fixed logical
-// display until the wm/ + gfx/ Wayland/Skia stack lands (Phase 2).
+// Backs android.view.WindowManager / Display: display metrics. Defaults to a 1080p
+// logical display; wm::query_display() overrides it from the compositor's wl_output
+// (active mode + integer scale) before the app queries android.view.Display.
 class WindowService {
  public:
-  int display_width() const { return 1920; }
-  int display_height() const { return 1080; }
-  int rotation() const { return 0; }          // Surface.ROTATION_0
+  int display_width() const { return width_; }
+  int display_height() const { return height_; }
+  int density_dpi() const { return 160 * scale_; }   // Android baseline 160 dpi * scale
+  int rotation() const { return 0; }                 // Surface.ROTATION_0
+  void set_display(int width, int height, int scale) {
+    if (width > 0) width_ = width;
+    if (height > 0) height_ = height;
+    if (scale > 0) scale_ = scale;
+  }
+
+ private:
+  int width_ = 1920;
+  int height_ = 1080;
+  int scale_ = 1;
 };
 
 // Backs android.media.session.MediaSessionManager: tracks active sessions. A

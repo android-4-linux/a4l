@@ -17,6 +17,8 @@ constexpr const char* kMsg =
 
 bool wayland_available() noexcept { return false; }
 
+bool query_display(int&, int&, int&) noexcept { return false; }
+
 bool present_surface(const gfx::Surface&, std::string_view, std::string_view,
                      int) noexcept {
   log::w("aclcxx.wm", kMsg);

@@ -112,6 +112,27 @@ class FracScaleH : public fs::CWpFractionalScaleV1<FracScaleH> {
     if (dirty != nullptr) *dirty = true;
   }
 };
+// wl_output: integer scale (the fallback when there's no fractional scale) + the
+// display mode (for the Android Display metrics, read separately by query_display).
+class OutputH : public CWlOutput<OutputH> {
+ public:
+  std::int32_t* scale = nullptr;  // presenter: integer scale for set_buffer_scale
+  bool* dirty = nullptr;
+  int* mode_w = nullptr;          // query_display: current mode dimensions + scale
+  int* mode_h = nullptr;
+  int* out_scale = nullptr;
+  void OnScale(int32_t factor) override {
+    if (factor <= 0) return;
+    if (scale != nullptr) *scale = factor;
+    if (dirty != nullptr) *dirty = true;
+    if (out_scale != nullptr) *out_scale = factor;
+  }
+  void OnMode(uint32_t flags, int32_t w, int32_t h, int32_t) override {
+    if ((flags & WL_OUTPUT_MODE_CURRENT) == 0u) return;  // 0x1: the active mode
+    if (mode_w != nullptr) *mode_w = w;
+    if (mode_h != nullptr) *mode_h = h;
+  }
+};
 
 struct ShmMapping {
   int fd = -1;
@@ -193,6 +214,8 @@ class Presenter : public wl::ime::TextInputListener {
         { fsm_name_ = name; fsm_ver_ = ver; }
       else if (iface == vp::wp_viewporter_traits::interface_name)
         { vpr_name_ = name; vpr_ver_ = ver; }
+      else if (iface == wl_output_traits::interface_name)
+        { output_name_ = name; output_ver_ = ver; }
     });
     if (!wl::RoundtripWithTimeout(display_.Get())) { log::w(kTag, "present: registry roundtrip failed"); return false; }
     if (comp_name_ == 0 || shm_name_ == 0 || xdg_name_ == 0) {
@@ -224,7 +247,12 @@ class Presenter : public wl::ime::TextInputListener {
     if (vpr_name_ != 0)
       if (wl_proxy* raw = registry_.Bind<vp::wp_viewporter_traits>(vpr_name_, std::min(vpr_ver_, vp::wp_viewporter_traits::version)))
         viewporter_.Attach(raw);
-    if (!wl::RoundtripWithTimeout(display_.Get())) return false;  // shm formats + clock_id + seat caps
+    // wl_output: integer-scale fallback (has a scale event -> _SetProxy/BindHandler).
+    if (output_name_ != 0 && wl::BindHandler<wl_output_traits>(registry_, output_, output_name_, output_ver_)) {
+      output_.Get()->scale = &output_scale_;
+      output_.Get()->dirty = &scale_dirty_;
+    }
+    if (!wl::RoundtripWithTimeout(display_.Get())) return false;  // shm formats + clock_id + seat caps + output
 
     if (!wl::SetupHandler(surface_, wl::construct<wl_surface_traits, wl_compositor_traits::Op::CreateSurface>(*comp_.Get()))) return false;
     if (!wl::SetupHandler(xdg_surface_, wl::construct<xdg_surface_traits, xdg_wm_base_traits::Op::GetXdgSurface>(*xdg_wm_base_.Get(), surface_.Get()->GetProxy()))) return false;
@@ -245,7 +273,7 @@ class Presenter : public wl::ime::TextInputListener {
         wl::SetupHandler(frac_scale_, wl::construct<fs::wp_fractional_scale_v1_traits,
             fs::wp_fractional_scale_manager_v1_traits::Op::GetFractionalScale>(
                 *frac_mgr_.Get(), surface_.Get()->GetProxy()))) {
-      frac_scale_.Get()->scale_120 = &scale_120_;
+      frac_scale_.Get()->scale_120 = &frac_scale_120_;
       frac_scale_.Get()->dirty = &scale_dirty_;
     }
     if (!viewporter_.IsNull())
@@ -273,6 +301,14 @@ class Presenter : public wl::ime::TextInputListener {
     bool clean = true;
     while (!closed_) {
       if (bounded && now_ns(CLOCK_MONOTONIC) > deadline) { log::w(kTag, "present: loop deadline exceeded"); clean = false; break; }
+      // Runtime scale change (compositor moved the window to a different-DPI output):
+      // recompute the physical size and re-create the buffers.
+      if (scale_dirty_) {
+        const std::int32_t opw = pw_, oph = ph_;
+        apply_scale();
+        if ((pw_ != opw || ph_ != oph) && !rebuild_buffers()) { clean = false; break; }
+        need_frame_ = true;  // redraw at the new physical size
+      }
       // Render on each vsync tick, up to the frame budget.
       if (configured_ && need_frame_ && (max_frames_ == 0 || frame_index_ < max_frames_)) {
         need_frame_ = false;
@@ -393,21 +429,39 @@ class Presenter : public wl::ime::TextInputListener {
     return true;
   }
 
-  // Physical buffer size for the current fractional scale; sets the viewport dst to
-  // the logical size so the compositor maps the physical buffer back down.
+  // Choose the buffer scale and how it maps to the surface:
+  //   * a fractional preferred_scale (non-unity) -> physical buffer + wp_viewport
+  //     destination = logical (arbitrary ratios),
+  //   * else an integer wl_output.scale > 1 -> physical buffer + wl_surface.
+  //     set_buffer_scale (HiDPI without a fractional-scale compositor),
+  //   * else unity (buffer == logical).
   void apply_scale() {
     scale_dirty_ = false;
-    if (!viewport_.IsNull() && scale_120_ != wl::ScalePolicy::kUnityScale120) {
-      pw_ = wl::ScalePolicy::ScaledDim(w_, scale_120_);
-      ph_ = wl::ScalePolicy::ScaledDim(h_, scale_120_);
-      if (pw_ <= 0) pw_ = w_;
-      if (ph_ <= 0) ph_ = h_;
+    const bool have_frac = !frac_scale_.IsNull() && frac_scale_120_ != 0 &&
+                           frac_scale_120_ != wl::ScalePolicy::kUnityScale120 && !viewport_.IsNull();
+    if (have_frac) {
+      scale_120_ = frac_scale_120_;
+    } else if (output_scale_ > 1) {
+      scale_120_ = output_scale_ * wl::ScalePolicy::kUnityScale120;
+    } else {
+      scale_120_ = wl::ScalePolicy::kUnityScale120;
+      pw_ = w_;
+      ph_ = h_;
+      if (!surface_.IsNull()) surface_.Get()->SetBufferScale(1);
+      return;
+    }
+    pw_ = wl::ScalePolicy::ScaledDim(w_, scale_120_);
+    ph_ = wl::ScalePolicy::ScaledDim(h_, scale_120_);
+    if (pw_ <= 0) pw_ = w_;
+    if (ph_ <= 0) ph_ = h_;
+    if (have_frac) {
+      surface_.Get()->SetBufferScale(1);
       viewport_.Get()->SetDestination(w_, h_);
       log::i(kTag, "fractional scale {}/120: buffer {}x{} -> viewport {}x{}",
              scale_120_, pw_, ph_, w_, h_);
     } else {
-      pw_ = w_;
-      ph_ = h_;
+      surface_.Get()->SetBufferScale(output_scale_);  // integer HiDPI
+      log::i(kTag, "output scale {}: buffer {}x{} (set_buffer_scale)", output_scale_, pw_, ph_);
     }
   }
 
@@ -425,6 +479,16 @@ class Presenter : public wl::ime::TextInputListener {
       std::uint32_t* drow = dst + static_cast<std::size_t>(y) * pw_;
       for (int x = 0; x < pw_; ++x) drow[x] = srow[x * w_ / pw_];
     }
+  }
+
+  // Tear down and re-create the shm buffers at the current physical size (after a
+  // runtime scale change). Old proxies/mmap are released; a busy buffer becoming
+  // inert is fine — the compositor treats a destroyed wl_buffer as released.
+  bool rebuild_buffers() {
+    for (Buf& b : bufs_) { b.buffer.Reset(); b.busy = false; b.pixels = nullptr; }
+    pool_.Reset();
+    mem_.Reset();
+    return MakeBuffers();
   }
 
   bool MakeBuffers() {
@@ -473,6 +537,7 @@ class Presenter : public wl::ime::TextInputListener {
   wl::WlPtr<FracScaleH> frac_scale_;   // per-surface; preferred_scale event
   wl::WlPtr<ViewporterH> viewporter_;
   wl::WlPtr<ViewportH> viewport_;
+  wl::WlPtr<OutputH> output_;
   wl::WlPtr<SeatH> seat_;
   wl::WlPtr<wl::PointerHandler<Presenter>> pointer_;   // created on wl_seat capabilities
   wl::WlPtr<wl::KeyboardHandler<Presenter>> keyboard_;  // created on wl_seat capabilities
@@ -487,8 +552,8 @@ class Presenter : public wl::ime::TextInputListener {
 
   uint32_t comp_name_ = 0, comp_ver_ = 0, shm_name_ = 0, shm_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
   uint32_t seat_name_ = 0, seat_ver_ = 0, ti_name_ = 0, ti_ver_ = 0;
-  uint32_t fsm_name_ = 0, fsm_ver_ = 0, vpr_name_ = 0, vpr_ver_ = 0;
-  std::int32_t scale_120_ = 120, pw_ = 0, ph_ = 0;
+  uint32_t fsm_name_ = 0, fsm_ver_ = 0, vpr_name_ = 0, vpr_ver_ = 0, output_name_ = 0, output_ver_ = 0;
+  std::int32_t scale_120_ = 120, frac_scale_120_ = 0, output_scale_ = 1, pw_ = 0, ph_ = 0;
   bool scale_dirty_ = false;
   bool want_ime_ = false, ime_bound_ = false;
   int w_ = 0, h_ = 0;
@@ -503,6 +568,32 @@ class Presenter : public wl::ime::TextInputListener {
 bool wayland_available() noexcept {
   wl::DisplayHandle d;
   return d.Connect();  // disconnects on destruction
+}
+
+bool query_display(int& width, int& height, int& scale) noexcept {
+  wl::DisplayHandle d;
+  if (!d.Connect()) return false;
+  wl::CRegistry reg;
+  if (!reg.Create(d.Get())) return false;
+  uint32_t out_name = 0, out_ver = 0;
+  reg.OnGlobal([&](wl::CRegistry&, uint32_t name, std::string_view iface, uint32_t ver) {
+    if (iface == wl_output_traits::interface_name) { out_name = name; out_ver = ver; }
+  });
+  if (!wl::RoundtripWithTimeout(d.Get()) || out_name == 0) return false;
+  wl::WlPtr<OutputH> out;
+  if (!wl::BindHandler<wl_output_traits>(reg, out, out_name,
+                                         std::min(out_ver, wl_output_traits::version)))
+    return false;
+  int mw = 0, mh = 0, sc = 1;
+  out.Get()->mode_w = &mw;
+  out.Get()->mode_h = &mh;
+  out.Get()->out_scale = &sc;
+  // geometry/mode/scale/done arrive together after bind.
+  if (!wl::RoundtripWithTimeout(d.Get()) || mw <= 0 || mh <= 0) return false;
+  width = mw;
+  height = mh;
+  scale = sc;
+  return true;
 }
 
 bool present_loop(int width, int height, std::string_view title,

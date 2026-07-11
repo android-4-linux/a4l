@@ -94,6 +94,13 @@ bool present_loop(int width, int height, std::string_view title,
 bool present_surface(const gfx::Surface& surface, std::string_view title,
                      std::string_view app_id, int timeout_ms = 3000) noexcept;
 
+// Query the compositor's current display metrics from wl_output: the active mode's
+// pixel dimensions and the integer output scale. Connects, reads one wl_output, and
+// disconnects (a throwaway connection, so it can run before the app's lifecycle to
+// seed android.view.Display). Returns false when no backend/compositor/wl_output is
+// available, leaving the outputs untouched.
+bool query_display(int& width, int& height, int& scale) noexcept;
+
 const char* module_name() noexcept;
 
 }  // namespace aclcxx::wm

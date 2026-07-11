@@ -335,6 +335,19 @@ if py3.found() and have_jni
         depends : [aclcxx_exe, ime_apk, framework_shim, close_compositor],
         timeout : 120,
       )
+
+      # Display metrics: the compositor advertises a wl_output whose mode is 1280x720;
+      # aclcxx must query it before onCreate and seed android.view.Display, so the
+      # app's getWindowManager()/getDefaultDisplay() reports 1280x720 (not the 1080p
+      # default). Reuses touch.apk (any Activity queries the display on launch).
+      test(
+        'run-apk-display',
+        py3,
+        args : [files('run_display_test.py'), aclcxx_exe, touch_apk, framework_shim,
+                close_compositor],
+        depends : [aclcxx_exe, touch_apk, framework_shim, close_compositor],
+        timeout : 120,
+      )
     endif
   else
     message('javac not found; skipping run-apk-framework integration test.')

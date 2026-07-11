@@ -157,6 +157,17 @@ class JvmVm final : public Vm {
                        std::string(activity_class) + " is not an android.app.Activity");
     }
 
+    // Seed android.view.Display from the compositor's wl_output before onCreate, so
+    // the app's early getWindowManager()/getDefaultDisplay() metrics are real. A
+    // throwaway connection; a no-op when not presenting or no compositor is reachable.
+    if (config_.present) {
+      int dw = 0, dh = 0, dscale = 1;
+      if (wm::query_display(dw, dh, dscale)) {
+        svc::window().set_display(dw, dh, dscale);
+        log::i(kTag, "display from wl_output: {}x{} scale {}", dw, dh, dscale);
+      }
+    }
+
     Error result = Error::ok();
     jmethodID ctor = env_->GetMethodID(cls, "<init>", "()V");
     jobject activity = ctor != nullptr ? env_->NewObject(cls, ctor) : nullptr;

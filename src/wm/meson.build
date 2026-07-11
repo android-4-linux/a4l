@@ -197,6 +197,24 @@ if build_tests and have_wcs
                 wm_present_probe, close_compositor],
         timeout : 60,
       )
+      # Integer HiDPI: the compositor has no fractional scale but a wl_output.scale of
+      # 2; the presenter renders a 2x physical buffer and uses wl_surface.set_buffer_scale.
+      test(
+        'wm-present-outputscale',
+        py3_wm,
+        args : [files('../../tests/integration/run_outputscale_test.py'),
+                wm_present_probe, close_compositor],
+        timeout : 60,
+      )
+      # Dynamic scale: the compositor moves the surface from 1.5x to 2x mid-run; the
+      # presenter must re-create its buffers at the new physical size without a restart.
+      test(
+        'wm-present-dynamic',
+        py3_wm,
+        args : [files('../../tests/integration/run_dynamic_test.py'),
+                wm_present_probe, close_compositor],
+        timeout : 60,
+      )
     endif
   else
     message('python3/weston not both present; skipping wm-present Tier-C tests.')
