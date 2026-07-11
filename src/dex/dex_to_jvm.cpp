@@ -291,11 +291,21 @@ std::string obj_internal(const std::string& desc) {
 
 // Number of 16-bit code units of a supported Dalvik instruction (used by the
 // stack-map forward pass, which only ever sees already-translatable opcodes).
+// Instruction width in 16-bit code units, per the Dalvik instruction-format table
+// (source.android.com/docs/core/runtime/instruction-formats). This MUST be correct
+// for EVERY opcode — not only the ones translated — because the register-kind and
+// stackmap passes walk the whole method linearly; a wrong width desyncs the walk and
+// reads garbage (real apps carry const-string/jumbo, goto/32, invoke-custom for
+// lambdas, invoke-polymorphic, etc., even in methods that ultimately stub).
 int dalvik_insn_units(std::uint8_t op) {
-  if (op == 0x18) return 5;                                        // const-wide
-  if (op == 0x14 || op == 0x17 || op == 0x24 || op == 0x26 || op == 0x2b ||
-      op == 0x2c || (op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) {
-    return 3;  // const/32, filled-new-array, fill-array-data, switch, invoke-{,/range}
+  if (op == 0x18) return 5;                                        // const-wide (51l)
+  if (op == 0xfa || op == 0xfb) return 4;    // invoke-polymorphic{,/range} (45cc/4rcc)
+  if (op == 0x14 || op == 0x17 || op == 0x1b ||   // const/32, const-wide/32, const-string/jumbo
+      op == 0x24 || op == 0x25 || op == 0x26 ||   // filled-new-array{,/range}, fill-array-data
+      op == 0x2a || op == 0x2b || op == 0x2c ||   // goto/32, packed-switch, sparse-switch
+      (op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78) ||  // invoke-{,/range}
+      op == 0xfc || op == 0xfd) {                 // invoke-custom{,/range}
+    return 3;
   }
   if (op == 0x13 || op == 0x15 || op == 0x16 || op == 0x19 || op == 0x1a ||
       op == 0x1c ||                  // const-class
@@ -305,7 +315,8 @@ int dalvik_insn_units(std::uint8_t op) {
       (op >= 0x32 && op <= 0x3d) ||   // if-test / if-testz
       (op >= 0x44 && op <= 0x6d) ||   // aget/aput, iget/iput, sget/sput (all typed)
       (op >= 0x90 && op <= 0xaf) ||   // int/long/float/double binary ops (23x)
-      (op >= 0xd0 && op <= 0xe2)) {   // int op/lit16, op/lit8
+      (op >= 0xd0 && op <= 0xe2) ||   // int op/lit16, op/lit8
+      op == 0xfe || op == 0xff) {     // const-method-handle, const-method-type
     return 2;
   }
   return 1;  // moves, const/4, returns, gotos, /2addr, unary, nop, etc.
@@ -531,6 +542,12 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
     }
     const std::uint8_t op = u0 & 0xff;
     const int A4 = (u0 >> 8) & 0xf, B4 = (u0 >> 12) & 0xf, A8 = (u0 >> 8) & 0xff;
+    // Bounds-safe code-unit read: real-world DEX can desync this linear walk (an
+    // opcode length we don't advance), so a misread operand must not overrun `in`
+    // — the method stubs during translation instead. Returns 0 past the end.
+    const auto at = [&](std::size_t k) -> std::uint16_t {
+      return pc + k < in.size() ? in[pc + k] : std::uint16_t{0};
+    };
     const int BB = pc + 1 < in.size() ? (in[pc + 1] & 0xff) : 0;
     const int CC = pc + 1 < in.size() ? ((in[pc + 1] >> 8) & 0xff) : 0;
     const MethodRef* this_invoke = nullptr;
@@ -556,20 +573,20 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
     // Moves unify (32-bit and 64-bit), so a const/move-linked register inherits
     // the type pinned elsewhere.
     if (op == 0x01) unite(A4, B4);                       // move
-    else if (op == 0x02) unite(A8, in[pc + 1]);          // move/from16
-    else if (op == 0x03) unite(in[pc + 1], in[pc + 2]);  // move/16
+    else if (op == 0x02) unite(A8, at(1));               // move/from16
+    else if (op == 0x03) unite(at(1), at(2));            // move/16
     else if (op == 0x04) unite(A4, B4);                  // move-wide
-    else if (op == 0x05) unite(A8, in[pc + 1]);          // move-wide/from16
-    else if (op == 0x06) unite(in[pc + 1], in[pc + 2]);  // move-wide/16
+    else if (op == 0x05) unite(A8, at(1));               // move-wide/from16
+    else if (op == 0x06) unite(at(1), at(2));            // move-wide/16
     else if (op == 0x07) unite(A4, B4);                  // move-object
-    else if (op == 0x08) unite(A8, in[pc + 1]);          // move-object/from16
-    else if (op == 0x09) unite(in[pc + 1], in[pc + 2]);  // move-object/16
+    else if (op == 0x08) unite(A8, at(1));               // move-object/from16
+    else if (op == 0x09) unite(at(1), at(2));            // move-object/16
 
     // Ref-producing writes (value is a real object, never a bare null literal).
     if (op == 0x1a || op == 0x1c || op == 0x22 || op == 0x0c || op == 0x0d) pin_refdef(A8);
     else if (op == 0x23 || op == 0x07) pin_refdef(A4);
     else if (op == 0x08) pin_refdef(A8);
-    else if (op == 0x09 && pc + 1 < in.size()) pin_refdef(in[pc + 1]);
+    else if (op == 0x09) pin_refdef(at(1));
 
     switch (op) {
       case 0x11: pin(A8, RKind::Ref); break;   // return-object
@@ -614,7 +631,7 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
         break;
       case 0x52: case 0x53: case 0x54: {  // iget / iget-wide / iget-object
         if (op == 0x54) pin_refdef(A4);  // iget-object dst is a real ref
-        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        const FieldRef* fr = dex.field_ref(at(1));
         if (fr) pin(A4, fr->type_descriptor == "F" ? RKind::Float
                         : fr->type_descriptor == "D" ? RKind::Double
                         : is_wide_desc(fr->type_descriptor) ? RKind::Long
@@ -622,7 +639,7 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
         break;
       }
       case 0x59: case 0x5a: case 0x5b: {  // iput / iput-wide / iput-object
-        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        const FieldRef* fr = dex.field_ref(at(1));
         if (fr) pin(A4, fr->type_descriptor == "F" ? RKind::Float
                         : fr->type_descriptor == "D" ? RKind::Double
                         : is_wide_desc(fr->type_descriptor) ? RKind::Long
@@ -630,7 +647,7 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
         break;
       }
       case 0x60: case 0x61: {  // sget / sget-wide
-        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        const FieldRef* fr = dex.field_ref(at(1));
         if (fr) pin(A8, fr->type_descriptor == "F" ? RKind::Float
                         : fr->type_descriptor == "D" ? RKind::Double
                         : is_wide_desc(fr->type_descriptor) ? RKind::Long
@@ -638,7 +655,7 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
         break;
       }
       case 0x67: case 0x68: {  // sput / sput-wide
-        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        const FieldRef* fr = dex.field_ref(at(1));
         if (fr) pin(A8, fr->type_descriptor == "F" ? RKind::Float
                         : fr->type_descriptor == "D" ? RKind::Double
                         : is_wide_desc(fr->type_descriptor) ? RKind::Long
@@ -651,7 +668,7 @@ std::optional<std::vector<RKind>> infer_reg_kinds(const DexFile& dex,
       case 0x45: case 0x4c: pin(A8, RKind::Long); pin(CC, RKind::Int); break;  // aget/aput-wide (long)
       case 0x6e: case 0x6f: case 0x70: case 0x71: case 0x72:  // invoke 35c
       case 0x74: case 0x75: case 0x76: case 0x77: case 0x78:  // invoke /range
-        this_invoke = dex.method_ref(in[pc + 1]);
+        this_invoke = dex.method_ref(at(1));
         if (this_invoke) {
           const bool is_static = (op == 0x71 || op == 0x77);
           const bool range = op >= 0x74;
@@ -883,6 +900,11 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
     }
     const std::uint16_t u = in[pc];
     const std::uint8_t opcode = u & 0xff;
+    // Bounds-safe code-unit read (see infer_reg_kinds): a misdecoded operand must
+    // not overrun `in`; returns 0 past the end so the method stubs rather than aborts.
+    const auto at = [&](std::size_t k) -> std::uint16_t {
+      return pc + k < in.size() ? in[pc + k] : std::uint16_t{0};
+    };
     const auto rel_target = [&](std::int64_t off) {
       return static_cast<std::uint32_t>(static_cast<std::int64_t>(pc) + off);
     };
@@ -1286,7 +1308,7 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
       case 0x69: {  // sput-object
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xff;
-        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        const FieldRef* fr = dex.field_ref(at(1));
         if (fr == nullptr) return std::nullopt;
         const bool is_object = opcode == 0x62 || opcode == 0x69;
         const bool is_float = fr->type_descriptor == "F";
@@ -1402,7 +1424,7 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
       case 0x53: case 0x5a: {  // iget-wide / iput-wide (22c) - long or double field
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
-        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        const FieldRef* fr = dex.field_ref(at(1));
         if (fr == nullptr || !is_wide_desc(fr->type_descriptor)) return std::nullopt;
         const bool dbl = fr->type_descriptor == "D";
         const std::uint16_t ref =
@@ -1422,7 +1444,7 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
       case 0x61: case 0x68: {  // sget-wide / sput-wide (21c) - long or double field
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xff;
-        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        const FieldRef* fr = dex.field_ref(at(1));
         if (fr == nullptr || !is_wide_desc(fr->type_descriptor)) return std::nullopt;
         const bool dbl = fr->type_descriptor == "D";
         const std::uint16_t ref =
@@ -1572,7 +1594,7 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
       case 0x5b: {  // iput-object
         if (pc + 1 >= in.size()) return std::nullopt;
         const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
-        const FieldRef* fr = dex.field_ref(in[pc + 1]);
+        const FieldRef* fr = dex.field_ref(at(1));
         if (fr == nullptr) return std::nullopt;
         const bool is_object = opcode == 0x54 || opcode == 0x5b;
         const bool is_float = fr->type_descriptor == "F";
