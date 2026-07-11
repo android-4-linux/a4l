@@ -164,6 +164,10 @@ ClassWriter::ClassWriter(std::string this_internal, std::string super_internal) 
   code_attr_name_ = utf8("Code");
 }
 
+void ClassWriter::add_interface(std::string_view internal_name) {
+  interfaces_.push_back(class_ref(internal_name));
+}
+
 void ClassWriter::add_field(std::uint16_t access_flags, std::string_view name,
                             std::string_view descriptor) {
   fields_.push_back({access_flags, utf8(name), utf8(descriptor)});
@@ -197,7 +201,8 @@ std::vector<std::uint8_t> ClassWriter::build() const {
   be16(out, 0x0021);  // ACC_PUBLIC | ACC_SUPER
   be16(out, this_class_);
   be16(out, super_class_);
-  be16(out, 0);  // interfaces_count
+  be16(out, static_cast<std::uint16_t>(interfaces_.size()));  // interfaces_count
+  for (std::uint16_t iface : interfaces_) be16(out, iface);
 
   be16(out, static_cast<std::uint16_t>(fields_.size()));
   for (const Field& f : fields_) {

@@ -1989,6 +1989,7 @@ DexError convert(const DexFile& dex, const ConvertOptions& opts,
     const std::string super =
         cls.super_name ? internal_name(*cls.super_name) : "java/lang/Object";
     ClassWriter cw(internal_name(cls.java_name), super);
+    for (const std::string& iface : cls.interfaces) cw.add_interface(internal_name(iface));
 
     for (const DexField& f : cls.static_fields) {
       cw.add_field(static_cast<std::uint16_t>(f.access_flags & kFieldFlagsMask),

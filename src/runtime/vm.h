@@ -11,6 +11,7 @@
 // (the OpenJDK+Classpath-Exception fallback). `Null` executes no Java; it drives
 // the plumbing (CLI, services) and tests before either lands.
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -39,6 +40,7 @@ struct VmConfig {
   std::string package_name;                  // manifest package, injected into Context
   std::vector<std::string> options;          // raw VM options (-Xmx..., -verbose:gc)
   bool present = false;                       // present the rendered content view via wm/ (--present)
+  std::uint64_t present_frames = 0;           // continuous-present frame budget (0 = until close; --present-frames)
 };
 
 enum class Status {

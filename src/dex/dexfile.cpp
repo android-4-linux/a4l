@@ -381,6 +381,7 @@ std::optional<DexFile> DexFile::parse(const std::uint8_t* data, std::size_t size
     const std::uint32_t class_idx = r.u32(cd + 0);
     const std::uint32_t access = r.u32(cd + 4);
     const std::uint32_t super_idx = r.u32(cd + 8);
+    const std::uint32_t interfaces_off = r.u32(cd + 12);
     const std::uint32_t class_data_off = r.u32(cd + 24);
 
     DexClass cls;
@@ -389,6 +390,14 @@ std::optional<DexFile> DexFile::parse(const std::uint8_t* data, std::size_t size
     cls.access_flags = access;
     if (super_idx != kNoIndex) {
       cls.super_name = descriptor_to_java(t.type_desc(super_idx));
+    }
+    // interfaces_off -> type_list (u32 size, then size * u16 type_idx).
+    if (interfaces_off != 0) {
+      const std::uint32_t n = r.u32(interfaces_off);
+      for (std::uint32_t j = 0; j < n && r.ok(); ++j) {
+        cls.interfaces.push_back(
+            descriptor_to_java(t.type_desc(r.u16(interfaces_off + 4 + j * 2))));
+      }
     }
     if (class_data_off != 0) {
       parse_class_data(r, t, class_data_off, cls);

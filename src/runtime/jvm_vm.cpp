@@ -369,10 +369,10 @@ class JvmVm final : public Vm {
           env_->CallVoidMethod(view, draw, canvas);
           jmethodID describe = env_->GetMethodID(bmp_cls, "aclcxxDescribe", "()V");
           if (describe != nullptr) env_->CallVoidMethod(bmp, describe);
-          // Present the rendered frame in a Wayland window (--present). The Bitmap's
-          // native pointer IS the gfx::Surface just drawn; hand it to wm/ (wcs). No-op
-          // if no compositor is reachable or aclcxx was built without wcs.
-          if (config_.present) present_content(bmp_cls, bmp);
+          // Present the content view in a Wayland window (--present), driving a
+          // Choreographer loop: each vsync tick fires the app's frame callbacks and
+          // re-draws. No-op if no compositor / built without wcs.
+          if (config_.present) present_content_loop(view, bmp, canvas, w, h);
           env_->DeleteLocalRef(canvas);
         }
       }
@@ -384,21 +384,57 @@ class JvmVm final : public Vm {
     env_->DeleteLocalRef(view);
   }
 
-  // Present the rendered Bitmap (a gfx::Surface behind aclcxxPtr()) in a Wayland
-  // window via wm/ (wcs). One-shot: blocks until the frame is shown or times out.
-  void present_content(jclass bmp_cls, jobject bmp) {
-    jmethodID ptr_m = env_->GetMethodID(bmp_cls, "aclcxxPtr", "()J");
-    if (ptr_m == nullptr) { clear_exception(); return; }
-    const jlong ptr = env_->CallLongMethod(bmp, ptr_m);
-    auto* surface = reinterpret_cast<const gfx::Surface*>(ptr);
-    if (surface == nullptr) return;
+  // Present the content view in a Wayland window via wm/ (wcs), driven by a
+  // Choreographer-style loop: on each vsync tick the ViewRoot fires the app's
+  // frame callbacks (android.view.Choreographer.aclcxxDoFrame), re-runs the View
+  // draw, and blits into the presenter's frame — the ViewRootImpl.performTraversals
+  // + Choreographer path. A static app (no frame callbacks) shows one frame and
+  // stops; an animating one runs to the frame budget (--present-frames) or close.
+  // The Bitmap's native pointer IS the gfx::Surface the View draws into.
+  void present_content_loop(jobject view, jobject bmp, jobject canvas, int w, int h) {
     if (!wm::wayland_available()) {
       log::i(kTag, "--present: no Wayland compositor reachable; frame not shown");
       return;
     }
+    jclass bmp_cls = env_->GetObjectClass(bmp);
+    jmethodID ptr_m = env_->GetMethodID(bmp_cls, "aclcxxPtr", "()J");
+    env_->DeleteLocalRef(bmp_cls);
+    if (ptr_m == nullptr) { clear_exception(); return; }
+    auto* surface = reinterpret_cast<const gfx::Surface*>(env_->CallLongMethod(bmp, ptr_m));
+    if (surface == nullptr) return;
+
+    jclass vcls = env_->GetObjectClass(view);
+    jmethodID draw = env_->GetMethodID(vcls, "draw", "(Landroid/graphics/Canvas;)V");
+    env_->DeleteLocalRef(vcls);
+
+    // Choreographer.getInstance() + the per-frame pump. Optional: if the shim isn't
+    // on the classpath we present a single static frame.
+    jobject choreo = nullptr;
+    jmethodID do_frame = nullptr;
+    if (jclass ch_cls = env_->FindClass("android/view/Choreographer")) {
+      if (jmethodID gi = env_->GetStaticMethodID(ch_cls, "getInstance",
+                                                 "()Landroid/view/Choreographer;"))
+        choreo = env_->CallStaticObjectMethod(ch_cls, gi);
+      do_frame = env_->GetMethodID(ch_cls, "aclcxxDoFrame", "(J)J");
+      env_->DeleteLocalRef(ch_cls);
+    }
+    clear_exception();
+
     const std::string& pkg = config_.package_name;
-    wm::present_surface(*surface, pkg.empty() ? "aclcxx" : pkg,
-                        pkg.empty() ? "org.aclcxx.app" : pkg);
+    const auto render = [&](gfx::Surface& out, std::uint64_t frame_time_ns,
+                            std::uint64_t idx) -> bool {
+      jlong fired = 0;
+      if (choreo != nullptr && do_frame != nullptr)
+        fired = env_->CallLongMethod(choreo, do_frame, static_cast<jlong>(frame_time_ns));
+      if (env_->ExceptionCheck() == JNI_TRUE) { fail_with_exception("Choreographer.doFrame"); return false; }
+      if (draw != nullptr) env_->CallVoidMethod(view, draw, canvas);  // re-draw with updated state
+      if (env_->ExceptionCheck() == JNI_TRUE) { fail_with_exception("View.draw"); return false; }
+      out.blit(surface->data());
+      return !(fired == 0 && idx > 0);  // static app: present frame 0, then stop
+    };
+    wm::present_loop(w, h, pkg.empty() ? "aclcxx" : pkg,
+                     pkg.empty() ? "org.aclcxx.app" : pkg, render, config_.present_frames);
+    if (choreo != nullptr) env_->DeleteLocalRef(choreo);
   }
 
   // Print + clear a pending exception and return a RuntimeError describing `what`.

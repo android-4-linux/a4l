@@ -102,6 +102,7 @@ if py3.found() and have_jni
                     '../../framework/shim/android/graphics/Canvas.java',
                     '../../framework/shim/android/view/View.java',
                     '../../framework/shim/android/view/ViewGroup.java',
+                    '../../framework/shim/android/view/Choreographer.java',
                     '../../framework/shim/android/util/Log.java'),
       output : 'framework-shim',
       command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
@@ -219,6 +220,25 @@ if py3.found() and have_jni
         py3,
         args : [files('run_view_present_test.py'), aclcxx_exe, view_apk, framework_shim],
         depends : [aclcxx_exe, view_apk, framework_shim],
+        timeout : 120,
+      )
+
+      # Tier C (continuous, JVM-driven): anim.apk's AnimView implements
+      # Choreographer.FrameCallback and re-posts itself each frame; `aclcxx run
+      # --present-frames=N` runs the Choreographer loop so the app redraws a moving
+      # band and N distinct frames are presented to a headless Weston.
+      anim_apk = custom_target(
+        'anim-apk',
+        input : files('../fixtures/make_anim_apk.py'),
+        output : 'anim.apk',
+        command : [py3, '@INPUT@', '@OUTPUT@'],
+        depend_files : files('../fixtures/make_axml.py'),
+      )
+      test(
+        'run-apk-anim-present',
+        py3,
+        args : [files('run_anim_present_test.py'), aclcxx_exe, anim_apk, framework_shim],
+        depends : [aclcxx_exe, anim_apk, framework_shim],
         timeout : 120,
       )
     endif

@@ -89,6 +89,7 @@ struct DexClass {
   std::string descriptor;                   // "Lcom/example/Foo;"
   std::string java_name;                    // "com.example.Foo"
   std::optional<std::string> super_name;    // "java.lang.Object"
+  std::vector<std::string> interfaces;      // directly-implemented, java names
   std::uint32_t access_flags = 0;
   std::vector<DexField> static_fields;
   std::vector<DexField> instance_fields;

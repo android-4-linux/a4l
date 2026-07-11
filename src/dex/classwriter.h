@@ -4,10 +4,9 @@
 #ifndef ACLCXX_DEX_CLASSWRITER_H
 #define ACLCXX_DEX_CLASSWRITER_H
 
-// Minimal writer for a single JVM .class file: constant pool + methods, each
-// with a Code attribute. Emits class-file version 52 (Java 8). Only what the
-// DEX->JVM translator needs — no fields, interfaces, or StackMapTable (the
-// translator emits branchless code, which needs no stack-map frames).
+// Minimal writer for a single JVM .class file: constant pool, interfaces,
+// fields, and methods (each with a Code attribute + optional StackMapTable).
+// Emits class-file version 51 (Java 7) — only what the DEX->JVM translator needs.
 //
 // NOTE: the class file format is big-endian (unlike dex/zip, which are
 // little-endian).
@@ -39,6 +38,10 @@ class ClassWriter {
                                     std::string_view desc);
   std::uint16_t fieldref(std::string_view cls, std::string_view name,
                          std::string_view desc);
+
+  // Declare a directly-implemented interface (internal name), so casts/invoke-
+  // interface against it verify. Emitted in the class file's interfaces array.
+  void add_interface(std::string_view internal_name);
 
   // Add a field declaration.
   void add_field(std::uint16_t access_flags, std::string_view name,
@@ -90,6 +93,7 @@ class ClassWriter {
   std::uint16_t super_class_;
   std::uint16_t code_attr_name_;   // utf8 "Code"
   std::uint16_t stackmap_name_ = 0;  // utf8 "StackMapTable" (lazily interned)
+  std::vector<std::uint16_t> interfaces_;  // cp Class indices
   std::vector<Field> fields_;
   std::vector<Method> methods_;
 };
