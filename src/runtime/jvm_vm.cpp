@@ -165,10 +165,7 @@ class JvmVm final : public Vm {
     }
     const std::string name = to_jni_name(activity_class);
     jclass cls = env_->FindClass(name.c_str());
-    if (cls == nullptr) {
-      clear_exception();
-      return Error::of(Status::NotFound, "class not found: " + std::string(activity_class));
-    }
+    if (cls == nullptr) return class_load_error("class", activity_class);
     // Only drive the lifecycle for real Activity subclasses; otherwise the caller
     // falls back to a static main() (self-contained apps).
     jclass activity_cls = env_->FindClass("android/app/Activity");
@@ -220,10 +217,7 @@ class JvmVm final : public Vm {
     }
     const std::string name = to_jni_name(service_class);
     jclass cls = env_->FindClass(name.c_str());
-    if (cls == nullptr) {
-      clear_exception();
-      return Error::of(Status::NotFound, "class not found: " + std::string(service_class));
-    }
+    if (cls == nullptr) return class_load_error("MediaBrowserService", service_class);
     jclass mbs_cls = env_->FindClass("android/service/media/MediaBrowserService");
     if (mbs_cls == nullptr || env_->IsAssignableFrom(cls, mbs_cls) != JNI_TRUE) {
       clear_exception();
@@ -265,10 +259,7 @@ class JvmVm final : public Vm {
     }
     const std::string name = to_jni_name(service_class);
     jclass cls = env_->FindClass(name.c_str());
-    if (cls == nullptr) {
-      clear_exception();
-      return Error::of(Status::NotFound, "class not found: " + std::string(service_class));
-    }
+    if (cls == nullptr) return class_load_error("CarAppService", service_class);
     jclass cas_cls = env_->FindClass("androidx/car/app/CarAppService");
     if (cas_cls == nullptr || env_->IsAssignableFrom(cls, cas_cls) != JNI_TRUE) {
       clear_exception();
@@ -309,6 +300,38 @@ class JvmVm final : public Vm {
     if (env_ != nullptr && env_->ExceptionCheck() == JNI_TRUE) {
       env_->ExceptionClear();
     }
+  }
+
+  // If an exception is pending, return its toString() (e.g. "java.lang.
+  // NoClassDefFoundError: androidx/media/MediaBrowserServiceCompat") and clear it;
+  // else "". Lets a FindClass failure distinguish a genuinely-absent class from one
+  // that is present but cannot be linked (a missing dependency in its hierarchy).
+  std::string pending_exception_text() {
+    if (env_ == nullptr || env_->ExceptionCheck() != JNI_TRUE) return {};
+    jthrowable ex = env_->ExceptionOccurred();
+    env_->ExceptionClear();
+    if (ex == nullptr) return {};
+    std::string out;
+    jclass ex_cls = env_->GetObjectClass(ex);
+    jmethodID to_string = env_->GetMethodID(ex_cls, "toString", "()Ljava/lang/String;");
+    if (to_string != nullptr) {
+      auto s = static_cast<jstring>(env_->CallObjectMethod(ex, to_string));
+      if (env_->ExceptionCheck() == JNI_TRUE) env_->ExceptionClear();  // toString threw
+      if (s != nullptr) { out = utf8(s); env_->DeleteLocalRef(s); }
+    }
+    env_->DeleteLocalRef(ex_cls);
+    env_->DeleteLocalRef(ex);
+    return out;
+  }
+
+  // Report a failed entry-class lookup: a link error (present-but-unloadable) is a
+  // RuntimeError with the underlying exception; a truly absent class is NotFound.
+  Error class_load_error(std::string_view kind, std::string_view name) {
+    const std::string exc = pending_exception_text();
+    if (!exc.empty())
+      return Error::of(Status::RuntimeError,
+                       "could not load " + std::string(kind) + " " + std::string(name) + ": " + exc);
+    return Error::of(Status::NotFound, "class not found: " + std::string(name));
   }
 
   // If `obj` is an android.content.Context (Service/Activity now are), inject the
