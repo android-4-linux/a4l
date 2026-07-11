@@ -60,9 +60,20 @@ def main() -> int:
               "MANIFEST.md missing the vendored rows / tag")
     shutil.rmtree(dest, ignore_errors=True)
 
+    # (4) plan: size each package in a plan file; flag over-budget + combined total.
+    os.makedirs(dest, exist_ok=True)
+    planf = os.path.join(dest, "plan.txt")
+    with open(planf, "w", encoding="utf-8") as fh:
+        fh.write("android.util 10\nandroid.text 1\n")  # util fits (4<=10); text over (2>1)
+    rc, out = run(base + ["plan", "--plan-file", planf])
+    check(rc == 1, f"plan should exit 1 on an over-budget package: {out}")
+    check("OVER BUDGET" in out, "plan should flag android.text over its budget")
+    check("COMBINED" in out, "plan should print a combined total")
+    shutil.rmtree(dest, ignore_errors=True)
+
     if not ok:
         return 1
-    sys.stdout.write("OK: vendor_framework size/budget/vendor + MANIFEST verified\n")
+    sys.stdout.write("OK: vendor_framework size/budget/vendor/plan + MANIFEST verified\n")
     return 0
 
 

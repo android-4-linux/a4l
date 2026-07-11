@@ -49,6 +49,12 @@ if py3.found()
     'framework-size',
     command : [py3, files('../../tools/vendor_framework.py'), 'size'],
   )
+  # Size every package in the ADR-0002 vendoring plan in one pass (closure + shim
+  # edges vs budget): ninja -C build framework-plan
+  run_target(
+    'framework-plan',
+    command : [py3, files('../../tools/vendor_framework.py'), 'plan'],
+  )
 endif
 
 if py3.found() and have_jni

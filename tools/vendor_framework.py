@@ -37,8 +37,18 @@ DEFAULT_SRC_REL = [
 DEFAULT_SEED = ["android.util"]  # a small starter; grow package-by-package (R-2 budget)
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DEST = os.path.join(REPO_ROOT, "third_party", "aosp", "frameworks")
+DEFAULT_PLAN = os.path.join(DEFAULT_DEST, "vendor-plan.txt")
 SHIM_ROOT = os.path.join(REPO_ROOT, "framework", "shim")
 # REUSE-IgnoreStart  (the literal license tokens below are data, not this file's header)
+# frameworks/base is Apache-2.0 at the repo level (MODULE_LICENSE_APACHE2 / NOTICE);
+# many files carry NO per-file header, so we do not require one. We only REFUSE files
+# that carry a forbidden copyleft marker (a stray GPL/LGPL-3/AGPL file); everything
+# else inherits the pinned repo license (third_party/aosp/METADATA + REUSE.toml).
+FORBIDDEN_MARKERS = (
+    "GPL-3.0", "LGPL-3.0", "AGPL",
+    "GNU General Public License", "GNU Affero General Public License",
+    "GNU Lesser General Public License, Version 3",
+)
 APACHE_MARKERS = ("Licensed under the Apache License", "SPDX-License-Identifier: Apache-2.0")
 # REUSE-IgnoreEnd
 
@@ -108,9 +118,67 @@ def cmd_size(args):
     return 0
 
 
+def load_plan(path):
+    """Parse the vendoring plan: `package [budget]` per line, # comments ignored."""
+    entries = []
+    for line in open(path, encoding="utf-8"):
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        entries.append((parts[0], int(parts[1]) if len(parts) > 1 else 0))
+    return entries
+
+
+def cmd_plan(args):
+    if not os.path.isfile(args.plan_file):
+        sys.stderr.write(f"plan file not found: {args.plan_file}\n")
+        return 2
+    entries = load_plan(args.plan_file)
+    roots, missing = resolve_roots(args.aosp_root, args.src_rel)
+    if missing:
+        sys.stderr.write(aosp_hint(args.aosp_root))
+        return 1
+    fqcn_to_file, pkg_to_fqcns = fw_extract.index_sources(roots)
+
+    print(f"ADR-0002 vendoring plan ({args.aosp_root}, {TAG})")
+    print(f"{'package':<20}{'closure':>9}{'budget':>9}{'shim-edges':>12}   status")
+    print("-" * 62)
+    over = False
+    combined = set()
+    for pkg, budget in entries:
+        seed_fqcns, unknown = fw_extract.expand_seeds([pkg], fqcn_to_file, pkg_to_fqcns)
+        if unknown:
+            print(f"{pkg:<20}{'—':>9}{budget:>9}{'—':>12}   NOT FOUND in --src-rel")
+            continue
+        seen, denyhits = fw_extract.closure(seed_fqcns, fqcn_to_file, pkg_to_fqcns, args.denylist)
+        combined |= seen
+        flag = "OK"
+        if budget and len(seen) > budget:
+            flag, over = "OVER BUDGET", True
+        print(f"{pkg:<20}{len(seen):>9}{budget or '-':>9}{len(denyhits):>12}   {flag}")
+    print("-" * 62)
+    # Combined closure seeds every package at once (dedup across packages).
+    all_seed, _ = fw_extract.expand_seeds([p for p, _ in entries], fqcn_to_file, pkg_to_fqcns)
+    all_seen, all_deny = fw_extract.closure(all_seed, fqcn_to_file, pkg_to_fqcns, args.denylist)
+    print(f"{'COMBINED (unique)':<20}{len(all_seen):>9}{'':>9}{len(all_deny):>12}")
+    print("\nshim-edges = closure edges into the no-Binder/SystemServer denylist "
+          "(each needs a\nshim at the Manager boundary, not a vendored class). "
+          "Size, then `vendor --seed <pkg>`.")
+    return 1 if over else 0
+
+
+def read_head(path):
+    return open(path, encoding="utf-8", errors="replace").read(4096)
+
+
+def has_forbidden_license(path):
+    head = read_head(path)
+    return any(m in head for m in FORBIDDEN_MARKERS)
+
+
 def has_apache_header(path):
-    head = open(path, encoding="utf-8", errors="replace").read(4096)
-    return any(m in head for m in APACHE_MARKERS)
+    return any(m in read_head(path) for m in APACHE_MARKERS)
 
 
 def layer_path(root, fqcn):
@@ -153,10 +221,15 @@ def cmd_vendor(args):
         sys.stderr.write(f"refusing: closure {len(seen)} exceeds budget {args.budget}\n")
         return 1
     if not args.skip_license_check:
-        bad = sorted(f for f in seen if not has_apache_header(fqcn_to_file[f]))
-        if bad:
-            sys.stderr.write("refusing: non-Apache header in: " + ", ".join(bad[:10]) + "\n")
+        forbidden = sorted(f for f in seen if has_forbidden_license(fqcn_to_file[f]))
+        if forbidden:
+            sys.stderr.write("refusing: forbidden (copyleft) license in: "
+                             + ", ".join(forbidden[:10]) + "\n")
             return 1
+        headerless = sum(1 for f in seen if not has_apache_header(fqcn_to_file[f]))
+        if headerless:
+            print(f"note: {headerless}/{len(seen)} file(s) have no per-file header; they "
+                  f"inherit the repo-level Apache-2.0 pin ({TAG}) via REUSE.toml.")
 
     copied, shims_dropped, rows = [], [], []
     for fqcn in sorted(seen):
@@ -190,7 +263,7 @@ def cmd_vendor(args):
 
 def main():
     ap = argparse.ArgumentParser(description="ADR-0002 framework vendoring orchestrator")
-    ap.add_argument("command", choices=["check", "size", "vendor"])
+    ap.add_argument("command", choices=["check", "size", "vendor", "plan"])
     ap.add_argument("--aosp-root", default=os.environ.get("ACL_AOSP_ROOT", DEFAULT_AOSP_ROOT))
     ap.add_argument("--src-rel", default=":".join(DEFAULT_SRC_REL),
                     help="colon-separated java roots relative to the AOSP checkout")
@@ -199,13 +272,15 @@ def main():
     ap.add_argument("--budget", type=int, default=0, help="max closure size (0=off)")
     ap.add_argument("--denylist", default=",".join(fw_extract.DEFAULT_DENYLIST))
     ap.add_argument("--dest", default=DEFAULT_DEST, help="vendored-layer destination dir")
+    ap.add_argument("--plan-file", default=DEFAULT_PLAN, help="plan for the `plan` command")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--skip-license-check", action="store_true")
     args = ap.parse_args()
     args.src_rel = [p for p in args.src_rel.split(":") if p]
     args.seed = [s for s in args.seed.split(",") if s]
     args.denylist = [d for d in args.denylist.split(",") if d]
-    return {"check": cmd_check, "size": cmd_size, "vendor": cmd_vendor}[args.command](args)
+    return {"check": cmd_check, "size": cmd_size, "vendor": cmd_vendor,
+            "plan": cmd_plan}[args.command](args)
 
 
 if __name__ == "__main__":
