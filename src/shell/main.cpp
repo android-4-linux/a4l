@@ -57,6 +57,7 @@ void print_usage() {
       "  --vm=<art|jvm|null>  runtime backend (default: $ACL_VM or art)\n"
       "  --main=<class>       static main() class to invoke\n"
       "  --service=<class>    host a MediaBrowserService (automotive media path)\n"
+      "  --cal=<class>        host a CarAppService (automotive Car App Library path)\n"
       "  --classpath=<paths>  extra classpath entries (colon-separated); the JVM\n"
       "                       backend runs .class/.jar from here (DEX is not loaded\n"
       "                       by a stock JVM)\n"
@@ -91,6 +92,7 @@ int cmd_run(const std::vector<std::string>& args) {
   std::string vm_name;
   std::string main_class;
   std::string service_class;
+  std::string cal_class;
   std::string cache_dir;
   std::vector<std::string> extra_classpath;
   std::vector<std::string> framework_dirs;
@@ -124,6 +126,8 @@ int cmd_run(const std::vector<std::string>& args) {
       split_paths(v, framework_dirs);  // vendored android.* boot classpath
     } else if (match_opt(a, "--service", v)) {
       service_class = v;
+    } else if (match_opt(a, "--cal", v)) {
+      cal_class = v;
     } else if (match_opt(a, "--main", v)) {
       main_class = v;
     } else if (match_opt(a, "--classpath", v)) {
@@ -290,6 +294,14 @@ int cmd_run(const std::vector<std::string>& args) {
     // Automotive media path: host a MediaBrowserService (no Views, no launcher).
     if (r::Error e = vm->call_media_browser(service_class)) {
       acl::log::e(kTag, "host service {} failed: [{}] {}", service_class,
+                     r::status_name(e.status), e.message);
+      vm->shutdown();
+      return kRuntimeError;
+    }
+  } else if (!cal_class.empty()) {
+    // Automotive Car App Library path: host a CarAppService (template tree, no Views).
+    if (r::Error e = vm->call_car_app(cal_class)) {
+      acl::log::e(kTag, "host CarAppService {} failed: [{}] {}", cal_class,
                      r::status_name(e.status), e.message);
       vm->shutdown();
       return kRuntimeError;

@@ -15,7 +15,7 @@ endif
 
 # Under the automotive profile the runtime drives the media bridge (Gate G1.5a),
 # so it link_withs the host lib (built earlier); phone builds #if it out.
-runtime_link = profile_automotive ? [host_media_lib] : []
+runtime_link = profile_automotive ? [host_media_lib, host_cal_lib] : []
 
 module_libs += static_library(
   'acl_runtime',

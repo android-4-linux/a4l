@@ -107,7 +107,15 @@ if py3.found() and have_jni
                     '../../framework/shim/android/view/KeyEvent.java',
                     '../../framework/shim/android/view/inputmethod/EditorInfo.java',
                     '../../framework/shim/android/view/inputmethod/InputConnection.java',
-                    '../../framework/shim/android/util/Log.java'),
+                    '../../framework/shim/android/util/Log.java',
+                    # androidx.car.app (Gate G1.5b, CAL template host)
+                    '../../framework/shim/androidx/car/app/model/Template.java',
+                    '../../framework/shim/androidx/car/app/model/Row.java',
+                    '../../framework/shim/androidx/car/app/model/ItemList.java',
+                    '../../framework/shim/androidx/car/app/model/ListTemplate.java',
+                    '../../framework/shim/androidx/car/app/Screen.java',
+                    '../../framework/shim/androidx/car/app/Session.java',
+                    '../../framework/shim/androidx/car/app/CarAppService.java'),
       output : 'framework-shim',
       command : [javac, '-d', '@OUTPUT@', '@INPUT@'],
     )
@@ -154,6 +162,26 @@ if py3.found() and have_jni
       depends : [acl_exe, media_apk, framework_shim],
       timeout : 120,
     )
+
+    # Gate G1.5b (automotive CAL path): host a CarAppService (no Views). cal.apk's
+    # CarApp -> Session -> Screen -> ListTemplate; `acl run --cal=...` walks it and
+    # the native CAL host (hosts/cal) renders + content-limits it. Automotive only.
+    if profile_automotive
+      cal_apk = custom_target(
+        'cal-apk',
+        input : files('../fixtures/make_cal_apk.py'),
+        output : 'cal.apk',
+        command : [py3, '@INPUT@', '@OUTPUT@'],
+        depend_files : files('../fixtures/make_axml.py'),
+      )
+      test(
+        'run-apk-cal',
+        py3,
+        args : [files('run_cal_test.py'), acl_exe, cal_apk, framework_shim],
+        depends : [acl_exe, cal_apk, framework_shim],
+        timeout : 120,
+      )
+    endif
 
     # Gate G2.e (media audio): an app writes PCM via android.media.AudioTrack; the
     # acl native underside forwards it to acl::audio (counting sink here;

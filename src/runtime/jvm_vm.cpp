@@ -26,6 +26,7 @@
 #include "svc/svc.h"
 #include "wm/present.h"
 #if ACL_PROFILE_AUTOMOTIVE
+#include "hosts/cal/cal.h"             // Gate G1.5b: Car App Library template host
 #include "hosts/media/media_bridge.h"  // Gate G1.5a: headless media bridge (automotive)
 #endif
 
@@ -231,6 +232,45 @@ class JvmVm final : public Vm {
     env_->DeleteLocalRef(mbs_cls);
     env_->DeleteLocalRef(cls);
     return result;
+  }
+
+  Error call_car_app(std::string_view service_class) override {
+#if !ACL_PROFILE_AUTOMOTIVE
+    (void)service_class;
+    return Error::of(Status::NotApplicable, "CAL host is automotive-profile only");
+#else
+    if (env_ == nullptr) {
+      return Error::of(Status::NotStarted, "call_car_app before start()");
+    }
+    const std::string name = to_jni_name(service_class);
+    jclass cls = env_->FindClass(name.c_str());
+    if (cls == nullptr) {
+      clear_exception();
+      return Error::of(Status::NotFound, "class not found: " + std::string(service_class));
+    }
+    jclass cas_cls = env_->FindClass("androidx/car/app/CarAppService");
+    if (cas_cls == nullptr || env_->IsAssignableFrom(cls, cas_cls) != JNI_TRUE) {
+      clear_exception();
+      env_->DeleteLocalRef(cls);
+      if (cas_cls != nullptr) env_->DeleteLocalRef(cas_cls);
+      return Error::of(Status::NotApplicable,
+                       std::string(service_class) + " is not a CarAppService");
+    }
+    env_->DeleteLocalRef(cas_cls);
+
+    Error result = Error::ok();
+    jmethodID ctor = env_->GetMethodID(cls, "<init>", "()V");
+    jobject svc = ctor != nullptr ? env_->NewObject(cls, ctor) : nullptr;
+    if (svc == nullptr) {
+      result = fail_with_exception("instantiate " + std::string(service_class));
+    } else {
+      log::i(kTag, "hosting CarAppService {}", service_class);
+      result = render_car_app(cls, svc);
+      env_->DeleteLocalRef(svc);
+    }
+    env_->DeleteLocalRef(cls);
+    return result;
+#endif
   }
 
   Error shutdown() override {
@@ -739,6 +779,98 @@ class JvmVm final : public Vm {
     env_->DeleteLocalRef(result_cls);
     return result_err;
   }
+
+#if ACL_PROFILE_AUTOMOTIVE
+  // Walk a CarAppService -> Session -> Screen -> Template and render it through the
+  // native CAL host (Gate G1.5b). In-process, no Binder (ADR-3).
+  Error render_car_app(jclass cls, jobject svc) {
+    jmethodID m_sess = env_->GetMethodID(cls, "onCreateSession",
+                                         "()Landroidx/car/app/Session;");
+    if (m_sess == nullptr) { clear_exception(); return Error::of(Status::NotFound, "no onCreateSession()"); }
+    jobject session = env_->CallObjectMethod(svc, m_sess);
+    if (env_->ExceptionCheck() == JNI_TRUE) return fail_with_exception("onCreateSession()");
+    if (session == nullptr) return Error::of(Status::RuntimeError, "onCreateSession returned null");
+
+    jclass sess_cls = env_->GetObjectClass(session);
+    jmethodID m_screen = env_->GetMethodID(sess_cls, "onCreateScreen",
+                                           "()Landroidx/car/app/Screen;");
+    jobject screen = m_screen != nullptr ? env_->CallObjectMethod(session, m_screen) : nullptr;
+    if (env_->ExceptionCheck() == JNI_TRUE) { env_->DeleteLocalRef(sess_cls); env_->DeleteLocalRef(session); return fail_with_exception("onCreateScreen()"); }
+    if (screen == nullptr) { env_->DeleteLocalRef(sess_cls); env_->DeleteLocalRef(session); return Error::of(Status::RuntimeError, "onCreateScreen returned null"); }
+
+    jclass screen_cls = env_->GetObjectClass(screen);
+    jmethodID m_tmpl = env_->GetMethodID(screen_cls, "onGetTemplate",
+                                         "()Landroidx/car/app/model/Template;");
+    jobject tmpl = m_tmpl != nullptr ? env_->CallObjectMethod(screen, m_tmpl) : nullptr;
+    Error result = Error::ok();
+    if (env_->ExceptionCheck() == JNI_TRUE) {
+      result = fail_with_exception("onGetTemplate()");
+    } else if (tmpl == nullptr) {
+      result = Error::of(Status::RuntimeError, "onGetTemplate returned null");
+    } else {
+      const hosts::cal::Template t = read_template(tmpl);
+      auto& host = hosts::cal::CalHost::instance();
+      host.render(t);
+      log::i(kTag, "CalHost: rendered [{}] '{}' — {} row(s), limit {}, truncated={}",
+             hosts::cal::template_kind_name(t.kind), t.title, host.visible_rows(),
+             host.content_limit(), host.truncated());
+      for (const std::string& line : host.lines()) log::i(kTag, "  {}", line);
+      env_->DeleteLocalRef(tmpl);
+    }
+    env_->DeleteLocalRef(screen_cls); env_->DeleteLocalRef(screen);
+    env_->DeleteLocalRef(sess_cls); env_->DeleteLocalRef(session);
+    return result;
+  }
+
+  // Deserialize a Template into the native model (Tier-1: ListTemplate). The shim's
+  // acl* accessors substitute for the Bundleable read the host would do over Binder.
+  hosts::cal::Template read_template(jobject tmpl) {
+    hosts::cal::Template t;
+    jclass lt_cls = env_->FindClass("androidx/car/app/model/ListTemplate");
+    if (lt_cls == nullptr || env_->IsInstanceOf(tmpl, lt_cls) != JNI_TRUE) {
+      clear_exception();
+      if (lt_cls != nullptr) env_->DeleteLocalRef(lt_cls);
+      t.kind = hosts::cal::TemplateKind::Unknown;
+      log::w(kTag, "CAL template is not a Tier-1 ListTemplate; rendering header only");
+      return t;
+    }
+    t.kind = hosts::cal::TemplateKind::List;
+    jclass tcls = env_->GetObjectClass(tmpl);
+    auto title = static_cast<jstring>(env_->CallObjectMethod(
+        tmpl, env_->GetMethodID(tcls, "aclTitle", "()Ljava/lang/String;")));
+    if (title != nullptr) { t.title = utf8(title); env_->DeleteLocalRef(title); }
+    jobject list = env_->CallObjectMethod(
+        tmpl, env_->GetMethodID(tcls, "aclList", "()Landroidx/car/app/model/ItemList;"));
+    if (list != nullptr) {
+      jclass il_cls = env_->GetObjectClass(list);
+      jobject rows = env_->CallObjectMethod(
+          list, env_->GetMethodID(il_cls, "aclRows", "()Ljava/util/List;"));
+      if (rows != nullptr) {
+        jclass list_cls = env_->FindClass("java/util/List");
+        jmethodID size_m = env_->GetMethodID(list_cls, "size", "()I");
+        jmethodID get_m = env_->GetMethodID(list_cls, "get", "(I)Ljava/lang/Object;");
+        const jint n = env_->CallIntMethod(rows, size_m);
+        for (jint i = 0; i < n; ++i) {
+          jobject row = env_->CallObjectMethod(rows, get_m, i);
+          jclass row_cls = env_->GetObjectClass(row);
+          hosts::cal::Row r;
+          auto rt = static_cast<jstring>(env_->CallObjectMethod(
+              row, env_->GetMethodID(row_cls, "aclTitle", "()Ljava/lang/String;")));
+          if (rt != nullptr) { r.title = utf8(rt); env_->DeleteLocalRef(rt); }
+          auto rx = static_cast<jstring>(env_->CallObjectMethod(
+              row, env_->GetMethodID(row_cls, "aclText", "()Ljava/lang/String;")));
+          if (rx != nullptr) { r.text = utf8(rx); env_->DeleteLocalRef(rx); }
+          t.rows.push_back(std::move(r));
+          env_->DeleteLocalRef(row_cls); env_->DeleteLocalRef(row);
+        }
+        env_->DeleteLocalRef(list_cls); env_->DeleteLocalRef(rows);
+      }
+      env_->DeleteLocalRef(il_cls); env_->DeleteLocalRef(list);
+    }
+    env_->DeleteLocalRef(tcls); env_->DeleteLocalRef(lt_cls);
+    return t;
+  }
+#endif  // ACL_PROFILE_AUTOMOTIVE
 
   // After onCreate, read the published MediaSession via getSessionToken() ->
   // Token -> MediaSession, and log its now-playing metadata + playback state

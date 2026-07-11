@@ -98,6 +98,13 @@ class Vm {
   // MediaBrowserService).
   virtual Error call_media_browser(std::string_view service_class) = 0;
 
+  // Host an androidx.car.app.CarAppService (the automotive CAL template path, no
+  // Views): instantiate it, onCreateSession() -> Session -> onCreateScreen() ->
+  // Screen -> onGetTemplate(), then render the template via the native CAL host
+  // (hosts/cal) — in-process (no Binder, ADR-3). NotApplicable when the class isn't
+  // a CarAppService (or under the phone profile, where the host is compiled out).
+  virtual Error call_car_app(std::string_view service_class) = 0;
+
   // Tear the VM down. Safe to call once after start(); idempotent thereafter.
   virtual Error shutdown() = 0;
 

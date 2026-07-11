@@ -84,6 +84,15 @@ class NullVm final : public Vm {
     return Error::of(Status::NotApplicable, "null backend executes no Java");
   }
 
+  Error call_car_app(std::string_view service_class) override {
+    if (!started_) {
+      return Error::of(Status::NotStarted, "call_car_app before start()");
+    }
+    log::i(kTag, "VM(null) would host CarAppService {} — no Java executed",
+           service_class);
+    return Error::of(Status::NotApplicable, "null backend executes no Java");
+  }
+
   Error shutdown() override {
     if (started_) {
       log::i(kTag, "VM(null) shutdown");
