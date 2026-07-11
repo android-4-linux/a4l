@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <ctime>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -75,6 +76,28 @@ class PipeWireSink final : public Sink {
     if (rc < 0) return false;
 
     pw_thread_loop_start(loop_);
+
+    // Wait — bounded — for the stream to actually reach the daemon. Without this a
+    // missing/unreachable daemon would leave the stream stuck CONNECTING while we
+    // stream PCM into a void (and drain() would then block). If it can't connect
+    // within the budget, report failure so the caller falls back to the null sink.
+    bool connected = false;
+    for (int i = 0; i < 50; ++i) {  // ~500ms budget (10ms steps)
+      pw_thread_loop_lock(loop_);
+      const pw_stream_state st = pw_stream_get_state(stream_, nullptr);
+      pw_thread_loop_unlock(loop_);
+      if (st == PW_STREAM_STATE_PAUSED || st == PW_STREAM_STATE_STREAMING) {
+        connected = true;
+        break;
+      }
+      if (st == PW_STREAM_STATE_ERROR || st == PW_STREAM_STATE_UNCONNECTED) break;
+      const timespec ts{0, 10 * 1000 * 1000};  // 10ms
+      nanosleep(&ts, nullptr);
+    }
+    if (!connected) {
+      log::w(kTag, "sink=pipewire: no daemon reachable within budget");
+      return false;
+    }
     log::i(kTag, "sink=pipewire open: {} Hz, {} ch, S16 (streaming to daemon)",
            fmt.sample_rate, fmt.channels);
     return true;
@@ -92,14 +115,17 @@ class PipeWireSink final : public Sink {
   }
 
   void drain() override {
-    // Best-effort: let the RT callback consume the FIFO before we tear down.
-    for (int i = 0; i < 200; ++i) {  // up to ~1s
+    // Best-effort: let the RT callback consume the FIFO before we tear down. Bounded
+    // so a stalled/underrunning stream can never hang the app — the FIFO holds ~1s
+    // of audio, so a few seconds is a generous cap.
+    if (stream_ == nullptr) return;
+    for (int i = 0; i < 3; ++i) {  // <= 3s total (1s per wait)
       {
         std::lock_guard<std::mutex> lk(mu_);
         if (fifo_.empty()) break;
       }
       pw_thread_loop_lock(loop_);
-      pw_thread_loop_timed_wait(loop_, 1);  // 1s cap per wait; woken by process
+      pw_thread_loop_timed_wait(loop_, 1);  // woken by process; 1s cap per wait
       pw_thread_loop_unlock(loop_);
     }
   }

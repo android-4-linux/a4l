@@ -52,7 +52,13 @@ jlong JNICALL AudioTrack_nativeOpen(JNIEnv* /*env*/, jclass /*cls*/, jint sample
   auto sink = audio::make_sink();
   audio::Format fmt{sample_rate, channels};
   if (!sink->open(fmt)) {
-    log::write(log::Level::Warn, "acl.audio", "AudioTrack open failed");
+    // A selected device backend (e.g. PipeWire with no reachable daemon) failed to
+    // open; fall back to the deterministic null sink so playback degrades to a
+    // frame count instead of failing or hanging.
+    log::write(log::Level::Warn, "acl.audio",
+               "AudioTrack open failed; falling back to null sink");
+    sink = audio::make_null_sink();
+    sink->open(fmt);
   }
   return reinterpret_cast<jlong>(sink.release());  // handle owns the sink
 }

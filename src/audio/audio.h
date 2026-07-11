@@ -37,6 +37,10 @@ class Sink {
 // (only if built with it); anything else (default) is the counting/null sink.
 std::unique_ptr<Sink> make_sink();
 
+// The deterministic counting/null sink, exposed for a graceful fallback when a
+// selected device backend (e.g. PipeWire with no reachable daemon) fails to open.
+std::unique_ptr<Sink> make_null_sink();
+
 const char* module_name() noexcept;
 
 }  // namespace acl::audio

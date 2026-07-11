@@ -51,6 +51,8 @@ class NullSink final : public Sink {
 
 }  // namespace
 
+std::unique_ptr<Sink> make_null_sink() { return std::make_unique<NullSink>(); }
+
 #if ACL_HAVE_PIPEWIRE
 std::unique_ptr<Sink> make_pipewire_sink();  // defined in pipewire_sink.cpp
 #endif

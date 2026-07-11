@@ -201,6 +201,20 @@ if py3.found() and have_jni
       timeout : 120,
     )
 
+    # PipeWire backend: the same app with ACL_AUDIO=pipewire routes PCM to the
+    # PipeWire sink — streaming to the daemon if one is reachable, else falling back
+    # to the null sink within a bounded budget (never hangs). Only when built with
+    # libpipewire (have_pipewire); the test itself adapts to daemon presence.
+    if have_pipewire
+      test(
+        'run-apk-audio-pipewire',
+        py3,
+        args : [files('run_audio_pipewire_test.py'), acl_exe, audio_apk, framework_shim],
+        depends : [acl_exe, audio_apk, framework_shim],
+        timeout : 120,
+      )
+    endif
+
     # Phase 2 (gfx/Canvas): gfx.apk's main() builds a custom MyView extends
     # android.view.View; v.draw(c) -> onDraw(c) fills a Bitmap-backed Canvas blue and
     # draws a red rect. The Canvas/Bitmap natives raster into acl::gfx::Surface and
