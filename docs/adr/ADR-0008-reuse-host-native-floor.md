@@ -63,3 +63,14 @@ for host one subsystem at a time and **stubbing each device dep against acl's su
 work as P2.4/P2.5, entered from the native side; `libandroidfw` (resources) is already
 `host_supported`, so resources is the first candidate. This is what AOSP's own host framework
 (ravenwood/layoutlib) does. See docs/phase2-scope.md "A(2)".
+
+**Correction (2026-07-12, from R1):** the hybrid boundary is narrower than A(2) first stated.
+The host `libandroid_runtime` (via its LayoutlibLoader host srcs block) DOES compile and export
+**31 framework registrars** — including resources (`register_android_content_AssetManager`,
+ApkAssets, XmlBlock, StringBlock), Looper (`MessageQueue`), the input stack, Parcel, SQLite,
+animation. A(2)'s "AssetManager is target-only" was a wrong-name search
+(`register_android_content_res_AssetManager` does not exist; the symbol is
+`register_android_content_AssetManager`). So acl reuses these directly (R1: ArtVm registers 28).
+Only the **render** natives (View, Bitmap/Canvas, Configuration) are genuinely target-only and
+still need the P2.4 SurfaceFlinger→Wayland/Skia substitution. Resources beyond the native is now
+a **data** problem (framework-res.apk), not a native one.

@@ -1285,12 +1285,47 @@ class ArtVm final : public JniVm {
       register_framework_natives(env);  // fall back to the shim floor
       return;
     }
+    // The framework native registrars the host libandroid_runtime exports (its
+    // LayoutlibLoader host build compiles these device-independent-enough natives —
+    // resources, input, os, db, animation). Each register_*(env) FindClass'es its
+    // framework class and RegisterNatives; missing ones are cleared and counted. This
+    // clears the real-Activity frontier (Resources -> AssetManager native). Natives
+    // NOT here (View, Bitmap/Canvas, Configuration) stay target-only — the P2.4 render
+    // subsystem (docs/resources-host-scope.md, ADR-0008).
     static constexpr const char* kReg[] = {
+        // resources
+        "_ZN7android37register_android_content_AssetManagerEP7_JNIEnv",
+        "_ZN7android38register_android_content_res_ApkAssetsEP7_JNIEnv",
+        "_ZN7android33register_android_content_XmlBlockEP7_JNIEnv",
+        "_ZN7android36register_android_content_StringBlockEP7_JNIEnv",
+        // os / looper / props
         "_ZN7android36register_android_os_SystemPropertiesEP7_JNIEnv",
         "_ZN7android31register_android_os_SystemClockEP7_JNIEnv",
         "_ZN7android25register_android_os_TraceEP7_JNIEnv",
         "_ZN7android26register_android_os_ParcelEP7_JNIEnv",
-        "_ZN7android38register_android_content_res_ApkAssetsEP7_JNIEnv",
+        "_ZN7android32register_android_os_MessageQueueEP7_JNIEnv",
+        "_ZN7android32register_android_os_FileObserverEP7_JNIEnv",
+        // util
+        "_ZN7android25register_android_util_LogEP7_JNIEnv",
+        "_ZN7android30register_android_util_EventLogEP7_JNIEnv",
+        "_ZN7android38register_android_text_AndroidCharacterEP7_JNIEnv",
+        "_ZN7android39register_android_util_jar_StrictJarFileEP7_JNIEnv",
+        // input / view (event plumbing; not the View/graphics render natives)
+        "_ZN7android30register_android_view_KeyEventEP7_JNIEnv",
+        "_ZN7android33register_android_view_MotionEventEP7_JNIEnv",
+        "_ZN7android33register_android_view_InputDeviceEP7_JNIEnv",
+        "_ZN7android34register_android_view_InputChannelEP7_JNIEnv",
+        "_ZN7android37register_android_view_KeyCharacterMapEP7_JNIEnv",
+        "_ZN7android37register_android_view_VelocityTrackerEP7_JNIEnv",
+        "_ZN7android38register_android_view_InputEventSenderEP7_JNIEnv",
+        "_ZN7android40register_android_view_InputEventReceiverEP7_JNIEnv",
+        "_ZN7android44register_android_view_InputApplicationHandleEP7_JNIEnv",
+        // database / animation
+        "_ZN7android38register_android_database_CursorWindowEP7_JNIEnv",
+        "_ZN7android38register_android_database_SQLiteGlobalEP7_JNIEnv",
+        "_ZN7android37register_android_database_SQLiteDebugEP7_JNIEnv",
+        "_ZN7android42register_android_database_SQLiteConnectionEP7_JNIEnv",
+        "_ZN7android47register_android_animation_PropertyValuesHolderEP7_JNIEnv",
     };
     using RegFn = jint (*)(JNIEnv*);
     int ok = 0, unavailable = 0;

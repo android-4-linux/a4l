@@ -5,6 +5,23 @@
 
 # Resources subsystem host-enablement — scope
 
+## R1 RESULT (2026-07-12) — done, and it corrected A(2)
+R1 turned out trivial: the host `libandroid_runtime` **already exports** the resources native
+(`register_android_content_AssetManager` — A(2) wrongly concluded "target-only" by searching the
+non-existent name `register_android_content_res_AssetManager`). The host build compiles these
+framework natives via the **LayoutlibLoader host srcs block**; **31 framework registrars are
+exported** (AssetManager, ApkAssets, XmlBlock/StringBlock resources, MessageQueue/Looper, the
+full input stack, Parcel, SQLite, animation). So R1 = **register them in ArtVm** — no new lib.
+ArtVm now registers 28 of them (`ART native floor: 28 framework native group(s)`), which
+**clears the AssetManager frontier**: `Resources.<init>` → `AssetManager.getSystem()` executes
+the native. The new frontier is exactly **R3 (data)**: `Failed to load /system/framework/
+framework-res.apk`. Nuance for ADR-0008: only the **render** natives (View, Bitmap/Canvas,
+Configuration) are genuinely target-only — the resources/input/os floor is host-exported.
+Milestones R2 (register) folded into R1; **R3 (framework-res data) is next**.
+
+---
+
+
 The first framework-native subsystem to host-enable (A(2) / ADR-0008 hybrid). A real
 `Activity` needs `Resources` first — `Resources.getSystem()` was the frontier after the
 build.prop fix (`ResourcesImpl.<clinit>` → `AssetManager.nativeGetThemeFreeFunction` →
