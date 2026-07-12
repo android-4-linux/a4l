@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # ADR-0002: Java framework — vendored AOSP subset, not hand-written stubs
 
-- **Status:** Accepted
+- **Status:** Accepted (native-underside clause amended by ADR-0008)
 - **Date:** 2026-07-09
 - **Provenance:** plan.md §3 ADR-2, R-2, R-4. No GPL-3.0 sources.
 
