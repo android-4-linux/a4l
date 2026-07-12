@@ -3,6 +3,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdlib>
+
 #include "acl_config.h"
 #include "runtime/vm.h"
 
@@ -23,12 +25,41 @@ TEST_CASE("backend name parsing round-trips and is case-insensitive", "[runtime]
   CHECK(std::string_view(backend_name(Backend::Null)) == "null");
 }
 
-TEST_CASE("ART backend reports Unavailable, not a null crash", "[runtime]") {
-  Error err;
-  auto art = create_vm(Backend::Art, {}, err);
-  CHECK(art == nullptr);
-  CHECK(err.status == Status::Unavailable);
-  CHECK_FALSE(err.message.empty());
+TEST_CASE("ART backend availability tracks ACL_ART_HOME", "[runtime]") {
+  // Snapshot + restore the env so the test is order-independent (other suites may
+  // rely on ACL_ART_HOME being set).
+  const char* saved = std::getenv("ACL_ART_HOME");
+  const std::string saved_str = saved != nullptr ? saved : std::string();
+
+  // No host ART build (ACL_ART_HOME unset): the Art backend reports Unavailable
+  // gracefully — no null-deref crash.
+  ::unsetenv("ACL_ART_HOME");
+  {
+    Error err;
+    auto art = create_vm(Backend::Art, {}, err);
+    CHECK(art == nullptr);
+    CHECK(err.status == Status::Unavailable);
+    CHECK_FALSE(err.message.empty());
+  }
+
+#if ACL_HAVE_JNI
+  // With ACL_ART_HOME set (M2: host-ART embedding compiled in), create_vm
+  // constructs the backend. Starting it would dlopen libart — out of scope for a
+  // unit test — so a bogus path still constructs; only start() would fail.
+  ::setenv("ACL_ART_HOME", "/nonexistent/acl-art-home", 1);
+  {
+    Error err;
+    auto art = create_vm(Backend::Art, {}, err);
+    CHECK(art != nullptr);
+    CHECK(err.status == Status::Ok);
+  }
+#endif
+
+  if (saved != nullptr) {
+    ::setenv("ACL_ART_HOME", saved_str.c_str(), 1);
+  } else {
+    ::unsetenv("ACL_ART_HOME");
+  }
 }
 
 TEST_CASE("JVM backend availability tracks the build", "[runtime]") {

@@ -141,6 +141,22 @@ if py3.found() and have_jni
       timeout : 120,
     )
 
+    # The same Activity, but on REAL host ART (--vm=art): the harness d8s the vendored
+    # framework + a MainActivity fixture into an ART-loadable (zipaligned) APK and
+    # asserts the lifecycle runs on host libart. Needs a host ART build (ACL_ART_HOME)
+    # + the AOSP host toolchain (d8/zipalign/jdk) — it SKIPs (exit 77) when absent, so
+    # CI stays green without ART. Reuses activity.apk's binary manifest + android.jar.
+    if framework_android_jar != ''
+      test(
+        'run-apk-activity-art',
+        py3,
+        args : [files('run_activity_art_test.py'), acl_exe,
+                meson.project_source_root(), framework_android_jar, activity_apk],
+        depends : [acl_exe, activity_apk],
+        timeout : 300,
+      )
+    endif
+
     # ADR-0002: the same app with NO --framework must load android.* off the staged
     # default boot classpath baked into the binary (build/framework/classes).
     test(
