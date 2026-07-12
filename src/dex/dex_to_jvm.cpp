@@ -270,9 +270,12 @@ struct Translated {
 // A JVM verification type for one local slot. Long occupies two slots: the low
 // slot is Long, the high slot LongHi (skipped when serialized).
 struct VType {
-  enum Kind { Top, Int, Long, LongHi, Obj } kind = Top;
-  std::string cls;  // internal name when kind == Obj
-  bool operator==(const VType& o) const { return kind == o.kind && cls == o.cls; }
+  enum Kind { Top, Int, Long, LongHi, Obj, Uninit } kind = Top;
+  std::string cls;       // internal name when kind == Obj (or the new'd type for Uninit)
+  std::uint32_t pc = 0;  // dalvik pc of the `new` when kind == Uninit (its identity)
+  bool operator==(const VType& o) const {
+    return kind == o.kind && cls == o.cls && (kind != Uninit || pc == o.pc);
+  }
 };
 
 // Object-typed field/element/return descriptor -> internal class name (or "" if
@@ -351,9 +354,23 @@ void sm_transfer(std::vector<VType>& locals, const DexFile& dex, const DexMethod
       const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
       (void)b; set_long(L(a)); break;
     }
-    case 0x22: {  // new-instance -> Obj (uninitialized elided; no frame between new/<init>)
+    case 0x22: {  // new-instance -> Uninit(this pc): stays uninitialized until <init>
       const std::string* td = dex.type_at(in[pc + 1]);
-      set(L((u >> 8) & 0xff), {VType::Obj, td ? obj_internal(*td) : ""}); break;
+      set(L((u >> 8) & 0xff),
+          {VType::Uninit, td ? obj_internal(*td) : "", static_cast<std::uint32_t>(pc)});
+      break;
+    }
+    case 0x70: case 0x76: {  // invoke-direct[/range]: <init> initializes the object
+      const MethodRef* mr = dex.method_ref(in[pc + 1]);
+      if (mr != nullptr && mr->name == "<init>" && pc + 2 < in.size()) {
+        const int recv = op == 0x76 ? in[pc + 2] : (in[pc + 2] & 0xf);
+        const VType u = get(L(recv));
+        if (u.kind == VType::Uninit) {  // transition it and every alias to Obj
+          for (VType& v : locals)
+            if (v.kind == VType::Uninit && v.pc == u.pc) v = {VType::Obj, u.cls, 0};
+        }
+      }
+      break;
     }
     case 0x23: {  // new-array vA, vB, type -> vA = Obj(array)
       const std::string* td = dex.type_at(in[pc + 1]);
@@ -1995,6 +2012,11 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
     for (const auto& [dpc, stk] : frame_stack) {
       const auto it = in_state.find(dpc);
       if (it == in_state.end()) continue;  // unreachable frame point
+      // A `new`'d object still uninitialized at a frame point needs an
+      // uninitialized_variable_info (with the JVM offset of the `new`) we don't emit
+      // yet — verify-then-stub the method so the class still loads.
+      for (const VType& v : it->second)
+        if (v.kind == VType::Uninit) return std::nullopt;
       frames.push_back({static_cast<std::uint32_t>(pc_to_jvm[dpc]), it->second, stk});
     }
     // frame_stack (a map) iterates dpc-ascending == jvm-offset-ascending.
