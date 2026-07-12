@@ -49,3 +49,17 @@ Risks and follow-on:
   (**android-13.0.0_r84**); the reused native ABI is tied to that framework build.
 - **Fallback.** Where a reused native proves unworkable on host, drop that class to the
   ADR-0002 shim / clean-room path — the two approaches coexist per class.
+
+## Refinement (2026-07-12, from the A(2) bridge spike)
+The reuse is a **hybrid**, narrower than first hoped. Host `libandroid_runtime` builds only its
+~12 device-independent sources (SystemProperties, Log, Trace, SystemClock, EventLog, ... → the 33
+exported `register_android_*`). The framework-heavy JNI — `AndroidRuntime`/`startReg`,
+`android_util_AssetManager`, View, graphics, Parcel, Binder — sits in the `Android.bp`
+`target: { android: {...} }` block and is **not compiled for host** (device-tied deps:
+SurfaceFlinger, Binder, HALs). So a real Activity's native floor (Resources/AssetManager/View)
+is not reachable by simply dlopening the stock host lib. Getting it means enabling those `.cpp`
+for host one subsystem at a time and **stubbing each device dep against acl's substitutes**
+(SurfaceFlinger→Wayland/Skia per ADR-0004, Binder→svc hub per ADR-0003) — the same substitution
+work as P2.4/P2.5, entered from the native side; `libandroidfw` (resources) is already
+`host_supported`, so resources is the first candidate. This is what AOSP's own host framework
+(ravenwood/layoutlib) does. See docs/phase2-scope.md "A(2)".

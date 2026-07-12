@@ -114,6 +114,35 @@ ActivityInfo)` → `Instrumentation.callActivityOnCreate`). Two concrete require
 props + full floor, iterate remaining frontiers (Binder/ServiceManager calls → `svc` hub stubs)
 to a real `Activity.onCreate` against the real framework. Then the View stack → P2.4 render.
 
+### A(1) DONE + A(2) re-scoped by a spike (2026-07-12)
+**A(1) committed (`3c50e2a`):** ArtVm seeds a curated ~27-entry build.prop after registering the
+SystemProperties native, so framework static initializers stop crashing (Build.CPU_ABI resolves).
+
+**A(2) — the in-tree bridge attempt found the real native-floor boundary (a key finding that
+refines ADR-0008).** Wrote a bridge (`acl_art_bridge.cpp`, saved in scratch) that boots ART via
+an `AndroidRuntime` subclass + `startReg` (the full 153-entry floor), compiled into
+libandroid_runtime. Cleared two build issues (private startReg → protected patch; `-fno-rtti`
+subclass typeinfo), then hit the wall: **`AndroidRuntime.cpp`, `android_util_AssetManager.cpp`,
+the View/graphics/Parcel/Binder JNI — the entire framework-heavy native floor — are in
+`frameworks/base/core/jni/Android.bp`'s `target: { android: {...} }` block, i.e. compiled ONLY
+for the device.** `startReg`/`startVm` are absent from the host `.so`; only the ~12
+device-independent files (SystemProperties, Log, Trace, SystemClock, EventLog, ...) build for
+host (the 33 exported `register_android_*`). Their device deps (SurfaceFlinger, Binder, HALs)
+are why they're target-only.
+
+**So the "reuse host libandroid_runtime" strategy is a HYBRID, not wholesale reuse:** the leaf
+natives reuse cleanly (P2.2), but the framework-heavy natives a real Activity needs (AssetManager/
+Resources/View/graphics) are NOT host-buildable as-is. Getting them requires, per component,
+either (a) making it host-buildable by stubbing its device deps (SurfaceFlinger→Wayland/Skia,
+Binder→svc hub) — which is the same substitution work as P2.4/P2.5, just entered from the native
+side — or (b) reimplementing it in acl C++ (the clean-room path). AOSP's own host framework
+(ravenwood/layoutlib) does exactly this stubbing. **A(2) revised plan:** enable the target-only
+framework native `.cpp` files for host one subsystem at a time, stubbing each device dep against
+acl's substitutes — starting with resources (`android_util_AssetManager` + libandroidfw, which is
+already host_supported) since a real Activity needs `Resources` first. The AndroidRuntime bridge
+still applies once AndroidRuntime.cpp is host-enabled. AOSP-tree bridge changes were reverted
+(unworkable as-is); bridge source kept at scratch/acl_art_bridge.cpp.
+
 ### P2.3 — App native `.so` loading
 `System.loadLibrary`/`Runtime.load`: pick the ABI (`pkg/` split/ABI selection), extract
 `lib/<abi>/*.so` from the APK, `dlopen`, run `JNI_OnLoad`, honor `RegisterNatives`.
