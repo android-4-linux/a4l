@@ -1305,6 +1305,52 @@ class ArtVm final : public JniVm {
            "ART native floor: {} framework native group(s) from libandroid_runtime "
            "({} unavailable)",
            ok, unavailable);
+    populate_system_properties(env);
+  }
+
+  // Populate a minimal build.prop before the app's framework classes initialize. Many
+  // framework static initializers read system properties and crash on empty values
+  // (e.g. android.os.Build.<clinit> indexes ro.product.cpu.abilist* — a length-0 array
+  // without these). On host, properties are an in-process map that SystemProperties.set
+  // writes, so acl seeds the essential set. Done after the SystemProperties native is
+  // registered above; values are placeholders, not a claim of a real device.
+  void populate_system_properties(JNIEnv* env) {
+    jclass sp = env->FindClass("android/os/SystemProperties");
+    if (sp == nullptr) { env->ExceptionClear(); return; }
+    jmethodID set = env->GetStaticMethodID(
+        sp, "set", "(Ljava/lang/String;Ljava/lang/String;)V");
+    if (set == nullptr) { env->ExceptionClear(); return; }
+    struct Prop { const char* k; const char* v; };
+    static const Prop kProps[] = {
+        {"ro.product.cpu.abilist", "x86_64,x86"}, {"ro.product.cpu.abilist64", "x86_64"},
+        {"ro.product.cpu.abilist32", "x86"},
+        {"ro.build.version.sdk", "33"}, {"ro.build.version.release", "13"},
+        {"ro.build.version.codename", "REL"}, {"ro.build.version.incremental", "acl"},
+        {"ro.build.id", "acl"}, {"ro.build.display.id", "acl"}, {"ro.build.type", "eng"},
+        {"ro.build.tags", "test-keys"}, {"ro.build.flavor", "acl-eng"},
+        {"ro.build.date.utc", "0"}, {"ro.build.host", "acl"}, {"ro.build.user", "acl"},
+        {"ro.build.fingerprint", "acl/acl/acl:13/acl/acl:eng/test-keys"},
+        {"ro.product.name", "acl"}, {"ro.product.device", "acl"},
+        {"ro.product.board", "acl"}, {"ro.product.brand", "acl"},
+        {"ro.product.model", "acl"}, {"ro.product.manufacturer", "acl"},
+        {"ro.hardware", "acl"}, {"ro.bootloader", "acl"}, {"ro.secure", "0"},
+        {"ro.debuggable", "1"}, {"ro.dalvik.vm.native.bridge", "0"},
+    };
+    int n = 0;
+    for (const Prop& p : kProps) {
+      jstring k = env->NewStringUTF(p.k);
+      jstring v = env->NewStringUTF(p.v);
+      env->CallStaticVoidMethod(sp, set, k, v);
+      if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+      } else {
+        ++n;
+      }
+      env->DeleteLocalRef(k);
+      env->DeleteLocalRef(v);
+    }
+    env->DeleteLocalRef(sp);
+    log::i(kTag, "ART build.prop: seeded {} system propert{}", n, n == 1 ? "y" : "ies");
   }
 };
 

@@ -26,5 +26,9 @@ public class Main {
         Method get = sp.getMethod("get", String.class, String.class);
         Object v = get.invoke(null, "ro.build.version.sdk", "unknown");
         System.out.println("FRAMEWORK-FLOOR PROBE: SystemProperties.get(ro.build.version.sdk)=" + v);
+        // android.os.Build.<clinit> reads ro.product.cpu.abilist* and crashes on an empty
+        // value — this succeeds only because acl seeded a build.prop before framework init.
+        Object abi = Class.forName("android.os.Build").getField("CPU_ABI").get(null);
+        System.out.println("FRAMEWORK-FLOOR PROBE: Build.CPU_ABI=" + abi);
     }
 }

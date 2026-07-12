@@ -25,7 +25,8 @@ CHECKS = [
     "ART native floor:",                                # acl registered libandroid_runtime natives
     "framework native group(s) from libandroid_runtime",
     "FRAMEWORK-FLOOR PROBE: android.os.SystemProperties classloader=BOOT",  # P2.1: on bootclasspath
-    "FRAMEWORK-FLOOR PROBE: SystemProperties.get(ro.build.version.sdk)=",   # P2.2: native executed
+    "FRAMEWORK-FLOOR PROBE: SystemProperties.get(ro.build.version.sdk)=33", # P2.2: native + seeded prop
+    "FRAMEWORK-FLOOR PROBE: Build.CPU_ABI=x86_64",                          # A(1): build.prop seeded
 ]
 
 # The framework boot jars (PRODUCT_BOOT_JARS, system), in order.
