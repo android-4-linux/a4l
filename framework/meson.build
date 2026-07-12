@@ -57,7 +57,7 @@ framework_android_jar = ''
 fs = import('fs')
 android_jar_src = get_option('android_jar')
 if android_jar_src == ''
-  aosp_root = run_command('sh', '-c', 'echo -n "${ACL_AOSP_ROOT:-/home/joel/aosp}"',
+  aosp_root = run_command('sh', '-c', 'echo -n "${ACL_AOSP_ROOT:-/mnt/dev/aosp}"',
                           check : false).stdout()
   android_jar_src = aosp_root / 'prebuilts' / 'sdk' / '33' / 'public' / 'android.jar'
 endif

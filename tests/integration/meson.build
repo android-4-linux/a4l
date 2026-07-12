@@ -42,7 +42,7 @@ if py3.found()
   )
 
   # Push-button: size the AOSP frameworks/base subset for a seed against the real
-  # checkout ($ACL_AOSP_ROOT, default /home/joel/aosp). Manual (not a gating test):
+  # checkout ($ACL_AOSP_ROOT, default /mnt/dev/aosp). Manual (not a gating test):
   #   ninja -C build framework-size            # default seed (android.util)
   #   tools/vendor_framework.py size --seed android.app,android.os --budget 400
   run_target(

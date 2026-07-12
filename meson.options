@@ -26,5 +26,5 @@ option(
   'android_jar',
   type : 'string',
   value : '',
-  description : 'Path to the api-33 public android.jar (stub API, ADR-0002 base boot-classpath layer beneath the acl shims). Empty tries $ACL_AOSP_ROOT/prebuilts/sdk/33/public/android.jar (default /home/joel/aosp). When present it is staged and baked in as the default framework, so `acl run <apk>` resolves the whole android.* surface (stub bodies throw on call = demand-driven).',
+  description : 'Path to the api-33 public android.jar (stub API, ADR-0002 base boot-classpath layer beneath the acl shims). Empty tries $ACL_AOSP_ROOT/prebuilts/sdk/33/public/android.jar (default /mnt/dev/aosp). When present it is staged and baked in as the default framework, so `acl run <apk>` resolves the whole android.* surface (stub bodies throw on call = demand-driven).',
 )

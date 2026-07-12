@@ -16,7 +16,7 @@
 #           rewrite MANIFEST.md. --dry-run previews without writing.
 #
 # The AOSP checkout is NOT vendored in-tree; create it once (see `check` output) at
-# $ACL_AOSP_ROOT (default /home/joel/aosp), pinned android-13.0.0_r84. Then classes
+# $ACL_AOSP_ROOT (default /mnt/dev/aosp), pinned android-13.0.0_r84. Then classes
 # land in the boot classpath automatically (framework/meson.build compiles the layer).
 import argparse
 import os
@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # sibling fw_ext
 import fw_extract  # noqa: E402
 
 TAG = "android-13.0.0_r84"  # keep in sync with third_party/aosp/METADATA
-DEFAULT_AOSP_ROOT = "/home/joel/aosp"
+DEFAULT_AOSP_ROOT = "/mnt/dev/aosp"
 # AOSP frameworks/base Java source roots, relative to the checkout root.
 DEFAULT_SRC_REL = [
     "frameworks/base/core/java",
