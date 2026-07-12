@@ -59,13 +59,21 @@ offscreen GPU `SkSurface`, render a scene, `flushAndSubmit`, `readPixels` back t
 without a compositor grab). **Gate:** a solid-fill + rect rendered on Ganesh Vulkan reads back
 matching the software rasterizer (AA off); SKIPs cleanly where no Vulkan device is present.
 
-### V2 — dma-buf export + Wayland present (wm/)
-Export the slot `VkImage`s as dma-buf (`VK_KHR_external_memory_fd` +
-`VK_EXT_external_memory_dma_buf`), build `wl_buffer`s via `zwp_linux_buffer_params`, and present
-through the wcs `wl::LinuxDmabuf`/`wl::DmabufFeedback` bindings driven from `wm/`. Start with
-the **LINEAR fallback** (`DRM_FORMAT_MOD_LINEAR`, guaranteed baseline), then the modifier-tiled
-direct path. **Gate:** the Tier-C headless-compositor harness (wlheadless, as the existing
-present-loop test uses) shows an acl-rendered frame committed via dma-buf.
+### V2 — dma-buf export + Wayland present
+Split into V2a (gfx-side export, headless-testable) and V2b (wm-side present).
+
+**V2a — dma-buf export (gfx/).** Export a rendered frame as a Linux dma-buf
+(`VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf`): a **LINEAR**
+(`DRM_FORMAT_MOD_LINEAR`, guaranteed baseline) exported `VkImage` that the optimal Skia surface
+is `vkCmdCopyImage`'d into, with the fd + plane layout (stride/offset/modifier/fourcc) handed
+back as a `DmabufFrame`. **Gate:** headless — the exported plane layout is sane and the mmap'd
+dma-buf holds exactly the software-rasterizer pixels (no compositor needed).
+
+**V2b — Wayland present (wm/).** Build `wl_buffer`s from the `DmabufFrame` via
+`zwp_linux_buffer_params` and present through the wcs `wl::LinuxDmabuf`/`wl::DmabufFeedback`
+bindings driven from `wm/`, then the modifier-tiled direct path. **Gate:** the Tier-C
+headless-compositor harness (wlheadless, as the existing present-loop test uses) shows an
+acl-rendered frame committed via dma-buf.
 
 ### V3 — android.graphics natives compose onto the gfx surface
 Register the host-exported graphics native floor (`register_android_graphics_classes` /
@@ -105,5 +113,20 @@ as the example does), and the bundled VMA + `ThreadSafe` come from the m150 `src
 headers. **Verified: an AA-off fill+rect rendered on the real GPU (`AMD … RADV RAPHAEL`) reads
 back bit-identical to the software rasterizer (161 assertions).** The Tier A test SKIPs cleanly
 (WARN + SUCCEED) where `VkRenderTarget::Create` returns null (no device), so GPU-less CI passes.
-libdrm is deliberately NOT a V1 dependency — it enters at V2 with the dma-buf export. **V2
-(dma-buf export + zwp_linux_dmabuf_v1 present via wm/) is next.**
+libdrm is deliberately NOT a V1 dependency — it enters at V2 with the dma-buf export.
+
+## V2a RESULT (2026-07-12) — done; rendered frame exports as a verified linear dma-buf
+`gfx_vk` gained the dma-buf export path (patterned after the example's linear copy-fallback):
+device creation now enables `VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf` when
+offered (`dmabuf_export_available()`), and `render_and_export_linear()` renders the scene, flushes
+the optimal Skia surface into `TRANSFER_SRC_OPTIMAL` (`skgpu::MutableTextureStates::MakeVulkan`),
+`vkCmdCopyImage`s it into a **linear, dma-buf-exported** `VkImage`, and exports the fd via
+`vkGetMemoryFdKHR` — handing back a `DmabufFrame` {fd, stride, offset, `MOD_LINEAR`,
+`DRM_FORMAT_XRGB8888`, mem_size}. The export memory is allocated host-visible+coherent when
+available so the frame is mmap-verifiable. libdrm joins the deps (`drm_fourcc.h` fourcc/modifier
+constants). **Verified headless on the real GPU (RADV): the exported plane layout is sane and the
+mmap'd dma-buf holds exactly the software-rasterizer pixels (167 assertions).** Caught + fixed a
+real bug: `SkSurfaces::RenderTarget` defaults to `kBottomLeft` origin, so a raw `vkCmdCopyImage`
+into the dma-buf came out vertically flipped — the render target is now `kTopLeft` (top-down
+storage, which is also what Wayland surfaces expect). Test SKIPs cleanly with no device / no
+export extensions. **V2b (present the DmabufFrame via wcs `wl::LinuxDmabuf` from wm/) is next.**

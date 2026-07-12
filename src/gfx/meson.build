@@ -17,7 +17,7 @@ endif
 # into a GPU SkSurface (dma-buf export lands in V2). Needs system vulkan + libdrm.
 if have_vulkan
   gfx_sources += files('gfx_vk.cpp')
-  gfx_deps += vulkan_dep
+  gfx_deps += [vulkan_dep, libdrm_dep]
 endif
 gfx_lib = static_library(
   'acl_gfx',

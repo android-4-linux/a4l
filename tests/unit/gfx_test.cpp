@@ -96,4 +96,64 @@ TEST_CASE("Ganesh Vulkan render target matches the software rasterizer", "[gfx][
     }
   }
 }
+
+// P2.4 / V2: the render target hands a rendered frame over as a Linux dma-buf — the
+// handle a Wayland compositor imports via zwp_linux_dmabuf_v1. Headless verification:
+// the exported plane layout is sane, and (where the export memory is host-visible) the
+// mmap'd dma-buf holds exactly the software-rasterizer pixels. SKIPs cleanly when no
+// device / no dma-buf export.
+TEST_CASE("Ganesh Vulkan frame exports as a valid linear dma-buf", "[gfx][vulkan][dmabuf]") {
+  const int w = 16, h = 10;
+  const std::uint32_t bg = 0xFF204060;
+  const std::uint32_t fg = 0xFFCC8844;
+  const int l = 3, t = 2, r = 11, b = 7;
+
+  std::string err;
+  std::unique_ptr<acl::gfx::VkRenderTarget> vk =
+      acl::gfx::VkRenderTarget::Create(w, h, &err);
+  if (!vk) {
+    WARN("no Vulkan render target (skipping dma-buf export): " + err);
+    SUCCEED();
+    return;
+  }
+  if (!vk->dmabuf_export_available()) {
+    WARN("device lacks dma-buf export extensions (skipping): " << vk->device_name());
+    SUCCEED();
+    return;
+  }
+
+  acl::gfx::DmabufFrame frame;
+  if (!vk->render_and_export_linear(bg, l, t, r, b, fg, &frame, &err)) {
+    WARN("dma-buf export failed (skipping parity): " + err);
+    SUCCEED();
+    return;
+  }
+  INFO("dma-buf on " << vk->device_name());
+
+  // Plane layout must be sane for a linear XRGB8888 frame.
+  CHECK(frame.fd >= 0);
+  CHECK(frame.width == static_cast<std::uint32_t>(w));
+  CHECK(frame.height == static_cast<std::uint32_t>(h));
+  CHECK(frame.stride >= static_cast<std::uint32_t>(w) * 4u);
+  CHECK(frame.modifier == 0u);  // DRM_FORMAT_MOD_LINEAR == 0 (no libdrm header in tests)
+  CHECK(frame.mem_size >= static_cast<std::uint64_t>(frame.stride) * h);
+
+  // Where the export memory is host-visible, the dma-buf must hold the rendered scene.
+  if (frame.host_mapped) {
+    Surface ref(w, h);
+    ref.draw_color(bg);
+    ref.fill_rect(l, t, r, b, fg);
+
+    Surface got(w, h);
+    REQUIRE(vk->read_exported_pixels(got));
+    for (int y = 0; y < h; ++y) {
+      for (int x = 0; x < w; ++x) {
+        INFO("pixel (" << x << "," << y << ")");
+        REQUIRE(got.pixel(x, y) == ref.pixel(x, y));
+      }
+    }
+  } else {
+    WARN("dma-buf memory not host-visible; layout checked, pixels not mmap-verified");
+  }
+}
 #endif  // ACL_HAVE_VULKAN

@@ -149,19 +149,22 @@ if skia_prefix != '' and fs.exists(skia_prefix / 'include' / 'core' / 'SkCanvas.
   endif
 endif
 
-# gfx/ GPU present path (P2.4): Skia's Ganesh Vulkan backend, patterned after wcs's
-# skia-vulkan-dmabuf example (ADR-4). The pinned Skia is built skia_use_vulkan=true, so
-# V1 (offscreen GPU render + readback) needs only the system Vulkan + vulkan-hpp. libdrm
-# (dma-buf format/modifier + drm_syncobj) is pulled in at V2 with the dma-buf export path.
-# When absent, gfx/ is the software/CPU-Skia rasterizer only.
+# gfx/ GPU present path (P2.4): Skia's Ganesh Vulkan backend rendering into dma-buf-
+# exported VkImages, patterned after wcs's skia-vulkan-dmabuf example (ADR-4). The pinned
+# Skia is built skia_use_vulkan=true, so this needs the system Vulkan + vulkan-hpp, plus
+# libdrm for the dma-buf format/modifier constants (drm_fourcc.h: DRM_FORMAT_XRGB8888,
+# DRM_FORMAT_MOD_LINEAR) the V2 export path names. When absent, gfx/ is the software/
+# CPU-Skia rasterizer only. (drm_syncobj explicit sync is a later, separately-gated add.)
 have_vulkan = false
 vulkan_dep = declare_dependency()
+libdrm_dep = declare_dependency()
 if have_skia
   vulkan_dep = dependency('vulkan', required : false)
+  libdrm_dep = dependency('libdrm', required : false)  # drm_fourcc.h format/modifier fourccs
   # vulkan-hpp (vulkan/vulkan.hpp) rides on the same package but isn't always installed.
-  if vulkan_dep.found() and cxx.has_header('vulkan/vulkan.hpp', dependencies : vulkan_dep)
+  if vulkan_dep.found() and libdrm_dep.found() and cxx.has_header('vulkan/vulkan.hpp', dependencies : vulkan_dep)
     have_vulkan = true
-    message('gfx/ Ganesh Vulkan present path enabled (vulkan + vulkan-hpp)')
+    message('gfx/ Ganesh Vulkan present path enabled (vulkan + vulkan-hpp + libdrm)')
   endif
 endif
 
