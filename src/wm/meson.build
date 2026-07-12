@@ -73,6 +73,23 @@ if have_wcs
   wm_inc += include_directories('.')
   wm_deps += [wayland_dep, wcs_dep, xkbcommon_dep]
   wm_cpp_args = ['-DWL_IME_BACKEND_TEXT_INPUT_V3']  # select the wcs IME facade backend
+
+  # P2.4/V2b: the Ganesh-Vulkan dma-buf presenter (zwp_linux_dmabuf_v1). Built only when
+  # the GPU render target is also available (have_vulkan). Needs the generated
+  # linux-dmabuf client header; the DmabufFrame it presents comes from gfx (acl_gfx),
+  # linked by the consumer — wm/ itself needs no Vulkan headers.
+  if have_vulkan
+    # No --emit-interface-tables: the wcs <wl/linux_dmabuf.hpp> framework emits the
+    # zwp_linux_dmabuf/buffer_params/feedback interface tables (as it does for xdg-shell).
+    linux_dmabuf_client_hpp = custom_target(
+      'wm-linux-dmabuf-client-header',
+      input : linux_dmabuf_xml,
+      output : 'linux_dmabuf_client.hpp',
+      command : [wcs_scanner, '--mode=client-header', '--std=c++23',
+                 '@INPUT@', '@OUTPUT@'],
+    )
+    wm_sources += [files('dmabuf_presenter.cpp'), linux_dmabuf_client_hpp]
+  endif
 else
   wm_sources += files('present_stub.cpp')
 endif
@@ -97,6 +114,18 @@ if build_tests and have_wcs
     link_with : [wm_lib, gfx_lib, acl_log],
     dependencies : wm_deps + [fmt_dep],
   )
+  # P2.4/V2b: the dma-buf present probe (Ganesh Vulkan → zwp_linux_dmabuf_v1). Links
+  # acl_gfx (VkRenderTarget) which pulls in the Skia + Vulkan link args. Run manually
+  # against a live compositor; the automated (test-compositor) coverage lands next.
+  if have_vulkan
+    wm_dmabuf_probe = executable(
+      'wm_dmabuf_probe',
+      files('dmabuf_probe_main.cpp'),
+      include_directories : [config_inc, core_inc],
+      link_with : [wm_lib, gfx_lib, acl_log],
+      dependencies : wm_deps + [fmt_dep],
+    )
+  endif
   py3_wm = find_program('python3', required : false)
   weston_prog = find_program('weston', required : false)
   if py3_wm.found() and weston_prog.found()

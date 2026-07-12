@@ -149,5 +149,24 @@ advertised modifiers with the GPU's render+sampleable ones (`getFormatProperties
 AMD tiled modifier (`0x0200…`, vendor 0x02 — not LINEAR), and the Skia-detiled readback of the
 tiled surface matches the software rasterizer exactly (166 assertions).** Pixels of a tiled
 image aren't CPU-linear, so verification reads back through Skia (the GPU detiles) rather than
-mmap. Test SKIPs cleanly without the modifier extension. **V2b-wm (present the DmabufFrame via
-wcs `wl::LinuxDmabuf` + the modifier-advertising test compositor) is next.**
+mmap. Test SKIPs cleanly without the modifier extension.
+
+## V2b-wm RESULT (2026-07-12) — done; live modifier-tiled dma-buf present to GNOME Shell
+`wm/dmabuf_presenter.cpp` — a focused presenter (kept separate from the mature shm
+`wayland_presenter.cpp`): binds `zwp_linux_dmabuf_v1` via the wcs `wl::DmabufFeedback`, learns the
+compositor's advertised modifiers (`Current().ModifiersFor(XRGB8888)`), calls the producer's
+`DmabufRenderFn` to render a frame targeting one of them, builds a `wl_buffer` (`create_params` →
+one `add()` per plane → `create_immed`), and presents it under an xdg_toplevel. `present_dmabuf()`
++ `DmabufRenderFn` are the new `present.h` seam (guarded `ACL_HAVE_WCS && ACL_HAVE_VULKAN`); wm/
+needs no Vulkan headers (the `DmabufFrame` is a plain struct; acl_gfx is linked by the consumer).
+Generated `linux_dmabuf_client.hpp` (NO `--emit-interface-tables` — the `wl/linux_dmabuf.hpp`
+framework emits the interface tables, like xdg-shell). `wm/dmabuf_probe_main.cpp` (`wm_dmabuf_probe`)
+drives it with a VkRenderTarget. **Verified LIVE against the running GNOME Shell/Mutter
+(`wayland-0`): the compositor advertised 6 XRGB8888 modifiers; the direct path chose an AMD tiled
+modifier `0x0200000000056bb03` — 2 planes (AMD DCC metadata, both described via per-plane `add()`);
+5 frames, 5 frame-callbacks, clean.** So the whole GPU path is live end-to-end: Ganesh Vulkan render
+→ modifier-tiled dma-buf → zwp_linux_dmabuf_v1 → real compositor composites it. Per the steer, the
+system compositor is the first target; the probe is run manually (no `meson test` yet — a live
+compositor isn't in CI). **NEXT = V2b-ci**: a libwayland-server test compositor (extending
+`close_compositor`) that advertises a modifier set + asserts the received plane params, for
+deterministic CI coverage. Then V3 (android.graphics natives compose onto the gfx surface).

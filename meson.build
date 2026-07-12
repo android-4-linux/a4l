@@ -95,6 +95,7 @@ if wcs_root != '' and wayland_dep.found() and wl_scanner_dep.found() and wp_dep.
       wl_core_xml = wl_scanner_dep.get_variable('pkgdatadir') / 'wayland.xml'
       xdg_shell_xml = wl_proto_dir / 'stable' / 'xdg-shell' / 'xdg-shell.xml'
       presentation_time_xml = wl_proto_dir / 'stable' / 'presentation-time' / 'presentation-time.xml'
+      linux_dmabuf_xml = wl_proto_dir / 'unstable' / 'linux-dmabuf' / 'linux-dmabuf-unstable-v1.xml'
       text_input_v3_xml = wl_proto_dir / 'unstable' / 'text-input' / 'text-input-unstable-v3.xml'
       fractional_scale_xml = wl_proto_dir / 'staging' / 'fractional-scale' / 'fractional-scale-v1.xml'
       viewporter_xml = wl_proto_dir / 'stable' / 'viewporter' / 'viewporter.xml'

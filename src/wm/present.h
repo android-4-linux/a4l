@@ -17,8 +17,13 @@
 #include <string>
 #include <string_view>
 #include <variant>
+#include <vector>
 
+#include "acl_config.h"  // ACL_HAVE_VULKAN / ACL_HAVE_WCS
 #include "gfx/gfx.h"
+#if ACL_HAVE_VULKAN
+#include "gfx/gfx_vk.h"  // gfx::DmabufFrame
+#endif
 
 namespace acl::wm {
 
@@ -100,6 +105,28 @@ bool present_surface(const gfx::Surface& surface, std::string_view title,
 // seed android.view.Display). Returns false when no backend/compositor/wl_output is
 // available, leaving the outputs untouched.
 bool query_display(int& width, int& height, int& scale) noexcept;
+
+#if ACL_HAVE_VULKAN && ACL_HAVE_WCS
+// The GPU present path (P2.4/V2b): present a Ganesh-Vulkan-rendered frame to the
+// compositor as a Linux dma-buf via zwp_linux_dmabuf_v1 — the pixels reach the
+// compositor without a wl_shm copy, and a scanout-capable modifier lets it promote the
+// surface onto a hardware plane. Patterned after wcs's skia-vulkan-dmabuf example.
+
+// Produce the frame to present, given the compositor's advertised DRM modifiers for the
+// target format (XRGB8888). The producer picks the modifier-tiled direct path (Skia
+// renders straight into the dma-buf) when one qualifies, else the linear fallback. The
+// returned DmabufFrame's fd is borrowed (owned by the producer's VkRenderTarget).
+using DmabufRenderFn = std::function<bool(
+    const std::vector<std::uint64_t>& advertised_modifiers, gfx::DmabufFrame* out)>;
+
+// Bind zwp_linux_dmabuf_v1, learn the compositor's advertised modifiers, call `render`
+// to produce a dma-buf frame, build a wl_buffer from it (create_params → add per plane →
+// create_immed), and present it under an xdg_toplevel titled `title`/`app_id`. Presents
+// `frames` frames (0 = until the toplevel closes); the same frame is re-attached each
+// tick for now (static present). Returns true on a clean run.
+bool present_dmabuf(const DmabufRenderFn& render, std::string_view title,
+                    std::string_view app_id, int frames) noexcept;
+#endif  // ACL_HAVE_VULKAN && ACL_HAVE_WCS
 
 const char* module_name() noexcept;
 
