@@ -27,6 +27,7 @@ CHECKS = [
     "FRAMEWORK-FLOOR PROBE: android.os.SystemProperties classloader=BOOT",  # P2.1: on bootclasspath
     "FRAMEWORK-FLOOR PROBE: SystemProperties.get(ro.build.version.sdk)=33", # P2.2: native + seeded prop
     "FRAMEWORK-FLOOR PROBE: Build.CPU_ABI=x86_64",                          # A(1): build.prop seeded
+    "FRAMEWORK-FLOOR PROBE: android:string/ok=OK",                         # R1+R3: AssetManager + framework-res
 ]
 
 # The framework boot jars (PRODUCT_BOOT_JARS, system), in order.
@@ -76,6 +77,12 @@ def main() -> int:
         if jar:
             boot_jars.append(jar)
     framework = ":".join(boot_jars) if boot_jars else None
+    # framework-res.apk (the android:R.* resource data) — needed for R1+R3 resolution.
+    framework_res = first_file(
+        os.path.join(root, "out/target/product/*/system/framework/framework-res.apk"))
+    if not framework_res:
+        sys.stdout.write("SKIP: framework-res.apk not built (m framework-res)\n")
+        return SKIP
     if not framework:
         sys.stdout.write("SKIP: framework boot jars not built (m framework-minus-apex ...)\n")
         return SKIP
@@ -115,6 +122,7 @@ def main() -> int:
         env = dict(os.environ)
         env["ACL_ART_BOOTCLASSPATH"] = framework  # P2.1: framework on the bootclasspath
         env["ACL_ART_NATIVE"] = "1"
+        env["ACL_ART_FRAMEWORK_RES"] = framework_res  # R3: framework-res.apk resource data
         p = subprocess.run([acl, "run", apk, "--vm=art", "--main=com.acl.hello.Main"],
                            env=env, capture_output=True, text=True, timeout=180)
         out = p.stdout + p.stderr

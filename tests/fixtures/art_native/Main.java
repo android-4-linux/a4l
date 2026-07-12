@@ -30,5 +30,13 @@ public class Main {
         // value — this succeeds only because acl seeded a build.prop before framework init.
         Object abi = Class.forName("android.os.Build").getField("CPU_ABI").get(null);
         System.out.println("FRAMEWORK-FLOOR PROBE: Build.CPU_ABI=" + abi);
+        // Resolve a real framework resource — works only because acl registered the
+        // AssetManager native (R1) and pre-loaded framework-res.apk (R3).
+        Class<?> resC = Class.forName("android.content.res.Resources");
+        Object sys = resC.getMethod("getSystem").invoke(null);
+        Method getId = resC.getMethod("getIdentifier", String.class, String.class, String.class);
+        int id = (Integer) getId.invoke(sys, "ok", "string", "android");
+        Object ok = resC.getMethod("getString", int.class).invoke(sys, id);
+        System.out.println("FRAMEWORK-FLOOR PROBE: android:string/ok=" + ok);
     }
 }

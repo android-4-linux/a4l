@@ -1341,6 +1341,32 @@ class ArtVm final : public JniVm {
            "({} unavailable)",
            ok, unavailable);
     populate_system_properties(env);
+    load_system_resources(env);
+  }
+
+  // Pre-load the framework's system assets (framework-res.apk = the android:R.* resources)
+  // so Resources.getSystem() resolves real framework resources. AssetManager hardcodes
+  // FRAMEWORK_APK_PATH=/system/framework/framework-res.apk with no override, but its
+  // createSystemAssetsInZygoteLocked(reinit, path) is public and sets sSystem — so acl
+  // pre-populates from a real path (ACL_ART_FRAMEWORK_RES) before getSystem() runs.
+  void load_system_resources(JNIEnv* env) {
+    const char* res = std::getenv("ACL_ART_FRAMEWORK_RES");
+    if (res == nullptr || *res == '\0') return;
+    jclass am = env->FindClass("android/content/res/AssetManager");
+    if (am == nullptr) { env->ExceptionClear(); return; }
+    jmethodID create = env->GetStaticMethodID(
+        am, "createSystemAssetsInZygoteLocked", "(ZLjava/lang/String;)V");
+    if (create == nullptr) { env->ExceptionClear(); return; }
+    jstring path = env->NewStringUTF(res);
+    env->CallStaticVoidMethod(am, create, JNI_FALSE, path);
+    if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+      log::w(kTag, "ART framework resources: failed to load {}", res);
+    } else {
+      log::i(kTag, "ART framework resources: loaded {}", res);
+    }
+    env->DeleteLocalRef(path);
+    env->DeleteLocalRef(am);
   }
 
   // Populate a minimal build.prop before the app's framework classes initialize. Many
@@ -1361,6 +1387,9 @@ class ArtVm final : public JniVm {
         {"ro.product.cpu.abilist32", "x86"},
         {"ro.build.version.sdk", "33"}, {"ro.build.version.release", "13"},
         {"ro.build.version.codename", "REL"}, {"ro.build.version.incremental", "acl"},
+        {"ro.build.version.all_codenames", "REL"}, {"ro.build.version.known_codenames", "REL"},
+        {"ro.build.version.preview_sdk", "0"}, {"ro.build.version.preview_sdk_fingerprint", "REL"},
+        {"ro.build.version.min_supported_target_sdk", "0"}, {"ro.build.version.security_patch", "2022-01-01"},
         {"ro.build.id", "acl"}, {"ro.build.display.id", "acl"}, {"ro.build.type", "eng"},
         {"ro.build.tags", "test-keys"}, {"ro.build.flavor", "acl-eng"},
         {"ro.build.date.utc", "0"}, {"ro.build.host", "acl"}, {"ro.build.user", "acl"},
