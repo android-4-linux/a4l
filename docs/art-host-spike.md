@@ -158,11 +158,24 @@ work is getting ART's options + apex/env layout right.
 **GO/NO-GO:** `acl run hello.apk --vm=art` prints via real ART, no DEX→JVM step.
 **The spike ends here.** M0–M2 = the ADR-1 answer.
 
-### M3 — host framework boot image · weeks · POST-DECISION (the "commit to ART" work)
-`dex2oat` the vendored `frameworks/base` + `libcore` → a framework `boot.art`, so real
-`Activity`s load. This is where ADR-0002's vendored framework meets ART (and where the
-android.jar-stubs boot classpath is replaced by a real dex2oat'd image). NOT part of the
-spike — only started once M2 says "go".
+### M3 — framework on ART · IN PROGRESS
+Get the vendored android.* framework (ADR-0002) onto ART so real `Activity`s load.
+
+**Step 1 DONE (2026-07-12): real Activity lifecycle on host ART.** `acl run
+activity_art.apk --vm=art` (ACL_ART_HOME + ACL_ART_FRAMEWORK=shim.dex:stubs.dex) →
+launcher resolved → recognized as `android.app.Activity` subclass → `onCreate→onStart→
+onResume` runs; "MainActivity.onCreate ran on host ART"; ActivityManager/WindowManager/
+MediaSessionManager answer; exit 0. Matches the JVM `run_activity` test on REAL ART.
+The lifecycle + `register_framework_natives` are shared `JniVm` code (backend-agnostic),
+so ART needed only the framework as DEX (one small `ArtVm` change: `ACL_ART_FRAMEWORK`
+prepended to the app classpath). Framework dex = `d8` of acl's 41 shim classes
+(recompiled `--release 8` — acl's Java-25/class-v69 output is rejected by android-13 d8)
++ `d8` of android.jar. App apk must be d8+zipaligned.
+
+Remaining M3 / Phase 2: (a) meson d8 custom_target for the framework dex + a `--vm=art`
+`run_activity` regression test; (b) `dex2oat` the framework → a boot image (startup perf,
+replaces `-Xint` imageless); (c) native `.so` loading + a much broader slice of real AOSP
+`frameworks/base` (vs the 41 shims) so real apps (Spotify) *execute*, not just verify.
 
 ## Version locking — NON-NEGOTIABLE (two-track)
 

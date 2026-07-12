@@ -1198,11 +1198,23 @@ class ArtVm final : public JniVm {
     }
     const std::string bcp_joined = join(bcp, ':');
 
+    // Application classpath: the vendored android.* framework DEX (ADR-0002) ahead
+    // of the app, so real framework classes (android.app.Activity, ...) resolve —
+    // the JVM backend folds these into java.class.path from .class dirs, but ART
+    // needs DEX, so ACL_ART_FRAMEWORK carries the d8'd framework (colon-separated;
+    // shim dex before the android.jar-stub dex). Absent it, only java.* is available
+    // and apps that touch the framework fail to load — a static-main DEX still runs.
+    std::vector<std::string> cp;
+    if (const char* fw = std::getenv("ACL_ART_FRAMEWORK"); fw != nullptr && *fw != '\0') {
+      cp.emplace_back(fw);
+    }
+    cp.insert(cp.end(), config_.classpath.begin(), config_.classpath.end());
+
     std::vector<std::string> option_strings;
     option_strings.push_back("-Xbootclasspath:" + bcp_joined);
     option_strings.push_back("-Xbootclasspath-locations:" + bcp_joined);
     option_strings.push_back("-Xint");  // imageless: interpret; no runtime dex2oat
-    option_strings.push_back("-Djava.class.path=" + join(config_.classpath, ':'));
+    option_strings.push_back("-Djava.class.path=" + join(cp, ':'));
     for (const std::string& opt : config_.options) option_strings.push_back(opt);
 
     std::vector<JavaVMOption> options;
