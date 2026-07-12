@@ -189,6 +189,24 @@ if py3.found() and have_jni
       timeout : 120,
     )
 
+    # Same media path, but the service extends the ANDROIDX MediaBrowserServiceCompat
+    # (the base most real Auto media apps, e.g. Spotify, extend) — the host must
+    # recognize it alongside the framework MediaBrowserService.
+    media_compat_apk = custom_target(
+      'media-compat-apk',
+      input : files('../fixtures/make_media_compat_apk.py'),
+      output : 'media_compat.apk',
+      command : [py3, '@INPUT@', '@OUTPUT@'],
+      depend_files : files('../fixtures/make_axml.py'),
+    )
+    test(
+      'run-apk-media-compat',
+      py3,
+      args : [files('run_media_compat_test.py'), acl_exe, media_compat_apk, framework_shim],
+      depends : [acl_exe, media_compat_apk, framework_shim],
+      timeout : 120,
+    )
+
     # Gate G1.5b (automotive CAL path): host a CarAppService (no Views). cal.apk's
     # CarApp -> Session -> Screen -> ListTemplate; `acl run --cal=...` walks it and
     # the native CAL host (hosts/cal) renders + content-limits it. Automotive only.

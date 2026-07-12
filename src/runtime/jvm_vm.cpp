@@ -211,6 +211,38 @@ class JvmVm final : public Vm {
     return result;
   }
 
+  // The media-browse API family a hosted service uses: the framework
+  // android.service.media.MediaBrowserService, or the support-library
+  // androidx.media.MediaBrowserServiceCompat (what most real Auto apps extend). The
+  // methods are identical bar the package of the nested BrowserRoot/Result/Description.
+  struct MbsApi {
+    const char* label;
+    bool framework;
+    std::string browser_root;  // internal name of the BrowserRoot nested class
+    std::string result_cls;    // internal name of the Result nested class
+    std::string media_desc;    // internal name of MediaDescription(Compat)
+  };
+  bool media_browser_api(jclass cls, MbsApi& api) {
+    struct Cand { const char* base; const char* label; bool fw;
+                  const char* root; const char* res; const char* desc; };
+    static const Cand cands[] = {
+        {"android/service/media/MediaBrowserService", "MediaBrowserService", true,
+         "android/service/media/MediaBrowserService$BrowserRoot",
+         "android/service/media/MediaBrowserService$Result", "android/media/MediaDescription"},
+        {"androidx/media/MediaBrowserServiceCompat", "MediaBrowserServiceCompat", false,
+         "androidx/media/MediaBrowserServiceCompat$BrowserRoot",
+         "androidx/media/MediaBrowserServiceCompat$Result", "androidx/media/MediaDescriptionCompat"},
+    };
+    for (const Cand& c : cands) {
+      jclass base = env_->FindClass(c.base);
+      if (base == nullptr) { clear_exception(); continue; }
+      const bool ok = env_->IsAssignableFrom(cls, base) == JNI_TRUE;
+      env_->DeleteLocalRef(base);
+      if (ok) { api = {c.label, c.fw, c.root, c.res, c.desc}; return true; }
+    }
+    return false;
+  }
+
   Error call_media_browser(std::string_view service_class) override {
     if (env_ == nullptr) {
       return Error::of(Status::NotStarted, "call_media_browser before start()");
@@ -218,13 +250,12 @@ class JvmVm final : public Vm {
     const std::string name = to_jni_name(service_class);
     jclass cls = env_->FindClass(name.c_str());
     if (cls == nullptr) return class_load_error("MediaBrowserService", service_class);
-    jclass mbs_cls = env_->FindClass("android/service/media/MediaBrowserService");
-    if (mbs_cls == nullptr || env_->IsAssignableFrom(cls, mbs_cls) != JNI_TRUE) {
+    MbsApi api;
+    if (!media_browser_api(cls, api)) {
       clear_exception();
       env_->DeleteLocalRef(cls);
-      if (mbs_cls != nullptr) env_->DeleteLocalRef(mbs_cls);
       return Error::of(Status::NotApplicable,
-                       std::string(service_class) + " is not a MediaBrowserService");
+                       std::string(service_class) + " is not a MediaBrowserService(Compat)");
     }
 
     Error result = Error::ok();
@@ -233,18 +264,19 @@ class JvmVm final : public Vm {
     if (svc == nullptr) {
       result = fail_with_exception("instantiate " + std::string(service_class));
     } else {
-      log::i(kTag, "hosting MediaBrowserService {}", service_class);
+      log::i(kTag, "hosting {} {}", api.label, service_class);
       log_context(svc);
 #if ACL_PROFILE_AUTOMOTIVE
       hosts::media::MediaBridge::instance().set_audio_route(&audio_route_);
 #endif
       result = call_lifecycle(cls, svc, "onCreate", "()V", false);
       if (result.is_ok()) probe_managers(svc);  // the app's MediaSession now shows up
-      if (result.is_ok()) result = read_session(cls, svc);
-      if (result.is_ok()) result = browse_root(cls, svc);
+      // Session read uses the framework MediaSession; androidx uses MediaSessionCompat
+      // (a separate follow-on) — skip it there.
+      if (result.is_ok() && api.framework) result = read_session(cls, svc);
+      if (result.is_ok()) result = browse_root(cls, svc, api);
       env_->DeleteLocalRef(svc);
     }
-    env_->DeleteLocalRef(mbs_cls);
     env_->DeleteLocalRef(cls);
     return result;
   }
@@ -694,12 +726,12 @@ class JvmVm final : public Vm {
     return Error::of(Status::RuntimeError, "failed to " + what);
   }
 
-  // Call MediaBrowserService.onGetRoot(pkg, uid, null) and read BrowserRoot.getRootId().
-  Error browse_root(jclass cls, jobject svc) {
-    jmethodID on_get_root = env_->GetMethodID(
-        cls, "onGetRoot",
-        "(Ljava/lang/String;ILandroid/os/Bundle;)"
-        "Landroid/service/media/MediaBrowserService$BrowserRoot;");
+  // Call onGetRoot(pkg, uid, null) and read BrowserRoot.getRootId(). `api` supplies
+  // the framework-vs-androidx nested-class names.
+  Error browse_root(jclass cls, jobject svc, const MbsApi& api) {
+    const std::string sig =
+        "(Ljava/lang/String;ILandroid/os/Bundle;)L" + api.browser_root + ";";
+    jmethodID on_get_root = env_->GetMethodID(cls, "onGetRoot", sig.c_str());
     if (on_get_root == nullptr) {
       clear_exception();
       return Error::of(Status::NotFound, "no onGetRoot(String,int,Bundle)");
@@ -724,7 +756,7 @@ class JvmVm final : public Vm {
       const char* c = id != nullptr ? env_->GetStringUTFChars(id, nullptr) : nullptr;
       log::i(kTag, "media browse root: {}", c != nullptr ? c : "?");
       if (c != nullptr) env_->ReleaseStringUTFChars(id, c);
-      result = load_children(cls, svc, id);  // walk the root's children
+      result = load_children(cls, svc, id, api);  // walk the root's children
       if (id != nullptr) env_->DeleteLocalRef(id);
     }
     env_->DeleteLocalRef(root_cls);
@@ -753,13 +785,12 @@ class JvmVm final : public Vm {
     return out;
   }
 
-  Error load_children(jclass cls, jobject svc, jstring parent_id) {
-    jmethodID on_load = env_->GetMethodID(
-        cls, "onLoadChildren",
-        "(Ljava/lang/String;Landroid/service/media/MediaBrowserService$Result;)V");
+  Error load_children(jclass cls, jobject svc, jstring parent_id, const MbsApi& api) {
+    const std::string on_load_sig = "(Ljava/lang/String;L" + api.result_cls + ";)V";
+    jmethodID on_load = env_->GetMethodID(cls, "onLoadChildren", on_load_sig.c_str());
     if (on_load == nullptr) { clear_exception(); return Error::ok(); }  // optional
 
-    jclass result_cls = env_->FindClass("android/service/media/MediaBrowserService$Result");
+    jclass result_cls = env_->FindClass(api.result_cls.c_str());
     jmethodID result_ctor =
         result_cls != nullptr ? env_->GetMethodID(result_cls, "<init>", "()V") : nullptr;
     jobject result = result_ctor != nullptr ? env_->NewObject(result_cls, result_ctor) : nullptr;
@@ -788,9 +819,9 @@ class JvmVm final : public Vm {
       for (jint i = 0; i < n; ++i) {
         jobject item = env_->CallObjectMethod(list, get_m, i);  // MediaBrowser.MediaItem
         jclass item_cls = env_->GetObjectClass(item);
+        const std::string desc_sig = "()L" + api.media_desc + ";";
         jobject desc = env_->CallObjectMethod(
-            item, env_->GetMethodID(item_cls, "getDescription",
-                                    "()Landroid/media/MediaDescription;"));
+            item, env_->GetMethodID(item_cls, "getDescription", desc_sig.c_str()));
         jclass desc_cls = env_->GetObjectClass(desc);
         auto title = env_->CallObjectMethod(  // CharSequence
             desc, env_->GetMethodID(desc_cls, "getTitle", "()Ljava/lang/CharSequence;"));
