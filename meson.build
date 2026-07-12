@@ -149,6 +149,22 @@ if skia_prefix != '' and fs.exists(skia_prefix / 'include' / 'core' / 'SkCanvas.
   endif
 endif
 
+# gfx/ GPU present path (P2.4): Skia's Ganesh Vulkan backend, patterned after wcs's
+# skia-vulkan-dmabuf example (ADR-4). The pinned Skia is built skia_use_vulkan=true, so
+# V1 (offscreen GPU render + readback) needs only the system Vulkan + vulkan-hpp. libdrm
+# (dma-buf format/modifier + drm_syncobj) is pulled in at V2 with the dma-buf export path.
+# When absent, gfx/ is the software/CPU-Skia rasterizer only.
+have_vulkan = false
+vulkan_dep = declare_dependency()
+if have_skia
+  vulkan_dep = dependency('vulkan', required : false)
+  # vulkan-hpp (vulkan/vulkan.hpp) rides on the same package but isn't always installed.
+  if vulkan_dep.found() and cxx.has_header('vulkan/vulkan.hpp', dependencies : vulkan_dep)
+    have_vulkan = true
+    message('gfx/ Ganesh Vulkan present path enabled (vulkan + vulkan-hpp)')
+  endif
+endif
+
 conf = configuration_data()
 conf.set('ACL_VERSION', '"' + meson.project_version() + '"')
 conf.set10('ACL_PROFILE_AUTOMOTIVE', profile_automotive)
@@ -156,6 +172,7 @@ conf.set10('ACL_HAVE_JNI', have_jni)
 conf.set10('ACL_HAVE_PIPEWIRE', have_pipewire)
 conf.set10('ACL_HAVE_WCS', have_wcs)
 conf.set10('ACL_HAVE_SKIA', have_skia)
+conf.set10('ACL_HAVE_VULKAN', have_vulkan)
 # javac matched to the detected libjvm (same java_home), for the DEX->JVM
 # converter. Empty when no JDK; the converter then needs an explicit path.
 conf.set('ACL_JAVAC',

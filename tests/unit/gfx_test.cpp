@@ -8,8 +8,11 @@
 // what wm/ presents.
 
 #include "gfx/gfx.h"
+#include "gfx/gfx_vk.h"
 
 #include <cstdint>
+#include <memory>
+#include <string>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -57,3 +60,40 @@ TEST_CASE("Skia raster output matches the software rasterizer", "[gfx][skia]") {
   }
 }
 #endif  // ACL_HAVE_SKIA
+
+#if ACL_HAVE_VULKAN
+// P2.4 / V1: the Ganesh Vulkan render target draws through a real SkCanvas on the GPU
+// and reads the pixels back. AA-off solid fills must match the software rasterizer
+// exactly. SKIPs cleanly (SUCCEED with a note) where no Vulkan device is present — the
+// same contract the host-ART tests use, so CI without a GPU still passes.
+TEST_CASE("Ganesh Vulkan render target matches the software rasterizer", "[gfx][vulkan]") {
+  const int w = 16, h = 10;
+  const std::uint32_t bg = 0xFF204060;
+  const std::uint32_t fg = 0xFFCC8844;
+  const int l = 3, t = 2, r = 11, b = 7;
+
+  std::string err;
+  std::unique_ptr<acl::gfx::VkRenderTarget> vk =
+      acl::gfx::VkRenderTarget::Create(w, h, &err);
+  if (!vk) {
+    WARN("no Vulkan render target (skipping GPU parity): " + err);
+    SUCCEED();
+    return;
+  }
+  INFO("Vulkan device: " << vk->device_name());
+
+  Surface ref(w, h);
+  ref.draw_color(bg);
+  ref.fill_rect(l, t, r, b, fg);
+
+  Surface gpu(w, h);
+  REQUIRE(vk->render_rect(gpu, bg, l, t, r, b, fg));
+
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      INFO("pixel (" << x << "," << y << ") dev=" << vk->device_name());
+      REQUIRE(gpu.pixel(x, y) == ref.pixel(x, y));
+    }
+  }
+}
+#endif  // ACL_HAVE_VULKAN

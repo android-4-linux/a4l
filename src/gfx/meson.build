@@ -13,6 +13,12 @@ if have_skia
   gfx_sources += files('gfx_skia.cpp')
   gfx_deps += skia_dep
 endif
+# The Ganesh Vulkan present target (P2.4/V1) — pinned Skia's Vulkan backend rendering
+# into a GPU SkSurface (dma-buf export lands in V2). Needs system vulkan + libdrm.
+if have_vulkan
+  gfx_sources += files('gfx_vk.cpp')
+  gfx_deps += vulkan_dep
+endif
 gfx_lib = static_library(
   'acl_gfx',
   gfx_sources,
