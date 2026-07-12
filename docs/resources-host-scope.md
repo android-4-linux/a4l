@@ -27,10 +27,20 @@ Built `framework-res` (→ `.../system/framework/framework-res.apk`). `AssetMana
 Also seeded the version codename props (`all_codenames`/`known_codenames`/...) — `Build$VERSION.
 <clinit>` indexes `all_codenames[0]` and crashed on empty. **Verified: a real `Resources`
 resolves `android:string/ok` → "OK" (id 0x104000a) on host ART.** Test asserts it (locates
-framework-res.apk, sets `ACL_ART_FRAMEWORK_RES`; SKIPs if not built). R4 (an app's own resources
-via ApkAssets) is a small follow-on. **The resources subsystem is live** — native floor (R1) +
-data (R3). Remaining native frontier before apps draw: the **render** subsystem (View/Bitmap/
-Canvas → Skia → Wayland, P2.4).
+framework-res.apk, sets `ACL_ART_FRAMEWORK_RES`; SKIPs if not built). **The resources subsystem is live** — native floor (R1) + data (R3).
+
+## R4 RESULT (2026-07-12) — app resources resolve; subsystem COMPLETE
+Built a resource APK with `aapt2` (compile + link -I framework-res), loaded
+`[framework-res, app.apk]` via `ApkAssets.loadFromPath` into an `AssetManager.Builder`, wrapped
+in a `Resources`, and **resolved the app's own `com.acl.restest:string/app_greeting` +
+`integer/app_answer=42` on host ART**. No new acl code — it works through the standard framework
+`AssetManager.Builder`/`Resources` API a real `Context` uses, over the R1 native floor. So the
+resources subsystem is **complete** (framework + app). Proven by scratch/r4probe; a dedicated
+regression test (aapt2-built fixture) is an optional follow-on — the R3 test already covers the
+native floor + resource resolution, the regression-prone half.
+
+**Remaining native frontier before apps draw:** the **render** subsystem (View/Bitmap/Canvas →
+Skia → Wayland, P2.4) — the only genuinely target-only natives left.
 
 ---
 
