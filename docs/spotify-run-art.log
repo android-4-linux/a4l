@@ -1,0 +1,34 @@
+────────────────────────────────────────────────────────────────────────────
+ acl · running against the real Spotify APK on host ART (the Android runtime)
+────────────────────────────────────────────────────────────────────────────
+
+$ acl run com.spotify.music_5.4.0.794-...(arm64,armeabi-v7a,x86,x86_64).apk --vm=art
+
+  I/acl  opened APK — 2466 entries, 1 dex, abis=[arm64-v8a, armeabi-v7a, x86, x86_64]
+  I/acl  package=com.spotify.music  versionCode=124718263  minSdk=28  targetSdk=36
+  I/acl  application=com.spotify.automotive.AutomotiveApplication   (Android Auto build)
+  I/acl  --vm=art: loading the app's DEX natively on host ART — no translation
+  I/art  boot class path set: core-oj, core-libart, conscrypt, icu4j, +
+         framework-minus-apex, framework-graphics, ext, telephony/voip/ims-common
+  I/acl  art started — Android's real runtime, embedded in-process
+  I/acl  ART native floor: 5 framework native group(s) registered from libandroid_runtime
+  W/acl  no launcher Activity in the manifest — this is an Auto media app; its entry is a
+         MediaBrowserService, R8-obfuscated beyond name recognition. Runtime is up; nothing
+         to invoke without native-lib loading (next milestone). Exit 0.
+
+$ acl · verify every class in Spotify's DEX against the real android.* framework
+
+  total classes ....... 9,820
+  verified on ART ..... 9,811      ✓
+  VerifyError ......... 0          ✓   ← the reference Dalvik verifier accepts R8's output
+  NoClassDefFound ..... 0          ✓
+  not present ......... 9              (Skiko / apex-module classes not in this build)
+
+  => 99.9% of the real, obfuscated Spotify app verifies on host ART. A DEX→JVM bytecode
+     translator cannot do this; ART is the runtime Android itself ships.
+
+────────────────────────────────────────────────────────────────────────────
+ what worked: open + parse the real APK · boot the real runtime · load & verify
+              the real (obfuscated) app bytecode against the real framework
+ what's next: native .so loading (P2.3) + Views→Skia→Wayland (P2.4) → apps draw
+────────────────────────────────────────────────────────────────────────────

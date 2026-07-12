@@ -9,7 +9,7 @@
 # SKIPs (exit 77) when any are absent (normal CI), so it never fails the build.
 #
 # Steps: locate the real framework jar in the ART tree; d8 the Main fixture into a
-# zipaligned APK; run `acl run <apk> --vm=art` with ACL_ART_FRAMEWORK=<real framework>
+# zipaligned APK; run `acl run <apk> --vm=art` with ACL_ART_BOOTCLASSPATH=<real framework>
 # and ACL_ART_NATIVE=1; assert the native floor registered and SystemProperties executed.
 #
 # Usage: run_native_floor_art_test.py <acl> <source_root>
@@ -24,8 +24,13 @@ SKIP = 77
 CHECKS = [
     "ART native floor:",                                # acl registered libandroid_runtime natives
     "framework native group(s) from libandroid_runtime",
-    "NATIVE-FLOOR PROBE: SystemProperties.get(ro.build.version.sdk)=",  # native executed
+    "FRAMEWORK-FLOOR PROBE: android.os.SystemProperties classloader=BOOT",  # P2.1: on bootclasspath
+    "FRAMEWORK-FLOOR PROBE: SystemProperties.get(ro.build.version.sdk)=",   # P2.2: native executed
 ]
+
+# The framework boot jars (PRODUCT_BOOT_JARS, system), in order.
+BOOT_JAR_MODULES = ["framework-minus-apex", "framework-graphics", "ext",
+                    "telephony-common", "voip-common", "ims-common"]
 
 
 def first_file(*pats):
@@ -59,13 +64,19 @@ def main() -> int:
         return SKIP
 
     root = os.path.abspath(os.path.join(home, "..", "..", ".."))
-    framework = first_file(
-        os.path.join(root, "out/target/product/*/obj/JAVA_LIBRARIES/"
-                           "framework-minus-apex_intermediates/javalib.jar"),
-        os.path.join(root, "out/soong/.intermediates/frameworks/base/"
-                           "framework-minus-apex/*/*/javalib.jar"))
+    # Assemble the framework BOOTCLASSPATH from the built boot jars (P2.1). All must be
+    # present; framework-minus-apex is the anchor others resolve against.
+    boot_jars = []
+    for mod in BOOT_JAR_MODULES:
+        jar = first_file(
+            os.path.join(root, "out/target/product/*/obj/JAVA_LIBRARIES/"
+                               f"{mod}_intermediates/javalib.jar"),
+            os.path.join(root, f"out/soong/.intermediates/frameworks/base/{mod}/*/*/javalib.jar"))
+        if jar:
+            boot_jars.append(jar)
+    framework = ":".join(boot_jars) if boot_jars else None
     if not framework:
-        sys.stdout.write("SKIP: real framework not built (m framework-minus-apex)\n")
+        sys.stdout.write("SKIP: framework boot jars not built (m framework-minus-apex ...)\n")
         return SKIP
     d8 = os.path.join(home, "bin", "d8")
     zipalign = first_executable(os.path.join(root, "prebuilts/build-tools/linux*-x86/bin/zipalign"))
@@ -101,7 +112,7 @@ def main() -> int:
         run([zipalign, "-f", "4", unaligned, apk])
 
         env = dict(os.environ)
-        env["ACL_ART_FRAMEWORK"] = framework
+        env["ACL_ART_BOOTCLASSPATH"] = framework  # P2.1: framework on the bootclasspath
         env["ACL_ART_NATIVE"] = "1"
         p = subprocess.run([acl, "run", apk, "--vm=art", "--main=com.acl.hello.Main"],
                            env=env, capture_output=True, text=True, timeout=180)

@@ -1202,6 +1202,14 @@ class ArtVm final : public JniVm {
     for (const BcpJar& j : kBcp) {
       bcp.push_back(home + "/apex/" + j.apex + "/javalib/" + j.module + ".jar");
     }
+    // P2.1 (ADR-0002): append the real framework to the BOOT classpath (not the app
+    // classpath) so framework classes get boot-classloader identity as on device —
+    // needed for framework internals that assume bootclasspath residency. Colon-
+    // separated jars (framework-minus-apex, framework-graphics, ext, ...).
+    if (const char* ext = std::getenv("ACL_ART_BOOTCLASSPATH");
+        ext != nullptr && *ext != '\0') {
+      bcp.emplace_back(ext);
+    }
     const std::string bcp_joined = join(bcp, ':');
 
     // Application classpath: the vendored android.* framework DEX (ADR-0002) ahead
@@ -1219,7 +1227,15 @@ class ArtVm final : public JniVm {
     std::vector<std::string> option_strings;
     option_strings.push_back("-Xbootclasspath:" + bcp_joined);
     option_strings.push_back("-Xbootclasspath-locations:" + bcp_joined);
-    option_strings.push_back("-Xint");  // imageless: interpret; no runtime dex2oat
+    // P2.1: a dex2oat'd framework boot image (ACL_ART_BOOT_IMAGE) makes the framework
+    // AOT-compiled on the bootclasspath; without one, interpret imageless (-Xint). The
+    // image's baked bootclasspath must match ACL_ART_BOOTCLASSPATH or ART falls back.
+    if (const char* img = std::getenv("ACL_ART_BOOT_IMAGE");
+        img != nullptr && *img != '\0') {
+      option_strings.push_back(std::string("-Ximage:") + img);
+    } else {
+      option_strings.push_back("-Xint");  // imageless: interpret; no runtime dex2oat
+    }
     option_strings.push_back("-Djava.class.path=" + join(cp, ':'));
     for (const std::string& opt : config_.options) option_strings.push_back(opt);
 
