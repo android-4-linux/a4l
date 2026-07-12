@@ -3,10 +3,14 @@
 #ifndef ACL_RUNTIME_JVM_VM_H
 #define ACL_RUNTIME_JVM_VM_H
 
-// Factory for the OpenJDK-backed VM (ADR-0001 fallback). Declared separately so
-// jni.h stays confined to jvm_vm.cpp and out of the public runtime seam. Only
-// meaningful when the build detected a JDK (ACL_HAVE_JNI); create_vm() calls
-// this under that guard.
+// Factories for the two JNI-Invocation-API backends. Declared separately so jni.h
+// stays confined to jvm_vm.cpp and out of the public runtime seam. Only meaningful
+// when the build detected the JNI headers (ACL_HAVE_JNI); create_vm() calls these
+// under that guard.
+//
+// make_jvm_vm: OpenJDK/HotSpot (ADR-0001 fallback), linked at build time.
+// make_art_vm: host ART (ADR-0001 target), dlopen'd at runtime from ACL_ART_HOME —
+//   runs the app's DEX natively (no translation).
 
 #include <memory>
 
@@ -15,6 +19,7 @@
 namespace acl::runtime {
 
 std::unique_ptr<Vm> make_jvm_vm(VmConfig config);
+std::unique_ptr<Vm> make_art_vm(VmConfig config);
 
 }  // namespace acl::runtime
 

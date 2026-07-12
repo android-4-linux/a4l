@@ -151,28 +151,29 @@ std::unique_ptr<Vm> create_vm(Backend backend, VmConfig config, Error& out_error
       out_error = Error::ok();
       return std::make_unique<NullVm>(std::move(config));
 
-    case Backend::Art: {
-      // R-1 / ADR-0001 (reaffirmed at the Gate-G1 confrontation): host ART is the
-      // target, but standing up a host-ART build is out of budget so far. The seam
-      // is ready — Backend::Art, VmConfig.boot_classpath, and cache_dir model what a
-      // host-ART VM consumes; ACL_ART_HOME points at a prebuilt host ART. When
-      // the embedding lands (JNI_CreateJavaVM against libart.so with -Ximage=<boot
-      // image>) this branch constructs it. Until then it reports precisely how to
-      // enable it.
-      const char* art_home = std::getenv("ACL_ART_HOME");
+    case Backend::Art:
+#if ACL_HAVE_JNI
+      // ADR-0001 target: host ART via the JNI Invocation API, dlopen'd from
+      // ACL_ART_HOME. Runs the app's DEX natively (no dex_to_jvm translation). The
+      // spike (docs/art-host-spike.md) proved a host ART build boots + runs DEX and
+      // verifies/AOT-compiles a real obfuscated app; make_art_vm embeds it.
+      if (const char* art_home = std::getenv("ACL_ART_HOME");
+          art_home == nullptr || *art_home == '\0') {
+        out_error = Error::of(
+            Status::Unavailable,
+            "host ART not available: set ACL_ART_HOME to a host ART build's "
+            "out/host/linux-x86 (see docs/art-host-spike.md), or use --vm=jvm.");
+        return nullptr;
+      }
+      out_error = Error::ok();
+      return make_art_vm(std::move(config));
+#else
       out_error = Error::of(
           Status::Unavailable,
-          (art_home != nullptr && *art_home != '\0')
-              ? std::string("ACL_ART_HOME=") + art_home +
-                    " is set, but the host-ART embedding is not compiled into this "
-                    "build (R-1). The seam is ready; see "
-                    "docs/adr/ADR-0001-dex-execution-host-art.md."
-              : std::string(
-                    "host ART not available (R-1). Build a host ART + boot image, "
-                    "set ACL_ART_HOME, or use --vm=jvm (the development/CI "
-                    "vehicle). See docs/adr/ADR-0001-dex-execution-host-art.md."));
+          "ART backend not built (no JNI headers at configure time); rebuild with "
+          "a JDK present, or use --vm=null. See docs/art-host-spike.md");
       return nullptr;
-    }
+#endif
 
     case Backend::Jvm:
 #if ACL_HAVE_JNI

@@ -7,10 +7,13 @@
 runtime_sources = files('runtime.cpp', 'vm.cpp')
 runtime_deps = [fmt_dep]   # via log/log.h
 
-# ADR-0001 fallback: OpenJDK-backed backend, compiled only when a JDK was found.
+# The two JNI-Invocation-API backends (OpenJDK fallback + host-ART target), compiled
+# only when the JNI headers were found. The ART backend dlopen()s libart.so at
+# runtime, so it needs libdl.
 if have_jni
   runtime_sources += files('jvm_vm.cpp', 'framework_natives.cpp')
   runtime_deps += jni_dep
+  runtime_deps += meson.get_compiler('cpp').find_library('dl', required : false)
 endif
 
 # Under the automotive profile the runtime drives the media bridge (Gate G1.5a),

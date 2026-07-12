@@ -15,8 +15,10 @@
 #include <variant>
 #include <vector>
 
+#include <cstdlib>
 #include <ctime>
 
+#include <dlfcn.h>
 #include <jni.h>
 
 #include "acl_config.h"
@@ -71,53 +73,37 @@ std::string to_jni_name(std::string_view name) {
   return out;
 }
 
-class JvmVm final : public Vm {
+// Base for the two JNI-Invocation-API backends. Both embed a Java runtime via
+// JNI_CreateJavaVM and drive it through identical JNI (call_static_main, the
+// Activity/media/CAL lifecycles, the present path). Subclasses differ ONLY in
+// create_java_vm(): JvmVm links HotSpot's JNI_CreateJavaVM (ADR-0001 fallback);
+// ArtVm dlopens a host ART build's libart.so and loads DEX natively (the ADR-0001
+// target). Everything below create_java_vm() is runtime-agnostic and shared.
+class JniVm : public Vm {
  public:
-  explicit JvmVm(VmConfig config) : Vm(Backend::Jvm), config_(std::move(config)) {}
+  JniVm(Backend backend, VmConfig config)
+      : Vm(backend), config_(std::move(config)) {}
 
-  ~JvmVm() override { shutdown(); }
+  ~JniVm() override { shutdown(); }
 
   Error start() override {
     if (jvm_ != nullptr) return Error::ok();
-
-    // Assemble VM options. A stock JVM has no separate boot classpath we can
-    // safely repopulate, so the vendored framework (boot_classpath) is prepended
-    // to java.class.path: it resolves ahead of, and independently of, app classes.
-    // The ART target (R-1) will instead build a real boot image from these entries.
-    std::vector<std::string> cp = config_.boot_classpath;
-    cp.insert(cp.end(), config_.classpath.begin(), config_.classpath.end());
-
-    std::vector<std::string> option_strings;
-    option_strings.push_back("-Djava.class.path=" + join(cp, ':'));
-    for (const std::string& opt : config_.options) option_strings.push_back(opt);
-
-    std::vector<JavaVMOption> options;
-    options.reserve(option_strings.size());
-    for (std::string& s : option_strings) {
-      options.push_back(JavaVMOption{s.data(), nullptr});
-    }
-
-    JavaVMInitArgs args{};
-    args.version = JNI_VERSION_1_8;
-    args.nOptions = static_cast<jint>(options.size());
-    args.options = options.data();
-    args.ignoreUnrecognized = JNI_FALSE;
-
     JNIEnv* env = nullptr;
-    const jint rc =
-        JNI_CreateJavaVM(&jvm_, reinterpret_cast<void**>(&env), &args);
-    if (rc != JNI_OK || jvm_ == nullptr) {
-      jvm_ = nullptr;
-      return Error::of(Status::RuntimeError,
-                       "JNI_CreateJavaVM failed (rc=" + std::to_string(rc) + ")");
-    }
+    if (Error e = create_java_vm(env)) return e;
     env_ = env;
-    log::i(kTag, "JVM started: boot=[{}] classpath=[{}]",
+    log::i(kTag, "{} started: boot=[{}] classpath=[{}]", backend_name(backend()),
            join(config_.boot_classpath, ':'), join(config_.classpath, ':'));
     // Bind acl C++ to the android.* native methods on the boot classpath.
     register_framework_natives(env_);
     return Error::ok();
   }
+
+ protected:
+  // Create and configure the underlying VM, returning its main-thread JNIEnv and
+  // setting jvm_. Implemented per backend.
+  virtual Error create_java_vm(JNIEnv*& env) = 0;
+
+ public:
 
   Error call_static_main(std::string_view main_class,
                          const std::vector<std::string>& args) override {
@@ -322,7 +308,7 @@ class JvmVm final : public Vm {
       jvm_->DestroyJavaVM();  // blocks until non-daemon threads finish
       jvm_ = nullptr;
       env_ = nullptr;
-      log::i(kTag, "JVM shutdown");
+      log::i(kTag, "{} shutdown", backend_name(backend()));
     }
     return Error::ok();
   }
@@ -1097,6 +1083,7 @@ class JvmVm final : public Vm {
     return arr;
   }
 
+ protected:
   VmConfig config_;
   JavaVM* jvm_ = nullptr;
   JNIEnv* env_ = nullptr;
@@ -1105,10 +1092,150 @@ class JvmVm final : public Vm {
 #endif
 };
 
+// OpenJDK backend (ADR-0001 fallback): links HotSpot's JNI_CreateJavaVM. A stock
+// JVM has no separately repopulatable boot classpath, so the vendored framework
+// (boot_classpath) is folded into java.class.path ahead of the app classes. Stock
+// JVM bytecode only — DEX is fed via the dex_to_jvm translator (--convert-dex).
+class JvmVm final : public JniVm {
+ public:
+  explicit JvmVm(VmConfig config) : JniVm(Backend::Jvm, std::move(config)) {}
+
+ protected:
+  Error create_java_vm(JNIEnv*& env) override {
+    std::vector<std::string> cp = config_.boot_classpath;
+    cp.insert(cp.end(), config_.classpath.begin(), config_.classpath.end());
+
+    std::vector<std::string> option_strings;
+    option_strings.push_back("-Djava.class.path=" + join(cp, ':'));
+    for (const std::string& opt : config_.options) option_strings.push_back(opt);
+
+    std::vector<JavaVMOption> options;
+    options.reserve(option_strings.size());
+    for (std::string& s : option_strings) {
+      options.push_back(JavaVMOption{s.data(), nullptr});
+    }
+
+    JavaVMInitArgs args{};
+    args.version = JNI_VERSION_1_8;
+    args.nOptions = static_cast<jint>(options.size());
+    args.options = options.data();
+    args.ignoreUnrecognized = JNI_FALSE;
+
+    const jint rc =
+        JNI_CreateJavaVM(&jvm_, reinterpret_cast<void**>(&env), &args);
+    if (rc != JNI_OK || jvm_ == nullptr) {
+      jvm_ = nullptr;
+      return Error::of(Status::RuntimeError,
+                       "JNI_CreateJavaVM failed (rc=" + std::to_string(rc) + ")");
+    }
+    return Error::ok();
+  }
+};
+
+// Host ART backend (ADR-0001 target): dlopens a prebuilt host ART's libart.so and
+// boots it via the JNI Invocation API, so the app's DEX runs natively — no
+// translation. ACL_ART_HOME points at the host ART tree's out/host/linux-x86 (holds
+// lib64/libart.so with RUNPATH=$ORIGIN so its deps resolve, plus apex/com.android.*
+// with the core bootclasspath jars). M2 milestone: imageless + interpreter (-Xint);
+// the dex2oat'd framework boot image and app OAT cache are M3.
+class ArtVm final : public JniVm {
+ public:
+  explicit ArtVm(VmConfig config) : JniVm(Backend::Art, std::move(config)) {}
+
+ protected:
+  Error create_java_vm(JNIEnv*& env) override {
+    const char* home_c = std::getenv("ACL_ART_HOME");
+    if (home_c == nullptr || *home_c == '\0') {
+      return Error::of(
+          Status::InvalidConfig,
+          "ACL_ART_HOME not set: point it at a host ART build's out/host/linux-x86 "
+          "(lib64/libart.so + apex/com.android.art). See docs/art-host-spike.md");
+    }
+    const std::string home = home_c;
+
+    // Host ART locates its runtime/data modules via these roots. Note the host
+    // apex layout is mixed: the javalib bootclasspath jars + boot image live under
+    // $HOME/apex/com.android.*/, but the ICU/tzdata *data* roots are the non-apex
+    // $HOME/com.android.{i18n,tzdata} (that is where etc/icu/icudt*.dat lives, and
+    // libicu_jni aborts at startup if ANDROID_I18N_ROOT does not point at it).
+    ::setenv("ANDROID_ROOT", home.c_str(), 1);
+    ::setenv("ANDROID_ART_ROOT", (home + "/apex/com.android.art").c_str(), 1);
+    ::setenv("ANDROID_I18N_ROOT", (home + "/com.android.i18n").c_str(), 1);
+    ::setenv("ANDROID_TZDATA_ROOT", (home + "/com.android.tzdata").c_str(), 1);
+    if (std::getenv("ANDROID_DATA") == nullptr) {
+      ::setenv("ANDROID_DATA", (home + "/acl-android-data").c_str(), 1);
+    }
+
+    // libart.so carries RUNPATH=$ORIGIN, so its lib64/ siblings resolve without
+    // LD_LIBRARY_PATH; RTLD_GLOBAL exposes ART's JNI symbols to loaded natives.
+    const std::string libart = home + "/lib64/libart.so";
+    void* handle = ::dlopen(libart.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    if (handle == nullptr) {
+      const char* e = ::dlerror();
+      return Error::of(Status::Unavailable,
+                       "dlopen(" + libart + ") failed: " + (e ? e : "?"));
+    }
+    using CreateVmFn = jint (*)(JavaVM**, void**, void*);
+    auto create_vm =
+        reinterpret_cast<CreateVmFn>(::dlsym(handle, "JNI_CreateJavaVM"));
+    if (create_vm == nullptr) {
+      return Error::of(Status::Unavailable,
+                       "JNI_CreateJavaVM not found in " + libart);
+    }
+
+    // Core boot classpath (java.* + a few libs), in ART image order. ART loads
+    // these DEX jars natively. config_.boot_classpath (acl's android.jar stubs, for
+    // the JVM backend) does not apply here — the real framework is an M3 boot image.
+    struct BcpJar { const char* module; const char* apex; };
+    static const BcpJar kBcp[] = {
+        {"core-oj", "com.android.art"},     {"core-libart", "com.android.art"},
+        {"okhttp", "com.android.art"},      {"bouncycastle", "com.android.art"},
+        {"apache-xml", "com.android.art"},  {"core-icu4j", "com.android.i18n"},
+        {"conscrypt", "com.android.conscrypt"}};
+    std::vector<std::string> bcp;
+    for (const BcpJar& j : kBcp) {
+      bcp.push_back(home + "/apex/" + j.apex + "/javalib/" + j.module + ".jar");
+    }
+    const std::string bcp_joined = join(bcp, ':');
+
+    std::vector<std::string> option_strings;
+    option_strings.push_back("-Xbootclasspath:" + bcp_joined);
+    option_strings.push_back("-Xbootclasspath-locations:" + bcp_joined);
+    option_strings.push_back("-Xint");  // imageless: interpret; no runtime dex2oat
+    option_strings.push_back("-Djava.class.path=" + join(config_.classpath, ':'));
+    for (const std::string& opt : config_.options) option_strings.push_back(opt);
+
+    std::vector<JavaVMOption> options;
+    options.reserve(option_strings.size());
+    for (std::string& s : option_strings) {
+      options.push_back(JavaVMOption{s.data(), nullptr});
+    }
+
+    JavaVMInitArgs args{};
+    args.version = JNI_VERSION_1_6;
+    args.nOptions = static_cast<jint>(options.size());
+    args.options = options.data();
+    args.ignoreUnrecognized = JNI_FALSE;
+
+    const jint rc = create_vm(&jvm_, reinterpret_cast<void**>(&env), &args);
+    if (rc != JNI_OK || jvm_ == nullptr) {
+      jvm_ = nullptr;
+      return Error::of(Status::RuntimeError,
+                       "ART JNI_CreateJavaVM failed (rc=" + std::to_string(rc) +
+                           "); ACL_ART_HOME=" + home);
+    }
+    return Error::ok();
+  }
+};
+
 }  // namespace
 
 std::unique_ptr<Vm> make_jvm_vm(VmConfig config) {
   return std::make_unique<JvmVm>(std::move(config));
+}
+
+std::unique_ptr<Vm> make_art_vm(VmConfig config) {
+  return std::make_unique<ArtVm>(std::move(config));
 }
 
 }  // namespace acl::runtime
