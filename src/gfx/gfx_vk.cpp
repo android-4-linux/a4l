@@ -29,6 +29,7 @@
 
 #include "include/core/SkAlphaType.h"
 #include "include/core/SkCanvas.h"
+#include "include/core/SkColorSpace.h"
 #include "include/core/SkColorType.h"
 #include "include/core/SkImageInfo.h"
 #include "include/core/SkPaint.h"
@@ -48,6 +49,7 @@
 #include "include/gpu/vk/VulkanExtensions.h"
 #include "include/gpu/vk/VulkanMemoryAllocator.h"
 #include "include/gpu/vk/VulkanMutableTextureState.h"
+#include "include/gpu/vk/VulkanTypes.h"  // skgpu::VulkanAlloc
 // Private headers: the bundled VMA factory + the ThreadSafe enum it takes (the same
 // includes the wcs example uses; pinned to the m150 build, ADR-4).
 #include "src/gpu/GpuTypesPriv.h"
@@ -77,12 +79,21 @@ struct VkRenderTarget::Impl {
 
   // dma-buf export (V2): the linear exported image + its command pool/fence.
   bool dmabuf_export_ok = false;
+  bool modifier_ext_ok = false;  // VK_EXT_image_drm_format_modifier available
   vk::UniqueCommandPool cmd_pool;
   vk::UniqueImage export_image;
   vk::UniqueDeviceMemory export_memory;
   vk::UniqueCommandBuffer copy_cmd;
   vk::UniqueFence copy_fence;
   int export_fd = -1;
+
+  // Modifier-tiled direct path (V2b): the exported tiled image Skia renders into.
+  vk::UniqueImage mod_image;
+  vk::UniqueDeviceMemory mod_memory;
+  sk_sp<SkSurface> mod_surface;
+  int mod_fd = -1;
+
+  SkSurface* last_rendered = nullptr;  // for read_rendered_pixels
   DmabufFrame frame{};  // last exported descriptor
 };
 
@@ -91,11 +102,16 @@ VkRenderTarget::~VkRenderTarget() {
   if (impl_) {
     if (impl_->context) impl_->context->flushAndSubmit(GrSyncCpu::kYes);
     if (impl_->export_fd >= 0) ::close(impl_->export_fd);
+    if (impl_->mod_fd >= 0) ::close(impl_->mod_fd);
   }
 }
 
 bool VkRenderTarget::dmabuf_export_available() const {
   return impl_ && impl_->dmabuf_export_ok;
+}
+
+bool VkRenderTarget::modifier_tiled_available() const {
+  return impl_ && impl_->modifier_ext_ok;
 }
 
 std::unique_ptr<VkRenderTarget> VkRenderTarget::Create(int width, int height,
@@ -159,6 +175,14 @@ std::unique_ptr<VkRenderTarget> VkRenderTarget::Create(int width, int height,
       vk_.device_exts.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
       vk_.device_exts.push_back(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
       vk_.dmabuf_export_ok = true;
+      // Modifier-tiled direct path (zero-copy) needs these; their absence forces the
+      // linear copy-fallback.
+      if (has_ext(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME) &&
+          has_ext(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME)) {
+        vk_.device_exts.push_back(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
+        vk_.device_exts.push_back(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);
+        vk_.modifier_ext_ok = true;
+      }
     }
   }
 
@@ -285,6 +309,7 @@ bool VkRenderTarget::render_and_export_linear(std::uint32_t bg_argb, int left, i
 
   // ── 1. Render the scene into the optimal Skia surface ──────────────────────
   draw_scene(vk_.surface->getCanvas(), bg_argb, left, top, right, bottom, rect_argb);
+  vk_.last_rendered = vk_.surface.get();
 
   // ── 2. Build the linear exported image (once) ──────────────────────────────
   if (!vk_.export_image) {
@@ -359,12 +384,14 @@ bool VkRenderTarget::render_and_export_linear(std::uint32_t bg_argb, int left, i
     vk_.frame.fd = raw_fd;
     vk_.frame.width = static_cast<std::uint32_t>(width_);
     vk_.frame.height = static_cast<std::uint32_t>(height_);
-    vk_.frame.stride = static_cast<std::uint32_t>(layout.rowPitch);
-    vk_.frame.offset = static_cast<std::uint32_t>(layout.offset);
+    vk_.frame.plane_count = 1;
+    vk_.frame.planes[0] = {static_cast<std::uint32_t>(layout.offset),
+                           static_cast<std::uint32_t>(layout.rowPitch)};
     vk_.frame.modifier = static_cast<std::uint64_t>(DRM_FORMAT_MOD_LINEAR);
     vk_.frame.drm_format = kDrmFormat;
     vk_.frame.mem_size = reqs.size;
     vk_.frame.host_mapped = host_visible;
+    vk_.frame.modifier_tiled = false;
 
     // Command buffer + fence for the copy pass.
     const vk::CommandBufferAllocateInfo cb_ai{*vk_.cmd_pool,
@@ -449,12 +476,246 @@ bool VkRenderTarget::read_exported_pixels(Surface& out) {
   std::vector<std::uint32_t> buf(static_cast<std::size_t>(width_) *
                                  static_cast<std::size_t>(height_));
   for (int y = 0; y < height_; ++y) {
-    const std::uint8_t* row = base + vk_.frame.offset +
-                              static_cast<std::size_t>(y) * vk_.frame.stride;
+    const std::uint8_t* row = base + vk_.frame.offset() +
+                              static_cast<std::size_t>(y) * vk_.frame.stride();
     std::memcpy(buf.data() + static_cast<std::size_t>(y) * width_, row,
                 static_cast<std::size_t>(width_) * sizeof(std::uint32_t));
   }
   vk_.device->unmapMemory(*vk_.export_memory);
+  out.blit(buf.data());
+  return true;
+}
+
+std::vector<std::uint64_t> VkRenderTarget::renderable_modifiers(
+    const std::vector<std::uint64_t>& candidate_modifiers) const {
+  std::vector<std::uint64_t> out;
+  Impl& vk_ = *impl_;
+  if (!vk_.modifier_ext_ok) return out;
+
+  // Query the GPU's DRM-format-modifier support for kVkFormat (two-call idiom).
+  vk::DrmFormatModifierPropertiesListEXT list{};
+  vk::FormatProperties2 fp2{};
+  fp2.pNext = &list;
+  vk_.phys_dev.getFormatProperties2(kVkFormat, &fp2);
+  std::vector<vk::DrmFormatModifierPropertiesEXT> mods(list.drmFormatModifierCount);
+  list.pDrmFormatModifierProperties = mods.data();
+  vk_.phys_dev.getFormatProperties2(kVkFormat, &fp2);
+
+  constexpr auto need = vk::FormatFeatureFlagBits::eColorAttachment |
+                        vk::FormatFeatureFlagBits::eSampledImage;
+  for (std::uint64_t m : candidate_modifiers) {
+    if (m == DRM_FORMAT_MOD_INVALID) continue;
+    const bool ok = std::any_of(mods.begin(), mods.end(),
+                                [&](const vk::DrmFormatModifierPropertiesEXT& p) {
+                                  return p.drmFormatModifier == m &&
+                                         (p.drmFormatModifierTilingFeatures & need) == need;
+                                });
+    if (ok) out.push_back(m);
+  }
+  return out;
+}
+
+std::vector<std::uint64_t> VkRenderTarget::all_renderable_modifiers() const {
+  Impl& vk_ = *impl_;
+  std::vector<std::uint64_t> out;
+  if (!vk_.modifier_ext_ok) return out;
+  vk::DrmFormatModifierPropertiesListEXT list{};
+  vk::FormatProperties2 fp2{};
+  fp2.pNext = &list;
+  vk_.phys_dev.getFormatProperties2(kVkFormat, &fp2);
+  std::vector<vk::DrmFormatModifierPropertiesEXT> mods(list.drmFormatModifierCount);
+  list.pDrmFormatModifierProperties = mods.data();
+  vk_.phys_dev.getFormatProperties2(kVkFormat, &fp2);
+  constexpr auto need = vk::FormatFeatureFlagBits::eColorAttachment |
+                        vk::FormatFeatureFlagBits::eSampledImage;
+  std::uint64_t linear = 0;
+  bool has_linear = false;
+  for (const auto& p : mods) {
+    if ((p.drmFormatModifierTilingFeatures & need) != need) continue;
+    if (p.drmFormatModifier == static_cast<std::uint64_t>(DRM_FORMAT_MOD_LINEAR)) {
+      has_linear = true;
+      linear = p.drmFormatModifier;
+    } else {
+      out.push_back(p.drmFormatModifier);  // tiled first
+    }
+  }
+  if (has_linear) out.push_back(linear);  // LINEAR last
+  return out;
+}
+
+bool VkRenderTarget::render_to_modifier_dmabuf(
+    const std::vector<std::uint64_t>& candidate_modifiers, std::uint32_t bg_argb,
+    int left, int top, int right, int bottom, std::uint32_t rect_argb, DmabufFrame* out,
+    std::string* error) {
+  Impl& vk_ = *impl_;
+  const auto fail = [&](std::string_view msg) {
+    if (error) *error = std::string(msg);
+    return false;
+  };
+  if (!vk_.context) return fail("no context");
+  if (!vk_.dmabuf_export_ok) return fail("dma-buf export unavailable");
+  if (!vk_.modifier_ext_ok) return fail("modifier extensions unavailable");
+
+  // Build the modifier-tiled exported image once (a fixed-size target).
+  if (!vk_.mod_surface) {
+    // Pick the modifier's plane count from the GPU's properties for the chosen mod.
+    const std::vector<std::uint64_t> ok = renderable_modifiers(candidate_modifiers);
+    if (ok.empty()) return fail("no candidate modifier is GPU render+sampleable");
+
+    vk::DrmFormatModifierPropertiesListEXT list{};
+    vk::FormatProperties2 fp2{};
+    fp2.pNext = &list;
+    vk_.phys_dev.getFormatProperties2(kVkFormat, &fp2);
+    std::vector<vk::DrmFormatModifierPropertiesEXT> props(list.drmFormatModifierCount);
+    list.pDrmFormatModifierProperties = props.data();
+    vk_.phys_dev.getFormatProperties2(kVkFormat, &fp2);
+
+    const std::uint64_t chosen = ok.front();
+    std::uint32_t plane_count = 1;
+    for (const auto& p : props)
+      if (p.drmFormatModifier == chosen) plane_count = p.drmFormatModifierPlaneCount;
+    plane_count = std::min<std::uint32_t>(plane_count, DmabufFrame::kMaxPlanes);
+
+    // Modifier-tiled, dma-buf-exported, color-attachment+sampled image.
+    const std::array<std::uint64_t, 1> mods{chosen};
+    vk::ImageDrmFormatModifierListCreateInfoEXT mod_ci{};
+    mod_ci.setDrmFormatModifiers(mods);
+    vk::ExternalMemoryImageCreateInfo ext_img{
+        vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT};
+    ext_img.pNext = &mod_ci;
+    vk::ImageCreateInfo ci;
+    ci.imageType = vk::ImageType::e2D;
+    ci.format = kVkFormat;
+    ci.extent = vk::Extent3D{static_cast<std::uint32_t>(width_),
+                             static_cast<std::uint32_t>(height_), 1};
+    ci.mipLevels = 1;
+    ci.arrayLayers = 1;
+    ci.samples = vk::SampleCountFlagBits::e1;
+    ci.tiling = vk::ImageTiling::eDrmFormatModifierEXT;
+    ci.usage = vk::ImageUsageFlagBits::eColorAttachment |
+               vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferSrc |
+               vk::ImageUsageFlagBits::eTransferDst;
+    ci.sharingMode = vk::SharingMode::eExclusive;
+    ci.initialLayout = vk::ImageLayout::eUndefined;
+    ci.setPNext(&ext_img);
+    {
+      auto rv = vk_.device->createImageUnique(ci);
+      if (rv.result != vk::Result::eSuccess) return fail("vkCreateImage (modifier) failed");
+      vk_.mod_image = std::move(rv.value);
+    }
+
+    // Per-plane offset/stride (a modifier may span planes, e.g. AMD DCC metadata).
+    static constexpr std::array<vk::ImageAspectFlagBits, 4> kPlaneAspect = {
+        vk::ImageAspectFlagBits::eMemoryPlane0EXT, vk::ImageAspectFlagBits::eMemoryPlane1EXT,
+        vk::ImageAspectFlagBits::eMemoryPlane2EXT, vk::ImageAspectFlagBits::eMemoryPlane3EXT};
+    DmabufFrame f{};
+    f.plane_count = plane_count;
+    for (std::uint32_t i = 0; i < plane_count; ++i) {
+      const vk::SubresourceLayout l =
+          vk_.device->getImageSubresourceLayout(*vk_.mod_image, {kPlaneAspect.at(i), 0, 0});
+      f.planes[i] = {static_cast<std::uint32_t>(l.offset),
+                     static_cast<std::uint32_t>(l.rowPitch)};
+    }
+
+    // Dedicated exportable device-local memory + fd.
+    const vk::MemoryRequirements reqs =
+        vk_.device->getImageMemoryRequirements(*vk_.mod_image);
+    const vk::PhysicalDeviceMemoryProperties mp = vk_.phys_dev.getMemoryProperties();
+    std::uint32_t mt = UINT32_MAX;
+    for (std::uint32_t j = 0; j < mp.memoryTypeCount; ++j) {
+      if (!(reqs.memoryTypeBits & (1u << j))) continue;
+      if (mp.memoryTypes.at(j).propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal) {
+        mt = j;
+        break;
+      }
+      if (mt == UINT32_MAX) mt = j;
+    }
+    if (mt == UINT32_MAX) return fail("no compatible memory type (modifier)");
+    vk::MemoryDedicatedAllocateInfo dedicated{*vk_.mod_image};
+    vk::ExportMemoryAllocateInfo export_mem{
+        vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT};
+    export_mem.pNext = &dedicated;
+    vk::MemoryAllocateInfo mem_ai{reqs.size, mt};
+    mem_ai.setPNext(&export_mem);
+    {
+      auto rv = vk_.device->allocateMemoryUnique(mem_ai);
+      if (rv.result != vk::Result::eSuccess) return fail("vkAllocateMemory (modifier) failed");
+      vk_.mod_memory = std::move(rv.value);
+    }
+    if (vk_.device->bindImageMemory(*vk_.mod_image, *vk_.mod_memory, 0) !=
+        vk::Result::eSuccess)
+      return fail("vkBindImageMemory (modifier) failed");
+    auto get_fd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
+        vkGetDeviceProcAddr(*vk_.device, "vkGetMemoryFdKHR"));
+    if (!get_fd) return fail("vkGetMemoryFdKHR unavailable");
+    const VkMemoryGetFdInfoKHR fd_info{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, nullptr,
+                                       *vk_.mod_memory,
+                                       VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
+    int raw_fd = -1;
+    if (static_cast<vk::Result>(get_fd(*vk_.device, &fd_info, &raw_fd)) !=
+        vk::Result::eSuccess)
+      return fail("vkGetMemoryFdKHR (modifier) failed");
+    vk_.mod_fd = raw_fd;
+
+    f.fd = raw_fd;
+    f.width = static_cast<std::uint32_t>(width_);
+    f.height = static_cast<std::uint32_t>(height_);
+    f.modifier = chosen;
+    f.drm_format = kDrmFormat;
+    f.mem_size = reqs.size;
+    f.host_mapped = false;
+    f.modifier_tiled = true;
+    vk_.frame = f;
+
+    // Wrap the tiled image as a Ganesh SkSurface — Skia renders straight in.
+    skgpu::VulkanAlloc alloc;
+    alloc.fMemory = *vk_.mod_memory;
+    alloc.fOffset = 0;
+    alloc.fSize = reqs.size;
+    GrVkImageInfo info;
+    info.fImage = *vk_.mod_image;
+    info.fAlloc = alloc;
+    info.fImageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    info.fImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    info.fFormat = static_cast<VkFormat>(kVkFormat);
+    info.fImageUsageFlags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                            VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    info.fSampleCount = 1;
+    info.fLevelCount = 1;
+    info.fCurrentQueueFamily = vk_.queue_family;
+    info.fSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    GrBackendTexture bt = GrBackendTextures::MakeVk(width_, height_, info);
+    vk_.mod_surface = SkSurfaces::WrapBackendTexture(vk_.context.get(), bt,
+                                                     kTopLeft_GrSurfaceOrigin, 1,
+                                                     kSkColorType, nullptr, nullptr);
+    if (!vk_.mod_surface) return fail("WrapBackendTexture failed");
+  }
+
+  // Render straight into the tiled surface — no copy — and leave it compositor-readable.
+  draw_scene(vk_.mod_surface->getCanvas(), bg_argb, left, top, right, bottom, rect_argb);
+  vk_.last_rendered = vk_.mod_surface.get();
+  const skgpu::MutableTextureState to_present =
+      skgpu::MutableTextureStates::MakeVulkan(VK_IMAGE_LAYOUT_GENERAL, vk_.queue_family);
+  vk_.context->flush(vk_.mod_surface.get(), GrFlushInfo{}, &to_present);
+  vk_.context->submit(GrSyncCpu::kYes);
+
+  if (out) *out = vk_.frame;
+  return true;
+}
+
+bool VkRenderTarget::read_rendered_pixels(Surface& out) {
+  Impl& vk_ = *impl_;
+  if (!vk_.last_rendered) return false;
+  if (out.width() != width_ || out.height() != height_) return false;
+  const SkImageInfo info =
+      SkImageInfo::Make(width_, height_, kSkColorType, kUnpremul_SkAlphaType);
+  std::vector<std::uint32_t> buf(static_cast<std::size_t>(width_) *
+                                 static_cast<std::size_t>(height_));
+  if (!vk_.last_rendered->readPixels(info, buf.data(),
+                                     static_cast<std::size_t>(width_) * sizeof(std::uint32_t),
+                                     0, 0))
+    return false;
   out.blit(buf.data());
   return true;
 }

@@ -134,9 +134,11 @@ TEST_CASE("Ganesh Vulkan frame exports as a valid linear dma-buf", "[gfx][vulkan
   CHECK(frame.fd >= 0);
   CHECK(frame.width == static_cast<std::uint32_t>(w));
   CHECK(frame.height == static_cast<std::uint32_t>(h));
-  CHECK(frame.stride >= static_cast<std::uint32_t>(w) * 4u);
+  CHECK(frame.plane_count == 1u);
+  CHECK(frame.stride() >= static_cast<std::uint32_t>(w) * 4u);
   CHECK(frame.modifier == 0u);  // DRM_FORMAT_MOD_LINEAR == 0 (no libdrm header in tests)
-  CHECK(frame.mem_size >= static_cast<std::uint64_t>(frame.stride) * h);
+  CHECK_FALSE(frame.modifier_tiled);
+  CHECK(frame.mem_size >= static_cast<std::uint64_t>(frame.stride()) * h);
 
   // Where the export memory is host-visible, the dma-buf must hold the rendered scene.
   if (frame.host_mapped) {
@@ -154,6 +156,65 @@ TEST_CASE("Ganesh Vulkan frame exports as a valid linear dma-buf", "[gfx][vulkan
     }
   } else {
     WARN("dma-buf memory not host-visible; layout checked, pixels not mmap-verified");
+  }
+}
+
+// P2.4 / V2b: the modifier-tiled DIRECT path (zero-copy) — Skia renders straight into
+// a modifier-tiled, dma-buf-exported VkImage. Headless, we stand in for the compositor
+// by offering the GPU's own render+sampleable modifiers as the "advertised" set (a real
+// compositor's set is intersected the same way). Verifies a non-linear modifier is
+// chosen, the export is valid, and the Skia-detiled pixels match the software raster.
+TEST_CASE("Ganesh Vulkan modifier-tiled direct dma-buf path", "[gfx][vulkan][dmabuf][modifier]") {
+  const int w = 16, h = 10;
+  const std::uint32_t bg = 0xFF204060;
+  const std::uint32_t fg = 0xFFCC8844;
+  const int l = 3, t = 2, r = 11, b = 7;
+
+  std::string err;
+  std::unique_ptr<acl::gfx::VkRenderTarget> vk =
+      acl::gfx::VkRenderTarget::Create(w, h, &err);
+  if (!vk) { WARN("no Vulkan render target: " + err); SUCCEED(); return; }
+  if (!vk->modifier_tiled_available()) {
+    WARN("device lacks VK_EXT_image_drm_format_modifier (skipping): " << vk->device_name());
+    SUCCEED();
+    return;
+  }
+
+  // Stand-in for compositor feedback: every modifier the GPU can render+sample (tiled
+  // preferred over LINEAR). A real presenter passes the compositor's advertised set.
+  std::vector<std::uint64_t> advertised = vk->all_renderable_modifiers();
+  if (advertised.empty()) {
+    WARN("GPU advertises no render+sampleable modifiers (skipping)");
+    SUCCEED();
+    return;
+  }
+
+  acl::gfx::DmabufFrame frame;
+  if (!vk->render_to_modifier_dmabuf(advertised, bg, l, t, r, b, fg, &frame, &err)) {
+    WARN("no usable modifier / direct path unavailable (skipping): " + err);
+    SUCCEED();
+    return;
+  }
+  INFO("modifier-tiled dma-buf on " << vk->device_name());
+
+  CHECK(frame.fd >= 0);
+  CHECK(frame.modifier_tiled);
+  CHECK(frame.plane_count >= 1u);
+  CHECK(frame.width == static_cast<std::uint32_t>(w));
+  CHECK(frame.stride() >= static_cast<std::uint32_t>(w) * 4u);
+
+  // The pixels: Skia detiles the wrapped tiled surface on readback, so this verifies
+  // the direct render landed correctly even though the memory isn't CPU-linear.
+  Surface ref(w, h);
+  ref.draw_color(bg);
+  ref.fill_rect(l, t, r, b, fg);
+  Surface got(w, h);
+  REQUIRE(vk->read_rendered_pixels(got));
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      INFO("pixel (" << x << "," << y << ") mod=" << frame.modifier);
+      REQUIRE(got.pixel(x, y) == ref.pixel(x, y));
+    }
   }
 }
 #endif  // ACL_HAVE_VULKAN

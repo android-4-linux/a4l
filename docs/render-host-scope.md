@@ -69,11 +69,15 @@ is `vkCmdCopyImage`'d into, with the fd + plane layout (stride/offset/modifier/f
 back as a `DmabufFrame`. **Gate:** headless — the exported plane layout is sane and the mmap'd
 dma-buf holds exactly the software-rasterizer pixels (no compositor needed).
 
-**V2b — Wayland present (wm/).** Build `wl_buffer`s from the `DmabufFrame` via
-`zwp_linux_buffer_params` and present through the wcs `wl::LinuxDmabuf`/`wl::DmabufFeedback`
-bindings driven from `wm/`, then the modifier-tiled direct path. **Gate:** the Tier-C
-headless-compositor harness (wlheadless, as the existing present-loop test uses) shows an
-acl-rendered frame committed via dma-buf.
+**V2b — modifier-tiled direct path (gfx/) + Wayland present (wm/).** The **modifier-tiled
+direct path is the primary** (per the steer toward the example's zero-copy headline): Skia
+renders *straight into* a modifier-tiled, dma-buf-exported `VkImage` (no copy), the modifier
+chosen from the compositor's advertised set intersected with the GPU's render+sampleable
+modifiers. Then build `wl_buffer`s from the `DmabufFrame` (one `add()` per plane) via
+`zwp_linux_buffer_params` → `create_immed`, presented through the wcs `wl::LinuxDmabuf`/
+`wl::DmabufFeedback` bindings driven from `wm/`. **Gate:** a libwayland-server test compositor
+(extending the existing `close_compositor`) that *advertises* a modifier set (making the direct
+path engage) and asserts the received plane params — deterministic, no GPU-import dependency.
 
 ### V3 — android.graphics natives compose onto the gfx surface
 Register the host-exported graphics native floor (`register_android_graphics_classes` /
@@ -129,4 +133,21 @@ mmap'd dma-buf holds exactly the software-rasterizer pixels (167 assertions).** 
 real bug: `SkSurfaces::RenderTarget` defaults to `kBottomLeft` origin, so a raw `vkCmdCopyImage`
 into the dma-buf came out vertically flipped — the render target is now `kTopLeft` (top-down
 storage, which is also what Wayland surfaces expect). Test SKIPs cleanly with no device / no
-export extensions. **V2b (present the DmabufFrame via wcs `wl::LinuxDmabuf` from wm/) is next.**
+export extensions.
+
+## V2b-gfx RESULT (2026-07-12) — done; modifier-tiled DIRECT (zero-copy) path on real GPU
+The gfx side of V2b: the **modifier-tiled direct path** (the example's zero-copy headline, now
+the primary). `render_to_modifier_dmabuf(candidate_modifiers, …)` intersects the compositor's
+advertised modifiers with the GPU's render+sampleable ones (`getFormatProperties2` +
+`DrmFormatModifierPropertiesListEXT`, needing `eColorAttachment | eSampledImage`), allocates a
+`eDrmFormatModifierEXT`-tiled, dma-buf-exported `VkImage` (per-plane offset/stride via
+`eMemoryPlaneNEXT` — a modifier may span planes), wraps it as a Ganesh `SkSurface`
+(`WrapBackendTexture`), and Skia renders **straight in — no copy**, leaving it in
+`VK_IMAGE_LAYOUT_GENERAL` for the compositor. Device creation now also enables
+`VK_EXT_image_drm_format_modifier` + `VK_KHR_image_format_list` (`modifier_tiled_available()`).
+`DmabufFrame` became multi-plane. **Verified on the real GPU (RADV): the direct path chose an
+AMD tiled modifier (`0x0200…`, vendor 0x02 — not LINEAR), and the Skia-detiled readback of the
+tiled surface matches the software rasterizer exactly (166 assertions).** Pixels of a tiled
+image aren't CPU-linear, so verification reads back through Skia (the GPU detiles) rather than
+mmap. Test SKIPs cleanly without the modifier extension. **V2b-wm (present the DmabufFrame via
+wcs `wl::LinuxDmabuf` + the modifier-advertising test compositor) is next.**

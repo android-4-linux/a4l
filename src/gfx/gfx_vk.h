@@ -17,8 +17,10 @@
 
 #if ACL_HAVE_VULKAN
 
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "gfx/gfx.h"
 
@@ -27,18 +29,29 @@ namespace acl::gfx {
 // A rendered frame exported as a Linux dma-buf (P2.4/V2): the handle + plane layout
 // a Wayland compositor imports via zwp_linux_dmabuf_v1 (zero-copy present). The fd is
 // owned by the VkRenderTarget that produced it (closed on its destruction); the
-// presenter (wm/) borrows it while the target is alive. V2 baseline is a single-plane
-// DRM_FORMAT_MOD_LINEAR image; the modifier-tiled direct path is a later refinement.
+// presenter (wm/) borrows it while the target is alive. Two producers: the linear
+// copy-fallback (single plane, DRM_FORMAT_MOD_LINEAR) and the modifier-tiled direct
+// path (a chosen modifier the compositor advertised; may span >1 memory plane, e.g.
+// AMD DCC metadata) into which Skia renders with no copy.
 struct DmabufFrame {
-  int fd = -1;
+  static constexpr int kMaxPlanes = 4;
+  struct Plane {
+    std::uint32_t offset = 0;
+    std::uint32_t stride = 0;  // row pitch in bytes
+  };
+  int fd = -1;                    // all planes share this fd at distinct offsets
   std::uint32_t width = 0;
   std::uint32_t height = 0;
-  std::uint32_t stride = 0;   // row pitch in bytes
-  std::uint32_t offset = 0;   // plane 0 byte offset
-  std::uint64_t modifier = 0; // DRM format modifier (LINEAR for the V2 baseline)
-  std::uint32_t drm_format = 0;  // DRM_FORMAT_* fourcc
+  std::uint32_t plane_count = 1;
+  Plane planes[kMaxPlanes]{};
+  std::uint64_t modifier = 0;     // DRM format modifier (0 == LINEAR)
+  std::uint32_t drm_format = 0;   // DRM_FORMAT_* fourcc
   std::uint64_t mem_size = 0;
-  bool host_mapped = false;   // export memory is host-visible (mmap/verifiable)
+  bool host_mapped = false;       // export memory is host-visible (mmap/verifiable)
+  bool modifier_tiled = false;    // true = direct path, false = linear copy-fallback
+
+  std::uint32_t stride() const { return planes[0].stride; }  // plane-0 convenience
+  std::uint32_t offset() const { return planes[0].offset; }
 };
 
 // A headless Ganesh Vulkan context + offscreen render target. Construct with
@@ -86,6 +99,38 @@ class VkRenderTarget {
   // render_and_export_linear whose frame reported host_mapped; false otherwise. This
   // is the headless verification that the dma-buf holds the rendered pixels.
   bool read_exported_pixels(Surface& out);
+
+  // True when the device offers the DRM-format-modifier extensions
+  // (VK_EXT_image_drm_format_modifier + VK_KHR_image_format_list) — i.e. the
+  // modifier-tiled direct path is possible.
+  bool modifier_tiled_available() const;
+
+  // Of `candidate_modifiers` (what the compositor advertised for the frame's format),
+  // the GPU-renderable+sampleable ones, in the given preference order — the intersection
+  // the direct path picks from. Empty ⇒ fall back to render_and_export_linear.
+  std::vector<std::uint64_t> renderable_modifiers(
+      const std::vector<std::uint64_t>& candidate_modifiers) const;
+
+  // Every DRM modifier the GPU can render+sample for the frame's format (LINEAR moved
+  // last so a tiled one is preferred). A stand-in for a maximally-permissive compositor
+  // feedback set; the wm/ presenter passes the real advertised set instead.
+  std::vector<std::uint64_t> all_renderable_modifiers() const;
+
+  // Modifier-tiled DIRECT path (P2.4/V2b, the zero-copy present): pick the first of
+  // `candidate_modifiers` the GPU can render+sample, allocate a modifier-tiled,
+  // dma-buf-exported VkImage, wrap it as a Ganesh SkSurface, and render the scene
+  // STRAIGHT into it (no copy). Fills *out (multi-plane) with the exported fd + per-
+  // plane layout. Returns false (sets *error) when no candidate qualifies or on GPU
+  // failure — the caller then uses the linear fallback. The fd is owned by this target.
+  bool render_to_modifier_dmabuf(const std::vector<std::uint64_t>& candidate_modifiers,
+                                 std::uint32_t bg_argb, int left, int top, int right,
+                                 int bottom, std::uint32_t rect_argb, DmabufFrame* out,
+                                 std::string* error);
+
+  // Read the pixels back from the surface last rendered (linear-copy source or the
+  // modifier-tiled wrapped surface) via Skia's readPixels — the GPU detiles a tiled
+  // surface, so this verifies modifier-tiled pixels headless (no CPU mmap needed).
+  bool read_rendered_pixels(Surface& out);
 
  private:
   VkRenderTarget();
