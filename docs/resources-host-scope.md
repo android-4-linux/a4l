@@ -19,6 +19,19 @@ framework-res.apk`. Nuance for ADR-0008: only the **render** natives (View, Bitm
 Configuration) are genuinely target-only — the resources/input/os floor is host-exported.
 Milestones R2 (register) folded into R1; **R3 (framework-res data) is next**.
 
+## R3 RESULT (2026-07-12) — done; resources live end-to-end (`d0341cc`)
+Built `framework-res` (→ `.../system/framework/framework-res.apk`). `AssetManager` hardcodes
+`FRAMEWORK_APK_PATH=/system/framework/framework-res.apk` (no override, host can't write
+`/system`), but `createSystemAssetsInZygoteLocked(reinit, path)` is public and sets `sSystem`
+— so ArtVm pre-loads the system assets from `ACL_ART_FRAMEWORK_RES` before `getSystem()` runs.
+Also seeded the version codename props (`all_codenames`/`known_codenames`/...) — `Build$VERSION.
+<clinit>` indexes `all_codenames[0]` and crashed on empty. **Verified: a real `Resources`
+resolves `android:string/ok` → "OK" (id 0x104000a) on host ART.** Test asserts it (locates
+framework-res.apk, sets `ACL_ART_FRAMEWORK_RES`; SKIPs if not built). R4 (an app's own resources
+via ApkAssets) is a small follow-on. **The resources subsystem is live** — native floor (R1) +
+data (R3). Remaining native frontier before apps draw: the **render** subsystem (View/Bitmap/
+Canvas → Skia → Wayland, P2.4).
+
 ---
 
 
