@@ -28,3 +28,10 @@ option(
   value : '',
   description : 'Path to the api-33 public android.jar (stub API, ADR-0002 base boot-classpath layer beneath the acl shims). Empty tries $ACL_AOSP_ROOT/prebuilts/sdk/33/public/android.jar (default /mnt/dev/aosp). When present it is staged and baked in as the default framework, so `acl run <apk>` resolves the whole android.* surface (stub bodies throw on call = demand-driven).',
 )
+
+option(
+  'skia_prefix',
+  type : 'string',
+  value : '',
+  description : 'Path to a pinned Skia install prefix (lib/*.a + include/core/...), shared with wcs (ADR-4/A02.2). Empty auto-detects the standalone install (~/.local/skia-m150). Enables the Skia-backed gfx Surface (ACL_HAVE_SKIA).',
+)

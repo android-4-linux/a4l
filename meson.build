@@ -103,12 +103,59 @@ if wcs_root != '' and wayland_dep.found() and wl_scanner_dep.found() and wp_dep.
   endif
 endif
 
+# ADR-4 / A02.2: the single pinned Skia build, shared with wcs (no ODR duplication),
+# consumed as prebuilt archives from a prefix (lib/*.a + include/core/...), the same way
+# wcs's examples do. skia_prefix option, else auto-detect the pinned standalone install.
+have_skia = false
+skia_dep = declare_dependency()   # empty no-op placeholder
+skia_prefix = get_option('skia_prefix')
+if skia_prefix == ''
+  foreach cand : ['/home/joel/.local/skia-m150']
+    if skia_prefix == '' and fs.exists(cand / 'include' / 'core' / 'SkCanvas.h')
+      skia_prefix = cand
+    endif
+  endforeach
+endif
+if skia_prefix != '' and fs.exists(skia_prefix / 'include' / 'core' / 'SkCanvas.h') and fs.exists(skia_prefix / 'lib')
+  cxx = meson.get_compiler('cpp')
+  # is_official_build Skia keeps bundled third-party in separate archives with circular
+  # refs; link every .a in one --start-group so archive order does not matter.
+  _ls = run_command('sh', '-c', 'ls "' + skia_prefix / 'lib' + '"/*.a 2>/dev/null', check : false)
+  _archives = _ls.stdout().strip().split('\n')
+  if _archives.length() > 0 and _archives[0] != ''
+    _linkargs = ['-Wl,--start-group']
+    foreach a : _archives
+      if a != ''
+        _linkargs += a
+      endif
+    endforeach
+    _linkargs += ['-Wl,--end-group']
+    _sysdeps = [dependency('threads')]
+    foreach s : ['dl', 'freetype2', 'fontconfig']
+      _d = (s == 'dl') ? cxx.find_library('dl', required : false) : dependency(s, required : false)
+      if _d.found()
+        _sysdeps += _d
+      endif
+    endforeach
+    # Skia headers reference each other as "include/core/..."; -isystem the prefix root
+    # keeps them out of -Werror.
+    skia_dep = declare_dependency(
+      compile_args : ['-isystem', skia_prefix],
+      link_args : _linkargs,
+      dependencies : _sysdeps,
+    )
+    have_skia = true
+    message('gfx/ Skia backend enabled: pinned Skia at ' + skia_prefix)
+  endif
+endif
+
 conf = configuration_data()
 conf.set('ACL_VERSION', '"' + meson.project_version() + '"')
 conf.set10('ACL_PROFILE_AUTOMOTIVE', profile_automotive)
 conf.set10('ACL_HAVE_JNI', have_jni)
 conf.set10('ACL_HAVE_PIPEWIRE', have_pipewire)
 conf.set10('ACL_HAVE_WCS', have_wcs)
+conf.set10('ACL_HAVE_SKIA', have_skia)
 # javac matched to the detected libjvm (same java_home), for the DEX->JVM
 # converter. Empty when no JDK; the converter then needs an explicit path.
 conf.set('ACL_JAVAC',

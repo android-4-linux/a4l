@@ -17,6 +17,7 @@ unit_test_sources = files(
   'pkg_test.cpp',
   'manifest_test.cpp',
   'dex_test.cpp',
+  'gfx_test.cpp',
 )
 
 # Automotive-only: the media bridge (hosts/media) is compiled out under the phone

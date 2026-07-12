@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "acl_config.h"  // ACL_HAVE_SKIA
+
 namespace acl::gfx {
 
 // ARGB_8888 raster target (premultiplied not assumed; opaque fills for now).
@@ -46,6 +48,15 @@ class Surface {
 };
 
 const char* module_name() noexcept;
+
+#if ACL_HAVE_SKIA
+// The pinned-Skia raster backend (ADR-4 / A02.2), compiled only when a pinned Skia
+// prefix is present. Same ARGB_8888 Surface, real SkCanvas underneath — the seam
+// android.graphics Canvas/Bitmap natives re-target onto host Skia. See gfx_skia.cpp.
+bool skia_backend_available() noexcept;
+bool skia_render_rect(Surface& out, std::uint32_t bg_argb, int left, int top,
+                      int right, int bottom, std::uint32_t rect_argb);
+#endif
 
 }  // namespace acl::gfx
 
