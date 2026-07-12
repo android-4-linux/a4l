@@ -765,7 +765,8 @@ std::pair<std::vector<std::uint8_t>, std::uint16_t> encode_vtypes(
 // opcode, type, or register width.
 std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
                                            const DexMethod& m,
-                                           const std::string& this_internal) {
+                                           const std::string& this_internal,
+                                           const std::string& super_internal) {
   if (!m.has_code()) return std::nullopt;
   const DexCode& c = *m.code;
   const int ins = c.ins_size;
@@ -1795,8 +1796,13 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
           if (kind == 0x70 && mr->name == "<init>" && has_receiver) {
             auto it = reg_new_type.find(arg_reg(0));
             if (it != reg_new_type.end()) {
-              owner = it->second;
-              reg_new_type.erase(it);  // initialized now
+              owner = it->second;       // new-instance construction: use the new type
+              reg_new_type.erase(it);   // initialized now
+            } else if (owner != this_internal) {
+              // super() on uninitialized-this: Dalvik names the declaring ancestor's
+              // <init> (an intermediate super with no own ctor), but JVM super() MUST
+              // target the DIRECT superclass. this() (owner == this class) is unchanged.
+              owner = super_internal;
             }
           }
           e.op(invoke_op);
@@ -2097,7 +2103,7 @@ DexError convert(const DexFile& dex, const ConvertOptions& opts,
           continue;
         }
         if (!emittable_method(m)) continue;
-        if (auto t = translate_method(cw, dex, m, internal_name(cls.java_name))) {
+        if (auto t = translate_method(cw, dex, m, internal_name(cls.java_name), super)) {
           cw.add_method(access, m.name, m.jvm_descriptor(), t->max_stack,
                         t->max_locals, std::move(t->code), std::move(t->exceptions),
                         std::move(t->stackmaptable));
