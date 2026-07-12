@@ -68,6 +68,21 @@ exactly which classes are SystemServer/Binder-entangled → the substitution bou
 **Gate:** a real app reads its own `resources.arsc` + assets and a real `ContextImpl` +
 `Resources` construct without a fatal native gap.
 
+**Bootstrap mechanism SOLVED (2026-07-12).** The host `libandroid_runtime.so` **strips** the
+`AndroidRuntime::start`/`startReg`/ctor bootstrap symbols (gc-sections; no host consumer keeps
+them), so app_process-style bootstrapping isn't linkable from the stock host `.so`. BUT all 33
+`register_android_*(JNIEnv*)` functions ARE exported. Proven: boot host ART → `dlopen`
+libandroid_runtime → call `register_android_os_SystemProperties(env)` (returns JNI_OK) →
+`SystemProperties.get(...)` **executes on ART** (no UnsatisfiedLinkError). So acl registers the
+framework natives it needs by calling the exported `register_android_*(env)` set directly — no
+`AndroidRuntime` instance for simple components. Caveats to handle during integration: (a) the
+real framework (`framework-minus-apex.jar`, not the shim/stub set) must be on the classpath so
+each `register_*`'s `FindClass` resolves; (b) natives that call `AndroidRuntime::getJavaVM`/
+thread-attach may still need `gCurRuntime` set — expect a subset needing an in-tree bridge or a
+minimal AndroidRuntime shim; (c) prefer libandroid_runtime's natives over acl's hand-bound shim
+natives where they overlap (ADR-0008). **Integration next:** ArtVm dlopens libandroid_runtime +
+calls a curated `register_android_*` set when pointed at the real framework.
+
 ### P2.3 — App native `.so` loading
 `System.loadLibrary`/`Runtime.load`: pick the ABI (`pkg/` split/ABI selection), extract
 `lib/<abi>/*.so` from the APK, `dlopen`, run `JNI_OnLoad`, honor `RegisterNatives`.
