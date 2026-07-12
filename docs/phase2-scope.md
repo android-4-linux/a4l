@@ -83,6 +83,37 @@ minimal AndroidRuntime shim; (c) prefer libandroid_runtime's natives over acl's 
 natives where they overlap (ADR-0008). **Integration next:** ArtVm dlopens libandroid_runtime +
 calls a curated `register_android_*` set when pointed at the real framework.
 
+**Committed:** `1b839ea` ArtVm native floor (opt-in `ACL_ART_NATIVE`); `46e98f7` P2.1
+framework on the bootclasspath (`ACL_ART_BOOTCLASSPATH` → `java.lang.BootClassLoader`).
+
+### A — real Activity bootstrap · frontiers mapped (2026-07-12)
+Probed the real path on host ART (`ActivityThread.systemMain()` → `getSystemContext()` →
+`Activity.attach(Context, ActivityThread, Instrumentation, token, Application, Intent,
+ActivityInfo)` → `Instrumentation.callActivityOnCreate`). Two concrete requirements fell out:
+
+1. **System-property source (bounded; mechanism proven).** Framework static initializers
+   need a populated `build.prop`: `Build.<clinit>` crashed on empty `ro.product.cpu.abilist*`
+   (`abiList[0]` on a length-0 array). Host props ARE settable — `system/libbase/
+   properties.cpp` keeps an in-process `g_properties` map and `__system_property_set` writes
+   it. Setting ~25 props (`ro.product.cpu.abilist*`, `ro.build.version.*`, `ro.product.*`,
+   `ro.build.*`) via the registered `SystemProperties` native unblocked `Build` (CPU_ABI=x86_64)
+   and `systemMain` advanced. **Action:** ArtVm populates a curated build.prop before framework
+   init (real-framework mode).
+2. **Full native floor via an in-tree bridge (the real requirement).** After props, the next
+   frontier was `UnsatisfiedLinkError: AssetManager.nativeGetThemeFreeFunction` (via
+   `Resources.getSystem()`). The full floor is **153 `REG_JNI` entries** registered by the
+   stripped `startReg`; only **33 are individually exported** (leaf natives). Resources/
+   AssetManager/View/graphics are NOT exported. **So the exported-function approach is a
+   partial floor for simple code; a real Activity needs the full floor → build an in-tree acl
+   native bridge** (a Soong `cc_library` alongside `libandroid_runtime` that creates a minimal
+   `AndroidRuntime` and calls `startReg`/the gRegJNI table with the symbols visible), which acl
+   dlopens from `ACL_ART_HOME`. This is ADR-0008's "minimal AndroidRuntime shim", now concretely
+   specified. It replaces the 33-function subset.
+
+**A plan:** (1) property source in ArtVm → (2) in-tree native bridge (full floor) → (3) with
+props + full floor, iterate remaining frontiers (Binder/ServiceManager calls → `svc` hub stubs)
+to a real `Activity.onCreate` against the real framework. Then the View stack → P2.4 render.
+
 ### P2.3 — App native `.so` loading
 `System.loadLibrary`/`Runtime.load`: pick the ABI (`pkg/` split/ABI selection), extract
 `lib/<abi>/*.so` from the APK, `dlopen`, run `JNI_OnLoad`, honor `RegisterNatives`.
