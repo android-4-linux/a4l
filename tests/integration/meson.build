@@ -157,6 +157,18 @@ if py3.found() and have_jni
       )
     endif
 
+    # P2.2 / ADR-0008: acl registers the REAL framework native floor from the host
+    # libandroid_runtime (--vm=art + ACL_ART_NATIVE) and a framework native executes.
+    # Needs a host ART build + the real framework DEX (m framework-minus-apex); SKIPs
+    # (exit 77) when absent, so CI stays green without them.
+    test(
+      'run-apk-native-floor-art',
+      py3,
+      args : [files('run_native_floor_art_test.py'), acl_exe, meson.project_source_root()],
+      depends : [acl_exe],
+      timeout : 300,
+    )
+
     # ADR-0002: the same app with NO --framework must load android.* off the staged
     # default boot classpath baked into the binary (build/framework/classes).
     test(

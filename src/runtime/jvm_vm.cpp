@@ -93,8 +93,8 @@ class JniVm : public Vm {
     env_ = env;
     log::i(kTag, "{} started: boot=[{}] classpath=[{}]", backend_name(backend()),
            join(config_.boot_classpath, ':'), join(config_.classpath, ':'));
-    // Bind acl C++ to the android.* native methods on the boot classpath.
-    register_framework_natives(env_);
+    // Bind the android.* native methods on the classpath.
+    register_natives(env_);
     return Error::ok();
   }
 
@@ -102,6 +102,12 @@ class JniVm : public Vm {
   // Create and configure the underlying VM, returning its main-thread JNIEnv and
   // setting jvm_. Implemented per backend.
   virtual Error create_java_vm(JNIEnv*& env) = 0;
+
+  // Bind the android.* native methods. Default: acl's C++ framework natives (the
+  // shim floor). ArtVm can instead register the real framework natives from a host
+  // libandroid_runtime (ADR-0008) — the two are alternatives, not stacked (acl's
+  // shims target the shim classes and would mis-bind against the real framework).
+  virtual void register_natives(JNIEnv* env) { register_framework_natives(env); }
 
  public:
 
@@ -1237,6 +1243,52 @@ class ArtVm final : public JniVm {
                            "); ACL_ART_HOME=" + home);
     }
     return Error::ok();
+  }
+
+  // ADR-0008: register the real framework's native methods from the host
+  // libandroid_runtime so android.* natives (SystemProperties, Parcel, resources, …)
+  // execute. Opt-in via ACL_ART_NATIVE, and only meaningful with the real framework
+  // (framework-minus-apex) on the classpath so each register_*'s FindClass resolves.
+  // Without it, fall back to acl's shim natives (the M2/M3 path). The host lib strips
+  // AndroidRuntime::startReg, but the per-component register_android_*(env) functions
+  // are exported, so acl calls a curated set of the pure-framework ones directly (no
+  // AndroidRuntime/gCurRuntime dependency).
+  void register_natives(JNIEnv* env) override {
+    const char* opt = std::getenv("ACL_ART_NATIVE");
+    const char* home_c = std::getenv("ACL_ART_HOME");
+    if (opt == nullptr || *opt == '\0' || home_c == nullptr || *home_c == '\0') {
+      register_framework_natives(env);  // shim floor (M2/M3)
+      return;
+    }
+    const std::string lib = std::string(home_c) + "/lib64/libandroid_runtime.so";
+    void* h = ::dlopen(lib.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    if (h == nullptr) {
+      const char* e = ::dlerror();
+      log::w(kTag, "ART native floor: dlopen({}) failed: {}; using shim natives", lib,
+             e ? e : "?");
+      register_framework_natives(env);  // fall back to the shim floor
+      return;
+    }
+    static constexpr const char* kReg[] = {
+        "_ZN7android36register_android_os_SystemPropertiesEP7_JNIEnv",
+        "_ZN7android31register_android_os_SystemClockEP7_JNIEnv",
+        "_ZN7android25register_android_os_TraceEP7_JNIEnv",
+        "_ZN7android26register_android_os_ParcelEP7_JNIEnv",
+        "_ZN7android38register_android_content_res_ApkAssetsEP7_JNIEnv",
+    };
+    using RegFn = jint (*)(JNIEnv*);
+    int ok = 0, unavailable = 0;
+    for (const char* sym : kReg) {
+      auto fn = reinterpret_cast<RegFn>(::dlsym(h, sym));
+      if (fn == nullptr) { ++unavailable; continue; }
+      const jint rc = fn(env);
+      if (env->ExceptionCheck()) { env->ExceptionClear(); ++unavailable; continue; }
+      if (rc == JNI_OK) ++ok; else ++unavailable;
+    }
+    log::i(kTag,
+           "ART native floor: {} framework native group(s) from libandroid_runtime "
+           "({} unavailable)",
+           ok, unavailable);
   }
 };
 
