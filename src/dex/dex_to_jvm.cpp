@@ -1020,9 +1020,13 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         break;
       case 0x01: {  // move vA, vB (12x)
         const int a = (u >> 8) & 0xf, b = (u >> 12) & 0xf;
+        // Pick int-vs-ref from the source register's ACTUAL per-pc type (Dalvik
+        // reuses a register as both; whole-method rk mispicks for reused ones and
+        // would emit aload/astore on an int slot). Float stays a whole-method kind.
         if (rkind(a) == RKind::Float) { e.load_f(local(b)); e.store_f(local(a)); }
-        else if (rkind(a) == RKind::Ref) { e.load_a(local(b)); e.store_a(local(a)); }
-        else { e.load_i(local(b)); e.store_i(local(a)); }
+        else if (pc_local(static_cast<std::uint32_t>(pc), b).kind == VType::Obj) {
+          e.load_a(local(b)); e.store_a(local(a));
+        } else { e.load_i(local(b)); e.store_i(local(a)); }
         pc += 1;
         break;
       }
@@ -1755,6 +1759,19 @@ std::optional<Translated> translate_method(ClassWriter& cw, const DexFile& dex,
         if (has_receiver) e.load_a(local(arg_reg(reg++)));  // receiver
         for (int i = 0; i < nparams; ++i) {
           const std::string& d = mr->param_descriptors[static_cast<std::size_t>(i)];
+          // A ref parameter whose arg register is a primitive at this pc (per the
+          // per-pc frame) can't be validly loaded — aload on an int slot is a
+          // VerifyError. Our frame is authoritative, so this WILL fail verification;
+          // stub the method (verify-then-stub) rather than emit dead-on-arrival code.
+          // Exception: a pure null literal (const-0 emitted as aconst_null, rk==Ref)
+          // reads Int in the frame but is a valid ref arg — do NOT stub it.
+          if (is_ref_desc(d)) {
+            const VType t = pc_local(static_cast<std::uint32_t>(pc), arg_reg(reg));
+            if ((t.kind == VType::Int || t.kind == VType::Long ||
+                 t.kind == VType::LongHi) &&
+                rkind(arg_reg(reg)) != RKind::Ref)
+              return std::nullopt;
+          }
           if (d == "J") { e.load_l(local(arg_reg(reg))); reg += 2; }
           else if (d == "D") { e.load_d(local(arg_reg(reg))); reg += 2; }
           else if (d == "F") { e.load_f(local(arg_reg(reg))); reg += 1; }
