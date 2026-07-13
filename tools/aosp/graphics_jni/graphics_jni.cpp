@@ -21,6 +21,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include "SkBitmap.h"
@@ -37,9 +39,11 @@
 #include "SkImageInfo.h"
 #include "SkMatrix.h"
 #include "SkPaint.h"
+#include "SkColorFilter.h"
 #include "SkPath.h"
 #include "SkPathMeasure.h"
 #include "SkPathTypes.h"
+#include "utils/SkParsePath.h"
 #include "SkRect.h"
 #include "SkRefCnt.h"
 #include "SkSamplingOptions.h"
@@ -778,6 +782,15 @@ void Paint_nSetStrokeWidth(jlong paintPtr, jfloat width) {
   auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
   if (ap != nullptr) ap->paint.setStrokeWidth(width);
 }
+// @CriticalNative — Paint.nSetXfermode(paint, porterDuffMode): the int is an SkBlendMode
+// value (PorterDuff.Mode.nativeInt aligns with SkBlendMode). Modern Paint keeps the blend
+// mode on the paint (no SkXfermode object). Used by Material MaterialShapeDrawable.
+void Paint_nSetXfermode(jlong paintPtr, jint mode) {
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap == nullptr) return;
+  if (mode >= 0 && mode <= static_cast<jint>(SkBlendMode::kLastMode))
+    ap->paint.setBlendMode(static_cast<SkBlendMode>(mode));
+}
 // @CriticalNative — Paint.Cap: BUTT=0, ROUND=1, SQUARE=2 (SkPaint::Cap matches).
 void Paint_nSetStrokeCap(jlong paintPtr, jint cap) {
   auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
@@ -883,6 +896,417 @@ jlong ColorSpaceRgb_nativeGetNativeFinalizer(JNIEnv*, jclass) {
   return reinterpret_cast<jlong>(&free_colorspace);
 }
 
+// ── PathParser (android.util.PathParser$PathData) ───────────────────────────────
+// A PathData is just an SkPath parsed from an SVG-style path string. VectorDrawable
+// holds one per <path> (for morphing/animation); the render path is set separately
+// via VectorDrawable.nSetPathString. Morph interpolation isn't supported (returns
+// false → no path animation), which static drawables don't use.
+struct AclPathData {
+  SkPath path;
+};
+jlong PathData_nCreateEmpty(JNIEnv*, jclass) {
+  return reinterpret_cast<jlong>(new AclPathData());
+}
+jlong PathData_nCreateFromString(JNIEnv* env, jclass, jstring str, jint /*len*/) {
+  auto* pd = new AclPathData();
+  if (str != nullptr) {
+    const char* s = env->GetStringUTFChars(str, nullptr);
+    if (s != nullptr) { SkParsePath::FromSVGString(s, &pd->path); env->ReleaseStringUTFChars(str, s); }
+  }
+  return reinterpret_cast<jlong>(pd);
+}
+jlong PathData_nCreateCopy(JNIEnv*, jclass, jlong src) {
+  auto* s = reinterpret_cast<AclPathData*>(src);
+  return reinterpret_cast<jlong>(s != nullptr ? new AclPathData(*s) : new AclPathData());
+}
+void PathData_nSet(JNIEnv*, jclass, jlong dst, jlong src) {
+  auto* d = reinterpret_cast<AclPathData*>(dst);
+  auto* s = reinterpret_cast<AclPathData*>(src);
+  if (d != nullptr && s != nullptr) d->path = s->path;
+}
+void PathData_nParseString(JNIEnv* env, jclass, jlong pd, jstring str, jint /*len*/) {
+  auto* d = reinterpret_cast<AclPathData*>(pd);
+  if (d == nullptr || str == nullptr) return;
+  const char* s = env->GetStringUTFChars(str, nullptr);
+  if (s != nullptr) { d->path.reset(); SkParsePath::FromSVGString(s, &d->path); env->ReleaseStringUTFChars(str, s); }
+}
+void PathData_nCreatePathFromData(JNIEnv*, jclass, jlong outPath, jlong pd) {
+  auto* p = reinterpret_cast<SkPath*>(outPath);
+  auto* d = reinterpret_cast<AclPathData*>(pd);
+  if (p != nullptr && d != nullptr) *p = d->path;
+}
+jboolean PathData_nInterpolate(JNIEnv*, jclass, jlong, jlong, jlong, jfloat) { return JNI_FALSE; }
+jboolean PathData_nCanMorph(JNIEnv*, jclass, jlong, jlong) { return JNI_FALSE; }
+void PathData_nFinalize(JNIEnv*, jclass, jlong pd) { delete reinterpret_cast<AclPathData*>(pd); }
+// nParseStringForPath(long skPath, String, int): parse an SVG string into an SkPath.
+void PathParser_nParseStringForPath(JNIEnv* env, jclass, jlong skPath, jstring str, jint /*len*/) {
+  auto* p = reinterpret_cast<SkPath*>(skPath);
+  if (p == nullptr || str == nullptr) return;
+  const char* s = env->GetStringUTFChars(str, nullptr);
+  if (s != nullptr) { p->reset(); SkParsePath::FromSVGString(s, p); env->ReleaseStringUTFChars(str, s); }
+}
+
+// ── VectorDrawable (android.graphics.drawable.VectorDrawable) ────────────────────
+// A retained SkPath/SkPaint scene-graph (Tree → Groups → FullPaths/ClipPaths). acl
+// dropped hwui (ADR-4), so nDraw renders the tree DIRECTLY onto the (GPU Ganesh)
+// SkCanvas instead of hwui's bitmap-cache/texture-atlas indirection.
+
+// ABI-compatible with android::VirtualLightRefBase (hwui, off our include path): a
+// vtable ptr + an atomic refcount, deleting on last release. com.android.internal.
+// util.VirtualRefBasePtr (in libhwui) reinterpret_casts the tree ptr to this and
+// inc/decStrongs it, so the layout must match. Only the Tree is Java-ref-managed.
+class VirtualLightRefBase {
+ public:
+  virtual ~VirtualLightRefBase() = default;
+  void incStrong(const void*) const { mRefCount.fetch_add(1, std::memory_order_relaxed); }
+  void decStrong(const void*) const {
+    if (mRefCount.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this;
+  }
+ private:
+  mutable std::atomic<int32_t> mRefCount{0};
+};
+
+SkColor vd_apply_alpha(SkColor color, float alpha) {
+  return SkColorSetA(color, static_cast<U8CPU>(SkColorGetA(color) * alpha));
+}
+void vd_apply_trim(SkPath* out, const SkPath& in, float start, float end, float offset) {
+  if (start == 0.0f && end == 1.0f) { *out = in; return; }
+  out->reset();
+  if (start == end) return;
+  SkPathMeasure measure(in, false);
+  const float len = measure.getLength();
+  const float s = len * std::fmod(start + offset, 1.0f);
+  const float e = len * std::fmod(end + offset, 1.0f);
+  if (s > e) {
+    measure.getSegment(s, len, out, true);
+    if (e > 0) measure.getSegment(0, e, out, true);
+  } else {
+    measure.getSegment(s, e, out, true);
+  }
+}
+
+struct VDNode {
+  std::string name;
+  virtual ~VDNode() = default;
+  virtual void draw(SkCanvas*, bool antiAlias) = 0;
+  virtual std::unique_ptr<VDNode> clone() const = 0;
+};
+
+struct VDFullPath : VDNode {
+  SkPath path;
+  float strokeWidth = 0;
+  SkColor strokeColor = SK_ColorTRANSPARENT;
+  float strokeAlpha = 1;
+  SkColor fillColor = SK_ColorTRANSPARENT;
+  float fillAlpha = 1;
+  float trimStart = 0, trimEnd = 1, trimOffset = 0;
+  int strokeLineCap = 0, strokeLineJoin = 0;  // SkPaint::Cap/Join match
+  float strokeMiter = 4;
+  int fillType = 0;  // SkPathFillType: 0 winding, 1 even-odd
+  sk_sp<SkShader> fillGradient, strokeGradient;
+
+  SkPath renderPath() const {
+    SkPath out;
+    vd_apply_trim(&out, path, trimStart, trimEnd, trimOffset);
+    if (fillGradient || fillColor != SK_ColorTRANSPARENT)
+      out.setFillType(static_cast<SkPathFillType>(fillType));
+    return out;
+  }
+  void draw(SkCanvas* c, bool antiAlias) override {
+    const SkPath rp = renderPath();
+    SkPaint fill;
+    bool needsFill = false;
+    if (fillGradient) {
+      fill.setColor(vd_apply_alpha(SK_ColorBLACK, fillAlpha));
+      fill.setShader(fillGradient);
+      needsFill = true;
+    } else if (fillColor != SK_ColorTRANSPARENT) {
+      fill.setColor(vd_apply_alpha(fillColor, fillAlpha));
+      needsFill = true;
+    }
+    if (needsFill) {
+      fill.setStyle(SkPaint::kFill_Style);
+      fill.setAntiAlias(antiAlias);
+      c->drawPath(rp, fill);
+    }
+    SkPaint stroke;
+    bool needsStroke = false;
+    if (strokeGradient) {
+      stroke.setColor(vd_apply_alpha(SK_ColorBLACK, strokeAlpha));
+      stroke.setShader(strokeGradient);
+      needsStroke = true;
+    } else if (strokeColor != SK_ColorTRANSPARENT) {
+      stroke.setColor(vd_apply_alpha(strokeColor, strokeAlpha));
+      needsStroke = true;
+    }
+    if (needsStroke) {
+      stroke.setStyle(SkPaint::kStroke_Style);
+      stroke.setAntiAlias(antiAlias);
+      stroke.setStrokeJoin(static_cast<SkPaint::Join>(strokeLineJoin));
+      stroke.setStrokeCap(static_cast<SkPaint::Cap>(strokeLineCap));
+      stroke.setStrokeMiter(strokeMiter);
+      stroke.setStrokeWidth(strokeWidth);
+      c->drawPath(rp, stroke);
+    }
+  }
+  std::unique_ptr<VDNode> clone() const override {
+    return std::make_unique<VDFullPath>(*this);
+  }
+};
+
+struct VDClipPath : VDNode {
+  SkPath path;
+  void draw(SkCanvas* c, bool /*aa*/) override { c->clipPath(path, true); }
+  std::unique_ptr<VDNode> clone() const override {
+    return std::make_unique<VDClipPath>(*this);
+  }
+};
+
+struct VDGroup : VDNode {
+  float rotate = 0, pivotX = 0, pivotY = 0, scaleX = 1, scaleY = 1, translateX = 0, translateY = 0;
+  std::vector<std::unique_ptr<VDNode>> children;
+  void draw(SkCanvas* c, bool antiAlias) override {
+    SkAutoCanvasRestore acr(c, true);
+    SkMatrix m;
+    m.reset();
+    m.postTranslate(-pivotX, -pivotY);
+    m.postScale(scaleX, scaleY);
+    m.postRotate(rotate, 0, 0);
+    m.postTranslate(translateX + pivotX, translateY + pivotY);
+    c->concat(m);
+    for (auto& ch : children) ch->draw(c, antiAlias);
+  }
+  std::unique_ptr<VDNode> clone() const override {
+    auto g = std::make_unique<VDGroup>();
+    g->name = name;
+    g->rotate = rotate; g->pivotX = pivotX; g->pivotY = pivotY;
+    g->scaleX = scaleX; g->scaleY = scaleY; g->translateX = translateX; g->translateY = translateY;
+    for (const auto& ch : children) g->children.push_back(ch->clone());
+    return g;
+  }
+};
+
+struct VDTree : VirtualLightRefBase {
+  std::unique_ptr<VDGroup> root;
+  float viewportW = 0, viewportH = 0;
+  float rootAlpha = 1;
+  bool antiAlias = true;
+  bool allowCaching = true;
+};
+
+// nCreate*
+jlong VD_nCreateFullPath(JNIEnv*, jclass) { return reinterpret_cast<jlong>(new VDFullPath()); }
+jlong VD_nCreateFullPathCopy(JNIEnv*, jclass, jlong src) {
+  auto* s = reinterpret_cast<VDFullPath*>(src);
+  return reinterpret_cast<jlong>(s != nullptr ? new VDFullPath(*s) : new VDFullPath());
+}
+jlong VD_nCreateClipPath(JNIEnv*, jclass) { return reinterpret_cast<jlong>(new VDClipPath()); }
+jlong VD_nCreateClipPathCopy(JNIEnv*, jclass, jlong src) {
+  auto* s = reinterpret_cast<VDClipPath*>(src);
+  return reinterpret_cast<jlong>(s != nullptr ? new VDClipPath(*s) : new VDClipPath());
+}
+jlong VD_nCreateGroup(JNIEnv*, jclass) { return reinterpret_cast<jlong>(new VDGroup()); }
+jlong VD_nCreateGroupCopy(JNIEnv*, jclass, jlong src) {
+  auto* s = reinterpret_cast<VDGroup*>(src);
+  if (s == nullptr) return reinterpret_cast<jlong>(new VDGroup());
+  return reinterpret_cast<jlong>(static_cast<VDGroup*>(s->clone().release()));
+}
+jlong VD_nCreateTree(JNIEnv*, jclass, jlong rootGroup) {
+  auto* t = new VDTree();
+  t->root.reset(reinterpret_cast<VDGroup*>(rootGroup));  // tree owns the root graph
+  return reinterpret_cast<jlong>(t);
+}
+jlong VD_nCreateTreeFromCopy(JNIEnv*, jclass, jlong copyTree, jlong rootGroup) {
+  auto* t = new VDTree();
+  t->root.reset(reinterpret_cast<VDGroup*>(rootGroup));
+  if (auto* c = reinterpret_cast<VDTree*>(copyTree)) {
+    t->viewportW = c->viewportW; t->viewportH = c->viewportH;
+    t->rootAlpha = c->rootAlpha; t->antiAlias = c->antiAlias; t->allowCaching = c->allowCaching;
+  }
+  return reinterpret_cast<jlong>(t);
+}
+void VD_nAddChild(JNIEnv*, jclass, jlong group, jlong child) {
+  auto* g = reinterpret_cast<VDGroup*>(group);
+  auto* ch = reinterpret_cast<VDNode*>(child);
+  if (g != nullptr && ch != nullptr) g->children.emplace_back(ch);  // group owns the child
+}
+
+// Tree-level setters
+void VD_nSetAllowCaching(JNIEnv*, jclass, jlong tree, jboolean allow) {
+  if (auto* t = reinterpret_cast<VDTree*>(tree)) t->allowCaching = allow;
+}
+void VD_nSetAntiAlias(JNIEnv*, jclass, jlong tree, jboolean aa) {
+  if (auto* t = reinterpret_cast<VDTree*>(tree)) t->antiAlias = aa;
+}
+jboolean VD_nSetRootAlpha(JNIEnv*, jclass, jlong tree, jfloat alpha) {
+  auto* t = reinterpret_cast<VDTree*>(tree);
+  if (t == nullptr) return JNI_FALSE;
+  t->rootAlpha = alpha;
+  return JNI_TRUE;
+}
+jfloat VD_nGetRootAlpha(JNIEnv*, jclass, jlong tree) {
+  auto* t = reinterpret_cast<VDTree*>(tree);
+  return t != nullptr ? t->rootAlpha : 1.0f;
+}
+void VD_nSetRendererViewportSize(JNIEnv*, jclass, jlong tree, jfloat w, jfloat h) {
+  if (auto* t = reinterpret_cast<VDTree*>(tree)) { t->viewportW = w; t->viewportH = h; }
+}
+void VD_nSetName(JNIEnv* env, jclass, jlong nodePtr, jstring name) {
+  auto* n = reinterpret_cast<VDNode*>(nodePtr);
+  if (n == nullptr || name == nullptr) return;
+  const char* s = env->GetStringUTFChars(name, nullptr);
+  if (s != nullptr) { n->name = s; env->ReleaseStringUTFChars(name, s); }
+}
+
+// Path data
+void VD_nSetPathString(JNIEnv* env, jclass, jlong pathPtr, jstring str, jint /*len*/) {
+  auto* fp = reinterpret_cast<VDFullPath*>(pathPtr);
+  if (fp == nullptr || str == nullptr) return;
+  const char* s = env->GetStringUTFChars(str, nullptr);
+  if (s != nullptr) { fp->path.reset(); SkParsePath::FromSVGString(s, &fp->path); env->ReleaseStringUTFChars(str, s); }
+}
+void VD_nSetPathData(JNIEnv*, jclass, jlong pathPtr, jlong pathDataPtr) {
+  auto* fp = reinterpret_cast<VDFullPath*>(pathPtr);
+  auto* pd = reinterpret_cast<AclPathData*>(pathDataPtr);
+  if (fp != nullptr && pd != nullptr) fp->path = pd->path;
+}
+
+// FullPath property setters (used by animation; inflation uses the bulk nUpdate).
+#define VDFP(ptr) auto* fp = reinterpret_cast<VDFullPath*>(ptr); if (fp == nullptr) return
+void VD_nSetStrokeWidth(JNIEnv*, jclass, jlong p, jfloat v) { VDFP(p); fp->strokeWidth = v; }
+void VD_nSetStrokeColor(JNIEnv*, jclass, jlong p, jint v) { VDFP(p); fp->strokeColor = v; }
+void VD_nSetStrokeAlpha(JNIEnv*, jclass, jlong p, jfloat v) { VDFP(p); fp->strokeAlpha = v; }
+void VD_nSetFillColor(JNIEnv*, jclass, jlong p, jint v) { VDFP(p); fp->fillColor = v; }
+void VD_nSetFillAlpha(JNIEnv*, jclass, jlong p, jfloat v) { VDFP(p); fp->fillAlpha = v; }
+void VD_nSetTrimPathStart(JNIEnv*, jclass, jlong p, jfloat v) { VDFP(p); fp->trimStart = v; }
+void VD_nSetTrimPathEnd(JNIEnv*, jclass, jlong p, jfloat v) { VDFP(p); fp->trimEnd = v; }
+void VD_nSetTrimPathOffset(JNIEnv*, jclass, jlong p, jfloat v) { VDFP(p); fp->trimOffset = v; }
+void VD_nUpdateFullPathFillGradient(JNIEnv*, jclass, jlong p, jlong shader) {
+  VDFP(p); fp->fillGradient = sk_ref_sp(reinterpret_cast<SkShader*>(shader));
+}
+void VD_nUpdateFullPathStrokeGradient(JNIEnv*, jclass, jlong p, jlong shader) {
+  VDFP(p); fp->strokeGradient = sk_ref_sp(reinterpret_cast<SkShader*>(shader));
+}
+void VD_nUpdateFullPathProperties(JNIEnv*, jclass, jlong p, jfloat strokeWidth, jint strokeColor,
+                                  jfloat strokeAlpha, jint fillColor, jfloat fillAlpha,
+                                  jfloat trimStart, jfloat trimEnd, jfloat trimOffset,
+                                  jfloat strokeMiter, jint strokeCap, jint strokeJoin,
+                                  jint fillType) {
+  VDFP(p);
+  fp->strokeWidth = strokeWidth; fp->strokeColor = strokeColor; fp->strokeAlpha = strokeAlpha;
+  fp->fillColor = fillColor; fp->fillAlpha = fillAlpha;
+  fp->trimStart = trimStart; fp->trimEnd = trimEnd; fp->trimOffset = trimOffset;
+  fp->strokeMiter = strokeMiter; fp->strokeLineCap = strokeCap; fp->strokeLineJoin = strokeJoin;
+  fp->fillType = fillType;
+}
+// FullPath getters
+float VD_nGetStrokeWidth(JNIEnv*, jclass, jlong p) { auto* fp = reinterpret_cast<VDFullPath*>(p); return fp ? fp->strokeWidth : 0; }
+jint VD_nGetStrokeColor(JNIEnv*, jclass, jlong p) { auto* fp = reinterpret_cast<VDFullPath*>(p); return fp ? static_cast<jint>(fp->strokeColor) : 0; }
+float VD_nGetStrokeAlpha(JNIEnv*, jclass, jlong p) { auto* fp = reinterpret_cast<VDFullPath*>(p); return fp ? fp->strokeAlpha : 1; }
+jint VD_nGetFillColor(JNIEnv*, jclass, jlong p) { auto* fp = reinterpret_cast<VDFullPath*>(p); return fp ? static_cast<jint>(fp->fillColor) : 0; }
+float VD_nGetFillAlpha(JNIEnv*, jclass, jlong p) { auto* fp = reinterpret_cast<VDFullPath*>(p); return fp ? fp->fillAlpha : 1; }
+float VD_nGetTrimPathStart(JNIEnv*, jclass, jlong p) { auto* fp = reinterpret_cast<VDFullPath*>(p); return fp ? fp->trimStart : 0; }
+float VD_nGetTrimPathEnd(JNIEnv*, jclass, jlong p) { auto* fp = reinterpret_cast<VDFullPath*>(p); return fp ? fp->trimEnd : 1; }
+float VD_nGetTrimPathOffset(JNIEnv*, jclass, jlong p) { auto* fp = reinterpret_cast<VDFullPath*>(p); return fp ? fp->trimOffset : 0; }
+jboolean VD_nGetFullPathProperties(JNIEnv* env, jclass, jlong p, jbyteArray outProps, jint length) {
+  auto* fp = reinterpret_cast<VDFullPath*>(p);
+  if (fp == nullptr) return JNI_FALSE;
+  int32_t buf[12];
+  auto putF = [&](int i, float v) { std::memcpy(&buf[i], &v, 4); };
+  putF(0, fp->strokeWidth); buf[1] = static_cast<int32_t>(fp->strokeColor); putF(2, fp->strokeAlpha);
+  buf[3] = static_cast<int32_t>(fp->fillColor); putF(4, fp->fillAlpha);
+  putF(5, fp->trimStart); putF(6, fp->trimEnd); putF(7, fp->trimOffset);
+  buf[8] = fp->strokeLineCap; buf[9] = fp->strokeLineJoin; putF(10, fp->strokeMiter);
+  buf[11] = fp->fillType;
+  const jsize avail = env->GetArrayLength(outProps);
+  const jsize count = std::min<jsize>(std::min<jsize>(length, avail), sizeof(buf));
+  env->SetByteArrayRegion(outProps, 0, count, reinterpret_cast<const jbyte*>(buf));
+  return JNI_TRUE;
+}
+
+// Group property setters/getters
+#define VDGP(ptr) auto* g = reinterpret_cast<VDGroup*>(ptr); if (g == nullptr) return
+void VD_nSetRotation(JNIEnv*, jclass, jlong p, jfloat v) { VDGP(p); g->rotate = v; }
+void VD_nSetPivotX(JNIEnv*, jclass, jlong p, jfloat v) { VDGP(p); g->pivotX = v; }
+void VD_nSetPivotY(JNIEnv*, jclass, jlong p, jfloat v) { VDGP(p); g->pivotY = v; }
+void VD_nSetScaleX(JNIEnv*, jclass, jlong p, jfloat v) { VDGP(p); g->scaleX = v; }
+void VD_nSetScaleY(JNIEnv*, jclass, jlong p, jfloat v) { VDGP(p); g->scaleY = v; }
+void VD_nSetTranslateX(JNIEnv*, jclass, jlong p, jfloat v) { VDGP(p); g->translateX = v; }
+void VD_nSetTranslateY(JNIEnv*, jclass, jlong p, jfloat v) { VDGP(p); g->translateY = v; }
+void VD_nUpdateGroupProperties(JNIEnv*, jclass, jlong p, jfloat rotate, jfloat pivotX, jfloat pivotY,
+                               jfloat scaleX, jfloat scaleY, jfloat translateX, jfloat translateY) {
+  VDGP(p);
+  g->rotate = rotate; g->pivotX = pivotX; g->pivotY = pivotY;
+  g->scaleX = scaleX; g->scaleY = scaleY; g->translateX = translateX; g->translateY = translateY;
+}
+float VD_nGetRotation(JNIEnv*, jclass, jlong p) { auto* g = reinterpret_cast<VDGroup*>(p); return g ? g->rotate : 0; }
+float VD_nGetPivotX(JNIEnv*, jclass, jlong p) { auto* g = reinterpret_cast<VDGroup*>(p); return g ? g->pivotX : 0; }
+float VD_nGetPivotY(JNIEnv*, jclass, jlong p) { auto* g = reinterpret_cast<VDGroup*>(p); return g ? g->pivotY : 0; }
+float VD_nGetScaleX(JNIEnv*, jclass, jlong p) { auto* g = reinterpret_cast<VDGroup*>(p); return g ? g->scaleX : 1; }
+float VD_nGetScaleY(JNIEnv*, jclass, jlong p) { auto* g = reinterpret_cast<VDGroup*>(p); return g ? g->scaleY : 1; }
+float VD_nGetTranslateX(JNIEnv*, jclass, jlong p) { auto* g = reinterpret_cast<VDGroup*>(p); return g ? g->translateX : 0; }
+float VD_nGetTranslateY(JNIEnv*, jclass, jlong p) { auto* g = reinterpret_cast<VDGroup*>(p); return g ? g->translateY : 0; }
+jboolean VD_nGetGroupProperties(JNIEnv* env, jclass, jlong p, jfloatArray out, jint length) {
+  auto* g = reinterpret_cast<VDGroup*>(p);
+  if (g == nullptr) return JNI_FALSE;
+  const float f[7] = {g->rotate, g->pivotX, g->pivotY, g->scaleX, g->scaleY, g->translateX, g->translateY};
+  const jsize count = std::min<jsize>(std::min<jsize>(length, env->GetArrayLength(out)), 7);
+  env->SetFloatArrayRegion(out, 0, count, f);
+  return JNI_TRUE;
+}
+
+// The draw: render the tree directly onto the (GPU) canvas, scaled from the SVG
+// viewport to the destination bounds, with root alpha + color filter in a layer.
+jint VD_nDraw(JNIEnv* env, jclass, jlong treePtr, jlong canvasPtr, jlong colorFilterPtr,
+              jobject boundsRect, jboolean needsMirroring, jboolean /*canReuseCache*/) {
+  auto* tree = reinterpret_cast<VDTree*>(treePtr);
+  auto* canvas = reinterpret_cast<SkCanvas*>(canvasPtr);
+  if (tree == nullptr || canvas == nullptr || !tree->root || boundsRect == nullptr) return 0;
+
+  static jfieldID f_left = nullptr, f_top = nullptr, f_right = nullptr, f_bottom = nullptr;
+  if (f_left == nullptr) {
+    jclass rc = env->GetObjectClass(boundsRect);
+    f_left = env->GetFieldID(rc, "left", "I");
+    f_top = env->GetFieldID(rc, "top", "I");
+    f_right = env->GetFieldID(rc, "right", "I");
+    f_bottom = env->GetFieldID(rc, "bottom", "I");
+  }
+  const float l = env->GetIntField(boundsRect, f_left);
+  const float t = env->GetIntField(boundsRect, f_top);
+  const float r = env->GetIntField(boundsRect, f_right);
+  const float b = env->GetIntField(boundsRect, f_bottom);
+  const float w = r - l, h = b - t;
+  if (w <= 0 || h <= 0) return 0;
+  const float vw = tree->viewportW > 0 ? tree->viewportW : w;
+  const float vh = tree->viewportH > 0 ? tree->viewportH : h;
+
+  SkAutoCanvasRestore acr(canvas, true);
+  canvas->translate(l, t);
+  if (needsMirroring) { canvas->translate(w, 0); canvas->scale(-1.0f, 1.0f); }
+
+  auto* colorFilter = reinterpret_cast<SkColorFilter*>(colorFilterPtr);
+  const bool useLayer = tree->rootAlpha < 1.0f || colorFilter != nullptr;
+  if (useLayer) {
+    SkPaint layerPaint;
+    layerPaint.setAlphaf(tree->rootAlpha);
+    if (colorFilter != nullptr) layerPaint.setColorFilter(sk_ref_sp(colorFilter));
+    canvas->saveLayer(nullptr, &layerPaint);
+  }
+  canvas->scale(w / vw, h / vh);
+  tree->root->draw(canvas, tree->antiAlias);
+  if (useLayer) canvas->restore();
+  return static_cast<jint>(w * h);
+}
+
+// com.android.internal.util.VirtualRefBasePtr — the tiny ref-counting wrapper Java uses
+// for the VectorDrawable tree (normally in libhwui). Drives our VirtualLightRefBase.
+void VirtualRefBasePtr_nIncStrong(JNIEnv*, jclass, jlong ptr) {
+  if (auto* r = reinterpret_cast<VirtualLightRefBase*>(ptr)) r->incStrong(nullptr);
+}
+void VirtualRefBasePtr_nDecStrong(JNIEnv*, jclass, jlong ptr) {
+  if (auto* r = reinterpret_cast<VirtualLightRefBase*>(ptr)) r->decStrong(nullptr);
+}
+
 const JNINativeMethod kBitmap[] = {
     {"nativeCreate", "([IIIIIIZJ)Landroid/graphics/Bitmap;",
      reinterpret_cast<void*>(Bitmap_nativeCreate)},
@@ -963,6 +1387,7 @@ const JNINativeMethod kPaint[] = {
     {"nSetTextLocales", "(JLjava/lang/String;)I", reinterpret_cast<void*>(Paint_nSetTextLocales)},
     {"nSetTextLocalesByMinikinLocaleListId", "(JI)V", reinterpret_cast<void*>(Paint_nSetTextLocalesByMinikinLocaleListId)},
     {"nSetStyle", "(JI)V", reinterpret_cast<void*>(Paint_nSetStyle)},
+    {"nSetXfermode", "(JI)V", reinterpret_cast<void*>(Paint_nSetXfermode)},
     {"nSetStrokeWidth", "(JF)V", reinterpret_cast<void*>(Paint_nSetStrokeWidth)},
     {"nSetStrokeCap", "(JI)V", reinterpret_cast<void*>(Paint_nSetStrokeCap)},
     {"nSetAntiAlias", "(JZ)V", reinterpret_cast<void*>(Paint_nSetAntiAlias)},
@@ -1085,6 +1510,78 @@ const JNINativeMethod kColorSpaceRgb[] = {
      reinterpret_cast<void*>(ColorSpaceRgb_nativeGetNativeFinalizer)},
 };
 
+const JNINativeMethod kVirtualRefBasePtr[] = {
+    {"nIncStrong", "(J)V", reinterpret_cast<void*>(VirtualRefBasePtr_nIncStrong)},
+    {"nDecStrong", "(J)V", reinterpret_cast<void*>(VirtualRefBasePtr_nDecStrong)},
+};
+const JNINativeMethod kPathParser[] = {
+    {"nParseStringForPath", "(JLjava/lang/String;I)V", reinterpret_cast<void*>(PathParser_nParseStringForPath)},
+    {"nCreatePathDataFromString", "(Ljava/lang/String;I)J", reinterpret_cast<void*>(PathData_nCreateFromString)},
+    {"nCreatePathFromPathData", "(JJ)V", reinterpret_cast<void*>(PathData_nCreatePathFromData)},
+    {"nCreateEmptyPathData", "()J", reinterpret_cast<void*>(PathData_nCreateEmpty)},
+    {"nCreatePathData", "(J)J", reinterpret_cast<void*>(PathData_nCreateCopy)},
+    {"nInterpolatePathData", "(JJJF)Z", reinterpret_cast<void*>(PathData_nInterpolate)},
+    {"nFinalize", "(J)V", reinterpret_cast<void*>(PathData_nFinalize)},
+    {"nCanMorph", "(JJ)Z", reinterpret_cast<void*>(PathData_nCanMorph)},
+    {"nSetPathData", "(JJ)V", reinterpret_cast<void*>(PathData_nSet)},
+};
+const JNINativeMethod kVectorDrawable[] = {
+    {"nDraw", "(JJJLandroid/graphics/Rect;ZZ)I", reinterpret_cast<void*>(VD_nDraw)},
+    {"nCreateTree", "(J)J", reinterpret_cast<void*>(VD_nCreateTree)},
+    {"nCreateTreeFromCopy", "(JJ)J", reinterpret_cast<void*>(VD_nCreateTreeFromCopy)},
+    {"nSetRendererViewportSize", "(JFF)V", reinterpret_cast<void*>(VD_nSetRendererViewportSize)},
+    {"nSetRootAlpha", "(JF)Z", reinterpret_cast<void*>(VD_nSetRootAlpha)},
+    {"nGetRootAlpha", "(J)F", reinterpret_cast<void*>(VD_nGetRootAlpha)},
+    {"nSetAntiAlias", "(JZ)V", reinterpret_cast<void*>(VD_nSetAntiAlias)},
+    {"nSetAllowCaching", "(JZ)V", reinterpret_cast<void*>(VD_nSetAllowCaching)},
+    {"nCreateFullPath", "()J", reinterpret_cast<void*>(VD_nCreateFullPath)},
+    {"nCreateFullPath", "(J)J", reinterpret_cast<void*>(VD_nCreateFullPathCopy)},
+    {"nGetFullPathProperties", "(J[BI)Z", reinterpret_cast<void*>(VD_nGetFullPathProperties)},
+    {"nUpdateFullPathProperties", "(JFIFIFFFFFIII)V", reinterpret_cast<void*>(VD_nUpdateFullPathProperties)},
+    {"nUpdateFullPathFillGradient", "(JJ)V", reinterpret_cast<void*>(VD_nUpdateFullPathFillGradient)},
+    {"nUpdateFullPathStrokeGradient", "(JJ)V", reinterpret_cast<void*>(VD_nUpdateFullPathStrokeGradient)},
+    {"nCreateClipPath", "()J", reinterpret_cast<void*>(VD_nCreateClipPath)},
+    {"nCreateClipPath", "(J)J", reinterpret_cast<void*>(VD_nCreateClipPathCopy)},
+    {"nCreateGroup", "()J", reinterpret_cast<void*>(VD_nCreateGroup)},
+    {"nCreateGroup", "(J)J", reinterpret_cast<void*>(VD_nCreateGroupCopy)},
+    {"nSetName", "(JLjava/lang/String;)V", reinterpret_cast<void*>(VD_nSetName)},
+    {"nGetGroupProperties", "(J[FI)Z", reinterpret_cast<void*>(VD_nGetGroupProperties)},
+    {"nUpdateGroupProperties", "(JFFFFFFF)V", reinterpret_cast<void*>(VD_nUpdateGroupProperties)},
+    {"nAddChild", "(JJ)V", reinterpret_cast<void*>(VD_nAddChild)},
+    {"nSetPathString", "(JLjava/lang/String;I)V", reinterpret_cast<void*>(VD_nSetPathString)},
+    {"nSetPathData", "(JJ)V", reinterpret_cast<void*>(VD_nSetPathData)},
+    {"nGetRotation", "(J)F", reinterpret_cast<void*>(VD_nGetRotation)},
+    {"nSetRotation", "(JF)V", reinterpret_cast<void*>(VD_nSetRotation)},
+    {"nGetPivotX", "(J)F", reinterpret_cast<void*>(VD_nGetPivotX)},
+    {"nSetPivotX", "(JF)V", reinterpret_cast<void*>(VD_nSetPivotX)},
+    {"nGetPivotY", "(J)F", reinterpret_cast<void*>(VD_nGetPivotY)},
+    {"nSetPivotY", "(JF)V", reinterpret_cast<void*>(VD_nSetPivotY)},
+    {"nGetScaleX", "(J)F", reinterpret_cast<void*>(VD_nGetScaleX)},
+    {"nSetScaleX", "(JF)V", reinterpret_cast<void*>(VD_nSetScaleX)},
+    {"nGetScaleY", "(J)F", reinterpret_cast<void*>(VD_nGetScaleY)},
+    {"nSetScaleY", "(JF)V", reinterpret_cast<void*>(VD_nSetScaleY)},
+    {"nGetTranslateX", "(J)F", reinterpret_cast<void*>(VD_nGetTranslateX)},
+    {"nSetTranslateX", "(JF)V", reinterpret_cast<void*>(VD_nSetTranslateX)},
+    {"nGetTranslateY", "(J)F", reinterpret_cast<void*>(VD_nGetTranslateY)},
+    {"nSetTranslateY", "(JF)V", reinterpret_cast<void*>(VD_nSetTranslateY)},
+    {"nGetStrokeWidth", "(J)F", reinterpret_cast<void*>(VD_nGetStrokeWidth)},
+    {"nSetStrokeWidth", "(JF)V", reinterpret_cast<void*>(VD_nSetStrokeWidth)},
+    {"nGetStrokeColor", "(J)I", reinterpret_cast<void*>(VD_nGetStrokeColor)},
+    {"nSetStrokeColor", "(JI)V", reinterpret_cast<void*>(VD_nSetStrokeColor)},
+    {"nGetStrokeAlpha", "(J)F", reinterpret_cast<void*>(VD_nGetStrokeAlpha)},
+    {"nSetStrokeAlpha", "(JF)V", reinterpret_cast<void*>(VD_nSetStrokeAlpha)},
+    {"nGetFillColor", "(J)I", reinterpret_cast<void*>(VD_nGetFillColor)},
+    {"nSetFillColor", "(JI)V", reinterpret_cast<void*>(VD_nSetFillColor)},
+    {"nGetFillAlpha", "(J)F", reinterpret_cast<void*>(VD_nGetFillAlpha)},
+    {"nSetFillAlpha", "(JF)V", reinterpret_cast<void*>(VD_nSetFillAlpha)},
+    {"nGetTrimPathStart", "(J)F", reinterpret_cast<void*>(VD_nGetTrimPathStart)},
+    {"nSetTrimPathStart", "(JF)V", reinterpret_cast<void*>(VD_nSetTrimPathStart)},
+    {"nGetTrimPathEnd", "(J)F", reinterpret_cast<void*>(VD_nGetTrimPathEnd)},
+    {"nSetTrimPathEnd", "(JF)V", reinterpret_cast<void*>(VD_nSetTrimPathEnd)},
+    {"nGetTrimPathOffset", "(J)F", reinterpret_cast<void*>(VD_nGetTrimPathOffset)},
+    {"nSetTrimPathOffset", "(JF)V", reinterpret_cast<void*>(VD_nSetTrimPathOffset)},
+};
+
 bool reg(JNIEnv* env, const char* cls, const JNINativeMethod* m, jint n) {
   jclass c = env->FindClass(cls);
   if (c == nullptr) {
@@ -1142,5 +1639,8 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/LinearGradient", kLinearGradient, n(kLinearGradient)) && ok;
   ok = reg(env, "android/graphics/RadialGradient", kRadialGradient, n(kRadialGradient)) && ok;
   ok = reg(env, "android/graphics/ColorSpace$Rgb", kColorSpaceRgb, n(kColorSpaceRgb)) && ok;
+  ok = reg(env, "com/android/internal/util/VirtualRefBasePtr", kVirtualRefBasePtr, n(kVirtualRefBasePtr)) && ok;
+  ok = reg(env, "android/util/PathParser", kPathParser, n(kPathParser)) && ok;
+  ok = reg(env, "android/graphics/drawable/VectorDrawable", kVectorDrawable, n(kVectorDrawable)) && ok;
   return ok ? JNI_OK : JNI_ERR;
 }

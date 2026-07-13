@@ -307,6 +307,22 @@ public final class HostBootstrap {
                 throws android.content.pm.PackageManager.NameNotFoundException {
             throw new android.content.pm.PackageManager.NameNotFoundException(p);
         }
+        // Non-null ActivityInfo (no parent activity) so androidx NavUtils.getParentActivityName
+        // and similar reads don't NPE on a null result.
+        @Override public android.content.pm.ActivityInfo getActivityInfo(
+                android.content.ComponentName component, int flags) {
+            android.content.pm.ActivityInfo ai = new android.content.pm.ActivityInfo();
+            ai.packageName = component != null ? component.getPackageName() : pkg;
+            ai.name = component != null ? component.getClassName() : null;
+            ai.applicationInfo = getApplicationInfo(pkg, 0);
+            return ai;
+        }
+        @Override public android.content.pm.ApplicationInfo getApplicationInfo(String p, int flags) {
+            android.content.pm.ApplicationInfo ai = new android.content.pm.ApplicationInfo();
+            ai.packageName = p;
+            ai.processName = p;
+            return ai;
+        }
     }
 
     // acl has no ContentProvider host yet (ADR-3): a ContentResolver whose provider lookups
@@ -432,6 +448,21 @@ public final class HostBootstrap {
             Throwable cause = (t instanceof java.lang.reflect.InvocationTargetException
                     && t.getCause() != null) ? t.getCause() : t;
             System.err.println("acl HostBootstrap: PhoneWindow deferred: " + cause);
+        }
+        // Attach the (framework) FragmentController host — real Activity.attach() calls
+        // mFragments.attachHost(null). Activity.onCreate → mFragments.dispatchCreate() throws
+        // "No activity" otherwise (the base Activity drives it even for androidx apps).
+        try {
+            java.lang.reflect.Field mf = android.app.Activity.class.getDeclaredField("mFragments");
+            mf.setAccessible(true);
+            Object fragments = mf.get(a);
+            if (fragments != null) {
+                fragments.getClass()
+                        .getMethod("attachHost", Class.forName("android.app.Fragment"))
+                        .invoke(fragments, (Object) null);
+            }
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: fragment host attach deferred: " + t);
         }
     }
 
