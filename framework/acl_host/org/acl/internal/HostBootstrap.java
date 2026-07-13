@@ -26,6 +26,29 @@ public final class HostBootstrap {
     /** Set the app's manifest theme resId; applied when a Context resolves its theme. */
     public static void setAppTheme(int resId) { appThemeResId = resId; }
 
+    // Drain the main Looper's currently-pending messages (non-blocking). The GPU present loop
+    // is a native frame loop, not Looper.loop(), so Handler-posted work never runs on its own —
+    // but Jetpack Compose's recomposer (and other async framework work) posts its continuations
+    // to the main Handler. Pump them each frame (after Choreographer.doFrame) so the composition
+    // completes before measure/layout, which would otherwise block. Bounded; stops when idle.
+    public static void pumpMainLooper(int maxIters) {
+        try {
+            android.os.Looper looper = android.os.Looper.getMainLooper();
+            if (looper == null) return;
+            android.os.MessageQueue q = looper.getQueue();
+            java.lang.reflect.Method isIdle = android.os.MessageQueue.class.getMethod("isIdle");
+            java.lang.reflect.Method loopOnce = android.os.Looper.class.getDeclaredMethod(
+                    "loopOnce", android.os.Looper.class, long.class, int.class);
+            loopOnce.setAccessible(true);
+            for (int i = 0; i < maxIters; i++) {
+                if (Boolean.TRUE.equals(isIdle.invoke(q))) break;  // nothing due
+                Object cont = loopOnce.invoke(null, looper, 0L, -1);
+                if (Boolean.FALSE.equals(cont)) break;  // looper asked to quit
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     // Seed the default typefaces from acl's bundled font. The system font map is normally
     // pushed to the process by the framework at boot (SharedMemory); a standalone run has
     // none, leaving Typeface.DEFAULT/sDefaults null, so create()/text rendering would NPE.

@@ -584,16 +584,11 @@ class JniVm : public Vm {
       env_->DeleteLocalRef(boot);
     }
 
-    env_->CallVoidMethod(view, measure, wspec, hspec);
-    const int mw = env_->CallIntMethod(view, gmw);
-    const int mh = env_->CallIntMethod(view, gmh);
-    log::i(kTag, "ViewRoot: performTraversals measured={}x{}, laying out {}x{}", mw, mh, w, h);
-    env_->CallVoidMethod(view, layout, 0, 0, mw, mh);
-
-    // GPU present: drive the Choreographer-pumped present loop directly (its per-frame
-    // View.draw + looper pump lets async content — Jetpack Compose composes on the frame
-    // clock — render). Skip the one-shot bitmap readback below, which would block on
-    // Compose's first composition.
+    // GPU present: drive the Choreographer-pumped present loop directly — its per-frame
+    // doFrame pumps the looper so async content composes (Jetpack Compose composes on the
+    // frame clock). The loop measures/lays out/draws each frame, so do NOT measure/layout
+    // here first: the ComposeView's measure/layout blocks on a composition that only runs
+    // once the loop's doFrame pumps it (chicken-and-egg).
     if (config_.present) {
       if (const char* gpu = std::getenv("ACL_PRESENT_GPU"); gpu != nullptr && *gpu != '\0') {
         present_content_loop_gpu(view, w, h);
@@ -601,6 +596,13 @@ class JniVm : public Vm {
         return;
       }
     }
+
+    // Headless / non-GPU path: one-shot measure → layout → draw into a Bitmap.
+    env_->CallVoidMethod(view, measure, wspec, hspec);
+    const int mw = env_->CallIntMethod(view, gmw);
+    const int mh = env_->CallIntMethod(view, gmh);
+    log::i(kTag, "ViewRoot: performTraversals measured={}x{}, laying out {}x{}", mw, mh, w, h);
+    env_->CallVoidMethod(view, layout, 0, 0, mw, mh);
 
     // Bitmap b = Bitmap.createBitmap(w, h); Canvas c = new Canvas(b); view.draw(c);
     jclass bmp_cls = env_->FindClass("android/graphics/Bitmap");
@@ -815,6 +817,7 @@ class JniVm : public Vm {
  protected:  // ArtVm's view-host demo drives this directly
   void present_content_loop_gpu(jobject view, int w, int h) {
 #if ACL_HAVE_VULKAN && ACL_HAVE_WCS
+    log::i(kTag, "--present(gpu): entered {}x{}, checking compositor…", w, h);
     if (!wm::wayland_available()) {
       log::i(kTag, "--present(gpu): no Wayland compositor reachable; frame not shown");
       return;
@@ -835,15 +838,31 @@ class JniVm : public Vm {
       return;
     }
     // Wrap the persistent GPU SkSurface canvas once; begin_frame clears it each tick.
+    log::i(kTag, "--present(gpu): compositor ok, begin_frame…");
     const jlong ch = begin(w, h);
     if (ch == 0) { log::w(kTag, "--present(gpu): begin_frame failed"); return; }
+    log::i(kTag, "--present(gpu): begin_frame ok (ch={}), setting up loop…", ch);
     jclass canvasC = env_->FindClass("android/graphics/Canvas");
     jmethodID cctor = canvasC ? env_->GetMethodID(canvasC, "<init>", "(J)V") : nullptr;
     jobject canvas = cctor ? env_->NewObject(canvasC, cctor, ch) : nullptr;
     if (canvas == nullptr) { clear_exception(); log::w(kTag, "--present(gpu): Canvas(long) failed"); return; }
     jclass vcls = env_->GetObjectClass(view);
     jmethodID draw = env_->GetMethodID(vcls, "draw", "(Landroid/graphics/Canvas;)V");
+    // Measure/layout each frame (after the doFrame pump) so async content — Jetpack Compose
+    // composes on the frame clock — is sized before it draws. MeasureSpec EXACTLY(w/h).
+    jmethodID measure = env_->GetMethodID(vcls, "measure", "(II)V");
+    jmethodID gmw = env_->GetMethodID(vcls, "getMeasuredWidth", "()I");
+    jmethodID gmh = env_->GetMethodID(vcls, "getMeasuredHeight", "()I");
+    jmethodID layout = env_->GetMethodID(vcls, "layout", "(IIII)V");
     env_->DeleteLocalRef(vcls);
+    const jint ms_mask = 0x3 << 30;
+    const jint wspec = (w & ~ms_mask) | (1 << 30);
+    const jint hspec = (h & ~ms_mask) | (1 << 30);
+    // Pump the main Looper each frame — async framework work (Jetpack Compose's recomposer)
+    // posts to the Handler queue, which this native frame loop otherwise never runs.
+    jclass boot_cls = env_->FindClass("org/acl/internal/HostBootstrap");
+    jmethodID pump = boot_cls ? env_->GetStaticMethodID(boot_cls, "pumpMainLooper", "(I)V") : nullptr;
+    if (boot_cls == nullptr) clear_exception();
 
     // Optional Choreographer pump (acl's shim exposes aclDoFrame). On host ART the REAL
     // Choreographer is present: its getInstance() needs a vsync native (DisplayEventReceiver)
@@ -921,6 +940,19 @@ class JniVm : public Vm {
       if (choreo != nullptr && do_frame != nullptr)
         env_->CallLongMethod(choreo, do_frame, static_cast<jlong>(frame_time_ns));
       if (env_->ExceptionCheck() == JNI_TRUE) { fail_with_exception("Choreographer.doFrame"); return false; }
+      // Run pending Handler work (Compose recomposition) posted by doFrame, before measure.
+      if (pump != nullptr && boot_cls != nullptr) {
+        env_->CallStaticVoidMethod(boot_cls, pump, static_cast<jint>(256));
+        if (env_->ExceptionCheck() == JNI_TRUE) clear_exception();
+      }
+      // measure → layout → draw (post-doFrame, so Compose has composed before it lays out).
+      if (measure != nullptr && layout != nullptr) {
+        env_->CallVoidMethod(view, measure, wspec, hspec);
+        const int mw = env_->CallIntMethod(view, gmw);
+        const int mh = env_->CallIntMethod(view, gmh);
+        env_->CallVoidMethod(view, layout, 0, 0, mw, mh);
+        if (idx == 0) log::i(kTag, "--present(gpu): frame0 measured {}x{}", mw, mh);
+      }
       if (draw != nullptr) env_->CallVoidMethod(view, draw, canvas);
       if (env_->ExceptionCheck() == JNI_TRUE) { fail_with_exception("View.draw"); return false; }
       AclDmabuf f{};
@@ -941,6 +973,7 @@ class JniVm : public Vm {
       return true;
     };
     const std::string& pkg = config_.package_name;
+    log::i(kTag, "--present(gpu): starting present_dmabuf_loop (budget={})", config_.present_frames);
     const bool ok = wm::present_dmabuf_loop(w, h, pkg.empty() ? "acl" : pkg,
                                             pkg.empty() ? "org.acl.app" : pkg, render, input,
                                             /*want_ime=*/false, config_.present_frames);
