@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "SkBitmap.h"
 #include "SkCanvas.h"
@@ -28,10 +29,12 @@
 #include "SkFontMetrics.h"
 #include "SkFontMgr.h"
 #include "SkFontTypes.h"
+#include "SkImage.h"
 #include "SkImageInfo.h"
 #include "SkPaint.h"
 #include "SkRect.h"
 #include "SkRefCnt.h"
+#include "SkSamplingOptions.h"
 #include "SkTypeface.h"
 
 namespace {
@@ -244,6 +247,32 @@ void Canvas_nDrawText(JNIEnv* env, jclass, jlong canvas, jstring text, jint star
   env->ReleaseStringUTFChars(text, utf8);
 }
 
+// nDrawBitmap(left,top): draw a Bitmap at (left,top). paintOrZero may be 0 (no paint).
+void Canvas_nDrawBitmap(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, jfloat left, jfloat top,
+                        jlong paint, jint /*canvasDensity*/, jint /*screenDensity*/,
+                        jint /*bitmapDensity*/) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* b = reinterpret_cast<AclBitmap*>(bitmapHandle);
+  if (c == nullptr || b == nullptr) return;
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  if (sk_sp<SkImage> img = SkImage::MakeFromBitmap(b->bitmap))
+    c->drawImage(img.get(), left, top, SkSamplingOptions(), ap != nullptr ? &ap->paint : nullptr);
+}
+
+// nDrawBitmap(src,dst): draw a src sub-rect of a Bitmap into a dst rect (scaled).
+void Canvas_nDrawBitmapRect(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, jfloat sl, jfloat st,
+                            jfloat sr, jfloat sb, jfloat dl, jfloat dt, jfloat dr, jfloat db,
+                            jlong paint, jint /*screenDensity*/, jint /*bitmapDensity*/) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* b = reinterpret_cast<AclBitmap*>(bitmapHandle);
+  if (c == nullptr || b == nullptr) return;
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  if (sk_sp<SkImage> img = SkImage::MakeFromBitmap(b->bitmap))
+    c->drawImageRect(img.get(), SkRect::MakeLTRB(sl, st, sr, sb), SkRect::MakeLTRB(dl, dt, dr, db),
+                     SkSamplingOptions(), ap != nullptr ? &ap->paint : nullptr,
+                     SkCanvas::kStrict_SrcRectConstraint);
+}
+
 // ── Canvas transform/clip — all @CriticalNative (handle-only, no JNIEnv/jclass) ──
 jint Canvas_nSave(jlong canvas, jint /*saveFlags*/) {
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
@@ -370,6 +399,57 @@ jint Paint_nGetFontMetricsInt(JNIEnv* env, jclass, jlong paintPtr, jobject fmi) 
   }
   return descent - ascent;
 }
+// Backs Paint.measureText / getTextWidths: return the total advance of text[start,end); fill
+// per-glyph advances if the array is provided. Latin path (per-char measure; no shaping).
+jfloat Paint_nGetTextAdvances(JNIEnv* env, jclass, jlong paintPtr, jstring text, jint start,
+                              jint end, jint, jint, jint, jfloatArray advances, jint advIdx) {
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap == nullptr || text == nullptr) return 0.0f;
+  const char* utf8 = env->GetStringUTFChars(text, nullptr);
+  if (utf8 == nullptr) return 0.0f;
+  const int len = static_cast<int>(std::strlen(utf8));
+  const int s = start < 0 ? 0 : start;
+  const int e = end > len ? len : end;
+  float total = 0.0f;
+  if (e > s) {
+    total = ap->font.measureText(utf8 + s, static_cast<std::size_t>(e - s), SkTextEncoding::kUTF8,
+                                 nullptr, &ap->paint);
+    if (advances != nullptr) {
+      std::vector<jfloat> adv(static_cast<std::size_t>(e - s), 0.0f);
+      for (int i = 0; i < e - s; ++i)
+        adv[i] = ap->font.measureText(utf8 + s + i, 1, SkTextEncoding::kUTF8, nullptr, &ap->paint);
+      env->SetFloatArrayRegion(advances, advIdx, e - s, adv.data());
+    }
+  }
+  env->ReleaseStringUTFChars(text, utf8);
+  return total;
+}
+// Backs Paint.getTextBounds(String): fill the Rect with the text's tight bounds (relative to
+// the baseline at the origin — top is negative, matching Skia's measureText bounds).
+void Paint_nGetStringBounds(JNIEnv* env, jclass, jlong paintPtr, jstring text, jint start, jint end,
+                            jint, jobject rect) {
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap == nullptr || text == nullptr || rect == nullptr) return;
+  const char* utf8 = env->GetStringUTFChars(text, nullptr);
+  if (utf8 == nullptr) return;
+  const int len = static_cast<int>(std::strlen(utf8));
+  const int s = start < 0 ? 0 : start;
+  const int e = end > len ? len : end;
+  SkRect b = SkRect::MakeEmpty();
+  if (e > s)
+    ap->font.measureText(utf8 + s, static_cast<std::size_t>(e - s), SkTextEncoding::kUTF8, &b,
+                         &ap->paint);
+  env->ReleaseStringUTFChars(text, utf8);
+  jclass rc = env->GetObjectClass(rect);
+  const auto set = [&](const char* f, int v) {
+    if (jfieldID id = env->GetFieldID(rc, f, "I")) env->SetIntField(rect, id, v);
+  };
+  set("left", static_cast<int>(std::floor(b.fLeft)));
+  set("top", static_cast<int>(std::floor(b.fTop)));
+  set("right", static_cast<int>(std::ceil(b.fRight)));
+  set("bottom", static_cast<int>(std::ceil(b.fBottom)));
+  env->DeleteLocalRef(rc);
+}
 
 // ── ColorSpace$Rgb (createBitmap's sRGB) ────────────────────────────────────────
 jlong ColorSpaceRgb_nativeCreate(JNIEnv*, jclass, jfloat, jfloat, jfloat, jfloat, jfloat,
@@ -415,6 +495,8 @@ const JNINativeMethod kBaseCanvas[] = {
     {"nDrawCircle", "(JFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawCircle)},
     {"nDrawRoundRect", "(JFFFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawRoundRect)},
     {"nDrawText", "(JLjava/lang/String;IIFFIJ)V", reinterpret_cast<void*>(Canvas_nDrawText)},
+    {"nDrawBitmap", "(JJFFJIII)V", reinterpret_cast<void*>(Canvas_nDrawBitmap)},
+    {"nDrawBitmap", "(JJFFFFFFFFJII)V", reinterpret_cast<void*>(Canvas_nDrawBitmapRect)},
 };
 const JNINativeMethod kPaint[] = {
     {"nInit", "()J", reinterpret_cast<void*>(Paint_nInit)},
@@ -432,6 +514,10 @@ const JNINativeMethod kPaint[] = {
     {"nSetTextSize", "(JF)V", reinterpret_cast<void*>(Paint_nSetTextSize)},
     {"nGetFontMetricsInt", "(JLandroid/graphics/Paint$FontMetricsInt;)I",
      reinterpret_cast<void*>(Paint_nGetFontMetricsInt)},
+    {"nGetTextAdvances", "(JLjava/lang/String;IIIII[FI)F",
+     reinterpret_cast<void*>(Paint_nGetTextAdvances)},
+    {"nGetStringBounds", "(JLjava/lang/String;IIILandroid/graphics/Rect;)V",
+     reinterpret_cast<void*>(Paint_nGetStringBounds)},
 };
 const JNINativeMethod kColorSpaceRgb[] = {
     {"nativeCreate", "(FFFFFFF[F)J", reinterpret_cast<void*>(ColorSpaceRgb_nativeCreate)},

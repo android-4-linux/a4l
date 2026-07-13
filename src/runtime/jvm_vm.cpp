@@ -1611,6 +1611,45 @@ class ArtVm final : public JniVm {
     }
     env->ExceptionClear();
 
+    // drawBitmap: an 8×8 magenta bitmap at (2,40) — clear region left of the circle.
+    bool bmp_ok_call = false;
+    jobject src = env->CallStaticObjectMethod(
+        bitmapC,
+        env->GetStaticMethodID(bitmapC, "createBitmap",
+                               "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;"),
+        8, 8, argb);
+    if (src != nullptr) {
+      env->CallVoidMethod(src, env->GetMethodID(bitmapC, "eraseColor", "(I)V"),
+                          static_cast<jint>(0xFFFF00FF));  // magenta
+      env->CallVoidMethod(
+          canvas,
+          env->GetMethodID(canvasC, "drawBitmap",
+                           "(Landroid/graphics/Bitmap;FFLandroid/graphics/Paint;)V"),
+          src, 2.0f, 40.0f, static_cast<jobject>(nullptr));
+      bmp_ok_call = env->ExceptionCheck() == JNI_FALSE;
+      env->DeleteLocalRef(src);
+    }
+    env->ExceptionClear();
+
+    // measureText / getTextBounds on "Ag".
+    float advance = 0.0f;
+    int bounds_w = 0;
+    if (jmethodID measure = env->GetMethodID(paintC, "measureText", "(Ljava/lang/String;)F")) {
+      jstring t = env->NewStringUTF("Ag");
+      advance = env->CallFloatMethod(paint, measure, t);
+      jclass rectC = env->FindClass("android/graphics/Rect");
+      jobject rb = env->NewObject(rectC, env->GetMethodID(rectC, "<init>", "()V"));
+      if (jmethodID gtb = env->GetMethodID(
+              paintC, "getTextBounds", "(Ljava/lang/String;IILandroid/graphics/Rect;)V")) {
+        env->CallVoidMethod(paint, gtb, t, 0, 2, rb);
+        bounds_w = env->CallIntMethod(rb, env->GetMethodID(rectC, "width", "()I"));
+      }
+      env->DeleteLocalRef(t);
+      env->DeleteLocalRef(rb);
+      env->DeleteLocalRef(rectC);
+    }
+    env->ExceptionClear();
+
     auto read = reinterpret_cast<bool (*)(long, std::uint32_t*, int, int)>(
         ::dlsym(RTLD_DEFAULT, "acl_read_bitmap"));
     if (read == nullptr) { log::w(kTag, "graphics ops: acl_read_bitmap missing"); return; }
@@ -1630,13 +1669,19 @@ class ArtVm final : public JniVm {
       for (int x = 40; x < W; ++x)
         if (at(x, y) != 0xFF000000u) ++text_px;
     const bool text_ok = text_ok_call && text_px > 0;
+    const bool bmp_ok = bmp_ok_call && at(4, 42) == 0xFFFF00FFu;  // magenta bitmap at (2,40)
+    const bool measure_ok = advance > 0.0f && bounds_w > 0;
     log::i(kTag,
-           "graphics ops: circle={} bg={} clip={} clip-bound={} text={} ({} px) — "
-           "center=0x{:08x} clip=0x{:08x}",
-           center_red, bg_black, clip_green, clip_edge, text_ok, text_px, at(32, 32), at(6, 6));
+           "graphics ops: circle={} bg={} clip={} text={} ({}px) bitmap={} (0x{:08x}) "
+           "measure={} (adv={:.1f} w={})",
+           center_red, bg_black, clip_green, text_ok, text_px, bmp_ok, at(4, 42), measure_ok,
+           advance, bounds_w);
     log::i(kTag,
-           "graphics ops: transform/clip + geometry + text natives {} (real Canvas, Android Skia)",
-           (center_red && bg_black && clip_green && clip_edge && text_ok) ? "PASS" : "MISMATCH");
+           "graphics ops: transform/clip + geometry + text + bitmap + measure {} (real Canvas, "
+           "Android Skia)",
+           (center_red && bg_black && clip_green && clip_edge && text_ok && bmp_ok && measure_ok)
+               ? "PASS"
+               : "MISMATCH");
     env->DeleteLocalRef(canvas);
     env->DeleteLocalRef(bmp);
   }
