@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1948,6 +1949,71 @@ void Typeface_nativeForceSetStaticFinalField(JNIEnv* env, jclass clazz, jstring 
 void Typeface_nativeAddFontCollections(JNIEnv*, jclass, jlong) {}
 void Typeface_nativeWarmUpCache(JNIEnv*, jclass, jstring) {}
 
+// android.graphics.HardwareRenderer — acl dropped hwui (ADR-4); RT-animation and other
+// process-global config natives are accepted no-ops (Compose's recomposer toggles them).
+void HardwareRenderer_nSetRtAnimationsEnabled(JNIEnv*, jclass, jboolean) {}
+
+// ── android.view.DisplayEventReceiver (synthetic vsync source) ───────────────────
+// The Choreographer's vsync source (normally SurfaceFlinger). acl provides a synthetic
+// one: scheduleVsync dispatches a frame with a MONOTONIC timestamp (posted async by the
+// Choreographer's FrameHandler, so it runs when the looper is pumped — the present loop).
+// Enough for Compose's frame clock / recomposer to initialize. Real vsync via
+// wp_presentation is a later refinement.
+struct AclVsyncReceiver { jobject weakRef; };  // global ref to the WeakReference<DisplayEventReceiver>
+jobject make_vsync_event_data(JNIEnv* env) {
+  jclass c = env->FindClass("android/view/DisplayEventReceiver$VsyncEventData");
+  if (c == nullptr) { env->ExceptionClear(); return nullptr; }
+  jmethodID ctor = env->GetMethodID(c, "<init>", "()V");
+  jobject o = ctor != nullptr ? env->NewObject(c, ctor) : nullptr;
+  if (env->ExceptionCheck()) env->ExceptionClear();
+  env->DeleteLocalRef(c);
+  return o;
+}
+jlong DisplayEventReceiver_nativeInit(JNIEnv* env, jclass, jobject weakReceiver, jobject /*mq*/,
+                                      jint /*source*/, jint /*config*/) {
+  auto* r = new AclVsyncReceiver();
+  r->weakRef = env->NewGlobalRef(weakReceiver);
+  return reinterpret_cast<jlong>(r);
+}
+void DisplayEventReceiver_nativeDispose(JNIEnv* env, jclass, jlong ptr) {
+  auto* r = reinterpret_cast<AclVsyncReceiver*>(ptr);
+  if (r != nullptr) {
+    if (r->weakRef != nullptr) env->DeleteGlobalRef(r->weakRef);
+    delete r;
+  }
+}
+void DisplayEventReceiver_nativeScheduleVsync(JNIEnv* env, jclass, jlong ptr) {
+  auto* r = reinterpret_cast<AclVsyncReceiver*>(ptr);
+  if (r == nullptr) return;
+  static jmethodID wrGet = nullptr;
+  if (wrGet == nullptr) {
+    jclass wrc = env->FindClass("java/lang/ref/Reference");
+    wrGet = env->GetMethodID(wrc, "get", "()Ljava/lang/Object;");
+    env->DeleteLocalRef(wrc);
+  }
+  jobject receiver = env->CallObjectMethod(r->weakRef, wrGet);
+  if (receiver == nullptr) return;
+  jclass derc = env->GetObjectClass(receiver);
+  jmethodID dispatch = env->GetMethodID(
+      derc, "dispatchVsync", "(JJILandroid/view/DisplayEventReceiver$VsyncEventData;)V");
+  if (dispatch != nullptr) {
+    jobject vsync = make_vsync_event_data(env);
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const jlong now = static_cast<jlong>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+    env->CallVoidMethod(receiver, dispatch, now, static_cast<jlong>(0), static_cast<jint>(1), vsync);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (vsync != nullptr) env->DeleteLocalRef(vsync);
+  } else {
+    env->ExceptionClear();
+  }
+  env->DeleteLocalRef(derc);
+  env->DeleteLocalRef(receiver);
+}
+jobject DisplayEventReceiver_nativeGetLatestVsyncEventData(JNIEnv* env, jclass, jlong) {
+  return make_vsync_event_data(env);
+}
+
 // ── android.graphics.Interpolator (legacy keyframe interpolator) ─────────────────
 // Skia dropped SkInterpolator; acl keeps the first keyframe's values and returns them
 // statically (animations don't advance in a single-frame render). Enough to inflate
@@ -2382,6 +2448,15 @@ const JNINativeMethod kRegion[] = {
     {"nativeWriteToParcel", "(JLandroid/os/Parcel;)Z", reinterpret_cast<void*>(Region_nativeWriteToParcel)},
     {"nativeToString", "(J)Ljava/lang/String;", reinterpret_cast<void*>(Region_nativeToString)},
 };
+const JNINativeMethod kHardwareRenderer[] = {
+    {"nSetRtAnimationsEnabled", "(Z)V", reinterpret_cast<void*>(HardwareRenderer_nSetRtAnimationsEnabled)},
+};
+const JNINativeMethod kDisplayEventReceiver[] = {
+    {"nativeInit", "(Ljava/lang/ref/WeakReference;Landroid/os/MessageQueue;II)J", reinterpret_cast<void*>(DisplayEventReceiver_nativeInit)},
+    {"nativeDispose", "(J)V", reinterpret_cast<void*>(DisplayEventReceiver_nativeDispose)},
+    {"nativeScheduleVsync", "(J)V", reinterpret_cast<void*>(DisplayEventReceiver_nativeScheduleVsync)},
+    {"nativeGetLatestVsyncEventData", "(J)Landroid/view/DisplayEventReceiver$VsyncEventData;", reinterpret_cast<void*>(DisplayEventReceiver_nativeGetLatestVsyncEventData)},
+};
 const JNINativeMethod kInterpolator[] = {
     {"nativeConstructor", "(II)J", reinterpret_cast<void*>(Interpolator_nativeConstructor)},
     {"nativeDestructor", "(J)V", reinterpret_cast<void*>(Interpolator_nativeDestructor)},
@@ -2526,6 +2601,8 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/fonts/FontFamily", kFontFamily, n(kFontFamily)) && ok;
   ok = reg(env, "android/graphics/fonts/Font", kFont, n(kFont)) && ok;
   ok = reg(env, "android/graphics/Interpolator", kInterpolator, n(kInterpolator)) && ok;
+  ok = reg(env, "android/graphics/HardwareRenderer", kHardwareRenderer, n(kHardwareRenderer)) && ok;
+  ok = reg(env, "android/view/DisplayEventReceiver", kDisplayEventReceiver, n(kDisplayEventReceiver)) && ok;
   ok = reg(env, "com/android/internal/util/VirtualRefBasePtr", kVirtualRefBasePtr, n(kVirtualRefBasePtr)) && ok;
   ok = reg(env, "android/util/PathParser", kPathParser, n(kPathParser)) && ok;
   ok = reg(env, "android/graphics/drawable/VectorDrawable", kVectorDrawable, n(kVectorDrawable)) && ok;

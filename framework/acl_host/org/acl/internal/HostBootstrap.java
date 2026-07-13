@@ -237,6 +237,44 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("clipboard".equals(name)) {
+                // ClipboardManager(Context, Handler) → ServiceManager("clipboard") IClipboard
+                // (seeded no-op). Compose's AndroidComposeView reads it.
+                try {
+                    java.lang.reflect.Constructor<?> c = android.content.ClipboardManager.class
+                            .getDeclaredConstructor(android.content.Context.class,
+                                    android.os.Handler.class);
+                    c.setAccessible(true);
+                    return c.newInstance(this, null);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
+            if ("autofill".equals(name)) {
+                // AutofillManager(Context, IAutoFillManager) — no-Binder proxy (Compose's
+                // AndroidComposeView constructs an AndroidAutofill that requires a non-null one).
+                try {
+                    Class<?> iafm = Class.forName("android.view.autofill.IAutoFillManager");
+                    java.lang.reflect.Constructor<?> c =
+                            Class.forName("android.view.autofill.AutofillManager")
+                                    .getDeclaredConstructor(android.content.Context.class, iafm);
+                    c.setAccessible(true);
+                    return c.newInstance(this, noop(iafm));
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
+            if ("accessibility".equals(name)) {
+                // AccessibilityManager.getInstance(ctx) routes via ServiceManager("accessibility")
+                // → IAccessibilityManager (seeded no-op). Compose reads it during view setup.
+                try {
+                    return Class.forName("android.view.accessibility.AccessibilityManager")
+                            .getMethod("getInstance", android.content.Context.class)
+                            .invoke(null, this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("connectivity".equals(name)) {
                 // acl's clean-room android.net.ConnectivityManager (on the boot classpath via
                 // this bootstrap jar, backed by svc/net) has a public no-arg ctor. Reflective
@@ -257,6 +295,9 @@ public final class HostBootstrap {
         @Override public String getSystemServiceName(Class<?> serviceClass) {
             if (serviceClass == android.app.ActivityManager.class) return "activity";
             if (serviceClass == android.app.job.JobScheduler.class) return "jobscheduler";
+            if (serviceClass == android.view.accessibility.AccessibilityManager.class) return "accessibility";
+            if (serviceClass == android.view.autofill.AutofillManager.class) return "autofill";
+            if (serviceClass == android.content.ClipboardManager.class) return "clipboard";
             if (serviceClass == android.app.NotificationManager.class) return "notification";
             if ("android.hardware.display.DisplayManager".equals(serviceClass.getName())) return "display";
             // ConnectivityManager compared by name (off this compile classpath, see above).
@@ -454,6 +495,13 @@ public final class HostBootstrap {
         setField(ContextWrapper.class, app, "mBase", base);
         if (base instanceof AppContext) ((AppContext) base).setApplication(app);
         seedActivityThread(pkg);
+        // ActivityThread.currentApplication() (read by e.g. AutofillManager) → mInitialApplication.
+        try {
+            Class<?> at = Class.forName("android.app.ActivityThread");
+            Object cur = at.getMethod("currentActivityThread").invoke(null);
+            if (cur != null) setField(at, cur, "mInitialApplication", app);
+        } catch (Throwable ignored) {
+        }
         app.onCreate();  // sets the app's own singleton; may throw on a not-yet-supported API
         return app;
     }
@@ -562,33 +610,8 @@ public final class HostBootstrap {
             // would re-query through it. With the cache off, getDisplayInfo falls through to the
             // no-Binder IDisplayManager (→ null) and the Display keeps the DisplayInfo we set here.
             try { setField(dmgCls, dmg, "mDisplayCache", null); } catch (Throwable ignored) {}
-            // Back the Display with acl's output metrics (Wayland output size/density via the app
-            // Resources; refresh rate defaults to 60). A future refinement threads the exact
-            // wl_output mode through.
-            android.util.DisplayMetrics met = ctx.getResources().getDisplayMetrics();
-            final int dw = met.widthPixels > 0 ? met.widthPixels : 1920;
-            final int dh = met.heightPixels > 0 ? met.heightPixels : 1080;
-            final int dpi = met.densityDpi > 0 ? met.densityDpi : 160;
             Class<?> diCls = Class.forName("android.view.DisplayInfo");
-            Object di = diCls.getConstructor().newInstance();
-            for (String[] f : new String[][]{
-                    {"logicalWidth", Integer.toString(dw)}, {"logicalHeight", Integer.toString(dh)},
-                    {"appWidth", Integer.toString(dw)}, {"appHeight", Integer.toString(dh)},
-                    {"logicalDensityDpi", Integer.toString(dpi)}, {"rotation", "0"},
-                    {"state", "2"}}) {
-                try { setField(diCls, di, f[0], Integer.parseInt(f[1])); } catch (Throwable ignored) {}
-            }
-            // Refresh rate lives on a Display.Mode; getRefreshRate() reads getMode().getRefreshRate().
-            try {
-                Class<?> modeCls = Class.forName("android.view.Display$Mode");
-                Object mode = modeCls.getConstructor(int.class, int.class, int.class, float.class)
-                        .newInstance(1, dw, dh, 60.0f);
-                Object modes = java.lang.reflect.Array.newInstance(modeCls, 1);
-                java.lang.reflect.Array.set(modes, 0, mode);
-                setField(diCls, di, "supportedModes", modes);
-                setField(diCls, di, "modeId", 1);
-                setField(diCls, di, "defaultModeId", 1);
-            } catch (Throwable ignored) {}
+            Object di = buildDisplayInfo();  // Wayland output metrics + 60Hz mode
             Class<?> daCls = Class.forName("android.view.DisplayAdjustments");
             Object da = daCls.getConstructor().newInstance();
             android.view.Display display = (android.view.Display) android.view.Display.class
@@ -721,6 +744,51 @@ public final class HostBootstrap {
                 });
     }
 
+    // A DisplayInfo carrying acl's output metrics (Wayland output; 60Hz mode). Used both to
+    // build the attach Display and as the IDisplayManager.getDisplayInfo result so every
+    // Display object (Compose's, RecyclerView's, …) is valid.
+    static Object buildDisplayInfo() {
+        try {
+            final int dw = 1920, dh = 1080, dpi = 160;
+            Class<?> diCls = Class.forName("android.view.DisplayInfo");
+            Object di = diCls.getConstructor().newInstance();
+            for (String[] f : new String[][]{
+                    {"logicalWidth", Integer.toString(dw)}, {"logicalHeight", Integer.toString(dh)},
+                    {"appWidth", Integer.toString(dw)}, {"appHeight", Integer.toString(dh)},
+                    {"logicalDensityDpi", Integer.toString(dpi)}, {"rotation", "0"}, {"state", "2"}}) {
+                try { setField(diCls, di, f[0], Integer.parseInt(f[1])); } catch (Throwable ignored) {}
+            }
+            try {
+                Class<?> modeCls = Class.forName("android.view.Display$Mode");
+                Object mode = modeCls.getConstructor(int.class, int.class, int.class, float.class)
+                        .newInstance(1, dw, dh, 60.0f);
+                Object modes = java.lang.reflect.Array.newInstance(modeCls, 1);
+                java.lang.reflect.Array.set(modes, 0, mode);
+                setField(diCls, di, "supportedModes", modes);
+                setField(diCls, di, "modeId", 1);
+                setField(diCls, di, "defaultModeId", 1);
+            } catch (Throwable ignored) {}
+            return di;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    // IDisplayManager translated: getDisplayInfo → a valid DisplayInfo (so Display objects have
+    // metrics), getDisplayIds → {0}. Other calls default. Without this, DisplayManagerGlobal
+    // hands out Displays with a null DisplayInfo and getRefreshRate() NPEs (Compose, etc.).
+    private static Object makeDisplayHandler(Class<?> iface) {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    switch (method.getName()) {
+                        case "getDisplayInfo": return buildDisplayInfo();
+                        case "getDisplayIds": return new int[]{0};
+                        default: return defaultValue(method.getReturnType());
+                    }
+                });
+    }
+
     // Read android.title / android.text out of a Notification's extras Bundle (reflectively —
     // HostBootstrap compiles against the framework classes.jar).
     private static String[] notificationTitleText(Object notification) {
@@ -777,6 +845,8 @@ public final class HostBootstrap {
         svc.put("display", "android.hardware.display.IDisplayManager");
         // ViewRootImpl.<init> resolves the IME service; a no-Binder proxy suffices (no IME host).
         svc.put("input_method", "com.android.internal.view.IInputMethodManager");
+        svc.put("accessibility", "android.view.accessibility.IAccessibilityManager");
+        svc.put("clipboard", "android.content.IClipboard");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},
@@ -788,7 +858,8 @@ public final class HostBootstrap {
                         if (ifaceName == null) return null;
                         Class<?> iface = Class.forName(ifaceName);
                         final Object localIface = "notification".equals(name)
-                                ? makeNotificationHandler(iface) : noop(iface);
+                                ? makeNotificationHandler(iface)
+                                : "display".equals(name) ? makeDisplayHandler(iface) : noop(iface);
                         final String descriptor = ifaceName;  // AIDL DESCRIPTOR == interface FQN
                         // Proxy IBinder (an interface) rather than new Binder() — the latter
                         // needs Binder natives. asInterface() calls queryLocalInterface and
