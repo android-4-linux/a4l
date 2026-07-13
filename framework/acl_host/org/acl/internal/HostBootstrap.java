@@ -98,12 +98,54 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("activity".equals(name)) {
+                // ActivityManager's ctor is package-private; construct via reflection. Its
+                // methods route through the seeded ServiceManager("activity") IActivityManager
+                // proxy, so getRunningAppProcesses() etc. return defaults instead of NPEing.
+                try {
+                    java.lang.reflect.Constructor<?> c = android.app.ActivityManager.class
+                            .getDeclaredConstructor(android.content.Context.class,
+                                    android.os.Handler.class);
+                    c.setAccessible(true);
+                    return c.newInstance(this, null);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             return null;
         }
         // getSystemService(Class) → getSystemServiceName(Class) → getSystemService(String).
-        // No service map, so return null name → getSystemService(Class) yields null (Managers
-        // are svc/-routed later, ADR-2). @hide, so compiled against the framework classes.jar.
-        @Override public String getSystemServiceName(Class<?> serviceClass) { return null; }
+        // Map the classes we back; unknown → null name → getSystemService(Class) yields null
+        // (remaining Managers are svc/-routed later, ADR-2). @hide → compiled vs classes.jar.
+        @Override public String getSystemServiceName(Class<?> serviceClass) {
+            if (serviceClass == android.app.ActivityManager.class) return "activity";
+            return null;
+        }
+
+        // No broadcast infrastructure yet — accept registrations as no-ops (return the sticky
+        // intent as absent) so apps that listen for connectivity/battery/etc. boot. Broadcasts
+        // are an svc/ concern later.
+        @Override public android.content.Intent registerReceiver(
+                android.content.BroadcastReceiver r, android.content.IntentFilter f) {
+            return null;
+        }
+        @Override public android.content.Intent registerReceiver(
+                android.content.BroadcastReceiver r, android.content.IntentFilter f, int flags) {
+            return null;
+        }
+        @Override public android.content.Intent registerReceiver(
+                android.content.BroadcastReceiver r, android.content.IntentFilter f,
+                String perm, android.os.Handler h) {
+            return null;
+        }
+        @Override public android.content.Intent registerReceiver(
+                android.content.BroadcastReceiver r, android.content.IntentFilter f,
+                String perm, android.os.Handler h, int flags) {
+            return null;
+        }
+        @Override public void unregisterReceiver(android.content.BroadcastReceiver r) {}
+        @Override public void sendBroadcast(android.content.Intent i) {}
+        @Override public void sendBroadcast(android.content.Intent i, String perm) {}
 
         // File-backed SharedPreferences (real android.app.SharedPreferencesImpl over a temp
         // dir) — apps read/write prefs in Application.onCreate. No app data dir yet, so a temp.
@@ -262,14 +304,19 @@ public final class HostBootstrap {
     private static Object noop(Class<?> iface) {
         return java.lang.reflect.Proxy.newProxyInstance(
                 iface.getClassLoader(), new Class<?>[]{iface},
-                (p, method, a) -> {
-                    Class<?> rt = method.getReturnType();
-                    if (rt == boolean.class) return false;
-                    if (rt == int.class || rt == long.class || rt == short.class
-                            || rt == byte.class) return 0;
-                    if (rt == float.class || rt == double.class) return 0;
-                    return null;
-                });
+                (p, method, a) -> defaultValue(method.getReturnType()));
+    }
+
+    private static Object defaultValue(Class<?> rt) {
+        if (rt == boolean.class) return false;
+        if (rt == int.class || rt == long.class || rt == short.class || rt == byte.class
+                || rt == char.class) return 0;
+        if (rt == float.class || rt == double.class) return 0;
+        // Empty collections (not null) so callers that iterate a Binder result don't NPE.
+        if (java.util.List.class.isAssignableFrom(rt)) return new java.util.ArrayList<>();
+        if (java.util.Map.class.isAssignableFrom(rt)) return new java.util.HashMap<>();
+        if (java.util.Set.class.isAssignableFrom(rt)) return new java.util.HashSet<>();
+        return null;
     }
 
     // acl has no Binder (ADR-3): seed a no-op ServiceManager. getService(name) returns a
@@ -279,6 +326,10 @@ public final class HostBootstrap {
     private static void seedNoBinderServiceManager() throws Exception {
         final java.util.Map<String, String> svc = new java.util.HashMap<>();
         svc.put("window", "android.view.IWindowManager");
+        // A real ActivityManager (constructed in AppContext.getSystemService) routes its calls
+        // through ServiceManager.getService("activity") → IActivityManager; a defaulting proxy
+        // (empty process list, etc.) is enough for boot-time probes like isAcraProcess.
+        svc.put("activity", "android.app.IActivityManager");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},
