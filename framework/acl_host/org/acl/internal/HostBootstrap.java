@@ -544,6 +544,102 @@ public final class HostBootstrap {
         }
     }
 
+    // Attach the decor view tree to a window before the measure/layout/draw pass — real
+    // Android does this via ViewRootImpl.setView(). We construct a ViewRootImpl (it builds a
+    // valid View.AttachInfo with a Handler/Choreographer/Display) and dispatch attach directly,
+    // skipping setView's Binder-heavy relayout. dispatchAttachedToWindow fires onAttachedToWindow
+    // across the tree — needed by e.g. Jetpack ComposeView (it can't locate its window recomposer
+    // until attached).
+    public static void attachDecorToWindow(android.view.View decor) {
+        if (decor == null) return;
+        try {
+            android.content.Context ctx = decor.getContext();
+            Class<?> dmgCls = Class.forName("android.hardware.display.DisplayManagerGlobal");
+            Object dmg = dmgCls.getMethod("getInstance").invoke(null);
+            // Disable DisplayManagerGlobal's display-info PropertyInvalidatedCache: its nonce
+            // lookup goes through a SystemProperties path that faults on this host, and any
+            // Display.getRefreshRate/updateDisplayInfoLocked (e.g. RecyclerView.onAttachedToWindow)
+            // would re-query through it. With the cache off, getDisplayInfo falls through to the
+            // no-Binder IDisplayManager (→ null) and the Display keeps the DisplayInfo we set here.
+            try { setField(dmgCls, dmg, "mDisplayCache", null); } catch (Throwable ignored) {}
+            // Back the Display with acl's output metrics (Wayland output size/density via the app
+            // Resources; refresh rate defaults to 60). A future refinement threads the exact
+            // wl_output mode through.
+            android.util.DisplayMetrics met = ctx.getResources().getDisplayMetrics();
+            final int dw = met.widthPixels > 0 ? met.widthPixels : 1920;
+            final int dh = met.heightPixels > 0 ? met.heightPixels : 1080;
+            final int dpi = met.densityDpi > 0 ? met.densityDpi : 160;
+            Class<?> diCls = Class.forName("android.view.DisplayInfo");
+            Object di = diCls.getConstructor().newInstance();
+            for (String[] f : new String[][]{
+                    {"logicalWidth", Integer.toString(dw)}, {"logicalHeight", Integer.toString(dh)},
+                    {"appWidth", Integer.toString(dw)}, {"appHeight", Integer.toString(dh)},
+                    {"logicalDensityDpi", Integer.toString(dpi)}, {"rotation", "0"},
+                    {"state", "2"}}) {
+                try { setField(diCls, di, f[0], Integer.parseInt(f[1])); } catch (Throwable ignored) {}
+            }
+            // Refresh rate lives on a Display.Mode; getRefreshRate() reads getMode().getRefreshRate().
+            try {
+                Class<?> modeCls = Class.forName("android.view.Display$Mode");
+                Object mode = modeCls.getConstructor(int.class, int.class, int.class, float.class)
+                        .newInstance(1, dw, dh, 60.0f);
+                Object modes = java.lang.reflect.Array.newInstance(modeCls, 1);
+                java.lang.reflect.Array.set(modes, 0, mode);
+                setField(diCls, di, "supportedModes", modes);
+                setField(diCls, di, "modeId", 1);
+                setField(diCls, di, "defaultModeId", 1);
+            } catch (Throwable ignored) {}
+            Class<?> daCls = Class.forName("android.view.DisplayAdjustments");
+            Object da = daCls.getConstructor().newInstance();
+            android.view.Display display = (android.view.Display) android.view.Display.class
+                    .getConstructor(dmgCls, int.class, diCls, daCls)
+                    .newInstance(dmg, 0, di, da);
+            // Build a View.AttachInfo directly rather than via ViewRootImpl (whose ctor pulls in
+            // SurfaceControl + Binder relayout). No-Binder IWindowSession/IWindow + Callbacks; a
+            // hollow ViewRootImpl (Unsafe-allocated, no ctor) satisfies the field without the
+            // heavy setup. Enough for dispatchAttachedToWindow + a one-shot measure/layout/draw.
+            Object session = noop(Class.forName("android.view.IWindowSession"));
+            Object window = noop(Class.forName("android.view.IWindow"));
+            Object callbacks = noop(Class.forName("android.view.View$AttachInfo$Callbacks"));
+            Object vri = allocateHollow(Class.forName("android.view.ViewRootImpl"));
+            // Seed the hollow ViewRootImpl fields the DecorView's attach touches: the window-
+            // callback list; the running thread (checkThread); and pretend a traversal is already
+            // scheduled so requestFitSystemWindows()'s scheduleTraversals() early-returns instead
+            // of driving the real Choreographer/relayout path (acl does its own measure/draw).
+            Class<?> vriCls = Class.forName("android.view.ViewRootImpl");
+            try { setField(vriCls, vri, "mWindowCallbacks", new java.util.ArrayList<>()); } catch (Throwable ignored) {}
+            try { setField(vriCls, vri, "mThread", Thread.currentThread()); } catch (Throwable ignored) {}
+            try { setField(vriCls, vri, "mTraversalScheduled", Boolean.TRUE); } catch (Throwable ignored) {}
+            android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
+            Class<?> aiCls = Class.forName("android.view.View$AttachInfo");
+            java.lang.reflect.Constructor<?> aiCtor = aiCls.getDeclaredConstructor(
+                    Class.forName("android.view.IWindowSession"),
+                    Class.forName("android.view.IWindow"),
+                    android.view.Display.class,
+                    Class.forName("android.view.ViewRootImpl"),
+                    android.os.Handler.class,
+                    Class.forName("android.view.View$AttachInfo$Callbacks"),
+                    android.content.Context.class);
+            aiCtor.setAccessible(true);
+            Object attachInfo = aiCtor.newInstance(session, window, display, vri, handler, callbacks, ctx);
+            // The DecorView's attach calls back into mViewRootImpl.setOnContentApplyWindowInsets
+            // Listener etc., which read the ViewRootImpl's own mAttachInfo — link them.
+            try {
+                setField(Class.forName("android.view.ViewRootImpl"), vri, "mAttachInfo", attachInfo);
+            } catch (Throwable ignored) {
+            }
+            java.lang.reflect.Method dispatch = android.view.View.class.getDeclaredMethod(
+                    "dispatchAttachedToWindow", aiCls, int.class);
+            dispatch.setAccessible(true);
+            dispatch.invoke(decor, attachInfo, 0 /* View.VISIBLE */);
+            System.out.println("acl HostBootstrap: decor attached to window");
+        } catch (Throwable t) {
+            Throwable c = (t instanceof java.lang.reflect.InvocationTargetException
+                    && t.getCause() != null) ? t.getCause() : t;
+            System.err.println("acl HostBootstrap: attachDecorToWindow deferred: " + c);
+        }
+    }
+
     private static void setField(Class<?> c, Object obj, String name, Object val) throws Exception {
         java.lang.reflect.Field f = c.getDeclaredField(name);
         f.setAccessible(true);
@@ -679,6 +775,8 @@ public final class HostBootstrap {
         // IActivityTaskManager.getActivityClientController() → a nested no-op.
         svc.put("activity_task", "android.app.IActivityTaskManager");
         svc.put("display", "android.hardware.display.IDisplayManager");
+        // ViewRootImpl.<init> resolves the IME service; a no-Binder proxy suffices (no IME host).
+        svc.put("input_method", "com.android.internal.view.IInputMethodManager");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},

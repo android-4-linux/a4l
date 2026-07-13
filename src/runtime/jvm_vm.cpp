@@ -574,6 +574,16 @@ class JniVm : public Vm {
       return;
     }
 
+    // Attach the tree to a window (real Android's ViewRootImpl.setView) before traversal —
+    // dispatchAttachedToWindow across the tree, needed by views like Jetpack ComposeView.
+    if (jclass boot = env_->FindClass("org/acl/internal/HostBootstrap"); boot != nullptr) {
+      if (jmethodID att =
+              env_->GetStaticMethodID(boot, "attachDecorToWindow", "(Landroid/view/View;)V"))
+        env_->CallStaticVoidMethod(boot, att, view);
+      if (env_->ExceptionCheck() == JNI_TRUE) env_->ExceptionClear();
+      env_->DeleteLocalRef(boot);
+    }
+
     env_->CallVoidMethod(view, measure, wspec, hspec);
     const int mw = env_->CallIntMethod(view, gmw);
     const int mh = env_->CallIntMethod(view, gmh);
