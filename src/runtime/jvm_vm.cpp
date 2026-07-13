@@ -1595,6 +1595,22 @@ class ArtVm final : public JniVm {
     env->CallVoidMethod(canvas, restore);
     if (env->ExceptionCheck()) return jfail("draw ops");
 
+    // Text: white "A" in the clear top-right region (y<16 is above the circle) — verifies
+    // the SkFont/drawText path (nSetTextSize + nDrawText).
+    const jmethodID setTextSize = env->GetMethodID(paintC, "setTextSize", "(F)V");
+    const jmethodID drawText = env->GetMethodID(
+        canvasC, "drawText", "(Ljava/lang/String;FFLandroid/graphics/Paint;)V");
+    bool text_ok_call = false;
+    if (setTextSize != nullptr && drawText != nullptr) {
+      env->CallVoidMethod(paint, setColor, static_cast<jint>(0xFFFFFFFF));  // white
+      env->CallVoidMethod(paint, setTextSize, 18.0f);
+      jstring s = env->NewStringUTF("A");
+      env->CallVoidMethod(canvas, drawText, s, 44.0f, 14.0f, paint);  // baseline (44,14)
+      env->DeleteLocalRef(s);
+      text_ok_call = env->ExceptionCheck() == JNI_FALSE;
+    }
+    env->ExceptionClear();
+
     auto read = reinterpret_cast<bool (*)(long, std::uint32_t*, int, int)>(
         ::dlsym(RTLD_DEFAULT, "acl_read_bitmap"));
     if (read == nullptr) { log::w(kTag, "graphics ops: acl_read_bitmap missing"); return; }
@@ -1607,11 +1623,20 @@ class ArtVm final : public JniVm {
     const bool bg_black = at(2, 2) == 0xFF000000u;         // outside circle + clip
     const bool clip_green = at(6, 6) == 0xFF00FF00u;       // inside translated clip (4,4)-(12,12)
     const bool clip_edge = at(2, 2) != 0xFF00FF00u;        // outside the clip stayed black
+    // Count non-black pixels in the glyph region (x 40..64, y 0..14) — above the circle
+    // (top y=16) and right of the clip (x<12), so any non-black = a rasterized glyph.
+    int text_px = 0;
+    for (int y = 0; y < 15; ++y)
+      for (int x = 40; x < W; ++x)
+        if (at(x, y) != 0xFF000000u) ++text_px;
+    const bool text_ok = text_ok_call && text_px > 0;
     log::i(kTag,
-           "graphics ops: circle={} bg={} clip={} clip-bound={} — center=0x{:08x} clip=0x{:08x}",
-           center_red, bg_black, clip_green, clip_edge, at(32, 32), at(6, 6));
-    log::i(kTag, "graphics ops: transform/clip + geometry natives {} (real Canvas, Android Skia)",
-           (center_red && bg_black && clip_green && clip_edge) ? "PASS" : "MISMATCH");
+           "graphics ops: circle={} bg={} clip={} clip-bound={} text={} ({} px) — "
+           "center=0x{:08x} clip=0x{:08x}",
+           center_red, bg_black, clip_green, clip_edge, text_ok, text_px, at(32, 32), at(6, 6));
+    log::i(kTag,
+           "graphics ops: transform/clip + geometry + text natives {} (real Canvas, Android Skia)",
+           (center_red && bg_black && clip_green && clip_edge && text_ok) ? "PASS" : "MISMATCH");
     env->DeleteLocalRef(canvas);
     env->DeleteLocalRef(bmp);
   }

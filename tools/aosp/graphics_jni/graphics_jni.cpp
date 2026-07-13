@@ -15,15 +15,24 @@
 
 #include <cstdint>
 
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+
 #include "SkBitmap.h"
 #include "SkCanvas.h"
 #include "SkClipOp.h"
 #include "SkColor.h"
 #include "SkColorSpace.h"
+#include "SkFont.h"
+#include "SkFontMetrics.h"
+#include "SkFontMgr.h"
+#include "SkFontTypes.h"
 #include "SkImageInfo.h"
 #include "SkPaint.h"
 #include "SkRect.h"
 #include "SkRefCnt.h"
+#include "SkTypeface.h"
 
 namespace {
 
@@ -32,6 +41,37 @@ struct AclBitmap {
   SkBitmap bitmap;
   bool immutable = false;
 };
+
+// The Paint native handle. Android's Paint carries both draw state (color/style/stroke →
+// SkPaint) AND text state (typeface/size → SkFont, which modern Skia split out of SkPaint).
+struct AclPaint {
+  SkPaint paint;
+  SkFont font;
+};
+
+// A shared default typeface for text, resolved once. The AOSP host Skia default SkFontMgr
+// only exposes Skia's TEST fonts (ahem.ttf etc.), which lack real Latin glyphs, so load a
+// real font file: ACL_GRAPHICS_FONT if set (point it at Android's Roboto-Regular.ttf),
+// else a common host font, else fall back to the test typeface. Per-app font config
+// (fonts.xml + the fallback chain) is future work.
+sk_sp<SkTypeface> default_typeface() {
+  static sk_sp<SkTypeface> tf = [] {
+    const char* candidates[] = {
+        std::getenv("ACL_GRAPHICS_FONT"),
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
+    };
+    for (const char* path : candidates) {
+      if (path == nullptr || *path == '\0') continue;
+      if (sk_sp<SkTypeface> t = SkTypeface::MakeFromFile(path)) return t;
+    }
+    sk_sp<SkFontMgr> mgr = SkFontMgr::RefDefault();
+    return mgr ? mgr->legacyMakeTypeface(nullptr, SkFontStyle::Normal()) : sk_sp<SkTypeface>();
+  }();
+  return tf;
+}
 
 jclass g_bitmap_class = nullptr;    // global ref, for nativeCreate -> NewObject
 jmethodID g_bitmap_ctor = nullptr;
@@ -42,7 +82,7 @@ extern "C" bool acl_graphics_canvas_borrowed(void* c);
 
 // NativeAllocationRegistry finalizers (returned as function pointers to Java).
 void free_bitmap(void* p) { delete reinterpret_cast<AclBitmap*>(p); }
-void free_paint(void* p) { delete reinterpret_cast<SkPaint*>(p); }
+void free_paint(void* p) { delete reinterpret_cast<AclPaint*>(p); }
 void free_canvas(void* p) {
   if (acl_graphics_canvas_borrowed(p)) return;  // surface-owned (GPU); not ours to delete
   delete reinterpret_cast<SkCanvas*>(p);
@@ -148,36 +188,60 @@ void Canvas_nDrawColor(JNIEnv*, jclass, jlong canvas, jint color, jint /*mode*/)
 void Canvas_nDrawRect(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b,
                       jlong paint) {
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
-  auto* p = reinterpret_cast<SkPaint*>(paint);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
   if (c != nullptr) c->drawRect(SkRect::MakeLTRB(l, t, r, b), p ? *p : SkPaint());
 }
 
 void Canvas_nDrawLine(JNIEnv*, jclass, jlong canvas, jfloat x0, jfloat y0, jfloat x1, jfloat y1,
                       jlong paint) {
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
-  auto* p = reinterpret_cast<SkPaint*>(paint);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
   if (c != nullptr) c->drawLine(x0, y0, x1, y1, p ? *p : SkPaint());
 }
 
 void Canvas_nDrawOval(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b,
                       jlong paint) {
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
-  auto* p = reinterpret_cast<SkPaint*>(paint);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
   if (c != nullptr) c->drawOval(SkRect::MakeLTRB(l, t, r, b), p ? *p : SkPaint());
 }
 
 void Canvas_nDrawCircle(JNIEnv*, jclass, jlong canvas, jfloat cx, jfloat cy, jfloat radius,
                         jlong paint) {
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
-  auto* p = reinterpret_cast<SkPaint*>(paint);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
   if (c != nullptr) c->drawCircle(cx, cy, radius, p ? *p : SkPaint());
 }
 
 void Canvas_nDrawRoundRect(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b,
                            jfloat rx, jfloat ry, jlong paint) {
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
-  auto* p = reinterpret_cast<SkPaint*>(paint);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
   if (c != nullptr) c->drawRoundRect(SkRect::MakeLTRB(l, t, r, b), rx, ry, p ? *p : SkPaint());
+}
+
+// nDrawText(String): draw text[start,end) at (x,y) using the Paint's SkFont + SkPaint.
+// Latin/default-font path via SkCanvas::drawSimpleText — no Minikin/HarfBuzz shaping yet, so
+// char indices are treated as UTF-8 byte offsets (correct for ASCII, the common case).
+void Canvas_nDrawText(JNIEnv* env, jclass, jlong canvas, jstring text, jint start, jint end,
+                      jfloat x, jfloat y, jint /*flags*/, jlong paint) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  if (c == nullptr || ap == nullptr || text == nullptr) return;
+  const char* utf8 = env->GetStringUTFChars(text, nullptr);
+  if (utf8 == nullptr) return;
+  const int len = static_cast<int>(std::strlen(utf8));
+  const int s = start < 0 ? 0 : start;
+  const int e = end > len ? len : end;
+  if (e > s)
+    c->drawSimpleText(utf8 + s, static_cast<std::size_t>(e - s), SkTextEncoding::kUTF8, x, y,
+                      ap->font, ap->paint);
+  env->ReleaseStringUTFChars(text, utf8);
 }
 
 // ── Canvas transform/clip — all @CriticalNative (handle-only, no JNIEnv/jclass) ──
@@ -222,29 +286,38 @@ jboolean Canvas_nClipRect(jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b, 
 }
 
 // ── Paint ─────────────────────────────────────────────────────────────────────
-jlong Paint_nInit(JNIEnv*, jclass) { return reinterpret_cast<jlong>(new SkPaint()); }
+jlong Paint_nInit(JNIEnv*, jclass) {
+  auto* ap = new AclPaint();
+  ap->font.setTypeface(default_typeface());
+  ap->font.setSize(16.0f);  // framework default is ~16px; overridden by nSetTextSize
+  return reinterpret_cast<jlong>(ap);
+}
 jlong Paint_nGetNativeFinalizer(JNIEnv*, jclass) {
   return reinterpret_cast<jlong>(&free_paint);
 }
 // @CriticalNative
 void Paint_nSetColor(jlong paintPtr, jint color) {
-  auto* p = reinterpret_cast<SkPaint*>(paintPtr);
-  if (p != nullptr) p->setColor(static_cast<SkColor>(color));
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap != nullptr) ap->paint.setColor(static_cast<SkColor>(color));
 }
-// @CriticalNative
+// @CriticalNative — reset draw state; keep the resolved default typeface, reset size.
 void Paint_nReset(jlong paintPtr) {
-  auto* p = reinterpret_cast<SkPaint*>(paintPtr);
-  if (p != nullptr) *p = SkPaint();
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap == nullptr) return;
+  ap->paint = SkPaint();
+  ap->font = SkFont();
+  ap->font.setTypeface(default_typeface());
+  ap->font.setSize(16.0f);
 }
 // @CriticalNative — ANTI_ALIAS_FLAG == 0x01.
 void Paint_nSetFlags(jlong paintPtr, jint flags) {
-  auto* p = reinterpret_cast<SkPaint*>(paintPtr);
-  if (p != nullptr) p->setAntiAlias((flags & 0x01) != 0);
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap != nullptr) ap->paint.setAntiAlias((flags & 0x01) != 0);
 }
 // @CriticalNative — return the flags we track (just antialias for the raster subset).
 jint Paint_nGetFlags(jlong paintPtr) {
-  auto* p = reinterpret_cast<SkPaint*>(paintPtr);
-  return (p != nullptr && p->isAntiAlias()) ? 0x01 : 0;
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  return (ap != nullptr && ap->paint.isAntiAlias()) ? 0x01 : 0;
 }
 // @FastNative — minikin locale id; no-op (no text in the raster subset).
 jint Paint_nSetTextLocales(JNIEnv*, jclass, jlong, jstring) { return 0; }
@@ -252,23 +325,50 @@ jint Paint_nSetTextLocales(JNIEnv*, jclass, jlong, jstring) { return 0; }
 void Paint_nSetTextLocalesByMinikinLocaleListId(jlong, jint) {}
 // @CriticalNative — Paint.Style: FILL=0, STROKE=1, FILL_AND_STROKE=2 (SkPaint::Style matches).
 void Paint_nSetStyle(jlong paintPtr, jint style) {
-  auto* p = reinterpret_cast<SkPaint*>(paintPtr);
-  if (p != nullptr) p->setStyle(static_cast<SkPaint::Style>(style));
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap != nullptr) ap->paint.setStyle(static_cast<SkPaint::Style>(style));
 }
 // @CriticalNative
 void Paint_nSetStrokeWidth(jlong paintPtr, jfloat width) {
-  auto* p = reinterpret_cast<SkPaint*>(paintPtr);
-  if (p != nullptr) p->setStrokeWidth(width);
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap != nullptr) ap->paint.setStrokeWidth(width);
 }
 // @CriticalNative — Paint.Cap: BUTT=0, ROUND=1, SQUARE=2 (SkPaint::Cap matches).
 void Paint_nSetStrokeCap(jlong paintPtr, jint cap) {
-  auto* p = reinterpret_cast<SkPaint*>(paintPtr);
-  if (p != nullptr) p->setStrokeCap(static_cast<SkPaint::Cap>(cap));
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap != nullptr) ap->paint.setStrokeCap(static_cast<SkPaint::Cap>(cap));
 }
 // @CriticalNative
 void Paint_nSetAntiAlias(jlong paintPtr, jboolean aa) {
-  auto* p = reinterpret_cast<SkPaint*>(paintPtr);
-  if (p != nullptr) p->setAntiAlias(aa != JNI_FALSE);
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap != nullptr) ap->paint.setAntiAlias(aa != JNI_FALSE);
+}
+// @CriticalNative — text size in pixels (into the SkFont; SkPaint no longer holds it).
+void Paint_nSetTextSize(jlong paintPtr, jfloat textSize) {
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap != nullptr) ap->font.setSize(textSize);
+}
+// @FastNative — fill Paint.FontMetricsInt (top/ascent/descent/bottom/leading) from the SkFont.
+jint Paint_nGetFontMetricsInt(JNIEnv* env, jclass, jlong paintPtr, jobject fmi) {
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap == nullptr) return 0;
+  SkFontMetrics m{};
+  ap->font.getMetrics(&m);
+  const int ascent = static_cast<int>(std::floor(m.fAscent));
+  const int descent = static_cast<int>(std::ceil(m.fDescent));
+  if (fmi != nullptr) {
+    jclass c = env->GetObjectClass(fmi);
+    const auto set = [&](const char* f, int v) {
+      if (jfieldID id = env->GetFieldID(c, f, "I")) env->SetIntField(fmi, id, v);
+    };
+    set("top", static_cast<int>(std::floor(m.fTop)));
+    set("ascent", ascent);
+    set("descent", descent);
+    set("bottom", static_cast<int>(std::ceil(m.fBottom)));
+    set("leading", static_cast<int>(std::ceil(m.fLeading)));
+    env->DeleteLocalRef(c);
+  }
+  return descent - ascent;
 }
 
 // ── ColorSpace$Rgb (createBitmap's sRGB) ────────────────────────────────────────
@@ -314,6 +414,7 @@ const JNINativeMethod kBaseCanvas[] = {
     {"nDrawOval", "(JFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawOval)},
     {"nDrawCircle", "(JFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawCircle)},
     {"nDrawRoundRect", "(JFFFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawRoundRect)},
+    {"nDrawText", "(JLjava/lang/String;IIFFIJ)V", reinterpret_cast<void*>(Canvas_nDrawText)},
 };
 const JNINativeMethod kPaint[] = {
     {"nInit", "()J", reinterpret_cast<void*>(Paint_nInit)},
@@ -328,6 +429,9 @@ const JNINativeMethod kPaint[] = {
     {"nSetStrokeWidth", "(JF)V", reinterpret_cast<void*>(Paint_nSetStrokeWidth)},
     {"nSetStrokeCap", "(JI)V", reinterpret_cast<void*>(Paint_nSetStrokeCap)},
     {"nSetAntiAlias", "(JZ)V", reinterpret_cast<void*>(Paint_nSetAntiAlias)},
+    {"nSetTextSize", "(JF)V", reinterpret_cast<void*>(Paint_nSetTextSize)},
+    {"nGetFontMetricsInt", "(JLandroid/graphics/Paint$FontMetricsInt;)I",
+     reinterpret_cast<void*>(Paint_nGetFontMetricsInt)},
 };
 const JNINativeMethod kColorSpaceRgb[] = {
     {"nativeCreate", "(FFFFFFF[F)J", reinterpret_cast<void*>(ColorSpaceRgb_nativeCreate)},
