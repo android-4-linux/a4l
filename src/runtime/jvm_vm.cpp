@@ -1528,7 +1528,92 @@ class ArtVm final : public JniVm {
     log::i(kTag,
            "acl graphics: android.graphics natives registered on Android host Skia "
            "(Bitmap/Canvas/Paint)");
+    graphics_ops_check(env);
     graphics_present_demo(env);
+  }
+
+  // Exercise the Canvas transform/clip + geometry natives on a REAL android.graphics.Canvas
+  // (Android host Skia) and verify with pixel readback. Gated by ACL_ART_GRAPHICS_OPS.
+  // Each new native is called (so a missing registration surfaces as UnsatisfiedLinkError)
+  // and a few pixels are asserted (fill circle, stroke, translate+clip).
+  void graphics_ops_check([[maybe_unused]] JNIEnv* env) {
+    const char* on = std::getenv("ACL_ART_GRAPHICS_OPS");
+    if (on == nullptr || *on == '\0') return;
+    constexpr int W = 64, H = 64;
+    const auto jfail = [&](const char* what) {
+      if (env->ExceptionCheck()) env->ExceptionDescribe();
+      env->ExceptionClear();
+      log::w(kTag, "graphics ops: {} failed", what);
+    };
+    jclass bitmapC = env->FindClass("android/graphics/Bitmap");
+    jclass configC = env->FindClass("android/graphics/Bitmap$Config");
+    jclass canvasC = env->FindClass("android/graphics/Canvas");
+    jclass paintC = env->FindClass("android/graphics/Paint");
+    if (bitmapC == nullptr || configC == nullptr || canvasC == nullptr || paintC == nullptr)
+      return jfail("FindClass");
+    jobject argb = env->GetStaticObjectField(
+        configC, env->GetStaticFieldID(configC, "ARGB_8888", "Landroid/graphics/Bitmap$Config;"));
+    jobject bmp = env->CallStaticObjectMethod(
+        bitmapC,
+        env->GetStaticMethodID(bitmapC, "createBitmap",
+                               "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;"),
+        W, H, argb);
+    if (bmp == nullptr) return jfail("createBitmap");
+    jobject canvas = env->NewObject(
+        canvasC, env->GetMethodID(canvasC, "<init>", "(Landroid/graphics/Bitmap;)V"), bmp);
+    if (canvas == nullptr) return jfail("new Canvas");
+
+    const jmethodID drawColor = env->GetMethodID(canvasC, "drawColor", "(I)V");
+    const jmethodID drawCircle = env->GetMethodID(canvasC, "drawCircle", "(FFFLandroid/graphics/Paint;)V");
+    const jmethodID drawRect = env->GetMethodID(canvasC, "drawRect", "(FFFFLandroid/graphics/Paint;)V");
+    const jmethodID save = env->GetMethodID(canvasC, "save", "()I");
+    const jmethodID restore = env->GetMethodID(canvasC, "restore", "()V");
+    const jmethodID translate = env->GetMethodID(canvasC, "translate", "(FF)V");
+    const jmethodID clipRect = env->GetMethodID(canvasC, "clipRect", "(FFFF)Z");
+    const jmethodID setColor = env->GetMethodID(paintC, "setColor", "(I)V");
+    const jmethodID setStyle = env->GetMethodID(paintC, "setStyle", "(Landroid/graphics/Paint$Style;)V");
+    if (drawCircle == nullptr || save == nullptr || translate == nullptr || clipRect == nullptr ||
+        setStyle == nullptr)
+      return jfail("GetMethodID (ops)");
+
+    // Black background; a red FILL circle at the center; then translate+clip a green rect.
+    env->CallVoidMethod(canvas, drawColor, static_cast<jint>(0xFF000000));
+    jobject paint = env->NewObject(paintC, env->GetMethodID(paintC, "<init>", "()V"));
+    jobject fillStyle = env->GetStaticObjectField(
+        env->FindClass("android/graphics/Paint$Style"),
+        env->GetStaticFieldID(env->FindClass("android/graphics/Paint$Style"), "FILL",
+                              "Landroid/graphics/Paint$Style;"));
+    env->CallVoidMethod(paint, setStyle, fillStyle);
+    env->CallVoidMethod(paint, setColor, static_cast<jint>(0xFFFF0000));  // red
+    env->CallVoidMethod(canvas, drawCircle, 32.0f, 32.0f, 16.0f, paint);
+
+    env->CallIntMethod(canvas, save);
+    env->CallVoidMethod(canvas, translate, 4.0f, 4.0f);
+    env->CallBooleanMethod(canvas, clipRect, 0.0f, 0.0f, 8.0f, 8.0f);  // device (4,4)-(12,12)
+    env->CallVoidMethod(paint, setColor, static_cast<jint>(0xFF00FF00));  // green
+    env->CallVoidMethod(canvas, drawRect, -100.0f, -100.0f, 100.0f, 100.0f, paint);  // clipped
+    env->CallVoidMethod(canvas, restore);
+    if (env->ExceptionCheck()) return jfail("draw ops");
+
+    auto read = reinterpret_cast<bool (*)(long, std::uint32_t*, int, int)>(
+        ::dlsym(RTLD_DEFAULT, "acl_read_bitmap"));
+    if (read == nullptr) { log::w(kTag, "graphics ops: acl_read_bitmap missing"); return; }
+    std::vector<std::uint32_t> px(static_cast<std::size_t>(W) * H);
+    const jlong handle = env->CallLongMethod(
+        bmp, env->GetMethodID(bitmapC, "getNativeInstance", "()J"));
+    if (!read(handle, px.data(), W, H)) { log::w(kTag, "graphics ops: readback failed"); return; }
+    const auto at = [&](int x, int y) { return px[static_cast<std::size_t>(y) * W + x]; };
+    const bool center_red = at(32, 32) == 0xFFFF0000u;
+    const bool bg_black = at(2, 2) == 0xFF000000u;         // outside circle + clip
+    const bool clip_green = at(6, 6) == 0xFF00FF00u;       // inside translated clip (4,4)-(12,12)
+    const bool clip_edge = at(2, 2) != 0xFF00FF00u;        // outside the clip stayed black
+    log::i(kTag,
+           "graphics ops: circle={} bg={} clip={} clip-bound={} — center=0x{:08x} clip=0x{:08x}",
+           center_red, bg_black, clip_green, clip_edge, at(32, 32), at(6, 6));
+    log::i(kTag, "graphics ops: transform/clip + geometry natives {} (real Canvas, Android Skia)",
+           (center_red && bg_black && clip_green && clip_edge) ? "PASS" : "MISMATCH");
+    env->DeleteLocalRef(canvas);
+    env->DeleteLocalRef(bmp);
   }
 
   // S3b (P2.4): the full loop, as a live demo. Gated by ACL_ART_GRAPHICS_DEMO. Drives a

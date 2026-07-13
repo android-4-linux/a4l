@@ -17,6 +17,7 @@
 
 #include "SkBitmap.h"
 #include "SkCanvas.h"
+#include "SkClipOp.h"
 #include "SkColor.h"
 #include "SkColorSpace.h"
 #include "SkImageInfo.h"
@@ -151,6 +152,75 @@ void Canvas_nDrawRect(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat 
   if (c != nullptr) c->drawRect(SkRect::MakeLTRB(l, t, r, b), p ? *p : SkPaint());
 }
 
+void Canvas_nDrawLine(JNIEnv*, jclass, jlong canvas, jfloat x0, jfloat y0, jfloat x1, jfloat y1,
+                      jlong paint) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* p = reinterpret_cast<SkPaint*>(paint);
+  if (c != nullptr) c->drawLine(x0, y0, x1, y1, p ? *p : SkPaint());
+}
+
+void Canvas_nDrawOval(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b,
+                      jlong paint) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* p = reinterpret_cast<SkPaint*>(paint);
+  if (c != nullptr) c->drawOval(SkRect::MakeLTRB(l, t, r, b), p ? *p : SkPaint());
+}
+
+void Canvas_nDrawCircle(JNIEnv*, jclass, jlong canvas, jfloat cx, jfloat cy, jfloat radius,
+                        jlong paint) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* p = reinterpret_cast<SkPaint*>(paint);
+  if (c != nullptr) c->drawCircle(cx, cy, radius, p ? *p : SkPaint());
+}
+
+void Canvas_nDrawRoundRect(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b,
+                           jfloat rx, jfloat ry, jlong paint) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* p = reinterpret_cast<SkPaint*>(paint);
+  if (c != nullptr) c->drawRoundRect(SkRect::MakeLTRB(l, t, r, b), rx, ry, p ? *p : SkPaint());
+}
+
+// ── Canvas transform/clip — all @CriticalNative (handle-only, no JNIEnv/jclass) ──
+jint Canvas_nSave(jlong canvas, jint /*saveFlags*/) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  return c != nullptr ? c->save() : 0;
+}
+jboolean Canvas_nRestore(jlong canvas) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  if (c == nullptr || c->getSaveCount() <= 1) return JNI_FALSE;
+  c->restore();
+  return JNI_TRUE;
+}
+void Canvas_nRestoreToCount(jlong canvas, jint saveCount) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  if (c != nullptr) c->restoreToCount(saveCount);
+}
+jint Canvas_nGetSaveCount(jlong canvas) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  return c != nullptr ? c->getSaveCount() : 0;
+}
+void Canvas_nTranslate(jlong canvas, jfloat dx, jfloat dy) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  if (c != nullptr) c->translate(dx, dy);
+}
+void Canvas_nScale(jlong canvas, jfloat sx, jfloat sy) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  if (c != nullptr) c->scale(sx, sy);
+}
+void Canvas_nRotate(jlong canvas, jfloat degrees) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  if (c != nullptr) c->rotate(degrees);
+}
+// Region.Op nativeInt: 0=DIFFERENCE, 1=INTERSECT (default clipRect), others map to intersect
+// (modern Skia only has Intersect/Difference). Returns whether the clip is non-empty.
+jboolean Canvas_nClipRect(jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b, jint regionOp) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  if (c == nullptr) return JNI_FALSE;
+  c->clipRect(SkRect::MakeLTRB(l, t, r, b),
+              regionOp == 0 ? SkClipOp::kDifference : SkClipOp::kIntersect, /*doAA=*/false);
+  return c->isClipEmpty() ? JNI_FALSE : JNI_TRUE;
+}
+
 // ── Paint ─────────────────────────────────────────────────────────────────────
 jlong Paint_nInit(JNIEnv*, jclass) { return reinterpret_cast<jlong>(new SkPaint()); }
 jlong Paint_nGetNativeFinalizer(JNIEnv*, jclass) {
@@ -180,6 +250,26 @@ jint Paint_nGetFlags(jlong paintPtr) {
 jint Paint_nSetTextLocales(JNIEnv*, jclass, jlong, jstring) { return 0; }
 // @CriticalNative — set-by-cached-id fast path; no-op.
 void Paint_nSetTextLocalesByMinikinLocaleListId(jlong, jint) {}
+// @CriticalNative — Paint.Style: FILL=0, STROKE=1, FILL_AND_STROKE=2 (SkPaint::Style matches).
+void Paint_nSetStyle(jlong paintPtr, jint style) {
+  auto* p = reinterpret_cast<SkPaint*>(paintPtr);
+  if (p != nullptr) p->setStyle(static_cast<SkPaint::Style>(style));
+}
+// @CriticalNative
+void Paint_nSetStrokeWidth(jlong paintPtr, jfloat width) {
+  auto* p = reinterpret_cast<SkPaint*>(paintPtr);
+  if (p != nullptr) p->setStrokeWidth(width);
+}
+// @CriticalNative — Paint.Cap: BUTT=0, ROUND=1, SQUARE=2 (SkPaint::Cap matches).
+void Paint_nSetStrokeCap(jlong paintPtr, jint cap) {
+  auto* p = reinterpret_cast<SkPaint*>(paintPtr);
+  if (p != nullptr) p->setStrokeCap(static_cast<SkPaint::Cap>(cap));
+}
+// @CriticalNative
+void Paint_nSetAntiAlias(jlong paintPtr, jboolean aa) {
+  auto* p = reinterpret_cast<SkPaint*>(paintPtr);
+  if (p != nullptr) p->setAntiAlias(aa != JNI_FALSE);
+}
 
 // ── ColorSpace$Rgb (createBitmap's sRGB) ────────────────────────────────────────
 jlong ColorSpaceRgb_nativeCreate(JNIEnv*, jclass, jfloat, jfloat, jfloat, jfloat, jfloat,
@@ -207,10 +297,23 @@ const JNINativeMethod kBitmap[] = {
 const JNINativeMethod kCanvas[] = {
     {"nInitRaster", "(J)J", reinterpret_cast<void*>(Canvas_nInitRaster)},
     {"nGetNativeFinalizer", "()J", reinterpret_cast<void*>(Canvas_nGetNativeFinalizer)},
+    // @CriticalNative transform/clip (handle-only).
+    {"nSave", "(JI)I", reinterpret_cast<void*>(Canvas_nSave)},
+    {"nRestore", "(J)Z", reinterpret_cast<void*>(Canvas_nRestore)},
+    {"nRestoreToCount", "(JI)V", reinterpret_cast<void*>(Canvas_nRestoreToCount)},
+    {"nGetSaveCount", "(J)I", reinterpret_cast<void*>(Canvas_nGetSaveCount)},
+    {"nTranslate", "(JFF)V", reinterpret_cast<void*>(Canvas_nTranslate)},
+    {"nScale", "(JFF)V", reinterpret_cast<void*>(Canvas_nScale)},
+    {"nRotate", "(JF)V", reinterpret_cast<void*>(Canvas_nRotate)},
+    {"nClipRect", "(JFFFFI)Z", reinterpret_cast<void*>(Canvas_nClipRect)},
 };
 const JNINativeMethod kBaseCanvas[] = {
     {"nDrawColor", "(JII)V", reinterpret_cast<void*>(Canvas_nDrawColor)},
     {"nDrawRect", "(JFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawRect)},
+    {"nDrawLine", "(JFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawLine)},
+    {"nDrawOval", "(JFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawOval)},
+    {"nDrawCircle", "(JFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawCircle)},
+    {"nDrawRoundRect", "(JFFFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawRoundRect)},
 };
 const JNINativeMethod kPaint[] = {
     {"nInit", "()J", reinterpret_cast<void*>(Paint_nInit)},
@@ -221,6 +324,10 @@ const JNINativeMethod kPaint[] = {
     {"nGetFlags", "(J)I", reinterpret_cast<void*>(Paint_nGetFlags)},
     {"nSetTextLocales", "(JLjava/lang/String;)I", reinterpret_cast<void*>(Paint_nSetTextLocales)},
     {"nSetTextLocalesByMinikinLocaleListId", "(JI)V", reinterpret_cast<void*>(Paint_nSetTextLocalesByMinikinLocaleListId)},
+    {"nSetStyle", "(JI)V", reinterpret_cast<void*>(Paint_nSetStyle)},
+    {"nSetStrokeWidth", "(JF)V", reinterpret_cast<void*>(Paint_nSetStrokeWidth)},
+    {"nSetStrokeCap", "(JI)V", reinterpret_cast<void*>(Paint_nSetStrokeCap)},
+    {"nSetAntiAlias", "(JZ)V", reinterpret_cast<void*>(Paint_nSetAntiAlias)},
 };
 const JNINativeMethod kColorSpaceRgb[] = {
     {"nativeCreate", "(FFFFFFF[F)J", reinterpret_cast<void*>(ColorSpaceRgb_nativeCreate)},
@@ -266,11 +373,12 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
     env->ExceptionClear();
     return JNI_ERR;
   }
+  const auto n = [](auto& arr) { return static_cast<jint>(sizeof(arr) / sizeof(arr[0])); };
   bool ok = true;
-  ok = reg(env, "android/graphics/Bitmap", kBitmap, 9) && ok;
-  ok = reg(env, "android/graphics/Canvas", kCanvas, 2) && ok;
-  ok = reg(env, "android/graphics/BaseCanvas", kBaseCanvas, 2) && ok;
-  ok = reg(env, "android/graphics/Paint", kPaint, 8) && ok;
-  ok = reg(env, "android/graphics/ColorSpace$Rgb", kColorSpaceRgb, 2) && ok;
+  ok = reg(env, "android/graphics/Bitmap", kBitmap, n(kBitmap)) && ok;
+  ok = reg(env, "android/graphics/Canvas", kCanvas, n(kCanvas)) && ok;
+  ok = reg(env, "android/graphics/BaseCanvas", kBaseCanvas, n(kBaseCanvas)) && ok;
+  ok = reg(env, "android/graphics/Paint", kPaint, n(kPaint)) && ok;
+  ok = reg(env, "android/graphics/ColorSpace$Rgb", kColorSpaceRgb, n(kColorSpaceRgb)) && ok;
   return ok ? JNI_OK : JNI_ERR;
 }
