@@ -278,9 +278,13 @@ bool ensure_ready(int w, int h) {
   g.gr = GrDirectContext::MakeVulkan(bc);
   if (!g.gr) { std::fprintf(stderr, "acl-gpu: MakeVulkan fail\n"); return false; }
 
+  // kTopLeft origin: Skia renders top-down so the raw vkCmdCopyImage into the (top-down)
+  // dma-buf keeps the right way up. The default (kBottomLeft) renders bottom-up and presents
+  // vertically flipped.
   g.opt = SkSurface::MakeRenderTarget(
       g.gr.get(), SkBudgeted::kYes,
-      SkImageInfo::Make(w, h, kBGRA_8888_SkColorType, kPremul_SkAlphaType));
+      SkImageInfo::Make(w, h, kBGRA_8888_SkColorType, kPremul_SkAlphaType), 0,
+      kTopLeft_GrSurfaceOrigin, nullptr);
   if (!g.opt) { std::fprintf(stderr, "acl-gpu: MakeRenderTarget fail\n"); return false; }
 
   VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
