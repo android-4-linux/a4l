@@ -334,3 +334,28 @@ blit. `make_direct_surface()` is gated behind `ACL_GPU_DIRECT` (off by default) 
 copy path — forward-compat for a future Skia bump. **NEXT:** (a) S4b breadth (grow Canvas ops + drive
 from a real `View.draw`) — the natural next; (b) optionally bump host Skia to a milestone with
 modifier-RT support for a true zero-copy direct path.
+
+## S4b RESULT (2026-07-12) — real android.graphics.Canvas renders GPU-native; animated loop live
+**Step 1** routed the app's real `android.graphics.Canvas` onto the GPU surface: `gpu_dmabuf` exposes
+`begin_frame` (returns the Ganesh `SkSurface`'s `SkCanvas` as a handle) and `end_frame` (flush +
+`vkCmdCopyImage` into the tiled dma-buf); the runtime wraps the handle in a real `Canvas(long)` and
+issues `drawColor`/`drawRect`, so the app's ops render GPU-native (not a hardcoded C++ scene). A
+borrowed-canvas registry stops the framework `Canvas(long)` finalizer from deleting the surface-owned
+`SkCanvas`.
+
+**Step 2** made it a continuous, double-buffered present loop that drives `View.draw` every frame:
+- `gpu_dmabuf` keeps **two** ping-pong dma-buf images; `end_frame(buffer_index)` copies the shared
+  optimal SkSurface into image `buffer_index`, so the compositor scans out one while Skia renders the
+  other. `wm::present_dmabuf_loop` picks a free slot (released via `wl_buffer.release`), renders into it,
+  and presents — one `wl_buffer` per slot.
+- **Single-buffering deadlocks** (the compositor holds the one buffer for scanout and stops re-ticking
+  `wl_surface.frame`); two buffers keep the callback/release cycle flowing. When the surface is occluded
+  the compositor legitimately withholds frame callbacks, so a **keep-alive self-tick** (~30 Hz) keeps the
+  animation progressing; a visible surface runs at vsync.
+- **wp_presentation** (via the wcs `wl::PresentationManager`) supplies the vsync-aligned
+  `Choreographer.frameTimeNanos` (`last_present_ns + refresh_ns`), matching the shm `present_loop`.
+- `jvm_vm`'s `present_content_loop_gpu` (gated `ACL_PRESENT_GPU`) drives the Phase-2 View traversal's
+  `View.draw` onto the GPU canvas each tick; `ACL_ART_GRAPHICS_GPU_LOOP=N` animates a moving rect through
+  the real Canvas. **Verified live on Mutter: 60/60 frames clean**, alternating tiled dma-buf images; the
+  static and single-frame GPU paths stay clean and 33 tests pass. Input/IME on this path is a follow-up
+  (the shm loop carries them today).
