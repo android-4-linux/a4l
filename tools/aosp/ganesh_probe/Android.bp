@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: Apache-2.0
+// Provenance: acl P2.4/S4a de-risk; consumes external/skia libskia (Apache-2.0). No GPL-3.0 sources.
+
+cc_binary_host {
+    name: "acl_ganesh_probe",
+    srcs: ["probe.cpp"],
+    static_libs: [
+        "libskia",
+        "libwebp-decode",
+        "libwebp-encode",
+        "libsfntly",
+        "libwuffs_mirror_release_c",
+    ],
+    shared_libs: [
+        "libpng",
+        "libjpeg",
+        "libz",
+        "libexpat",
+        "libft2",
+        "libicuuc",
+        "libicui18n",
+        "libharfbuzz_ng",
+        "libdng_sdk",
+        "libpiex",
+        "liblog",
+        "libbase",
+        "libcutils",
+    ],
+    host_ldlibs: [
+        "-ldl",
+    ],
+    include_dirs: [
+        "external/skia",
+        "external/skia/include",
+        "external/skia/include/core",
+        "external/skia/include/config",
+        "external/skia/include/gpu",
+        "external/skia/include/private",
+        "external/skia/include/android",
+        "external/skia/include/encode",
+        "external/skia/include/third_party/vulkan",
+    ],
+    cflags: [
+        "-Wno-unused-parameter",
+    ],
+}

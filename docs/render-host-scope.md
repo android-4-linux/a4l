@@ -152,10 +152,16 @@ is correct + working.** GPU-native therefore forks:
   `SkUserConfig.h` `SK_SUPPORT_GPU 1`+`SK_VULKAN`+`SK_USE_VMA`; the ~287-file GPU src set + VMA +
   Vulkan headers added to `libskia`'s `host_linux` block, GL excluded → Vulkan-only). Verified:
   `GrDirectContext::MakeVulkan` defined, 578 `GrVk*` symbols; `libacl_graphics_jni` rebuilds clean.
-  Skia calls Vulkan via consumer-provided `GrVkGetProc` (no vk loader linked). **Step 2 (next):** wrap
-  acl's dma-buf `VkImage` as an Android-Skia Ganesh `SkSurface` (`GrVkBackendContext` over a `VkDevice`
-  shared with acl's gfx, `GrBackendTexture`/`SkSurface::MakeFromBackendTexture`) and route the `Canvas`
-  to it — no CPU upload. A perf optimization over the working S3b loop, not a correctness fix.
+  Skia calls Vulkan via consumer-provided `GrVkGetProc` (no vk loader linked). **Step 2 foundation
+  DONE (2026-07-12):** the `acl_ganesh_probe` (`tools/aosp/ganesh_probe/`, cc_binary_host) creates a
+  Vulkan device, `GrDirectContext::MakeVulkan` (Android Skia), an offscreen GPU `SkSurface`
+  (`MakeRenderTarget`), renders + reads back — **verified on the real GPU (RADV):
+  bg=0xff204060 fg=0xffcc8844.** All vk entrypoints come via `dlopen`(libvulkan)+`GrVkGetProc` (Soong
+  can't `-lvulkan` on host; the real lib gets them from acl instead). So Android's Skia does Ganesh
+  Vulkan on host+GPU. **Step 2 remaining (wiring):** make a modifier-tiled dma-buf-exportable `VkImage`,
+  wrap it as an Android-Skia Ganesh `SkSurface` (`GrBackendTexture`+`GrVkImageInfo`), route the
+  `Canvas`'s `nInitRaster` to it, render + export fd + present via `present_dmabuf` — no CPU upload.
+  A perf optimization over the working S3b loop, not a correctness fix.
 - **S4b — breadth (runs real apps, into Gate G2).** No Skia rebuild: grow graphics ops
   (paths/text/drawBitmap/clip/transform) + Paint setters as real apps hit them, and drive the loop
   from a real `View.draw`/`onDraw` traversal (acl already has the View-traversal driver from Phase 2).
