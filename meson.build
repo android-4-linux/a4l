@@ -169,6 +169,17 @@ if have_skia
   endif
 endif
 
+# svc/net connectivity backend: a host D-Bus daemon (systemd-networkd on desktop,
+# ConnMan on device, NetworkManager elsewhere) is translated to android.net.
+# ConnectivityManager state. sdbus-c++ (LGPL-2.1, dynamically linked = policy-OK)
+# is the D-Bus client. When absent, svc/net is the Null backend (offline default).
+sdbus_dep = dependency('sdbus-c++', required : false)
+have_sdbus = sdbus_dep.found()
+net_backend = get_option('net_backend')
+if have_sdbus
+  message('svc/net D-Bus connectivity backend enabled (sdbus-c++ ' + sdbus_dep.version() + ', mode=' + net_backend + ')')
+endif
+
 conf = configuration_data()
 conf.set('ACL_VERSION', '"' + meson.project_version() + '"')
 conf.set10('ACL_PROFILE_AUTOMOTIVE', profile_automotive)
@@ -177,6 +188,12 @@ conf.set10('ACL_HAVE_PIPEWIRE', have_pipewire)
 conf.set10('ACL_HAVE_WCS', have_wcs)
 conf.set10('ACL_HAVE_SKIA', have_skia)
 conf.set10('ACL_HAVE_VULKAN', have_vulkan)
+conf.set10('ACL_HAVE_SDBUS', have_sdbus)
+# Connectivity backend build mode: auto (compile all, probe the bus) | networkd |
+# networkmanager | connman | null. Backends whose macro is 0 are compiled out.
+conf.set10('ACL_NET_NETWORKD', have_sdbus and (net_backend == 'auto' or net_backend == 'networkd'))
+conf.set10('ACL_NET_NETWORKMANAGER', have_sdbus and (net_backend == 'auto' or net_backend == 'networkmanager'))
+conf.set10('ACL_NET_CONNMAN', have_sdbus and (net_backend == 'auto' or net_backend == 'connman'))
 # javac matched to the detected libjvm (same java_home), for the DEX->JVM
 # converter. Empty when no JDK; the converter then needs an explicit path.
 conf.set('ACL_JAVAC',

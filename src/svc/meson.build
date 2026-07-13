@@ -5,6 +5,12 @@
 # PackageManager, Clipboard, SharedPreferences, ContentResolver, notifications.
 svc_sources = files('svc.cpp')
 
+# svc/net connectivity backend (host D-Bus → ConnectivityManager) builds when
+# sdbus-c++ is present; its own static lib + dev probe tool, wired via net/meson.build.
+if have_sdbus
+  subdir('net')
+endif
+
 # Automotive vehicle services (svc/car) compile in ONLY under the automotive
 # profile, so an OFF build emits zero automotive symbols (CI nm-diff gate, A01.1).
 if profile_automotive
