@@ -38,6 +38,7 @@
 #include "SkMatrix.h"
 #include "SkPaint.h"
 #include "SkPath.h"
+#include "SkPathMeasure.h"
 #include "SkPathTypes.h"
 #include "SkRect.h"
 #include "SkRefCnt.h"
@@ -351,6 +352,47 @@ void Path_nAddRoundRect(JNIEnv*, jclass, jlong p, jfloat l, jfloat t, jfloat r, 
                         jfloat ry, jint dir) {
   if (auto* s = reinterpret_cast<SkPath*>(p))
     s->addRoundRect(SkRect::MakeLTRB(l, t, r, b), rx, ry, static_cast<SkPathDirection>(dir));
+}
+// Path.nApproximate(long, float) -> float[]: sample the path into [fraction, x, y]
+// triples (PathInterpolator reads the x,y of each). Needed by androidx EdgeToEdge /
+// any XML PathInterpolator. Arc-length sampling via SkPathMeasure over the first
+// contour (interpolator curves are single-contour, monotonic in x).
+jfloatArray Path_nApproximate(JNIEnv* env, jclass, jlong p, jfloat error) {
+  auto* path = reinterpret_cast<SkPath*>(p);
+  if (path == nullptr) return env->NewFloatArray(0);
+  const float step = error > 1e-4f ? error : 0.5f / 200.0f;
+  SkPathMeasure meas(*path, false);
+  const float len = meas.getLength();
+  if (len <= 0.0f) {                             // degenerate → flat [0,0,0, 1,0,0]
+    const float z[6] = {0, 0, 0, 1, 0, 0};
+    jfloatArray a = env->NewFloatArray(6);
+    env->SetFloatArrayRegion(a, 0, 6, z);
+    return a;
+  }
+  int n = static_cast<int>(len / step) + 1;
+  if (n < 2) n = 2;
+  if (n > 3000) n = 3000;
+  // Endpoints from the authored control points, exact — getPosTan interpolates and can land
+  // a hair off, and PathInterpolator requires the first/last points to be exactly the path
+  // ends (e.g. (0,0)/(1,1) for an easing curve).
+  const int cnt = path->countPoints();
+  const SkPoint start = cnt > 0 ? path->getPoint(0) : SkPoint{0, 0};
+  const SkPoint end = cnt > 0 ? path->getPoint(cnt - 1) : SkPoint{0, 0};
+  std::vector<float> out;
+  out.reserve(static_cast<std::size_t>(n) * 3);
+  for (int i = 0; i < n; ++i) {
+    const float frac = static_cast<float>(i) / static_cast<float>(n - 1);
+    SkPoint pos{};
+    if (i == 0) pos = start;
+    else if (i == n - 1) pos = end;
+    else if (!meas.getPosTan(frac * len, &pos, nullptr)) continue;
+    out.push_back(frac);
+    out.push_back(pos.fX);
+    out.push_back(pos.fY);
+  }
+  jfloatArray arr = env->NewFloatArray(static_cast<jsize>(out.size()));
+  env->SetFloatArrayRegion(arr, 0, static_cast<jsize>(out.size()), out.data());
+  return arr;
 }
 // @CriticalNative — handle-only.
 void Path_nReset(jlong p) {
@@ -905,6 +947,7 @@ const JNINativeMethod kPath[] = {
     {"nAddOval", "(JFFFFI)V", reinterpret_cast<void*>(Path_nAddOval)},
     {"nAddCircle", "(JFFFI)V", reinterpret_cast<void*>(Path_nAddCircle)},
     {"nAddRoundRect", "(JFFFFFFI)V", reinterpret_cast<void*>(Path_nAddRoundRect)},
+    {"nApproximate", "(JF)[F", reinterpret_cast<void*>(Path_nApproximate)},
     // @CriticalNative (handle-only).
     {"nReset", "(J)V", reinterpret_cast<void*>(Path_nReset)},
     {"nRewind", "(J)V", reinterpret_cast<void*>(Path_nRewind)},
