@@ -309,6 +309,11 @@ class AxmlParser {
       if (const Attr* a = find(attrs, "name")) {
         current_.name = resolve_class_name(out_.package, a->string_value);
       }
+      // android:enabled=false (e.g. F-Droid's panic/disguise launcher aliases) —
+      // a disabled component isn't launchable. Absent → default true.
+      if (const Attr* a = find(attrs, "enabled")) {
+        current_.enabled = a->as_int().value_or(1) != 0;
+      }
     } else if (elem == "intent-filter") {
       in_intent_filter_ = true;
       if_main_ = false;
@@ -353,8 +358,10 @@ const char* axml_status_name(AxmlStatus status) noexcept {
 }
 
 const Activity* Manifest::launcher() const noexcept {
+  // First ENABLED launcher: a disabled MAIN/LAUNCHER component (e.g. a panic-mode
+  // disguise) must not shadow the app's real launcher.
   for (const Activity& a : activities) {
-    if (a.launcher) return &a;
+    if (a.launcher && a.enabled) return &a;
   }
   return nullptr;
 }

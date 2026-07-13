@@ -37,6 +37,7 @@ struct AxmlError {
 struct Activity {
   std::string name;        // fully-qualified class name (resolved against package)
   bool launcher = false;   // has an intent-filter with MAIN + LAUNCHER
+  bool enabled = true;     // android:enabled (default true); disabled ones aren't launchable
 };
 
 struct Manifest {

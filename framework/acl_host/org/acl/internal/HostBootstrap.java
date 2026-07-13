@@ -77,6 +77,12 @@ public final class HostBootstrap {
         void setApplication(android.app.Application a) { this.application = a; }
         @Override public Resources getResources() { return res; }
         @Override public String getPackageName() { return pkg; }
+        @Override public String getOpPackageName() { return pkg; }  // ContentResolver.<init> reads it
+        @Override public int getUserId() { return 0; }              // single-user (system user)
+        @Override public String getAttributionTag() { return null; }
+        @Override public android.content.AttributionSource getAttributionSource() {
+            return new android.content.AttributionSource.Builder(0).setPackageName(pkg).build();
+        }
         // Return the Application (not the base) per Android semantics: framework code keys off
         // it — e.g. WorkManager's on-demand init does getApplicationContext() instanceof
         // Configuration.Provider, which only holds if the Application flows back here.
@@ -96,6 +102,11 @@ public final class HostBootstrap {
         // AppContext has a null base (super(null)), so Context methods not overridden here
         // would NPE. Device-protected (direct-boot) storage isn't modeled → plain storage.
         @Override public boolean isDeviceProtectedStorage() { return false; }
+        private android.content.ContentResolver resolver;  // one per context (PhoneWindow, apps)
+        @Override public android.content.ContentResolver getContentResolver() {
+            if (resolver == null) resolver = new AppContentResolver(this);
+            return resolver;
+        }
         @Override public Resources.Theme getTheme() {
             if (theme == null) theme = res.newTheme();
             return theme;
@@ -283,6 +294,27 @@ public final class HostBootstrap {
         }
     }
 
+    // acl has no ContentProvider host yet (ADR-3): a ContentResolver whose provider lookups
+    // return null, so ContentResolver's concrete query/insert/… yield null/no-op and callers
+    // (e.g. PhoneWindow reading Settings.System) fall back to defaults. Compiled against the
+    // framework classes.jar (the abstract methods + IContentProvider are hidden).
+    static final class AppContentResolver extends android.content.ContentResolver {
+        AppContentResolver(android.content.Context c) { super(c); }
+        // A no-Binder IContentProvider whose calls return defaults (null Cursor/Bundle).
+        // Not null: ContentResolver.call() derefs the provider without a null check, and
+        // PhoneWindow reads Settings via call() — a null provider would NPE.
+        private static android.content.IContentProvider stubProvider() {
+            return (android.content.IContentProvider) noop(android.content.IContentProvider.class);
+        }
+        @Override protected android.content.IContentProvider acquireProvider(
+                android.content.Context c, String name) { return stubProvider(); }
+        @Override protected android.content.IContentProvider acquireUnstableProvider(
+                android.content.Context c, String name) { return stubProvider(); }
+        @Override public boolean releaseProvider(android.content.IContentProvider p) { return false; }
+        @Override public boolean releaseUnstableProvider(android.content.IContentProvider p) { return false; }
+        @Override public void unstableProviderDied(android.content.IContentProvider p) {}
+    }
+
     // acl has no JobScheduler service (ADR-3). Accept schedules (RESULT_SUCCESS) and
     // report no pending jobs so androidx WorkManager's SystemJobScheduler initializes;
     // the jobs are dropped (WorkManager also runs an in-process GreedyScheduler).
@@ -379,7 +411,9 @@ public final class HostBootstrap {
                     .getConstructor(android.content.Context.class).newInstance(ctx);
             setField(android.app.Activity.class, a, "mWindow", window);
         } catch (Throwable t) {
-            System.err.println("acl HostBootstrap: PhoneWindow deferred: " + t);
+            Throwable cause = (t instanceof java.lang.reflect.InvocationTargetException
+                    && t.getCause() != null) ? t.getCause() : t;
+            System.err.println("acl HostBootstrap: PhoneWindow deferred: " + cause);
         }
     }
 
