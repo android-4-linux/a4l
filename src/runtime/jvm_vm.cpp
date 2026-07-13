@@ -24,6 +24,9 @@
 #include "acl_config.h"
 #include "audio/audio.h"
 #include "gfx/gfx.h"
+#if ACL_HAVE_VULKAN
+#include "gfx/gfx_vk.h"  // S3b: VkRenderTarget import_pixels_to_dmabuf
+#endif
 #include "log/log.h"
 #include "runtime/framework_natives.h"
 #include "svc/svc.h"
@@ -1375,6 +1378,79 @@ class ArtVm final : public JniVm {
     log::i(kTag,
            "acl graphics: android.graphics natives registered on Android host Skia "
            "(Bitmap/Canvas/Paint)");
+    graphics_present_demo(env);
+  }
+
+  // S3b (P2.4): the full loop, as a live demo. Gated by ACL_ART_GRAPHICS_DEMO. Drives a
+  // real android.graphics render via JNI (Bitmap/Canvas/Paint on Android's Skia), reads
+  // the Bitmap's pixels (libacl_graphics_jni acl_read_bitmap) into a gfx::Surface, imports
+  // them into a dma-buf (gfx VkRenderTarget), and presents to the Wayland compositor
+  // (zwp_linux_dmabuf_v1). Closes app→android.graphics→Android Skia→dma-buf→Wayland.
+  void graphics_present_demo([[maybe_unused]] JNIEnv* env) {
+#if ACL_HAVE_VULKAN && ACL_HAVE_WCS
+    const char* on = std::getenv("ACL_ART_GRAPHICS_DEMO");
+    if (on == nullptr || *on == '\0') return;
+    constexpr int W = 480, H = 320;
+    constexpr jint kBg = 0xFF204060, kFg = 0xFFCC8844;
+
+    const auto jfail = [&](const char* what) {
+      if (env->ExceptionCheck()) env->ExceptionDescribe();
+      env->ExceptionClear();
+      log::w(kTag, "graphics demo: {} failed", what);
+    };
+
+    // ── Drive a real android.graphics render ────────────────────────────────
+    jclass bitmapC = env->FindClass("android/graphics/Bitmap");
+    jclass configC = env->FindClass("android/graphics/Bitmap$Config");
+    jclass canvasC = env->FindClass("android/graphics/Canvas");
+    jclass paintC = env->FindClass("android/graphics/Paint");
+    if (bitmapC == nullptr || configC == nullptr || canvasC == nullptr || paintC == nullptr)
+      return jfail("FindClass");
+    jfieldID argbF = env->GetStaticFieldID(configC, "ARGB_8888",
+                                           "Landroid/graphics/Bitmap$Config;");
+    jobject argb = env->GetStaticObjectField(configC, argbF);
+    jmethodID createBitmap = env->GetStaticMethodID(
+        bitmapC, "createBitmap",
+        "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
+    jobject bitmap = env->CallStaticObjectMethod(bitmapC, createBitmap, W, H, argb);
+    if (bitmap == nullptr) return jfail("createBitmap");
+    jobject canvas = env->NewObject(canvasC, env->GetMethodID(canvasC, "<init>",
+                                    "(Landroid/graphics/Bitmap;)V"), bitmap);
+    if (canvas == nullptr) return jfail("new Canvas");
+    env->CallVoidMethod(canvas, env->GetMethodID(canvasC, "drawColor", "(I)V"), kBg);
+    jobject paint = env->NewObject(paintC, env->GetMethodID(paintC, "<init>", "()V"));
+    env->CallVoidMethod(paint, env->GetMethodID(paintC, "setColor", "(I)V"), kFg);
+    env->CallVoidMethod(canvas,
+                        env->GetMethodID(canvasC, "drawRect", "(FFFFLandroid/graphics/Paint;)V"),
+                        80.0f, 60.0f, 400.0f, 260.0f, paint);
+    if (env->ExceptionCheck()) return jfail("draw");
+
+    // ── Read the rendered pixels → gfx::Surface ─────────────────────────────
+    const jlong handle = env->CallLongMethod(
+        bitmap, env->GetMethodID(bitmapC, "getNativeInstance", "()J"));
+    auto read = reinterpret_cast<bool (*)(long, std::uint32_t*, int, int)>(
+        ::dlsym(RTLD_DEFAULT, "acl_read_bitmap"));
+    if (read == nullptr) { log::w(kTag, "graphics demo: acl_read_bitmap missing"); return; }
+    std::vector<std::uint32_t> pixels(static_cast<std::size_t>(W) * H);
+    if (!read(handle, pixels.data(), W, H)) {
+      log::w(kTag, "graphics demo: acl_read_bitmap failed");
+      return;
+    }
+    gfx::Surface surf(W, H);
+    surf.blit(pixels.data());
+
+    // ── Import to dma-buf + present to the compositor ───────────────────────
+    std::string err;
+    auto rt = gfx::VkRenderTarget::Create(W, H, &err);
+    if (!rt) { log::w(kTag, "graphics demo: no Vulkan render target: {}", err); return; }
+    wm::DmabufRenderFn render = [&](const std::vector<std::uint64_t>&,
+                                    gfx::DmabufFrame* out) {
+      return rt->import_pixels_to_dmabuf(surf, out, &err);
+    };
+    const bool ok = wm::present_dmabuf(render, "acl graphics", "com.acl.graphics", 3);
+    log::i(kTag, "graphics demo: app→android.graphics→Android Skia→dma-buf→Wayland {}",
+           ok ? "presented" : "did not present (no compositor?)");
+#endif
   }
 
   // Pre-load the framework's system assets (framework-res.apk = the android:R.* resources)

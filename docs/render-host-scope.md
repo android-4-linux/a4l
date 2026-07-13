@@ -132,9 +132,18 @@ device-container model (contradicts ADR-1/host-ART, single-process, no-Binder).
   Android's host Skia, pixels correct (`bg=0xff204060 fg=0xffcc8844`)** — no `@CriticalNative`
   clearing, no AOSP patch, no libhwui rebuild, no container. ~20 natives; the register/ABI mechanism
   is proven, so the rest is filling in ops.
-- **S4 (S3b next)** — back the `Canvas`'s `SkBitmap` with acl's dma-buf `VkImage` (`GrBackendTexture`
-  over the shared `VkDevice`) so app draws land in the presentable surface → present via
-  `zwp_linux_dmabuf_v1` (built, V2b); then grow hwui's DisplayList/RenderThread/damage design.
+- **S3b DONE (2026-07-12) — THE LOOP IS CLOSED, LIVE.** `gfx::VkRenderTarget::import_pixels_to_dmabuf`
+  (shared `ensure_linear_export`) writes CPU pixels into the linear dma-buf; `+ acl_read_bitmap` in
+  libacl_graphics_jni copies a rendered `Bitmap`'s pixels; `ArtVm::graphics_present_demo` (gated
+  `ACL_ART_GRAPHICS_DEMO`) drives a real render via JNI (`createBitmap`→`Canvas`→`drawColor`→`Paint.
+  setColor`→`drawRect`), reads the pixels via `acl_read_bitmap`, imports to the dma-buf, and presents
+  via `present_dmabuf`. **Verified LIVE against GNOME Shell/Mutter: `app → android.graphics → Android's
+  Skia → dma-buf → Wayland`, 3 clean frames.** Unit `[import]` covers the CPU→dma-buf write (163
+  assertions); acl suite green (demo opt-in).
+- **S4 (next)** — the GPU-native zero-copy path: back the `Canvas`'s `SkBitmap` with acl's dma-buf
+  `VkImage` (`GrBackendTexture` over a shared `VkDevice` via `GrVkBackendContext`), so Android's Skia
+  renders straight into the presentable surface (no CPU upload); then grow ops (paths/text) + hwui's
+  DisplayList/RenderThread/damage design + drive from a real `View.draw` (into Gate G2).
 
 The reusable probe `tests/fixtures/art_graphics/Main.java` (real `Bitmap`/`Canvas`/`Paint` via
 reflection) validates whichever backend once S3 lands.

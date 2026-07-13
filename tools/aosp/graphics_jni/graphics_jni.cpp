@@ -171,6 +171,8 @@ jint Paint_nGetFlags(jlong paintPtr) {
 }
 // @FastNative — minikin locale id; no-op (no text in the raster subset).
 jint Paint_nSetTextLocales(JNIEnv*, jclass, jlong, jstring) { return 0; }
+// @CriticalNative — set-by-cached-id fast path; no-op.
+void Paint_nSetTextLocalesByMinikinLocaleListId(jlong, jint) {}
 
 // ── ColorSpace$Rgb (createBitmap's sRGB) ────────────────────────────────────────
 jlong ColorSpaceRgb_nativeCreate(JNIEnv*, jclass, jfloat, jfloat, jfloat, jfloat, jfloat,
@@ -211,6 +213,7 @@ const JNINativeMethod kPaint[] = {
     {"nSetFlags", "(JI)V", reinterpret_cast<void*>(Paint_nSetFlags)},
     {"nGetFlags", "(J)I", reinterpret_cast<void*>(Paint_nGetFlags)},
     {"nSetTextLocales", "(JLjava/lang/String;)I", reinterpret_cast<void*>(Paint_nSetTextLocales)},
+    {"nSetTextLocalesByMinikinLocaleListId", "(JI)V", reinterpret_cast<void*>(Paint_nSetTextLocalesByMinikinLocaleListId)},
 };
 const JNINativeMethod kColorSpaceRgb[] = {
     {"nativeCreate", "(FFFFFFF[F)J", reinterpret_cast<void*>(ColorSpaceRgb_nativeCreate)},
@@ -231,6 +234,17 @@ bool reg(JNIEnv* env, const char* cls, const JNINativeMethod* m, jint n) {
 
 }  // namespace
 
+// S3b: read a rendered Bitmap's pixels (by its native handle) into `dst` as 0xAARRGGBB
+// (kBGRA_8888 on little-endian — the gfx::Surface / dma-buf convention). acl dlsyms this
+// to get the app's android.graphics render output onto the Wayland present path.
+extern "C" bool acl_read_bitmap(long handle, std::uint32_t* dst, int w, int h) {
+  auto* b = reinterpret_cast<AclBitmap*>(handle);
+  if (b == nullptr || dst == nullptr) return false;
+  const SkImageInfo info = SkImageInfo::Make(w, h, kBGRA_8888_SkColorType,
+                                             kUnpremul_SkAlphaType, SkColorSpace::MakeSRGB());
+  return b->bitmap.readPixels(info, dst, static_cast<std::size_t>(w) * 4, 0, 0);
+}
+
 // acl calls this after dlopen. Returns JNI_OK when the minimal graphics floor is bound.
 extern "C" jint register_acl_graphics(JNIEnv* env) {
   jclass bmp = env->FindClass("android/graphics/Bitmap");
@@ -249,7 +263,7 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/Bitmap", kBitmap, 9) && ok;
   ok = reg(env, "android/graphics/Canvas", kCanvas, 2) && ok;
   ok = reg(env, "android/graphics/BaseCanvas", kBaseCanvas, 2) && ok;
-  ok = reg(env, "android/graphics/Paint", kPaint, 7) && ok;
+  ok = reg(env, "android/graphics/Paint", kPaint, 8) && ok;
   ok = reg(env, "android/graphics/ColorSpace$Rgb", kColorSpaceRgb, 2) && ok;
   return ok ? JNI_OK : JNI_ERR;
 }
