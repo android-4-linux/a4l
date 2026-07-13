@@ -590,6 +590,18 @@ class JniVm : public Vm {
     log::i(kTag, "ViewRoot: performTraversals measured={}x{}, laying out {}x{}", mw, mh, w, h);
     env_->CallVoidMethod(view, layout, 0, 0, mw, mh);
 
+    // GPU present: drive the Choreographer-pumped present loop directly (its per-frame
+    // View.draw + looper pump lets async content — Jetpack Compose composes on the frame
+    // clock — render). Skip the one-shot bitmap readback below, which would block on
+    // Compose's first composition.
+    if (config_.present) {
+      if (const char* gpu = std::getenv("ACL_PRESENT_GPU"); gpu != nullptr && *gpu != '\0') {
+        present_content_loop_gpu(view, w, h);
+        env_->DeleteLocalRef(view);
+        return;
+      }
+    }
+
     // Bitmap b = Bitmap.createBitmap(w, h); Canvas c = new Canvas(b); view.draw(c);
     jclass bmp_cls = env_->FindClass("android/graphics/Bitmap");
     jclass canvas_cls = env_->FindClass("android/graphics/Canvas");
