@@ -43,6 +43,7 @@
 #include "SkPath.h"
 #include "SkPathMeasure.h"
 #include "SkPathTypes.h"
+#include "SkRegion.h"
 #include "utils/SkParsePath.h"
 #include "SkRect.h"
 #include "SkRefCnt.h"
@@ -64,6 +65,8 @@ struct AclBitmap {
 struct AclPaint {
   SkPaint paint;
   SkFont font;
+  int textAlign = 0;         // Paint.Align: LEFT=0, CENTER=1, RIGHT=2
+  float letterSpacing = 0;   // em; SkFont has no letter spacing, tracked for get/set parity
 };
 
 // RenderNode shim (ADR-4: hwui dropped, render stack re-owned). acl renders via the GPU
@@ -741,6 +744,100 @@ jlong Paint_nInit(JNIEnv*, jclass) {
   ap->font.setSize(16.0f);  // framework default is ~16px; overridden by nSetTextSize
   return reinterpret_cast<jlong>(ap);
 }
+// Paint(Paint) copy ctor — new AclPaint copied from the source (SkPaint + SkFont copy).
+jlong Paint_nInitWithPaint(JNIEnv*, jclass, jlong src) {
+  auto* s = reinterpret_cast<AclPaint*>(src);
+  return reinterpret_cast<jlong>(s != nullptr ? new AclPaint(*s) : new AclPaint());
+}
+// Mechanical SkPaint/SkFont getters+setters (all @CriticalNative — handle-only). Batched
+// so Material/TextView construction and text layout resolve without one-off UnsatisfiedLinks.
+#define ACLP(ptr) auto* ap = reinterpret_cast<AclPaint*>(ptr)
+jfloat Paint_nGetTextSize(jlong p) { ACLP(p); return ap ? ap->font.getSize() : 0; }
+jint Paint_nGetStyle(jlong p) { ACLP(p); return ap ? static_cast<jint>(ap->paint.getStyle()) : 0; }
+jint Paint_nGetStrokeCap(jlong p) { ACLP(p); return ap ? static_cast<jint>(ap->paint.getStrokeCap()) : 0; }
+jint Paint_nGetStrokeJoin(jlong p) { ACLP(p); return ap ? static_cast<jint>(ap->paint.getStrokeJoin()) : 0; }
+void Paint_nSetStrokeJoin(jlong p, jint j) { ACLP(p); if (ap) ap->paint.setStrokeJoin(static_cast<SkPaint::Join>(j)); }
+jfloat Paint_nGetStrokeMiter(jlong p) { ACLP(p); return ap ? ap->paint.getStrokeMiter() : 0; }
+void Paint_nSetStrokeMiter(jlong p, jfloat m) { ACLP(p); if (ap) ap->paint.setStrokeMiter(m); }
+void Paint_nSetAlpha(jlong p, jint a) { ACLP(p); if (ap) ap->paint.setAlpha(static_cast<U8CPU>(a)); }
+jfloat Paint_nGetTextScaleX(jlong p) { ACLP(p); return ap ? ap->font.getScaleX() : 1; }
+void Paint_nSetTextScaleX(jlong p, jfloat s) { ACLP(p); if (ap) ap->font.setScaleX(s); }
+jfloat Paint_nGetTextSkewX(jlong p) { ACLP(p); return ap ? ap->font.getSkewX() : 0; }
+void Paint_nSetTextSkewX(jlong p, jfloat s) { ACLP(p); if (ap) ap->font.setSkewX(s); }
+void Paint_nSetTypeface(jlong p, jlong tf) { ACLP(p); if (ap) ap->font.setTypeface(sk_ref_sp(reinterpret_cast<SkTypeface*>(tf))); }
+jint Paint_nGetTextAlign(jlong p) { ACLP(p); return ap ? ap->textAlign : 0; }
+void Paint_nSetTextAlign(jlong p, jint a) { ACLP(p); if (ap) ap->textAlign = a; }
+jfloat Paint_nGetLetterSpacing(jlong p) { ACLP(p); return ap ? ap->letterSpacing : 0; }
+void Paint_nSetLetterSpacing(jlong p, jfloat s) { ACLP(p); if (ap) ap->letterSpacing = s; }
+// Filters/effects acl doesn't model yet: color filter is applied (SkColorFilter*), the rest
+// are accepted and ignored. The (JJ)J setters return the incoming handle (Java stores it).
+jlong Paint_nSetColorFilter(jlong p, jlong cf) { ACLP(p); if (ap) ap->paint.setColorFilter(sk_ref_sp(reinterpret_cast<SkColorFilter*>(cf))); return cf; }
+jlong Paint_nSetPathEffect(jlong /*p*/, jlong e) { return e; }
+jlong Paint_nSetMaskFilter(jlong /*p*/, jlong f) { return f; }
+void Paint_nSetShadowLayer(jlong, jfloat, jfloat, jfloat, jlong, jlong) {}
+void Paint_nSetDither(jlong p, jboolean d) { ACLP(p); if (ap) ap->paint.setDither(d); }
+void Paint_nSetLinearText(jlong, jboolean) {}
+void Paint_nSetSubpixelText(jlong p, jboolean on) { ACLP(p); if (ap) ap->font.setSubpixel(on); }
+void Paint_nSetUnderlineText(jlong, jboolean) {}
+jint Paint_nGetHinting(jlong p) { ACLP(p); return ap ? static_cast<jint>(ap->font.getHinting()) : 0; }
+void Paint_nSetHinting(jlong p, jint h) { ACLP(p); if (ap) ap->font.setHinting(static_cast<SkFontHinting>(h)); }
+jfloat Paint_nGetWordSpacing(jlong) { return 0; }
+void Paint_nSetWordSpacing(jlong, jfloat) {}
+jint Paint_nGetStartHyphenEdit(jlong) { return 0; }
+jint Paint_nGetEndHyphenEdit(jlong) { return 0; }
+void Paint_nSetStartHyphenEdit(jlong, jint) {}
+void Paint_nSetEndHyphenEdit(jlong, jint) {}
+void Paint_nSetFontFeatureSettings(JNIEnv*, jclass, jlong, jstring) {}
+void Paint_nSetFakeBoldText(jlong p, jboolean on) { ACLP(p); if (ap) ap->font.setEmbolden(on); }
+void Paint_nSetFilterBitmap(jlong, jboolean) {}
+void Paint_nSetStrikeThruText(jlong, jboolean) {}
+void Paint_nSetUnderlineTextFlag(jlong, jboolean) {}
+jboolean Paint_nIsElegantTextHeight(jlong) { return JNI_FALSE; }
+void Paint_nSetElegantTextHeight(jlong, jboolean) {}
+jboolean Paint_nHasShadowLayer(jlong) { return JNI_FALSE; }
+jfloat Paint_nAscent(jlong p) { ACLP(p); if (!ap) return 0; SkFontMetrics m; ap->font.getMetrics(&m); return m.fAscent; }
+jfloat Paint_nDescent(jlong p) { ACLP(p); if (!ap) return 0; SkFontMetrics m; ap->font.getMetrics(&m); return m.fDescent; }
+jfloat Paint_nGetUnderlinePosition(jlong p) { ACLP(p); if (!ap) return 0; SkFontMetrics m; ap->font.getMetrics(&m); float u = 0; m.hasUnderlinePosition(&u); return u; }
+jfloat Paint_nGetUnderlineThickness(jlong p) { ACLP(p); if (!ap) return 0; SkFontMetrics m; ap->font.getMetrics(&m); float t = 0; m.hasUnderlineThickness(&t); return t; }
+jfloat Paint_nGetStrikeThruPosition(jlong p) { ACLP(p); if (!ap) return 0; SkFontMetrics m; ap->font.getMetrics(&m); return m.fAscent / 2.0f; }
+jfloat Paint_nGetStrikeThruThickness(jlong p) { ACLP(p); if (!ap) return 0; SkFontMetrics m; ap->font.getMetrics(&m); float t = 0; m.hasUnderlineThickness(&t); return t; }
+jboolean Paint_nEqualsForTextMeasurement(jlong a, jlong b) {
+  auto* pa = reinterpret_cast<AclPaint*>(a); auto* pb = reinterpret_cast<AclPaint*>(b);
+  return (pa && pb && pa->font.getSize() == pb->font.getSize()
+          && pa->font.getTypeface() == pb->font.getTypeface()) ? JNI_TRUE : JNI_FALSE;
+}
+// Approximate: the fill path of a shape is the shape itself (no stroke expansion modeled).
+jboolean Paint_nGetFillPath(jlong, jlong src, jlong dst) {
+  auto* s = reinterpret_cast<SkPath*>(src); auto* d = reinterpret_cast<SkPath*>(dst);
+  if (s == nullptr || d == nullptr) return JNI_FALSE;
+  *d = *s;
+  return JNI_TRUE;
+}
+// nGetFontMetrics(paint, Paint$FontMetrics) — fill top/ascent/descent/bottom/leading; return
+// the recommended line spacing.
+jfloat Paint_nGetFontMetrics(JNIEnv* env, jclass, jlong p, jobject fm) {
+  auto* ap = reinterpret_cast<AclPaint*>(p);
+  if (ap == nullptr) return 0;
+  SkFontMetrics m;
+  const float spacing = ap->font.getMetrics(&m);
+  if (fm != nullptr) {
+    static jfieldID ft = nullptr, fa, fd, fb, fl;
+    if (ft == nullptr) {
+      jclass c = env->GetObjectClass(fm);
+      ft = env->GetFieldID(c, "top", "F"); fa = env->GetFieldID(c, "ascent", "F");
+      fd = env->GetFieldID(c, "descent", "F"); fb = env->GetFieldID(c, "bottom", "F");
+      fl = env->GetFieldID(c, "leading", "F");
+    }
+    env->SetFloatField(fm, ft, m.fTop); env->SetFloatField(fm, fa, m.fAscent);
+    env->SetFloatField(fm, fd, m.fDescent); env->SetFloatField(fm, fb, m.fBottom);
+    env->SetFloatField(fm, fl, m.fLeading);
+  }
+  return spacing;
+}
+jboolean Paint_nHasGlyph(JNIEnv*, jclass, jlong p, jint, jstring) {
+  return reinterpret_cast<AclPaint*>(p) != nullptr ? JNI_TRUE : JNI_FALSE;
+}
+#undef ACLP
 jlong Paint_nGetNativeFinalizer(JNIEnv*, jclass) {
   return reinterpret_cast<jlong>(&free_paint);
 }
@@ -1298,6 +1395,128 @@ jint VD_nDraw(JNIEnv* env, jclass, jlong treePtr, jlong canvasPtr, jlong colorFi
   return static_cast<jint>(w * h);
 }
 
+// ── Region (android.graphics.Region) ────────────────────────────────────────────
+// Backed by SkRegion. Region.Op ordinals match SkRegion::Op (DIFFERENCE=0, INTERSECT,
+// UNION, XOR, REVERSE_DIFFERENCE, REPLACE). Used by Material MaterialShapeDrawable.
+SkRegion* region_of(JNIEnv* env, jobject obj) {
+  static jfieldID fid = nullptr;
+  if (obj == nullptr) return nullptr;
+  if (fid == nullptr) fid = env->GetFieldID(env->GetObjectClass(obj), "mNativeRegion", "J");
+  return reinterpret_cast<SkRegion*>(env->GetLongField(obj, fid));
+}
+void rect_to_java(JNIEnv* env, jobject rect, const SkIRect& r) {
+  static jfieldID fl = nullptr, ft, fr, fb;
+  if (fl == nullptr) {
+    jclass c = env->GetObjectClass(rect);
+    fl = env->GetFieldID(c, "left", "I"); ft = env->GetFieldID(c, "top", "I");
+    fr = env->GetFieldID(c, "right", "I"); fb = env->GetFieldID(c, "bottom", "I");
+  }
+  env->SetIntField(rect, fl, r.fLeft); env->SetIntField(rect, ft, r.fTop);
+  env->SetIntField(rect, fr, r.fRight); env->SetIntField(rect, fb, r.fBottom);
+}
+jlong Region_nativeConstructor(JNIEnv*, jclass) { return reinterpret_cast<jlong>(new SkRegion()); }
+void Region_nativeDestructor(JNIEnv*, jclass, jlong r) { delete reinterpret_cast<SkRegion*>(r); }
+void Region_nativeSetRegion(JNIEnv*, jclass, jlong dst, jlong src) {
+  auto* d = reinterpret_cast<SkRegion*>(dst);
+  auto* s = reinterpret_cast<SkRegion*>(src);
+  if (d != nullptr && s != nullptr) *d = *s;
+}
+jboolean Region_nativeSetRect(JNIEnv*, jclass, jlong r, jint l, jint t, jint ri, jint b) {
+  auto* d = reinterpret_cast<SkRegion*>(r);
+  return (d != nullptr && d->setRect(SkIRect::MakeLTRB(l, t, ri, b))) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean Region_nativeSetPath(JNIEnv*, jclass, jlong r, jlong path, jlong clip) {
+  auto* d = reinterpret_cast<SkRegion*>(r);
+  auto* p = reinterpret_cast<SkPath*>(path);
+  auto* c = reinterpret_cast<SkRegion*>(clip);
+  if (d == nullptr || p == nullptr || c == nullptr) return JNI_FALSE;
+  return d->setPath(*p, *c) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean Region_nativeGetBounds(JNIEnv* env, jclass, jlong r, jobject rect) {
+  auto* d = reinterpret_cast<SkRegion*>(r);
+  if (d == nullptr) return JNI_FALSE;
+  rect_to_java(env, rect, d->getBounds());
+  return d->isEmpty() ? JNI_FALSE : JNI_TRUE;
+}
+jboolean Region_nativeGetBoundaryPath(JNIEnv*, jclass, jlong r, jlong path) {
+  auto* d = reinterpret_cast<SkRegion*>(r);
+  auto* p = reinterpret_cast<SkPath*>(path);
+  return (d != nullptr && p != nullptr && d->getBoundaryPath(p)) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean Region_nativeOpIIIII(JNIEnv*, jclass, jlong r, jint l, jint t, jint ri, jint b, jint op) {
+  auto* d = reinterpret_cast<SkRegion*>(r);
+  return (d != nullptr && d->op(SkIRect::MakeLTRB(l, t, ri, b),
+                                static_cast<SkRegion::Op>(op))) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean Region_nativeOpRectRegion(JNIEnv* env, jclass, jlong r, jobject rect, jlong region, jint op) {
+  auto* d = reinterpret_cast<SkRegion*>(r);
+  auto* rgn = reinterpret_cast<SkRegion*>(region);
+  if (d == nullptr || rgn == nullptr) return JNI_FALSE;
+  static jfieldID fl = nullptr, ft, fr, fb;
+  if (fl == nullptr) {
+    jclass c = env->GetObjectClass(rect);
+    fl = env->GetFieldID(c, "left", "I"); ft = env->GetFieldID(c, "top", "I");
+    fr = env->GetFieldID(c, "right", "I"); fb = env->GetFieldID(c, "bottom", "I");
+  }
+  const SkIRect ir = SkIRect::MakeLTRB(env->GetIntField(rect, fl), env->GetIntField(rect, ft),
+                                       env->GetIntField(rect, fr), env->GetIntField(rect, fb));
+  return d->op(ir, *rgn, static_cast<SkRegion::Op>(op)) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean Region_nativeOpRegionRegion(JNIEnv*, jclass, jlong r, jlong a, jlong b, jint op) {
+  auto* d = reinterpret_cast<SkRegion*>(r);
+  auto* ra = reinterpret_cast<SkRegion*>(a);
+  auto* rb = reinterpret_cast<SkRegion*>(b);
+  if (d == nullptr || ra == nullptr || rb == nullptr) return JNI_FALSE;
+  return d->op(*ra, *rb, static_cast<SkRegion::Op>(op)) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean Region_nativeEquals(JNIEnv*, jclass, jlong a, jlong b) {
+  auto* ra = reinterpret_cast<SkRegion*>(a);
+  auto* rb = reinterpret_cast<SkRegion*>(b);
+  return (ra != nullptr && rb != nullptr && *ra == *rb) ? JNI_TRUE : JNI_FALSE;
+}
+jstring Region_nativeToString(JNIEnv* env, jclass, jlong r) {
+  auto* d = reinterpret_cast<SkRegion*>(r);
+  if (d == nullptr) return env->NewStringUTF("Region(null)");
+  const SkIRect& b = d->getBounds();
+  char buf[96];
+  std::snprintf(buf, sizeof(buf), "Region(%d,%d,%d,%d)", b.fLeft, b.fTop, b.fRight, b.fBottom);
+  return env->NewStringUTF(buf);
+}
+jlong Region_nativeCreateFromParcel(JNIEnv*, jclass, jobject) { return reinterpret_cast<jlong>(new SkRegion()); }
+jboolean Region_nativeWriteToParcel(JNIEnv*, jclass, jlong, jobject) { return JNI_FALSE; }
+// Instance methods (read mNativeRegion off the object).
+jboolean Region_isEmpty(JNIEnv* env, jobject o) { auto* r = region_of(env, o); return (r && r->isEmpty()) ? JNI_TRUE : JNI_FALSE; }
+jboolean Region_isRect(JNIEnv* env, jobject o) { auto* r = region_of(env, o); return (r && r->isRect()) ? JNI_TRUE : JNI_FALSE; }
+jboolean Region_isComplex(JNIEnv* env, jobject o) { auto* r = region_of(env, o); return (r && r->isComplex()) ? JNI_TRUE : JNI_FALSE; }
+jboolean Region_contains(JNIEnv* env, jobject o, jint x, jint y) { auto* r = region_of(env, o); return (r && r->contains(x, y)) ? JNI_TRUE : JNI_FALSE; }
+jboolean Region_quickContains(JNIEnv* env, jobject o, jint l, jint t, jint ri, jint b) {
+  auto* r = region_of(env, o); return (r && r->quickContains(SkIRect::MakeLTRB(l, t, ri, b))) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean Region_quickRejectRect(JNIEnv* env, jobject o, jint l, jint t, jint ri, jint b) {
+  auto* r = region_of(env, o); return (r && r->quickReject(SkIRect::MakeLTRB(l, t, ri, b))) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean Region_quickRejectRegion(JNIEnv* env, jobject o, jobject other) {
+  auto* r = region_of(env, o); auto* ro = region_of(env, other);
+  return (r && ro && r->quickReject(*ro)) ? JNI_TRUE : JNI_FALSE;
+}
+void Region_translate(JNIEnv* env, jobject o, jint dx, jint dy, jobject dst) {
+  auto* r = region_of(env, o);
+  if (r == nullptr) return;
+  r->translate(dx, dy, dst != nullptr ? region_of(env, dst) : r);
+}
+void Region_scale(JNIEnv* env, jobject o, jfloat scale, jobject dst) {
+  auto* r = region_of(env, o);
+  if (r == nullptr) return;
+  SkRegion out;
+  for (SkRegion::Iterator it(*r); !it.done(); it.next()) {
+    const SkIRect& s = it.rect();
+    out.op(SkIRect::MakeLTRB(static_cast<int>(s.fLeft * scale), static_cast<int>(s.fTop * scale),
+                             static_cast<int>(s.fRight * scale), static_cast<int>(s.fBottom * scale)),
+           SkRegion::kUnion_Op);
+  }
+  if (auto* d = (dst != nullptr ? region_of(env, dst) : r)) *d = out;
+}
+
 // com.android.internal.util.VirtualRefBasePtr — the tiny ref-counting wrapper Java uses
 // for the VectorDrawable tree (normally in libhwui). Drives our VirtualLightRefBase.
 void VirtualRefBasePtr_nIncStrong(JNIEnv*, jclass, jlong ptr) {
@@ -1379,6 +1598,57 @@ const JNINativeMethod kPath[] = {
 };
 const JNINativeMethod kPaint[] = {
     {"nInit", "()J", reinterpret_cast<void*>(Paint_nInit)},
+    {"nInitWithPaint", "(J)J", reinterpret_cast<void*>(Paint_nInitWithPaint)},
+    {"nGetTextSize", "(J)F", reinterpret_cast<void*>(Paint_nGetTextSize)},
+    {"nGetStyle", "(J)I", reinterpret_cast<void*>(Paint_nGetStyle)},
+    {"nGetStrokeCap", "(J)I", reinterpret_cast<void*>(Paint_nGetStrokeCap)},
+    {"nGetStrokeJoin", "(J)I", reinterpret_cast<void*>(Paint_nGetStrokeJoin)},
+    {"nSetStrokeJoin", "(JI)V", reinterpret_cast<void*>(Paint_nSetStrokeJoin)},
+    {"nGetStrokeMiter", "(J)F", reinterpret_cast<void*>(Paint_nGetStrokeMiter)},
+    {"nSetStrokeMiter", "(JF)V", reinterpret_cast<void*>(Paint_nSetStrokeMiter)},
+    {"nSetAlpha", "(JI)V", reinterpret_cast<void*>(Paint_nSetAlpha)},
+    {"nGetTextScaleX", "(J)F", reinterpret_cast<void*>(Paint_nGetTextScaleX)},
+    {"nSetTextScaleX", "(JF)V", reinterpret_cast<void*>(Paint_nSetTextScaleX)},
+    {"nGetTextSkewX", "(J)F", reinterpret_cast<void*>(Paint_nGetTextSkewX)},
+    {"nSetTextSkewX", "(JF)V", reinterpret_cast<void*>(Paint_nSetTextSkewX)},
+    {"nSetTypeface", "(JJ)V", reinterpret_cast<void*>(Paint_nSetTypeface)},
+    {"nGetTextAlign", "(J)I", reinterpret_cast<void*>(Paint_nGetTextAlign)},
+    {"nSetTextAlign", "(JI)V", reinterpret_cast<void*>(Paint_nSetTextAlign)},
+    {"nGetLetterSpacing", "(J)F", reinterpret_cast<void*>(Paint_nGetLetterSpacing)},
+    {"nSetLetterSpacing", "(JF)V", reinterpret_cast<void*>(Paint_nSetLetterSpacing)},
+    {"nSetColorFilter", "(JJ)J", reinterpret_cast<void*>(Paint_nSetColorFilter)},
+    {"nSetPathEffect", "(JJ)J", reinterpret_cast<void*>(Paint_nSetPathEffect)},
+    {"nSetMaskFilter", "(JJ)J", reinterpret_cast<void*>(Paint_nSetMaskFilter)},
+    {"nSetShadowLayer", "(JFFFJJ)V", reinterpret_cast<void*>(Paint_nSetShadowLayer)},
+    {"nSetDither", "(JZ)V", reinterpret_cast<void*>(Paint_nSetDither)},
+    {"nSetLinearText", "(JZ)V", reinterpret_cast<void*>(Paint_nSetLinearText)},
+    {"nSetSubpixelText", "(JZ)V", reinterpret_cast<void*>(Paint_nSetSubpixelText)},
+    {"nSetUnderlineText", "(JZ)V", reinterpret_cast<void*>(Paint_nSetUnderlineText)},
+    {"nGetHinting", "(J)I", reinterpret_cast<void*>(Paint_nGetHinting)},
+    {"nSetHinting", "(JI)V", reinterpret_cast<void*>(Paint_nSetHinting)},
+    {"nGetWordSpacing", "(J)F", reinterpret_cast<void*>(Paint_nGetWordSpacing)},
+    {"nSetWordSpacing", "(JF)V", reinterpret_cast<void*>(Paint_nSetWordSpacing)},
+    {"nGetStartHyphenEdit", "(J)I", reinterpret_cast<void*>(Paint_nGetStartHyphenEdit)},
+    {"nGetEndHyphenEdit", "(J)I", reinterpret_cast<void*>(Paint_nGetEndHyphenEdit)},
+    {"nSetStartHyphenEdit", "(JI)V", reinterpret_cast<void*>(Paint_nSetStartHyphenEdit)},
+    {"nSetEndHyphenEdit", "(JI)V", reinterpret_cast<void*>(Paint_nSetEndHyphenEdit)},
+    {"nSetFontFeatureSettings", "(JLjava/lang/String;)V", reinterpret_cast<void*>(Paint_nSetFontFeatureSettings)},
+    {"nSetFakeBoldText", "(JZ)V", reinterpret_cast<void*>(Paint_nSetFakeBoldText)},
+    {"nSetFilterBitmap", "(JZ)V", reinterpret_cast<void*>(Paint_nSetFilterBitmap)},
+    {"nSetStrikeThruText", "(JZ)V", reinterpret_cast<void*>(Paint_nSetStrikeThruText)},
+    {"nIsElegantTextHeight", "(J)Z", reinterpret_cast<void*>(Paint_nIsElegantTextHeight)},
+    {"nSetElegantTextHeight", "(JZ)V", reinterpret_cast<void*>(Paint_nSetElegantTextHeight)},
+    {"nHasShadowLayer", "(J)Z", reinterpret_cast<void*>(Paint_nHasShadowLayer)},
+    {"nAscent", "(J)F", reinterpret_cast<void*>(Paint_nAscent)},
+    {"nDescent", "(J)F", reinterpret_cast<void*>(Paint_nDescent)},
+    {"nGetUnderlinePosition", "(J)F", reinterpret_cast<void*>(Paint_nGetUnderlinePosition)},
+    {"nGetUnderlineThickness", "(J)F", reinterpret_cast<void*>(Paint_nGetUnderlineThickness)},
+    {"nGetStrikeThruPosition", "(J)F", reinterpret_cast<void*>(Paint_nGetStrikeThruPosition)},
+    {"nGetStrikeThruThickness", "(J)F", reinterpret_cast<void*>(Paint_nGetStrikeThruThickness)},
+    {"nEqualsForTextMeasurement", "(JJ)Z", reinterpret_cast<void*>(Paint_nEqualsForTextMeasurement)},
+    {"nGetFillPath", "(JJJ)Z", reinterpret_cast<void*>(Paint_nGetFillPath)},
+    {"nGetFontMetrics", "(JLandroid/graphics/Paint$FontMetrics;)F", reinterpret_cast<void*>(Paint_nGetFontMetrics)},
+    {"nHasGlyph", "(JILjava/lang/String;)Z", reinterpret_cast<void*>(Paint_nHasGlyph)},
     {"nGetNativeFinalizer", "()J", reinterpret_cast<void*>(Paint_nGetNativeFinalizer)},
     {"nSetColor", "(JI)V", reinterpret_cast<void*>(Paint_nSetColor)},
     {"nReset", "(J)V", reinterpret_cast<void*>(Paint_nReset)},
@@ -1510,6 +1780,31 @@ const JNINativeMethod kColorSpaceRgb[] = {
      reinterpret_cast<void*>(ColorSpaceRgb_nativeGetNativeFinalizer)},
 };
 
+const JNINativeMethod kRegion[] = {
+    {"isEmpty", "()Z", reinterpret_cast<void*>(Region_isEmpty)},
+    {"isRect", "()Z", reinterpret_cast<void*>(Region_isRect)},
+    {"isComplex", "()Z", reinterpret_cast<void*>(Region_isComplex)},
+    {"contains", "(II)Z", reinterpret_cast<void*>(Region_contains)},
+    {"quickContains", "(IIII)Z", reinterpret_cast<void*>(Region_quickContains)},
+    {"quickReject", "(IIII)Z", reinterpret_cast<void*>(Region_quickRejectRect)},
+    {"quickReject", "(Landroid/graphics/Region;)Z", reinterpret_cast<void*>(Region_quickRejectRegion)},
+    {"translate", "(IILandroid/graphics/Region;)V", reinterpret_cast<void*>(Region_translate)},
+    {"scale", "(FLandroid/graphics/Region;)V", reinterpret_cast<void*>(Region_scale)},
+    {"nativeEquals", "(JJ)Z", reinterpret_cast<void*>(Region_nativeEquals)},
+    {"nativeConstructor", "()J", reinterpret_cast<void*>(Region_nativeConstructor)},
+    {"nativeDestructor", "(J)V", reinterpret_cast<void*>(Region_nativeDestructor)},
+    {"nativeSetRegion", "(JJ)V", reinterpret_cast<void*>(Region_nativeSetRegion)},
+    {"nativeSetRect", "(JIIII)Z", reinterpret_cast<void*>(Region_nativeSetRect)},
+    {"nativeSetPath", "(JJJ)Z", reinterpret_cast<void*>(Region_nativeSetPath)},
+    {"nativeGetBounds", "(JLandroid/graphics/Rect;)Z", reinterpret_cast<void*>(Region_nativeGetBounds)},
+    {"nativeGetBoundaryPath", "(JJ)Z", reinterpret_cast<void*>(Region_nativeGetBoundaryPath)},
+    {"nativeOp", "(JIIIII)Z", reinterpret_cast<void*>(Region_nativeOpIIIII)},
+    {"nativeOp", "(JLandroid/graphics/Rect;JI)Z", reinterpret_cast<void*>(Region_nativeOpRectRegion)},
+    {"nativeOp", "(JJJI)Z", reinterpret_cast<void*>(Region_nativeOpRegionRegion)},
+    {"nativeCreateFromParcel", "(Landroid/os/Parcel;)J", reinterpret_cast<void*>(Region_nativeCreateFromParcel)},
+    {"nativeWriteToParcel", "(JLandroid/os/Parcel;)Z", reinterpret_cast<void*>(Region_nativeWriteToParcel)},
+    {"nativeToString", "(J)Ljava/lang/String;", reinterpret_cast<void*>(Region_nativeToString)},
+};
 const JNINativeMethod kVirtualRefBasePtr[] = {
     {"nIncStrong", "(J)V", reinterpret_cast<void*>(VirtualRefBasePtr_nIncStrong)},
     {"nDecStrong", "(J)V", reinterpret_cast<void*>(VirtualRefBasePtr_nDecStrong)},
@@ -1639,6 +1934,7 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/LinearGradient", kLinearGradient, n(kLinearGradient)) && ok;
   ok = reg(env, "android/graphics/RadialGradient", kRadialGradient, n(kRadialGradient)) && ok;
   ok = reg(env, "android/graphics/ColorSpace$Rgb", kColorSpaceRgb, n(kColorSpaceRgb)) && ok;
+  ok = reg(env, "android/graphics/Region", kRegion, n(kRegion)) && ok;
   ok = reg(env, "com/android/internal/util/VirtualRefBasePtr", kVirtualRefBasePtr, n(kVirtualRefBasePtr)) && ok;
   ok = reg(env, "android/util/PathParser", kPathParser, n(kPathParser)) && ok;
   ok = reg(env, "android/graphics/drawable/VectorDrawable", kVectorDrawable, n(kVectorDrawable)) && ok;
