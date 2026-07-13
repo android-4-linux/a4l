@@ -15,7 +15,10 @@
 
 #include <cstdint>
 
+#include <atomic>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -56,6 +59,26 @@ struct AclBitmap {
 struct AclPaint {
   SkPaint paint;
   SkFont font;
+};
+
+// RenderNode shim (ADR-4: hwui dropped, render stack re-owned). acl renders via the GPU
+// (Ganesh Vulkan → dma-buf), but immediate-mode: a Canvas over an SkSurface is NOT a
+// RecordingCanvas, so the framework's View.draw() sees isHardwareAccelerated()==false and
+// calls onDraw directly onto the (GPU or Bitmap) Canvas — hwui's RenderNode display-list
+// recording is bypassed either way. So this only tracks the geometry/transform state the
+// View reads back; recording/animation are no-ops. Lets the real android.view.View
+// construct + measure/layout on host ART; the real present is the Vulkan Canvas (begin_frame).
+struct AclRenderNode {
+  int left = 0, top = 0, right = 0, bottom = 0;
+  float alpha = 1.0f, cameraDistance = 0.0f;
+  float translationX = 0, translationY = 0, translationZ = 0, elevation = 0;
+  float rotation = 0, rotationX = 0, rotationY = 0;
+  float scaleX = 1.0f, scaleY = 1.0f;
+  float pivotX = 0, pivotY = 0;
+  bool pivotExplicit = false;
+  int layerType = 0, spotShadowColor = 0, ambientShadowColor = 0;
+  bool clipToBounds = true, clipToOutline = false, allowForceDark = true;
+  bool hasOverlappingRendering = true;
 };
 
 // A shared default typeface for text, resolved once. The AOSP host Skia default SkFontMgr
@@ -99,6 +122,7 @@ void free_canvas(void* p) {
 void free_path(void* p) { delete reinterpret_cast<SkPath*>(p); }
 void free_matrix(void* p) { delete reinterpret_cast<SkMatrix*>(p); }
 void free_shader(void* p) { SkSafeUnref(reinterpret_cast<SkShader*>(p)); }
+void free_rendernode(void* p) { delete reinterpret_cast<AclRenderNode*>(p); }
 void free_colorspace(void* p) { SkSafeUnref(reinterpret_cast<SkColorSpace*>(p)); }
 
 // android.graphics.Bitmap.Config.nativeInt -> SkColorType (ARGB_8888 == 5).
@@ -505,6 +529,154 @@ jlong Shader_nativeGetFinalizer(JNIEnv*, jclass) {
   return reinterpret_cast<jlong>(&free_shader);
 }
 
+// ── RenderNode (hwui display-list node) — state-tracking shim over AclRenderNode ──
+// nCreate/nGetNativeFinalizer + the object/matrix/animator ops are NORMAL (env,jclass);
+// all the geometry/transform get/set are @CriticalNative (handle-only).
+AclRenderNode* rnode(jlong h) { return reinterpret_cast<AclRenderNode*>(h); }
+
+// Profiling bucket for a non-optimal path (ADR-4 hwui-drop RenderNode shim): how many
+// RenderNodes the framework created. Read via acl_graphics_profile() to prioritize which
+// non-optimal paths (if any) get hit hot enough to warrant a real implementation.
+std::atomic<std::uint64_t> g_rn_nodes{0};
+
+jlong RenderNode_nCreate(JNIEnv*, jclass, jstring) {
+  g_rn_nodes.fetch_add(1, std::memory_order_relaxed);
+  return reinterpret_cast<jlong>(new AclRenderNode());
+}
+jlong RenderNode_nGetNativeFinalizer(JNIEnv*, jclass) {
+  return reinterpret_cast<jlong>(&free_rendernode);
+}
+void RenderNode_nOutput(JNIEnv*, jclass, jlong) {}
+jint RenderNode_nGetUsageSize(JNIEnv*, jclass, jlong) { return 0; }
+jint RenderNode_nGetAllocatedSize(JNIEnv*, jclass, jlong) { return 0; }
+void RenderNode_nRequestPositionUpdates(JNIEnv*, jclass, jlong, jobject) {}
+void RenderNode_nAddAnimator(JNIEnv*, jclass, jlong, jlong) {}
+void RenderNode_nEndAllAnimators(JNIEnv*, jclass, jlong) {}
+void RenderNode_nForceEndAnimators(JNIEnv*, jclass, jlong) {}
+
+// @CriticalNative (handle-only). Macros for the uniform get/set forms; setters return
+// JNI_TRUE ("value changed"), which at worst requests an extra redraw — harmless.
+#define RN_SETF(fn, field) \
+  jboolean fn(jlong h, jfloat v) { auto* n = rnode(h); if (n) n->field = v; return JNI_TRUE; }
+#define RN_GETF(fn, field) \
+  jfloat fn(jlong h) { auto* n = rnode(h); return n ? n->field : 0.0f; }
+#define RN_SETI(fn, field) \
+  jboolean fn(jlong h, jint v) { auto* n = rnode(h); if (n) n->field = v; return JNI_TRUE; }
+#define RN_GETI(fn, field) \
+  jint fn(jlong h) { auto* n = rnode(h); return n ? n->field : 0; }
+#define RN_SETB(fn, field) \
+  jboolean fn(jlong h, jboolean v) { auto* n = rnode(h); if (n) n->field = (v != JNI_FALSE); return JNI_TRUE; }
+#define RN_GETB(fn, field) \
+  jboolean fn(jlong h) { auto* n = rnode(h); return (n && n->field) ? JNI_TRUE : JNI_FALSE; }
+#define RN_NOPB(fn) jboolean fn(jlong) { return JNI_TRUE; }
+
+void RenderNode_nDiscardDisplayList(jlong) {}
+jboolean RenderNode_nIsValid(jlong) { return JNI_TRUE; }
+void RenderNode_nGetTransformMatrix(jlong, jlong m) {
+  if (auto* mat = reinterpret_cast<SkMatrix*>(m)) mat->reset();
+}
+void RenderNode_nGetInverseTransformMatrix(jlong, jlong m) {
+  if (auto* mat = reinterpret_cast<SkMatrix*>(m)) mat->reset();
+}
+jboolean RenderNode_nHasIdentityMatrix(jlong) { return JNI_TRUE; }
+jboolean RenderNode_nOffsetTopAndBottom(jlong h, jint off) {
+  auto* n = rnode(h); if (n) { n->top += off; n->bottom += off; } return JNI_TRUE;
+}
+jboolean RenderNode_nOffsetLeftAndRight(jlong h, jint off) {
+  auto* n = rnode(h); if (n) { n->left += off; n->right += off; } return JNI_TRUE;
+}
+jboolean RenderNode_nSetLeftTopRightBottom(jlong h, jint l, jint t, jint r, jint b) {
+  auto* n = rnode(h); if (n) { n->left = l; n->top = t; n->right = r; n->bottom = b; } return JNI_TRUE;
+}
+RN_SETI(RenderNode_nSetLeft, left)
+RN_SETI(RenderNode_nSetTop, top)
+RN_SETI(RenderNode_nSetRight, right)
+RN_SETI(RenderNode_nSetBottom, bottom)
+RN_GETI(RenderNode_nGetLeft, left)
+RN_GETI(RenderNode_nGetTop, top)
+RN_GETI(RenderNode_nGetRight, right)
+RN_GETI(RenderNode_nGetBottom, bottom)
+jint RenderNode_nGetWidth(jlong h) { auto* n = rnode(h); return n ? n->right - n->left : 0; }
+jint RenderNode_nGetHeight(jlong h) { auto* n = rnode(h); return n ? n->bottom - n->top : 0; }
+RN_SETF(RenderNode_nSetCameraDistance, cameraDistance)
+RN_GETF(RenderNode_nGetCameraDistance, cameraDistance)
+jboolean RenderNode_nSetPivotX(jlong h, jfloat v) {
+  auto* n = rnode(h); if (n) { n->pivotX = v; n->pivotExplicit = true; } return JNI_TRUE;
+}
+jboolean RenderNode_nSetPivotY(jlong h, jfloat v) {
+  auto* n = rnode(h); if (n) { n->pivotY = v; n->pivotExplicit = true; } return JNI_TRUE;
+}
+jboolean RenderNode_nResetPivot(jlong h) {
+  auto* n = rnode(h); if (n) n->pivotExplicit = false; return JNI_TRUE;
+}
+RN_GETF(RenderNode_nGetPivotX, pivotX)
+RN_GETF(RenderNode_nGetPivotY, pivotY)
+jboolean RenderNode_nIsPivotExplicitlySet(jlong h) {
+  auto* n = rnode(h); return (n && n->pivotExplicit) ? JNI_TRUE : JNI_FALSE;
+}
+RN_SETI(RenderNode_nSetLayerType, layerType)
+RN_GETI(RenderNode_nGetLayerType, layerType)
+jboolean RenderNode_nSetLayerPaint(jlong, jlong) { return JNI_TRUE; }
+RN_SETB(RenderNode_nSetClipToBounds, clipToBounds)
+RN_GETB(RenderNode_nGetClipToBounds, clipToBounds)
+jboolean RenderNode_nSetClipBounds(jlong, jint, jint, jint, jint) { return JNI_TRUE; }
+RN_NOPB(RenderNode_nSetClipBoundsEmpty)
+RN_NOPB(RenderNode_nSetProjectBackwards)
+RN_NOPB(RenderNode_nSetProjectionReceiver)
+jboolean RenderNode_nSetOutlineRoundRect(jlong, jint, jint, jint, jint, jfloat, jfloat) {
+  return JNI_TRUE;
+}
+jboolean RenderNode_nSetOutlinePath(jlong, jlong, jfloat) { return JNI_TRUE; }
+RN_NOPB(RenderNode_nSetOutlineEmpty)
+RN_NOPB(RenderNode_nSetOutlineNone)
+RN_NOPB(RenderNode_nClearStretch)
+jboolean RenderNode_nStretch(jlong, jfloat, jfloat, jfloat, jfloat) { return JNI_TRUE; }
+jboolean RenderNode_nHasShadow(jlong) { return JNI_FALSE; }
+RN_SETI(RenderNode_nSetSpotShadowColor, spotShadowColor)
+RN_SETI(RenderNode_nSetAmbientShadowColor, ambientShadowColor)
+RN_GETI(RenderNode_nGetSpotShadowColor, spotShadowColor)
+RN_GETI(RenderNode_nGetAmbientShadowColor, ambientShadowColor)
+RN_SETB(RenderNode_nSetClipToOutline, clipToOutline)
+RN_GETB(RenderNode_nGetClipToOutline, clipToOutline)
+jboolean RenderNode_nSetRevealClip(jlong, jboolean, jfloat, jfloat, jfloat) { return JNI_TRUE; }
+RN_SETF(RenderNode_nSetAlpha, alpha)
+RN_GETF(RenderNode_nGetAlpha, alpha)
+jboolean RenderNode_nSetRenderEffect(jlong, jlong) { return JNI_TRUE; }
+RN_SETB(RenderNode_nSetHasOverlappingRendering, hasOverlappingRendering)
+RN_GETB(RenderNode_nHasOverlappingRendering, hasOverlappingRendering)
+void RenderNode_nSetUsageHint(jlong, jint) {}
+RN_SETF(RenderNode_nSetElevation, elevation)
+RN_GETF(RenderNode_nGetElevation, elevation)
+RN_SETF(RenderNode_nSetTranslationX, translationX)
+RN_SETF(RenderNode_nSetTranslationY, translationY)
+RN_SETF(RenderNode_nSetTranslationZ, translationZ)
+RN_GETF(RenderNode_nGetTranslationX, translationX)
+RN_GETF(RenderNode_nGetTranslationY, translationY)
+RN_GETF(RenderNode_nGetTranslationZ, translationZ)
+RN_SETF(RenderNode_nSetRotation, rotation)
+RN_SETF(RenderNode_nSetRotationX, rotationX)
+RN_SETF(RenderNode_nSetRotationY, rotationY)
+RN_GETF(RenderNode_nGetRotation, rotation)
+RN_GETF(RenderNode_nGetRotationX, rotationX)
+RN_GETF(RenderNode_nGetRotationY, rotationY)
+RN_SETF(RenderNode_nSetScaleX, scaleX)
+RN_SETF(RenderNode_nSetScaleY, scaleY)
+RN_GETF(RenderNode_nGetScaleX, scaleX)
+RN_GETF(RenderNode_nGetScaleY, scaleY)
+jboolean RenderNode_nSetStaticMatrix(jlong, jlong) { return JNI_TRUE; }
+jboolean RenderNode_nSetAnimationMatrix(jlong, jlong) { return JNI_TRUE; }
+jboolean RenderNode_nGetAnimationMatrix(jlong, jlong) { return JNI_FALSE; }
+RN_SETB(RenderNode_nSetAllowForceDark, allowForceDark)
+RN_GETB(RenderNode_nGetAllowForceDark, allowForceDark)
+jlong RenderNode_nGetUniqueId(jlong h) { return h; }
+#undef RN_SETF
+#undef RN_GETF
+#undef RN_SETI
+#undef RN_GETI
+#undef RN_SETB
+#undef RN_GETB
+#undef RN_NOPB
+
 // ── Paint ─────────────────────────────────────────────────────────────────────
 jlong Paint_nInit(JNIEnv*, jclass) {
   auto* ap = new AclPaint();
@@ -756,6 +928,101 @@ const JNINativeMethod kLinearGradient[] = {
 const JNINativeMethod kRadialGradient[] = {
     {"nativeCreate", "(JFFFFFF[J[FIJ)J", reinterpret_cast<void*>(RadialGradient_nativeCreate)},
 };
+#define RNM(name, sig, fn) {name, sig, reinterpret_cast<void*>(fn)}
+const JNINativeMethod kRenderNode[] = {
+    // normal (env, jclass)
+    RNM("nCreate", "(Ljava/lang/String;)J", RenderNode_nCreate),
+    RNM("nGetNativeFinalizer", "()J", RenderNode_nGetNativeFinalizer),
+    RNM("nOutput", "(J)V", RenderNode_nOutput),
+    RNM("nGetUsageSize", "(J)I", RenderNode_nGetUsageSize),
+    RNM("nGetAllocatedSize", "(J)I", RenderNode_nGetAllocatedSize),
+    RNM("nRequestPositionUpdates", "(JLjava/lang/ref/WeakReference;)V",
+        RenderNode_nRequestPositionUpdates),
+    RNM("nAddAnimator", "(JJ)V", RenderNode_nAddAnimator),
+    RNM("nEndAllAnimators", "(J)V", RenderNode_nEndAllAnimators),
+    RNM("nForceEndAnimators", "(J)V", RenderNode_nForceEndAnimators),
+    // @CriticalNative (handle-only)
+    RNM("nDiscardDisplayList", "(J)V", RenderNode_nDiscardDisplayList),
+    RNM("nIsValid", "(J)Z", RenderNode_nIsValid),
+    RNM("nGetTransformMatrix", "(JJ)V", RenderNode_nGetTransformMatrix),
+    RNM("nGetInverseTransformMatrix", "(JJ)V", RenderNode_nGetInverseTransformMatrix),
+    RNM("nHasIdentityMatrix", "(J)Z", RenderNode_nHasIdentityMatrix),
+    RNM("nOffsetTopAndBottom", "(JI)Z", RenderNode_nOffsetTopAndBottom),
+    RNM("nOffsetLeftAndRight", "(JI)Z", RenderNode_nOffsetLeftAndRight),
+    RNM("nSetLeftTopRightBottom", "(JIIII)Z", RenderNode_nSetLeftTopRightBottom),
+    RNM("nSetLeft", "(JI)Z", RenderNode_nSetLeft),
+    RNM("nSetTop", "(JI)Z", RenderNode_nSetTop),
+    RNM("nSetRight", "(JI)Z", RenderNode_nSetRight),
+    RNM("nSetBottom", "(JI)Z", RenderNode_nSetBottom),
+    RNM("nGetLeft", "(J)I", RenderNode_nGetLeft),
+    RNM("nGetTop", "(J)I", RenderNode_nGetTop),
+    RNM("nGetRight", "(J)I", RenderNode_nGetRight),
+    RNM("nGetBottom", "(J)I", RenderNode_nGetBottom),
+    RNM("nSetCameraDistance", "(JF)Z", RenderNode_nSetCameraDistance),
+    RNM("nSetPivotY", "(JF)Z", RenderNode_nSetPivotY),
+    RNM("nSetPivotX", "(JF)Z", RenderNode_nSetPivotX),
+    RNM("nResetPivot", "(J)Z", RenderNode_nResetPivot),
+    RNM("nSetLayerType", "(JI)Z", RenderNode_nSetLayerType),
+    RNM("nGetLayerType", "(J)I", RenderNode_nGetLayerType),
+    RNM("nSetLayerPaint", "(JJ)Z", RenderNode_nSetLayerPaint),
+    RNM("nSetClipToBounds", "(JZ)Z", RenderNode_nSetClipToBounds),
+    RNM("nGetClipToBounds", "(J)Z", RenderNode_nGetClipToBounds),
+    RNM("nSetClipBounds", "(JIIII)Z", RenderNode_nSetClipBounds),
+    RNM("nSetClipBoundsEmpty", "(J)Z", RenderNode_nSetClipBoundsEmpty),
+    RNM("nSetProjectBackwards", "(JZ)Z", RenderNode_nSetProjectBackwards),
+    RNM("nSetProjectionReceiver", "(JZ)Z", RenderNode_nSetProjectionReceiver),
+    RNM("nSetOutlineRoundRect", "(JIIIIFF)Z", RenderNode_nSetOutlineRoundRect),
+    RNM("nSetOutlinePath", "(JJF)Z", RenderNode_nSetOutlinePath),
+    RNM("nSetOutlineEmpty", "(J)Z", RenderNode_nSetOutlineEmpty),
+    RNM("nSetOutlineNone", "(J)Z", RenderNode_nSetOutlineNone),
+    RNM("nClearStretch", "(J)Z", RenderNode_nClearStretch),
+    RNM("nStretch", "(JFFFF)Z", RenderNode_nStretch),
+    RNM("nHasShadow", "(J)Z", RenderNode_nHasShadow),
+    RNM("nSetSpotShadowColor", "(JI)Z", RenderNode_nSetSpotShadowColor),
+    RNM("nSetAmbientShadowColor", "(JI)Z", RenderNode_nSetAmbientShadowColor),
+    RNM("nGetSpotShadowColor", "(J)I", RenderNode_nGetSpotShadowColor),
+    RNM("nGetAmbientShadowColor", "(J)I", RenderNode_nGetAmbientShadowColor),
+    RNM("nSetClipToOutline", "(JZ)Z", RenderNode_nSetClipToOutline),
+    RNM("nSetRevealClip", "(JZFFF)Z", RenderNode_nSetRevealClip),
+    RNM("nSetAlpha", "(JF)Z", RenderNode_nSetAlpha),
+    RNM("nSetRenderEffect", "(JJ)Z", RenderNode_nSetRenderEffect),
+    RNM("nSetHasOverlappingRendering", "(JZ)Z", RenderNode_nSetHasOverlappingRendering),
+    RNM("nSetUsageHint", "(JI)V", RenderNode_nSetUsageHint),
+    RNM("nSetElevation", "(JF)Z", RenderNode_nSetElevation),
+    RNM("nSetTranslationX", "(JF)Z", RenderNode_nSetTranslationX),
+    RNM("nSetTranslationY", "(JF)Z", RenderNode_nSetTranslationY),
+    RNM("nSetTranslationZ", "(JF)Z", RenderNode_nSetTranslationZ),
+    RNM("nSetRotation", "(JF)Z", RenderNode_nSetRotation),
+    RNM("nSetRotationX", "(JF)Z", RenderNode_nSetRotationX),
+    RNM("nSetRotationY", "(JF)Z", RenderNode_nSetRotationY),
+    RNM("nSetScaleX", "(JF)Z", RenderNode_nSetScaleX),
+    RNM("nSetScaleY", "(JF)Z", RenderNode_nSetScaleY),
+    RNM("nSetStaticMatrix", "(JJ)Z", RenderNode_nSetStaticMatrix),
+    RNM("nSetAnimationMatrix", "(JJ)Z", RenderNode_nSetAnimationMatrix),
+    RNM("nHasOverlappingRendering", "(J)Z", RenderNode_nHasOverlappingRendering),
+    RNM("nGetAnimationMatrix", "(JJ)Z", RenderNode_nGetAnimationMatrix),
+    RNM("nGetClipToOutline", "(J)Z", RenderNode_nGetClipToOutline),
+    RNM("nGetAlpha", "(J)F", RenderNode_nGetAlpha),
+    RNM("nGetCameraDistance", "(J)F", RenderNode_nGetCameraDistance),
+    RNM("nGetScaleX", "(J)F", RenderNode_nGetScaleX),
+    RNM("nGetScaleY", "(J)F", RenderNode_nGetScaleY),
+    RNM("nGetElevation", "(J)F", RenderNode_nGetElevation),
+    RNM("nGetTranslationX", "(J)F", RenderNode_nGetTranslationX),
+    RNM("nGetTranslationY", "(J)F", RenderNode_nGetTranslationY),
+    RNM("nGetTranslationZ", "(J)F", RenderNode_nGetTranslationZ),
+    RNM("nGetRotation", "(J)F", RenderNode_nGetRotation),
+    RNM("nGetRotationX", "(J)F", RenderNode_nGetRotationX),
+    RNM("nGetRotationY", "(J)F", RenderNode_nGetRotationY),
+    RNM("nIsPivotExplicitlySet", "(J)Z", RenderNode_nIsPivotExplicitlySet),
+    RNM("nGetPivotX", "(J)F", RenderNode_nGetPivotX),
+    RNM("nGetPivotY", "(J)F", RenderNode_nGetPivotY),
+    RNM("nGetWidth", "(J)I", RenderNode_nGetWidth),
+    RNM("nGetHeight", "(J)I", RenderNode_nGetHeight),
+    RNM("nSetAllowForceDark", "(JZ)Z", RenderNode_nSetAllowForceDark),
+    RNM("nGetAllowForceDark", "(J)Z", RenderNode_nGetAllowForceDark),
+    RNM("nGetUniqueId", "(J)J", RenderNode_nGetUniqueId),
+};
+#undef RNM
 const JNINativeMethod kColorSpaceRgb[] = {
     {"nativeCreate", "(FFFFFFF[F)J", reinterpret_cast<void*>(ColorSpaceRgb_nativeCreate)},
     {"nativeGetNativeFinalizer", "()J",
@@ -786,6 +1053,12 @@ extern "C" bool acl_read_bitmap(long handle, std::uint32_t* dst, int w, int h) {
   return b->bitmap.readPixels(info, dst, static_cast<std::size_t>(w) * 4, 0, 0);
 }
 
+// Profiling: bucket counts of non-optimal paths, for prioritising real implementations
+// before the final optimal path. Today: RenderNode shim nodes created (ADR-4 hwui-drop).
+extern "C" std::uint64_t acl_graphics_profile_rendernodes() {
+  return g_rn_nodes.load(std::memory_order_relaxed);
+}
+
 // acl calls this after dlopen. Returns JNI_OK when the minimal graphics floor is bound.
 extern "C" jint register_acl_graphics(JNIEnv* env) {
   jclass bmp = env->FindClass("android/graphics/Bitmap");
@@ -807,6 +1080,7 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/BaseCanvas", kBaseCanvas, n(kBaseCanvas)) && ok;
   ok = reg(env, "android/graphics/Path", kPath, n(kPath)) && ok;
   ok = reg(env, "android/graphics/Matrix", kMatrix, n(kMatrix)) && ok;
+  ok = reg(env, "android/graphics/RenderNode", kRenderNode, n(kRenderNode)) && ok;
   ok = reg(env, "android/graphics/Paint", kPaint, n(kPaint)) && ok;
   ok = reg(env, "android/graphics/Shader", kShader, n(kShader)) && ok;
   ok = reg(env, "android/graphics/LinearGradient", kLinearGradient, n(kLinearGradient)) && ok;

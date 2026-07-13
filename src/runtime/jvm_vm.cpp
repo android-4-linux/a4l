@@ -1505,15 +1505,50 @@ class ArtVm final : public JniVm {
   // null, and framework callers (ViewConfiguration, WindowManagerGlobal, …) fall back to
   // their no-service defaults. The Java-visible Manager APIs are served by svc/, not Binder.
   void register_no_binder(JNIEnv* env) {
-    jclass c = env->FindClass("com/android/internal/os/BinderInternal");
-    if (c == nullptr) { env->ExceptionClear(); return; }
-    JNINativeMethod m[] = {
-        {const_cast<char*>("getContextObject"), const_cast<char*>("()Landroid/os/IBinder;"),
-         reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jobject { return nullptr; })},
-    };
-    if (env->RegisterNatives(c, m, 1) != JNI_OK) env->ExceptionClear();
-    env->DeleteLocalRef(c);
-    log::i(kTag, "ART native floor: BinderInternal.getContextObject stubbed (no Binder, ADR-3)");
+    if (jclass c = env->FindClass("com/android/internal/os/BinderInternal")) {
+      JNINativeMethod m[] = {
+          {const_cast<char*>("getContextObject"), const_cast<char*>("()Landroid/os/IBinder;"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jobject { return nullptr; })},
+      };
+      if (env->RegisterNatives(c, m, 1) != JNI_OK) env->ExceptionClear();
+      env->DeleteLocalRef(c);
+    } else {
+      env->ExceptionClear();
+    }
+    // android.os.Binder identity statics: no Binder, so a single fixed in-process identity.
+    if (jclass c = env->FindClass("android/os/Binder")) {
+      JNINativeMethod m[] = {
+          {const_cast<char*>("getCallingUid"), const_cast<char*>("()I"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jint { return 1000; })},
+          {const_cast<char*>("getCallingPid"), const_cast<char*>("()I"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jint { return 0; })},
+          {const_cast<char*>("clearCallingIdentity"), const_cast<char*>("()J"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jlong { return 0; })},
+          {const_cast<char*>("restoreCallingIdentity"), const_cast<char*>("(J)V"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) {})},
+          // Binder object construction (getNativeBBinderHolder) → a non-null sentinel (the
+          // NativeAllocationRegistry rejects null). A Binder with no native backing: framework
+          // client stubs (e.g. IAccessibilityManagerClient) construct fine; they only fail if
+          // actually transacted, which has no service to reach anyway. The no-op finalizer
+          // below never frees the shared sentinel.
+          {const_cast<char*>("getNativeBBinderHolder"), const_cast<char*>("()J"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jlong {
+             static int holder = 0;
+             return reinterpret_cast<jlong>(&holder);
+           })},
+          // The NativeAllocationRegistry finalizer for a Binder holder → a no-op free (the
+          // holder is 0, so there is nothing to free).
+          {const_cast<char*>("getNativeFinalizer"), const_cast<char*>("()J"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jlong {
+             return reinterpret_cast<jlong>(static_cast<void (*)(void*)>(+[](void*) {}));
+           })},
+      };
+      if (env->RegisterNatives(c, m, 6) != JNI_OK) env->ExceptionClear();
+      env->DeleteLocalRef(c);
+    } else {
+      env->ExceptionClear();
+    }
+    log::i(kTag, "ART native floor: Binder/BinderInternal stubbed (no Binder, ADR-3)");
   }
 
   // P2.4/V3 (render): load acl's own android.graphics natives (libacl_graphics_jni, built

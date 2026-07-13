@@ -31,6 +31,9 @@ public class Main {
         public int getDisplayId() { return 0; }
         @Override public Object getSystemService(String name) { return null; }
         @Override public Resources.Theme getTheme() { return null; }
+        @Override public android.os.Looper getMainLooper() {
+            return android.os.Looper.getMainLooper();
+        }
         @Override public android.content.pm.ApplicationInfo getApplicationInfo() {
             return new android.content.pm.ApplicationInfo();
         }
@@ -96,6 +99,7 @@ public class Main {
 
     public static void main(String[] args) throws Exception {
         seedNoBinderServiceManager();
+        if (android.os.Looper.myLooper() == null) android.os.Looper.prepareMainLooper();
         final int W = 240, H = 160;
         DrawView v = new DrawView(new ViewContext());
         v.measure(View.MeasureSpec.makeMeasureSpec(W, View.MeasureSpec.EXACTLY),
