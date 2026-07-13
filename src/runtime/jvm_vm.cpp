@@ -1636,8 +1636,11 @@ class ArtVm final : public JniVm {
            reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jlong {
              return reinterpret_cast<jlong>(static_cast<void (*)(void*)>(+[](void*) {}));
            })},
+          // Called from MessageQueue.next on background looper threads (no Binder to flush).
+          {const_cast<char*>("flushPendingCommands"), const_cast<char*>("()V"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass) {})},
       };
-      if (env->RegisterNatives(c, m, 6) != JNI_OK) env->ExceptionClear();
+      if (env->RegisterNatives(c, m, 7) != JNI_OK) env->ExceptionClear();
       env->DeleteLocalRef(c);
     } else {
       env->ExceptionClear();

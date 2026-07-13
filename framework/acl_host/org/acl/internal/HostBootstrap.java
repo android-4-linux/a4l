@@ -100,6 +100,10 @@ public final class HostBootstrap {
             }
             return null;
         }
+        // getSystemService(Class) → getSystemServiceName(Class) → getSystemService(String).
+        // No service map, so return null name → getSystemService(Class) yields null (Managers
+        // are svc/-routed later, ADR-2). @hide, so compiled against the framework classes.jar.
+        @Override public String getSystemServiceName(Class<?> serviceClass) { return null; }
 
         // File-backed SharedPreferences (real android.app.SharedPreferencesImpl over a temp
         // dir) — apps read/write prefs in Application.onCreate. No app data dir yet, so a temp.
@@ -144,6 +148,23 @@ public final class HostBootstrap {
         // sees the app classes) — resource/XML inflation resolves app classes through this.
         @Override public ClassLoader getClassLoader() {
             return getClass().getClassLoader();
+        }
+        // No Binder/PMS (ADR-3) → a defaulted PackageManager (StubPackageManager) with the
+        // app-meaningful bits: getPackageInfo throws NameNotFoundException (queries resolve as
+        // "not installed"), getPackageName is the app's.
+        private android.content.pm.PackageManager pm;
+        @Override public android.content.pm.PackageManager getPackageManager() {
+            if (pm == null) pm = new AppPackageManager(pkg);
+            return pm;
+        }
+    }
+
+    static final class AppPackageManager extends StubPackageManager {
+        private final String pkg;
+        AppPackageManager(String pkg) { this.pkg = pkg; }
+        @Override public android.content.pm.PackageInfo getPackageInfo(String p, int flags)
+                throws android.content.pm.PackageManager.NameNotFoundException {
+            throw new android.content.pm.PackageManager.NameNotFoundException(p);
         }
     }
 
