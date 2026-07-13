@@ -126,6 +126,32 @@ using DmabufRenderFn = std::function<bool(
 // tick for now (static present). Returns true on a clean run.
 bool present_dmabuf(const DmabufRenderFn& render, std::string_view title,
                     std::string_view app_id, int frames) noexcept;
+
+// A per-frame dma-buf producer for the animated GPU present loop (S4b): called once per
+// vsync tick with the presenter-chosen `buffer_index` (which of the producer's ping-pong
+// dma-buf images to render into — the presenter guarantees that image is free, i.e. the
+// compositor has released it), the compositor's advertised XRGB8888 modifiers, the frame's
+// vsync-aligned time (ns; Choreographer's frameTimeNanos), and a monotonically increasing
+// index. Render the frame GPU-native into image `buffer_index` (begin_frame → View.draw →
+// end_frame(buffer_index)) and return its descriptor in `out`. Each buffer_index maps to a
+// stable fd/layout, so the presenter builds one wl_buffer per index and reuses it. Return
+// false to end the loop (the analogue of removing the frame callback).
+using DmabufFrameFn = std::function<bool(
+    int buffer_index, const std::vector<std::uint64_t>& advertised_modifiers,
+    std::uint64_t frame_time_ns, std::uint64_t frame_index, gfx::DmabufFrame* out)>;
+
+// Run a continuous dma-buf present loop driven by wl_surface.frame (vsync), calling
+// `render` each tick to produce the next GPU-native frame into a free ping-pong buffer and
+// presenting it under an xdg_toplevel titled `title`/`app_id`. Double-buffered: the next
+// frame renders into the buffer the compositor has released (tracked via wl_buffer.release)
+// while it holds the other, so the frame-callback/release cycle keeps flowing. `input` (may
+// be empty) delivers pointer/key/IME events. Presents until `render` returns false,
+// `max_frames` frames are shown (0 = unbounded), or the toplevel closes. Returns true on a
+// clean stop.
+bool present_dmabuf_loop(int width, int height, std::string_view title,
+                         std::string_view app_id, const DmabufFrameFn& render,
+                         const InputCallback& input, bool want_ime = false,
+                         std::uint64_t max_frames = 0) noexcept;
 #endif  // ACL_HAVE_VULKAN && ACL_HAVE_WCS
 
 const char* module_name() noexcept;

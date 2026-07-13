@@ -500,8 +500,14 @@ class JniVm : public Vm {
           if (describe != nullptr) env_->CallVoidMethod(bmp, describe);
           // Present the content view in a Wayland window (--present), driving a
           // Choreographer loop: each vsync tick fires the app's frame callbacks and
-          // re-draws. No-op if no compositor / built without wcs.
-          if (config_.present) present_content_loop(view, bmp, canvas, w, h);
+          // re-draws. No-op if no compositor / built without wcs. ACL_PRESENT_GPU routes
+          // to the GPU-native dma-buf loop (View.draw on Ganesh Vulkan); default is the
+          // mature shm loop (which also carries input/IME).
+          if (config_.present) {
+            const char* gpu = std::getenv("ACL_PRESENT_GPU");
+            if (gpu != nullptr && *gpu != '\0') present_content_loop_gpu(view, w, h);
+            else present_content_loop(view, bmp, canvas, w, h);
+          }
           env_->DeleteLocalRef(canvas);
         }
       }
@@ -677,6 +683,97 @@ class JniVm : public Vm {
     if (motionevent_cls != nullptr) env_->DeleteGlobalRef(motionevent_cls);
     if (keyevent_cls != nullptr) env_->DeleteGlobalRef(keyevent_cls);
     if (input_conn != nullptr) env_->DeleteGlobalRef(input_conn);
+  }
+
+  // S4b step 2: present the content view GPU-native. Each vsync tick, the app's
+  // View.draw runs on a real android.graphics.Canvas backed by the Ganesh Vulkan
+  // surface (begin_frame → Choreographer.doFrame → View.draw → end_frame), and the
+  // resulting modifier-tiled dma-buf is presented via zwp_linux_dmabuf_v1 — no CPU
+  // upload. Input/IME are not yet delivered on this path (the shm path carries them);
+  // gated by ACL_PRESENT_GPU so the mature interactive shm loop stays the default.
+  void present_content_loop_gpu(jobject view, int w, int h) {
+#if ACL_HAVE_VULKAN && ACL_HAVE_WCS
+    if (!wm::wayland_available()) {
+      log::i(kTag, "--present(gpu): no Wayland compositor reachable; frame not shown");
+      return;
+    }
+    struct AclDmabuf {
+      int fd;
+      std::uint32_t width, height, plane_count;
+      std::uint32_t offsets[4], strides[4];
+      std::uint64_t modifier;
+      std::uint32_t drm_format;
+    };
+    auto begin = reinterpret_cast<long (*)(int, int)>(
+        ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_begin_frame"));
+    auto finish = reinterpret_cast<bool (*)(int, AclDmabuf*)>(
+        ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_end_frame"));
+    if (begin == nullptr || finish == nullptr) {
+      log::w(kTag, "--present(gpu): begin/end frame missing (libacl_graphics_jni?)");
+      return;
+    }
+    // Wrap the persistent GPU SkSurface canvas once; begin_frame clears it each tick.
+    const jlong ch = begin(w, h);
+    if (ch == 0) { log::w(kTag, "--present(gpu): begin_frame failed"); return; }
+    jclass canvasC = env_->FindClass("android/graphics/Canvas");
+    jmethodID cctor = canvasC ? env_->GetMethodID(canvasC, "<init>", "(J)V") : nullptr;
+    jobject canvas = cctor ? env_->NewObject(canvasC, cctor, ch) : nullptr;
+    if (canvas == nullptr) { clear_exception(); log::w(kTag, "--present(gpu): Canvas(long) failed"); return; }
+    jclass vcls = env_->GetObjectClass(view);
+    jmethodID draw = env_->GetMethodID(vcls, "draw", "(Landroid/graphics/Canvas;)V");
+    env_->DeleteLocalRef(vcls);
+
+    jobject choreo = nullptr;
+    jmethodID do_frame = nullptr;
+    if (jclass ch_cls = env_->FindClass("android/view/Choreographer")) {
+      if (jmethodID gi = env_->GetStaticMethodID(ch_cls, "getInstance",
+                                                 "()Landroid/view/Choreographer;"))
+        choreo = env_->CallStaticObjectMethod(ch_cls, gi);
+      do_frame = env_->GetMethodID(ch_cls, "aclDoFrame", "(J)J");
+      env_->DeleteLocalRef(ch_cls);
+    }
+    clear_exception();
+
+    const wm::DmabufFrameFn render = [&](int bufidx, const std::vector<std::uint64_t>&,
+                                         std::uint64_t frame_time_ns, std::uint64_t idx,
+                                         gfx::DmabufFrame* out) -> bool {
+      if (idx > 0 && begin(w, h) == 0) return false;  // re-arm + clear (frame 0 pre-armed)
+      if (choreo != nullptr && do_frame != nullptr)
+        env_->CallLongMethod(choreo, do_frame, static_cast<jlong>(frame_time_ns));
+      if (env_->ExceptionCheck() == JNI_TRUE) { fail_with_exception("Choreographer.doFrame"); return false; }
+      if (draw != nullptr) env_->CallVoidMethod(view, draw, canvas);
+      if (env_->ExceptionCheck() == JNI_TRUE) { fail_with_exception("View.draw"); return false; }
+      AclDmabuf f{};
+      if (!finish(bufidx, &f) || f.fd < 0) return false;
+      gfx::DmabufFrame fr{};
+      fr.fd = f.fd;
+      fr.width = f.width;
+      fr.height = f.height;
+      fr.plane_count = f.plane_count;
+      for (std::uint32_t i = 0; i < f.plane_count && i < 4; ++i) {
+        fr.planes[i].offset = f.offsets[i];
+        fr.planes[i].stride = f.strides[i];
+      }
+      fr.modifier = f.modifier;
+      fr.drm_format = f.drm_format;
+      fr.modifier_tiled = f.modifier != 0;
+      *out = fr;
+      return true;
+    };
+    const std::string& pkg = config_.package_name;
+    const wm::InputCallback no_input;  // input is CPU-path-only for now
+    const bool ok = wm::present_dmabuf_loop(w, h, pkg.empty() ? "acl" : pkg,
+                                            pkg.empty() ? "org.acl.app" : pkg, render,
+                                            no_input, /*want_ime=*/false,
+                                            config_.present_frames);
+    log::i(kTag, "--present(gpu): View.draw → Ganesh Vulkan → dma-buf → Wayland {} (zero-copy)",
+           ok ? "presented" : "did not present");
+    if (choreo != nullptr) env_->DeleteLocalRef(choreo);
+    if (canvas != nullptr) env_->DeleteLocalRef(canvas);
+    if (canvasC != nullptr) env_->DeleteLocalRef(canvasC);
+#else
+    (void)view; (void)w; (void)h;
+#endif
   }
 
   // Map a Linux evdev scancode to an Android KeyEvent keycode (a small practical
@@ -1422,6 +1519,73 @@ class ArtVm final : public JniVm {
       return wm::present_dmabuf(present, title, "com.acl.graphics", 3);
     };
 
+    // S4b step 2: ANIMATED GPU loop — a real android.graphics.Canvas re-draws a moving
+    // rect each vsync tick onto the Ganesh Vulkan surface, presented via the per-frame
+    // dma-buf loop (begin_frame → drawColor/drawRect → end_frame → present). Proves the
+    // continuous GPU present path (present_dmabuf_loop) end-to-end. Gated by
+    // ACL_ART_GRAPHICS_GPU_LOOP; frame count from the value (default 60).
+    if (const char* gl = std::getenv("ACL_ART_GRAPHICS_GPU_LOOP");
+        gl != nullptr && *gl != '\0') {
+      const std::uint64_t frames = std::strtoull(gl, nullptr, 10) > 1
+                                       ? std::strtoull(gl, nullptr, 10) : 60;
+      auto begin = reinterpret_cast<long (*)(int, int)>(
+          ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_begin_frame"));
+      auto finish = reinterpret_cast<bool (*)(int, AclDmabuf*)>(
+          ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_end_frame"));
+      if (begin == nullptr || finish == nullptr) {
+        log::w(kTag, "graphics demo(gpu-loop): begin/end frame missing");
+        return;
+      }
+      const jlong ch = begin(W, H);
+      if (ch == 0) { log::w(kTag, "graphics demo(gpu-loop): begin_frame failed"); return; }
+      jclass canvasC = env->FindClass("android/graphics/Canvas");
+      jclass paintC = env->FindClass("android/graphics/Paint");
+      if (canvasC == nullptr || paintC == nullptr) { env->ExceptionClear(); return; }
+      jobject canvas = env->NewObject(
+          canvasC, env->GetMethodID(canvasC, "<init>", "(J)V"), ch);
+      jobject paint = env->NewObject(paintC, env->GetMethodID(paintC, "<init>", "()V"));
+      if (canvas == nullptr || paint == nullptr) { env->ExceptionClear(); return; }
+      const jmethodID drawColor = env->GetMethodID(canvasC, "drawColor", "(I)V");
+      const jmethodID setColor = env->GetMethodID(paintC, "setColor", "(I)V");
+      const jmethodID drawRect =
+          env->GetMethodID(canvasC, "drawRect", "(FFFFLandroid/graphics/Paint;)V");
+      env->CallVoidMethod(paint, setColor, kFg);
+      const wm::DmabufFrameFn render = [&](int bufidx, const std::vector<std::uint64_t>&,
+                                           std::uint64_t, std::uint64_t idx,
+                                           gfx::DmabufFrame* out) -> bool {
+        if (idx > 0 && begin(W, H) == 0) return false;  // re-arm + clear
+        // A rect sweeping horizontally so successive frames visibly differ.
+        const float x = 20.0f + static_cast<float>((idx * 8) % 360);
+        env->CallVoidMethod(canvas, drawColor, kBg);
+        env->CallVoidMethod(canvas, drawRect, x, 60.0f, x + 100.0f, 260.0f, paint);
+        if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionClear(); return false; }
+        AclDmabuf f{};
+        if (!finish(bufidx, &f) || f.fd < 0) return false;
+        gfx::DmabufFrame fr{};
+        fr.fd = f.fd;
+        fr.width = f.width;
+        fr.height = f.height;
+        fr.plane_count = f.plane_count;
+        for (std::uint32_t i = 0; i < f.plane_count && i < 4; ++i) {
+          fr.planes[i].offset = f.offsets[i];
+          fr.planes[i].stride = f.strides[i];
+        }
+        fr.modifier = f.modifier;
+        fr.drm_format = f.drm_format;
+        fr.modifier_tiled = f.modifier != 0;
+        *out = fr;
+        return true;
+      };
+      const wm::InputCallback no_input;
+      const bool ok = wm::present_dmabuf_loop(W, H, "acl graphics (GPU loop)",
+                                              "com.acl.graphics", render, no_input, false,
+                                              frames);
+      log::i(kTag, "graphics demo(gpu-loop): {} animated frame(s), real Canvas → Ganesh "
+                   "Vulkan → dma-buf → Wayland {} (zero-copy)", frames,
+             ok ? "presented" : "not presented");
+      return;
+    }
+
     // S4b: drive the app's REAL android.graphics.Canvas onto the GPU surface (not a
     // hardcoded C++ scene). Real Canvas ops → Android Skia Ganesh Vulkan → tiled dma-buf →
     // Wayland, zero-copy. Gated by ACL_ART_GRAPHICS_GPU_CANVAS.
@@ -1429,7 +1593,7 @@ class ArtVm final : public JniVm {
         gc != nullptr && *gc != '\0') {
       auto begin = reinterpret_cast<long (*)(int, int)>(
           ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_begin_frame"));
-      auto finish = reinterpret_cast<bool (*)(AclDmabuf*)>(
+      auto finish = reinterpret_cast<bool (*)(int, AclDmabuf*)>(
           ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_end_frame"));
       if (begin == nullptr || finish == nullptr) {
         log::w(kTag, "graphics demo(gpu-canvas): begin/end frame missing");
@@ -1459,7 +1623,7 @@ class ArtVm final : public JniVm {
           80.0f, 60.0f, 400.0f, 260.0f, paint);
       if (env->ExceptionCheck()) return jfail2("draw");
       AclDmabuf f{};
-      if (!finish(&f) || f.fd < 0) {
+      if (!finish(0, &f) || f.fd < 0) {
         log::w(kTag, "graphics demo(gpu-canvas): end_frame failed");
         return;
       }

@@ -19,6 +19,8 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <ctime>
+#include <vector>
 
 #include <poll.h>
 #include <unistd.h>
@@ -54,6 +56,10 @@ constexpr const char* kTag = "acl.wm.dmabuf";
 // dma-buf export uses. Hardcoded so wm/ needn't pull in libdrm (the value is stable).
 constexpr std::uint32_t kDrmFormatXrgb8888 = 0x34325258u;
 
+// Poll timeout / keep-alive self-tick interval (ms) for the animated loop when the
+// compositor withholds frame callbacks (occluded surface). ~30 Hz fallback.
+constexpr int kTickMs = 33;
+
 // Event-less globals use WlPtr::Attach; interfaces with events use handler subclasses.
 class CompositorH : public CWlCompositor<CompositorH> {};
 class SurfaceH : public CWlSurface<SurfaceH> {};
@@ -82,12 +88,42 @@ class BufferParamsH
 // and OnDmabufLegacyFormat (v1–v3 fallback) via the wcs binding, and drives xdg-shell.
 class Presenter {
  public:
+  // Static present: render once, re-attach the same frame each tick.
   bool run(const DmabufRenderFn& render, std::string_view title,
            std::string_view app_id, int frames) noexcept {
+    max_frames_ = frames < 0 ? 0 : static_cast<std::uint64_t>(frames);
+    if (!setup(title, app_id)) return false;
+    // Ask the producer for a frame targeting one of the advertised modifiers.
+    gfx::DmabufFrame frame;
+    if (!render(mods_, &frame) || frame.fd < 0) {
+      log::w(kTag, "dmabuf present: producer did not yield a frame");
+      return false;
+    }
+    log::i(kTag, "dmabuf present: {}x{} {} modifier=0x{:x} {} plane(s)", frame.width,
+           frame.height, frame.modifier_tiled ? "tiled" : "linear", frame.modifier,
+           frame.plane_count);
+    if (!build_buffer(frame)) return false;
+    return present_loop();
+  }
+
+  // Animated present (S4b): render a fresh GPU frame each vsync tick into a free ping-pong
+  // buffer. `input`/`want_ime` are accepted for API parity; wl_seat/text-input binding is a
+  // follow-up (the shm path carries input today), so they are unused here for now.
+  bool run_loop(const DmabufFrameFn& render, const InputCallback& /*input*/,
+                bool /*want_ime*/, std::string_view title, std::string_view app_id,
+                std::uint64_t max_frames) noexcept {
+    max_frames_ = max_frames;
+    if (!setup(title, app_id)) return false;
+    frame_fn_ = &render;
+    return present_loop_dynamic();
+  }
+
+  // Connect, bind (wl_compositor / xdg_wm_base / zwp_linux_dmabuf_v1), learn the advertised
+  // modifiers, create the surface + xdg_toplevel, and commit-for-configure. Shared by the
+  // static and animated present paths.
+  bool setup(std::string_view title, std::string_view app_id) noexcept {
     title_ = std::string(title);
     app_id_ = std::string(app_id);
-    max_frames_ = frames < 0 ? 0 : static_cast<std::uint64_t>(frames);
-
     if (!display_.Connect(nullptr)) {
       log::w(kTag, "dmabuf present: no Wayland display (WAYLAND_DISPLAY)");
       return false;
@@ -112,7 +148,6 @@ class Presenter {
       log::w(kTag, "dmabuf present: compositor/xdg_wm_base not advertised");
       return false;
     }
-
     if (wl_proxy* raw = registry_.Bind<wl_compositor_traits>(
             comp_name_, std::min(comp_ver_, wl_compositor_traits::version)))
       comp_.Attach(raw);
@@ -128,24 +163,10 @@ class Presenter {
     if (!wl::RoundtripWithTimeout(display_.Get())) return false;
     if (feedback_.BoundVersion() < 4) feedback_.CommitLegacy();
 
-    const std::vector<std::uint64_t> mods =
-        feedback_.Current().ModifiersFor(kDrmFormatXrgb8888);
+    mods_ = feedback_.Current().ModifiersFor(kDrmFormatXrgb8888);
     log::i(kTag, "dmabuf present: compositor advertises {} modifier(s) for XRGB8888",
-           mods.size());
+           mods_.size());
 
-    // Ask the producer for a frame targeting one of the advertised modifiers.
-    gfx::DmabufFrame frame;
-    if (!render(mods, &frame) || frame.fd < 0) {
-      log::w(kTag, "dmabuf present: producer did not yield a frame");
-      return false;
-    }
-    log::i(kTag, "dmabuf present: {}x{} {} modifier=0x{:x} {} plane(s)", frame.width,
-           frame.height, frame.modifier_tiled ? "tiled" : "linear", frame.modifier,
-           frame.plane_count);
-
-    if (!build_buffer(frame)) return false;
-
-    // Surface + xdg toplevel.
     if (!wl::SetupHandler(surface_, wl::construct<wl_surface_traits,
                           wl_compositor_traits::Op::CreateSurface>(*comp_.Get())))
       return false;
@@ -167,8 +188,7 @@ class Presenter {
     // Commit (no buffer) to elicit the initial configure, then present.
     surface_.Get()->Commit();
     (void)wl::RoundtripWithTimeout(display_.Get());
-
-    return present_loop();
+    return true;
   }
 
   // wl::DmabufFeedback<Presenter> callbacks.
@@ -200,6 +220,39 @@ class Presenter {
     w_ = static_cast<int>(frame.width);
     h_ = static_cast<int>(frame.height);
     return true;
+  }
+
+  // Build the wl_buffer for ping-pong slot `s` from its (stable) dma-buf frame. Each slot's
+  // wl_buffer.release clears its own busy flag.
+  bool build_slot(int s, const gfx::DmabufFrame& frame) noexcept {
+    wl_proxy* praw = feedback_.CreateParams();
+    if (praw == nullptr) { log::w(kTag, "dmabuf present(loop): create_params failed"); return false; }
+    // A fresh, per-build params object (event-less for create_immed) — destroyed at scope
+    // end. A shared member would trip WlPtr::Attach's non-null assert on the second slot.
+    wl::WlPtr<BufferParamsH> params;
+    params.Attach(praw);
+    for (std::uint32_t i = 0; i < frame.plane_count; ++i) {
+      params.Get()->Add(frame.fd, i, frame.planes[i].offset, frame.planes[i].stride,
+                        static_cast<std::uint32_t>(frame.modifier >> 32u),
+                        static_cast<std::uint32_t>(frame.modifier & 0xffffffffu));
+    }
+    wl_proxy* braw = wl::construct<wl_buffer_traits,
+                                   dmabuf::zwp_linux_buffer_params_v1_traits::Op::CreateImmed>(
+        *params.Get(), static_cast<std::int32_t>(frame.width),
+        static_cast<std::int32_t>(frame.height), frame.drm_format, 0u);
+    if (braw == nullptr) { log::w(kTag, "dmabuf present(loop): create_immed failed"); return false; }
+    slots_[s].handler._SetProxy(braw);
+    slots_[s].handler.busy = &slots_[s].busy;
+    slots_[s].built = true;
+    w_ = static_cast<int>(frame.width);
+    h_ = static_cast<int>(frame.height);
+    return true;
+  }
+
+  int free_slot() const noexcept {
+    for (int i = 0; i < kSlots; ++i)
+      if (!slots_[i].busy) return i;
+    return -1;
   }
 
   bool present_loop() noexcept {
@@ -236,6 +289,65 @@ class Presenter {
     return clean;
   }
 
+  // Animated loop (S4b): each vsync tick (wl_surface.frame — the compositor is ready for the
+  // next frame), pick a FREE ping-pong buffer (one the compositor has released), render the
+  // next GPU frame into it via frame_fn_, and present it. Double-buffered: the compositor
+  // holds one image while we render the other, so the frame-callback/release cycle keeps
+  // flowing (a single buffer would stall — the compositor holds it for scanout and won't
+  // release or re-tick). end_frame fence-waits for the GPU copy before Commit.
+  bool present_loop_dynamic() noexcept {
+    while (!closed_) {
+      if (configured_ && need_frame_ && free_slot() >= 0 &&
+          (max_frames_ == 0 || frame_index_ < max_frames_)) {
+        const int s = free_slot();
+        need_frame_ = false;
+        gfx::DmabufFrame frame;
+        if (!(*frame_fn_)(s, mods_, frame_time_ns(), frame_index_, &frame) || frame.fd < 0)
+          break;
+        if (!slots_[s].built && !build_slot(s, frame)) break;
+        if (frame_index_ == 0)
+          log::i(kTag, "dmabuf present(loop): {}x{} {} modifier=0x{:x} {} plane(s), {} buffers",
+                 frame.width, frame.height, frame.modifier_tiled ? "tiled" : "linear",
+                 frame.modifier, frame.plane_count, kSlots);
+        if (wl_proxy* raw = wl::construct<wl_callback_traits, wl_surface_traits::Op::Frame>(
+                *surface_.Get()))
+          frame_._SetProxy(raw);
+        slots_[s].busy = true;
+        surface_.Get()->Attach(slots_[s].handler.GetProxy(), 0, 0);
+        surface_.Get()->Damage(0, 0, w_, h_);
+        surface_.Get()->Commit();
+        ++frame_index_;
+      }
+      if (max_frames_ != 0 && frame_index_ >= max_frames_ && frame_callbacks_ >= max_frames_)
+        break;
+      while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
+      pollfd pfd{wl_display_get_fd(display_.Get()), POLLIN, 0};
+      const int n = poll(&pfd, 1, kTickMs);
+      if (n < 0 && errno != EINTR) break;
+      if (n > 0 && (pfd.revents & POLLIN)) {
+        if (wl_display_dispatch(display_.Get()) < 0) break;
+      } else if (n == 0) {
+        // No frame callback within kTickMs — the compositor is throttling us (the surface
+        // is occluded/unmapped, so wl_surface.frame legitimately stops). Keep the animation
+        // progressing with a self-tick; when the surface is visible, POLLIN wins first and
+        // we run at the compositor's vsync cadence instead.
+        wl_display_dispatch_pending(display_.Get());
+        need_frame_ = true;
+      }
+    }
+    const bool clean = frame_index_ > 0 && (closed_ || frame_callbacks_ >= frame_index_);
+    log::i(kTag, "dmabuf present(loop): {} frame(s), {} callback(s); {} ({})", frame_index_,
+           frame_callbacks_, closed_ ? "toplevel closed" : "done", clean ? "clean" : "aborted");
+    return clean;
+  }
+
+  static std::uint64_t frame_time_ns() noexcept {
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull +
+           static_cast<std::uint64_t>(ts.tv_nsec);
+  }
+
   wl::DisplayHandle display_;
   wl::CRegistry registry_;
   wl::DmabufFeedback<Presenter> feedback_;
@@ -245,10 +357,22 @@ class Presenter {
   wl::WlPtr<wl::XdgSurfaceHandler<Presenter>> xdg_surface_;
   wl::WlPtr<wl::XdgToplevelHandler<Presenter>> xdg_toplevel_;
   wl::WlPtr<BufferParamsH> params_;
-  BufferH buffer_;  // direct member: stable address for the dispatcher
+  BufferH buffer_;  // direct member: stable address for the dispatcher (static path)
   FrameH frame_;    // direct member: stable address for the dispatcher
 
+  // Ping-pong buffers for the animated loop. kSlots must match the producer's dma-buf
+  // image count (gpu_dmabuf kBuffers). Each BufferH has a stable address (array member).
+  static constexpr int kSlots = 2;
+  struct Slot {
+    BufferH handler;
+    bool busy = false;
+    bool built = false;
+  };
+  Slot slots_[kSlots];
+
   std::string title_, app_id_;
+  std::vector<std::uint64_t> mods_;           // compositor's advertised XRGB8888 modifiers
+  const DmabufFrameFn* frame_fn_ = nullptr;   // per-tick producer (animated loop)
   std::uint32_t comp_name_ = 0, comp_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
   int w_ = 0, h_ = 0;
   bool busy_ = false;
@@ -262,6 +386,14 @@ bool present_dmabuf(const DmabufRenderFn& render, std::string_view title,
                     std::string_view app_id, int frames) noexcept {
   Presenter p;
   return p.run(render, title, app_id, frames);
+}
+
+bool present_dmabuf_loop(int /*width*/, int /*height*/, std::string_view title,
+                         std::string_view app_id, const DmabufFrameFn& render,
+                         const InputCallback& input, bool want_ime,
+                         std::uint64_t max_frames) noexcept {
+  Presenter p;
+  return p.run_loop(render, input, want_ime, title, app_id, max_frames);
 }
 
 }  // namespace acl::wm

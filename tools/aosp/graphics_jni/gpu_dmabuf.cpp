@@ -59,25 +59,35 @@ namespace {
 constexpr VkFormat kVkFormat = VK_FORMAT_B8G8R8A8_UNORM;
 constexpr uint32_t kDrmFormat = DRM_FORMAT_XRGB8888;
 
+// One exported, modifier-tiled dma-buf VkImage + its memory/fd/descriptor. The animated
+// present loop ping-pongs two of these so the compositor can hold one for scanout while
+// Skia renders the next — see acl_graphics_gpu_end_frame(buffer_index, ...).
+struct Target {
+  VkImage image = VK_NULL_HANDLE;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  VkDeviceSize mem_size = 0;
+  int fd = -1;
+  AclDmabuf info{};
+  bool allocated = false;
+};
+
+constexpr int kBuffers = 2;
+
 struct Gpu {
   VkInstance instance = VK_NULL_HANDLE;
   VkPhysicalDevice phys = VK_NULL_HANDLE;
   VkDevice device = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t qfam = UINT32_MAX;
-  VkImage image = VK_NULL_HANDLE;
-  VkDeviceMemory memory = VK_NULL_HANDLE;
-  VkDeviceSize mem_size = 0;
   VkImageUsageFlags usage = 0;
-  int fd = -1;
+  Target targets[kBuffers];  // ping-pong dma-buf images (copy destinations)
   sk_sp<GrDirectContext> gr;
-  sk_sp<SkSurface> opt;     // Skia-owned optimal render target (copy-path src)
-  sk_sp<SkSurface> direct;  // dma-buf VkImage wrapped as SkSurface (zero-copy direct path)
+  sk_sp<SkSurface> opt;      // single Skia-owned optimal render target (copy-path src)
+  sk_sp<SkSurface> direct;   // a dma-buf VkImage wrapped as SkSurface (zero-copy direct path)
   GrVkExtensions ext;
   VkCommandPool pool = VK_NULL_HANDLE;
   VkCommandBuffer cmd = VK_NULL_HANDLE;
   VkFence fence = VK_NULL_HANDLE;
-  AclDmabuf info{};
   int w = 0, h = 0;
   bool ready = false;
 } g;
@@ -169,12 +179,13 @@ uint64_t choose_modifier(uint32_t* plane_count) {
   return DRM_FORMAT_MOD_INVALID;
 }
 
-// Create the modifier-tiled, dma-buf-exported VkImage + memory + fd (plain VkImage, the
-// vkCmdCopyImage DST — the scene is rendered into g.opt and copied here).
-bool make_target(int w, int h, AclDmabuf* out) {
+// Create one modifier-tiled, dma-buf-exported VkImage + memory + fd into `t` (a plain
+// VkImage, the vkCmdCopyImage DST — the scene is rendered into g.opt and copied here).
+bool make_target(Target& t, int w, int h) {
   uint32_t plane_count = 1;
   const uint64_t modifier = choose_modifier(&plane_count);
   if (modifier == DRM_FORMAT_MOD_INVALID) { std::fprintf(stderr, "acl-gpu: no modifier\n"); return false; }
+  AclDmabuf* out = &t.info;
 
   const uint64_t mods[1] = {modifier};
   VkImageDrmFormatModifierListCreateInfoEXT modci{
@@ -197,7 +208,7 @@ bool make_target(int w, int h, AclDmabuf* out) {
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   g.usage = ci.usage;
-  if (VKD.vkCreateImage(g.device, &ci, nullptr, &g.image) != VK_SUCCESS) { std::fprintf(stderr, "acl-gpu: createImage fail\n"); return false; }
+  if (VKD.vkCreateImage(g.device, &ci, nullptr, &t.image) != VK_SUCCESS) { std::fprintf(stderr, "acl-gpu: createImage fail\n"); return false; }
 
   const VkImageAspectFlagBits planeAspect[4] = {
       VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT, VK_IMAGE_ASPECT_MEMORY_PLANE_1_BIT_EXT,
@@ -205,13 +216,13 @@ bool make_target(int w, int h, AclDmabuf* out) {
   for (uint32_t i = 0; i < plane_count; ++i) {
     VkImageSubresource sub{static_cast<VkImageAspectFlags>(planeAspect[i]), 0, 0};
     VkSubresourceLayout lo{};
-    VKD.vkGetImageSubresourceLayout(g.device, g.image, &sub, &lo);
+    VKD.vkGetImageSubresourceLayout(g.device, t.image, &sub, &lo);
     out->offsets[i] = static_cast<uint32_t>(lo.offset);
     out->strides[i] = static_cast<uint32_t>(lo.rowPitch);
   }
 
   VkMemoryRequirements reqs{};
-  VKD.vkGetImageMemoryRequirements(g.device, g.image, &reqs);
+  VKD.vkGetImageMemoryRequirements(g.device, t.image, &reqs);
   VkPhysicalDeviceMemoryProperties mp{};
   VKD.vkGetPhysicalDeviceMemoryProperties(g.phys, &mp);
   uint32_t mt = UINT32_MAX;
@@ -222,24 +233,25 @@ bool make_target(int w, int h, AclDmabuf* out) {
   }
   if (mt == UINT32_MAX) return false;
   VkMemoryDedicatedAllocateInfo ded{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
-  ded.image = g.image;
+  ded.image = t.image;
   VkExportMemoryAllocateInfo exp{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO, &ded,
                                  VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
-  g.mem_size = reqs.size;
+  t.mem_size = reqs.size;
   VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &exp, reqs.size, mt};
-  if (VKD.vkAllocateMemory(g.device, &mai, nullptr, &g.memory) != VK_SUCCESS) { std::fprintf(stderr, "acl-gpu: allocMem fail\n"); return false; }
-  if (VKD.vkBindImageMemory(g.device, g.image, g.memory, 0) != VK_SUCCESS) { std::fprintf(stderr, "acl-gpu: bind fail\n"); return false; }
+  if (VKD.vkAllocateMemory(g.device, &mai, nullptr, &t.memory) != VK_SUCCESS) { std::fprintf(stderr, "acl-gpu: allocMem fail\n"); return false; }
+  if (VKD.vkBindImageMemory(g.device, t.image, t.memory, 0) != VK_SUCCESS) { std::fprintf(stderr, "acl-gpu: bind fail\n"); return false; }
 
-  VkMemoryGetFdInfoKHR fdi{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, nullptr, g.memory,
+  VkMemoryGetFdInfoKHR fdi{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, nullptr, t.memory,
                            VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
-  if (VKD.vkGetMemoryFdKHR(g.device, &fdi, &g.fd) != VK_SUCCESS) { std::fprintf(stderr, "acl-gpu: getFd fail\n"); return false; }
+  if (VKD.vkGetMemoryFdKHR(g.device, &fdi, &t.fd) != VK_SUCCESS) { std::fprintf(stderr, "acl-gpu: getFd fail\n"); return false; }
 
-  out->fd = g.fd;
+  out->fd = t.fd;
   out->width = static_cast<uint32_t>(w);
   out->height = static_cast<uint32_t>(h);
   out->plane_count = plane_count;
   out->modifier = modifier;
   out->drm_format = kDrmFormat;
+  t.allocated = true;
   return true;
 }
 
@@ -289,8 +301,8 @@ bool ensure_ready(int w, int h) {
   return true;
 }
 
-// Copy the just-rendered optimal Skia image (TRANSFER_SRC_OPTIMAL) into the dma-buf image.
-bool copy_to_dmabuf() {
+// Copy the just-rendered optimal Skia image (TRANSFER_SRC_OPTIMAL) into `t`'s dma-buf image.
+bool copy_to_dmabuf(Target& t) {
   GrBackendTexture bt = g.opt->getBackendTexture(SkSurface::kFlushRead_BackendHandleAccess);
   GrVkImageInfo si{};
   if (!bt.getVkImageInfo(&si)) { std::fprintf(stderr, "acl-gpu: getVkImageInfo fail\n"); return false; }
@@ -306,7 +318,7 @@ bool copy_to_dmabuf() {
   toDst.newLayout = VK_IMAGE_LAYOUT_GENERAL;
   toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  toDst.image = g.image;
+  toDst.image = t.image;
   toDst.subresourceRange = color;
   VKD.vkCmdPipelineBarrier(g.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toDst);
@@ -314,7 +326,7 @@ bool copy_to_dmabuf() {
   region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
   region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
   region.extent = {static_cast<uint32_t>(g.w), static_cast<uint32_t>(g.h), 1};
-  VKD.vkCmdCopyImage(g.cmd, si.fImage, static_cast<VkImageLayout>(si.fImageLayout), g.image,
+  VKD.vkCmdCopyImage(g.cmd, si.fImage, static_cast<VkImageLayout>(si.fImageLayout), t.image,
                      VK_IMAGE_LAYOUT_GENERAL, 1, &region);
   VkImageMemoryBarrier toExt{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   toExt.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -322,7 +334,7 @@ bool copy_to_dmabuf() {
   toExt.newLayout = VK_IMAGE_LAYOUT_GENERAL;
   toExt.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   toExt.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  toExt.image = g.image;
+  toExt.image = t.image;
   toExt.subresourceRange = color;
   VKD.vkCmdPipelineBarrier(g.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1,
@@ -344,13 +356,14 @@ bool copy_to_dmabuf() {
 // render target is the open question this path answers; falls back to the copy path if not.
 bool make_direct_surface() {
   if (g.direct) return true;
+  Target& t = g.targets[0];
   GrVkAlloc alloc;
-  alloc.fMemory = g.memory;
+  alloc.fMemory = t.memory;
   alloc.fOffset = 0;
-  alloc.fSize = g.mem_size;
+  alloc.fSize = t.mem_size;
   alloc.fFlags = 0;
   GrVkImageInfo info{};
-  info.fImage = g.image;
+  info.fImage = t.image;
   info.fAlloc = alloc;
   info.fImageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
   info.fImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -379,10 +392,8 @@ extern "C" bool acl_graphics_gpu_render(int w, int h, uint32_t bg, int l, int t,
   std::memset(out, 0, sizeof(*out));
   out->fd = -1;
   if (!ensure_ready(w, h)) return false;
-  if (g.image == VK_NULL_HANDLE) {
-    if (!make_target(w, h, &g.info)) return false;
-  }
-  *out = g.info;
+  if (!g.targets[0].allocated && !make_target(g.targets[0], w, h)) return false;
+  *out = g.targets[0].info;
 
   // Prefer the zero-copy direct path when ACL_GPU_DIRECT is set AND Skia accepts the
   // modifier-tiled image as a render target; otherwise use the proven copy path.
@@ -411,7 +422,7 @@ extern "C" bool acl_graphics_gpu_render(int w, int h, uint32_t bg, int l, int t,
   GrBackendSurfaceMutableState toSrc(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g.qfam);
   g.opt->flush(GrFlushInfo{}, &toSrc);
   g.gr->submit(/*syncCpu=*/true);
-  if (!copy_to_dmabuf()) return false;
+  if (!copy_to_dmabuf(g.targets[0])) return false;
   return out->fd >= 0;
 }
 
@@ -434,19 +445,24 @@ extern "C" bool acl_graphics_canvas_borrowed(void* c) {
 
 extern "C" long acl_graphics_gpu_begin_frame(int w, int h) {
   if (!ensure_ready(w, h)) return 0;
-  if (g.image == VK_NULL_HANDLE && !make_target(w, h, &g.info)) return 0;
   SkCanvas* c = g.opt->getCanvas();
   c->clear(SK_ColorTRANSPARENT);
   g_borrowed_canvas.insert(c);
   return reinterpret_cast<long>(c);
 }
 
-extern "C" bool acl_graphics_gpu_end_frame(AclDmabuf* out) {
+// Flush the shared optimal surface and copy it into dma-buf image `buffer_index` (0..1),
+// returning that buffer's descriptor. The animated loop alternates buffer_index so the
+// compositor can hold one image while the next is rendered — no in-flight overwrite.
+extern "C" bool acl_graphics_gpu_end_frame(int buffer_index, AclDmabuf* out) {
   if (out == nullptr || !g.ready || !g.opt) return false;
+  if (buffer_index < 0 || buffer_index >= kBuffers) buffer_index = 0;
+  Target& t = g.targets[buffer_index];
+  if (!t.allocated && !make_target(t, g.w, g.h)) return false;
   GrBackendSurfaceMutableState toSrc(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g.qfam);
   g.opt->flush(GrFlushInfo{}, &toSrc);
   g.gr->submit(/*syncCpu=*/true);
-  if (!copy_to_dmabuf()) return false;
-  *out = g.info;
+  if (!copy_to_dmabuf(t)) return false;
+  *out = t.info;
   return out->fd >= 0;
 }
