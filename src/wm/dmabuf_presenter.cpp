@@ -31,11 +31,13 @@
 #include "wayland_client.hpp"
 #include "xdg_shell_client.hpp"
 #include "linux_dmabuf_client.hpp"
+#include "presentation_time_client.hpp"
 
 #include <wl/client_helpers.hpp>
 #include <wl/dmabuf_feedback.hpp>  // wl::DmabufFeedback<App>, wl::FeedbackSnapshot
 #include <wl/display.hpp>
 #include <wl/linux_dmabuf.hpp>     // must follow linux_dmabuf_client.hpp
+#include <wl/presentation.hpp>     // wl::PresentationManager<App>, wl::PresentFeedback
 #include <wl/proxy_impl.hpp>
 #include <wl/registry.hpp>
 #include <wl/wl_ptr.hpp>
@@ -88,6 +90,8 @@ class BufferParamsH
 // and OnDmabufLegacyFormat (v1–v3 fallback) via the wcs binding, and drives xdg-shell.
 class Presenter {
  public:
+  ~Presenter() { presentation_.Release(); }  // idempotent; covers the static path too
+
   // Static present: render once, re-attach the same frame each tick.
   bool run(const DmabufRenderFn& render, std::string_view title,
            std::string_view app_id, int frames) noexcept {
@@ -138,6 +142,8 @@ class Presenter {
       else if (iface == xdg_wm_base_traits::interface_name) { xdg_name_ = name; xdg_ver_ = ver; }
       else if (iface == dmabuf::zwp_linux_dmabuf_v1_traits::interface_name) {
         feedback_.Record(name, ver);
+      } else if (iface == presentation_time::client::wp_presentation_traits::interface_name) {
+        presentation_.Record(name, ver);
       }
     });
     if (!wl::RoundtripWithTimeout(display_.Get())) {
@@ -158,6 +164,7 @@ class Presenter {
       log::w(kTag, "dmabuf present: zwp_linux_dmabuf_v1 bind failed");
       return false;
     }
+    (void)presentation_.Bind(registry_, this);  // wp_presentation (optional; timing only)
     // v4+ has per-format modifier feedback; v1–v3 use the legacy format list.
     if (feedback_.BoundVersion() >= 4) (void)feedback_.StartDefault(display_.Get());
     if (!wl::RoundtripWithTimeout(display_.Get())) return false;
@@ -194,6 +201,12 @@ class Presenter {
   // wl::DmabufFeedback<Presenter> callbacks.
   void OnDmabufFeedback(const wl::FeedbackSnapshot&) noexcept {}
   void OnDmabufLegacyFormat(std::uint32_t, std::uint64_t) noexcept {}
+  // wp_presentation feedback — the vsync clock that aligns Choreographer's frameTimeNanos.
+  void OnPresented(const wl::PresentFeedback& fb) noexcept {
+    last_present_ns_ = fb.present_ns;
+    if (fb.refresh_ns != 0) refresh_ns_ = fb.refresh_ns;
+  }
+  void OnDiscarded(std::uint32_t) noexcept {}
   // xdg handlers (the wcs XdgSurface/XdgToplevel handlers dispatch to these).
   void OnXdgSurfaceConfigure(std::uint32_t) noexcept { configured_ = true; need_frame_ = true; }
   void OnToplevelConfigure(std::int32_t, std::int32_t) noexcept {}
@@ -313,6 +326,8 @@ class Presenter {
                 *surface_.Get()))
           frame_._SetProxy(raw);
         slots_[s].busy = true;
+        presentation_.Arm(surface_.Get()->GetProxy(),
+                          static_cast<std::uint32_t>(frame_index_));  // before commit
         surface_.Get()->Attach(slots_[s].handler.GetProxy(), 0, 0);
         surface_.Get()->Damage(0, 0, w_, h_);
         surface_.Get()->Commit();
@@ -321,6 +336,7 @@ class Presenter {
       if (max_frames_ != 0 && frame_index_ >= max_frames_ && frame_callbacks_ >= max_frames_)
         break;
       while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
+      presentation_.Reap();
       pollfd pfd{wl_display_get_fd(display_.Get()), POLLIN, 0};
       const int n = poll(&pfd, 1, kTickMs);
       if (n < 0 && errno != EINTR) break;
@@ -335,15 +351,21 @@ class Presenter {
         need_frame_ = true;
       }
     }
+    presentation_.Release();
     const bool clean = frame_index_ > 0 && (closed_ || frame_callbacks_ >= frame_index_);
     log::i(kTag, "dmabuf present(loop): {} frame(s), {} callback(s); {} ({})", frame_index_,
            frame_callbacks_, closed_ ? "toplevel closed" : "done", clean ? "clean" : "aborted");
     return clean;
   }
 
-  static std::uint64_t frame_time_ns() noexcept {
+  // The vsync-aligned time for the frame about to be drawn (Choreographer.frameTimeNanos):
+  // the last wp_presentation time plus one refresh interval, or the raw presentation clock
+  // before any feedback has arrived (or CLOCK_MONOTONIC if wp_presentation is absent).
+  std::uint64_t frame_time_ns() const noexcept {
+    if (last_present_ns_ != 0 && refresh_ns_ != 0) return last_present_ns_ + refresh_ns_;
+    const clockid_t clk = presentation_.Bound() ? presentation_.clock() : CLOCK_MONOTONIC;
     timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    clock_gettime(clk, &ts);
     return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull +
            static_cast<std::uint64_t>(ts.tv_nsec);
   }
@@ -351,6 +373,7 @@ class Presenter {
   wl::DisplayHandle display_;
   wl::CRegistry registry_;
   wl::DmabufFeedback<Presenter> feedback_;
+  wl::PresentationManager<Presenter> presentation_;  // wp_presentation (vsync clock)
   wl::WlPtr<CompositorH> comp_;
   wl::WlPtr<wl::XdgWmBaseHandler> xdg_wm_base_;
   wl::WlPtr<SurfaceH> surface_;
@@ -376,6 +399,7 @@ class Presenter {
   std::uint32_t comp_name_ = 0, comp_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
   int w_ = 0, h_ = 0;
   bool busy_ = false;
+  std::uint64_t last_present_ns_ = 0, refresh_ns_ = 0;  // wp_presentation vsync clock
   std::uint64_t max_frames_ = 0, frame_index_ = 0, frame_callbacks_ = 0;
   bool configured_ = false, need_frame_ = false, closed_ = false;
 };
