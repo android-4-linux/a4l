@@ -32,11 +32,17 @@
 #include "xdg_shell_client.hpp"
 #include "linux_dmabuf_client.hpp"
 #include "presentation_time_client.hpp"
+#include "text_input_v3_client.hpp"  // WL_IME_BACKEND_TEXT_INPUT_V3 (IME)
 
 #include <wl/client_helpers.hpp>
 #include <wl/dmabuf_feedback.hpp>  // wl::DmabufFeedback<App>, wl::FeedbackSnapshot
 #include <wl/display.hpp>
+#include <wl/ime/backend.hpp>            // wl::ime::SelectedTextInput (text-input-v3)
+#include <wl/ime/text_input_receiver.hpp>
+#include <wl/keyboard.hpp>              // wl::KeyboardHandler (xkb keymap/repeat)
 #include <wl/linux_dmabuf.hpp>     // must follow linux_dmabuf_client.hpp
+#include <wl/pointer.hpp>              // wl::PointerHandler
+#include <wl/present_feedback.hpp>
 #include <wl/presentation.hpp>     // wl::PresentationManager<App>, wl::PresentFeedback
 #include <wl/proxy_impl.hpp>
 #include <wl/registry.hpp>
@@ -86,11 +92,38 @@ class FrameH : public CWlCallback<FrameH> {
 class BufferParamsH
     : public dmabuf::CZwpLinuxBufferParamsV1<BufferParamsH> {};
 
-// The presenter is the DmabufFeedback "App": it receives OnDmabufFeedback (v4 tranches)
-// and OnDmabufLegacyFormat (v1–v3 fallback) via the wcs binding, and drives xdg-shell.
-class Presenter {
+class Presenter;
+
+// wl_seat: on the capabilities event, create the wl_pointer / wl_keyboard and point their
+// handlers at the Presenter (which delivers the app-facing MotionEvent/KeyEvent). Mirrors
+// the shm presenter's SeatH. Forward-declared Presenter is enough (used by pointer only).
+class SeatH : public CWlSeat<SeatH> {
  public:
-  ~Presenter() { presentation_.Release(); }  // idempotent; covers the static path too
+  Presenter* app_ = nullptr;
+  wl::WlPtr<wl::PointerHandler<Presenter>>* pointer_slot_ = nullptr;
+  wl::WlPtr<wl::KeyboardHandler<Presenter>>* keyboard_slot_ = nullptr;
+  void OnCapabilities(std::uint32_t caps) override {
+    if ((caps & WL_SEAT_CAPABILITY_POINTER) != 0u && pointer_slot_ != nullptr &&
+        pointer_slot_->IsNull()) {
+      if (wl::SetupHandler(*pointer_slot_,
+              wl::construct<wl_pointer_traits, wl_seat_traits::Op::GetPointer>(*this)))
+        pointer_slot_->Get()->app_ = app_;
+    }
+    if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) != 0u && keyboard_slot_ != nullptr &&
+        keyboard_slot_->IsNull()) {
+      if (wl::SetupHandler(*keyboard_slot_,
+              wl::construct<wl_keyboard_traits, wl_seat_traits::Op::GetKeyboard>(*this)))
+        keyboard_slot_->Get()->app_ = app_;
+    }
+  }
+};
+
+// The presenter is the DmabufFeedback "App": it receives OnDmabufFeedback (v4 tranches)
+// and OnDmabufLegacyFormat (v1–v3 fallback) via the wcs binding, and drives xdg-shell. It
+// is also the pointer/keyboard/IME listener (input parity with the shm presenter).
+class Presenter : public wl::ime::TextInputListener {
+ public:
+  ~Presenter() { presentation_.Release(); ti_.Release(); }  // idempotent; static path too
 
   // Static present: render once, re-attach the same frame each tick.
   bool run(const DmabufRenderFn& render, std::string_view title,
@@ -113,12 +146,19 @@ class Presenter {
   // Animated present (S4b): render a fresh GPU frame each vsync tick into a free ping-pong
   // buffer. `input`/`want_ime` are accepted for API parity; wl_seat/text-input binding is a
   // follow-up (the shm path carries input today), so they are unused here for now.
-  bool run_loop(const DmabufFrameFn& render, const InputCallback& /*input*/,
-                bool /*want_ime*/, std::string_view title, std::string_view app_id,
+  bool run_loop(const DmabufFrameFn& render, const InputCallback& input, bool want_ime,
+                std::string_view title, std::string_view app_id,
                 std::uint64_t max_frames) noexcept {
     max_frames_ = max_frames;
+    input_ = &input;
+    want_ime_ = want_ime;
     if (!setup(title, app_id)) return false;
     frame_fn_ = &render;
+    // Enable text input on the surface once it's configured (mirrors the shm path).
+    if (ime_bound_) {
+      ti_.SetContentType(wl::ime::ContentHint::kNone, wl::ime::ContentPurpose::kNormal);
+      ti_.Activate();
+    }
     return present_loop_dynamic();
   }
 
@@ -144,6 +184,11 @@ class Presenter {
         feedback_.Record(name, ver);
       } else if (iface == presentation_time::client::wp_presentation_traits::interface_name) {
         presentation_.Record(name, ver);
+      } else if (iface == wl_seat_traits::interface_name) {
+        seat_name_ = name; seat_ver_ = ver;
+      } else if (iface ==
+                 text_input_unstable_v3::client::zwp_text_input_manager_v3_traits::interface_name) {
+        ti_name_ = name; ti_ver_ = ver;
       }
     });
     if (!wl::RoundtripWithTimeout(display_.Get())) {
@@ -165,6 +210,17 @@ class Presenter {
       return false;
     }
     (void)presentation_.Bind(registry_, this);  // wp_presentation (optional; timing only)
+    // wl_seat → pointer/keyboard (created on the capabilities event), and text-input-v3.
+    if (seat_name_ != 0 && wl::BindHandler<wl_seat_traits>(registry_, seat_, seat_name_, seat_ver_)) {
+      seat_.Get()->app_ = this;
+      seat_.Get()->pointer_slot_ = &pointer_;
+      seat_.Get()->keyboard_slot_ = &keyboard_;
+    }
+    if (want_ime_ && ti_name_ != 0 && !seat_.IsNull()) {
+      ti_.Record(ti_name_, ti_ver_);
+      ime_bound_ = ti_.Bind(registry_, this, seat_.Get()->GetProxy());
+      if (!ime_bound_) log::w(kTag, "dmabuf present: text-input bind failed");
+    }
     // v4+ has per-format modifier feedback; v1–v3 use the legacy format list.
     if (feedback_.BoundVersion() >= 4) (void)feedback_.StartDefault(display_.Get());
     if (!wl::RoundtripWithTimeout(display_.Get())) return false;
@@ -212,7 +268,50 @@ class Presenter {
   void OnToplevelConfigure(std::int32_t, std::int32_t) noexcept {}
   void OnToplevelClose() noexcept { closed_ = true; }
 
+  // wl_pointer → app input (native side of a MotionEvent): left button = touch Down/Up,
+  // motion while pressed = Move.
+  void OnPointerEnter(const wl::PointerEvent& e) { px_ = e.x; py_ = e.y; }
+  void OnPointerLeave() {}
+  void OnPointerMotion(const wl::PointerEvent& e) {
+    px_ = e.x; py_ = e.y;
+    if (pointer_down_) deliver(PointerInput::Action::Move);
+  }
+  void OnPointerButton(const wl::PointerButtonEvent& e) {
+    px_ = e.x; py_ = e.y;
+    const bool pressed = e.state == WL_POINTER_BUTTON_STATE_PRESSED;
+    if (pressed == pointer_down_) return;  // only edges
+    pointer_down_ = pressed;
+    deliver(pressed ? PointerInput::Action::Down : PointerInput::Action::Up);
+  }
+
+  // wl_keyboard → app input (native side of a KeyEvent). Press/release/repeat → Down/Up.
+  void OnKey(const wl::KeyEvent& e) {
+    if (input_ == nullptr || !*input_) return;
+    const bool pressed = e.state == WL_KEYBOARD_KEY_STATE_PRESSED;
+    (*input_)(KeyInput{pressed ? KeyInput::Action::Down : KeyInput::Action::Up, e.key,
+                       static_cast<std::uint32_t>(e.keysym)});
+  }
+
+  // wl::ime::TextInputListener — the compositor's IME (text-input-v3).
+  void OnEnter() override {}
+  void OnLeave() override {}
+  void OnCommitString(std::string_view utf8) override {
+    if (input_ != nullptr && *input_) (*input_)(TextInput{std::string(utf8), false, 1});
+  }
+  void OnPreeditString(std::string_view utf8, std::int32_t, std::int32_t) override {
+    if (input_ != nullptr && *input_) (*input_)(TextInput{std::string(utf8), true, 1});
+  }
+  void OnDeleteSurroundingText(std::uint32_t before, std::uint32_t after) override {
+    if (input_ != nullptr && *input_) (*input_)(DeleteSurroundingText{before, after});
+  }
+  void OnKeysym(std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) override {}
+
  private:
+  void deliver(PointerInput::Action a) {
+    if (input_ != nullptr && *input_)
+      (*input_)(PointerInput{a, static_cast<float>(px_), static_cast<float>(py_)});
+  }
+
   bool build_buffer(const gfx::DmabufFrame& frame) noexcept {
     wl_proxy* praw = feedback_.CreateParams();
     if (praw == nullptr) { log::w(kTag, "dmabuf present: create_params failed"); return false; }
@@ -337,10 +436,13 @@ class Presenter {
         break;
       while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
       presentation_.Reap();
-      pollfd pfd{wl_display_get_fd(display_.Get()), POLLIN, 0};
-      const int n = poll(&pfd, 1, kTickMs);
+      // Poll the wl fd + the wcs KeyboardHandler repeat timerfd (a held key repeats).
+      const int rfd = keyboard_.IsNull() ? -1 : keyboard_.Get()->GetRepeatFd();
+      pollfd pfds[2] = {{wl_display_get_fd(display_.Get()), POLLIN, 0}, {rfd, POLLIN, 0}};
+      const int n = poll(pfds, 2, kTickMs);
       if (n < 0 && errno != EINTR) break;
-      if (n > 0 && (pfd.revents & POLLIN)) {
+      if (n > 0 && (pfds[1].revents & POLLIN) != 0) keyboard_.Get()->DispatchRepeat();
+      if (n > 0 && (pfds[0].revents & POLLIN)) {
         if (wl_display_dispatch(display_.Get()) < 0) break;
       } else if (n == 0) {
         // No frame callback within kTickMs — the compositor is throttling us (the surface
@@ -352,6 +454,7 @@ class Presenter {
       }
     }
     presentation_.Release();
+    ti_.Release();
     const bool clean = frame_index_ > 0 && (closed_ || frame_callbacks_ >= frame_index_);
     log::i(kTag, "dmabuf present(loop): {} frame(s), {} callback(s); {} ({})", frame_index_,
            frame_callbacks_, closed_ ? "toplevel closed" : "done", clean ? "clean" : "aborted");
@@ -374,6 +477,10 @@ class Presenter {
   wl::CRegistry registry_;
   wl::DmabufFeedback<Presenter> feedback_;
   wl::PresentationManager<Presenter> presentation_;  // wp_presentation (vsync clock)
+  wl::WlPtr<SeatH> seat_;
+  wl::WlPtr<wl::PointerHandler<Presenter>> pointer_;    // created on wl_seat capabilities
+  wl::WlPtr<wl::KeyboardHandler<Presenter>> keyboard_;  // created on wl_seat capabilities
+  wl::ime::SelectedTextInput ti_;                       // text-input-v3 (IME)
   wl::WlPtr<CompositorH> comp_;
   wl::WlPtr<wl::XdgWmBaseHandler> xdg_wm_base_;
   wl::WlPtr<SurfaceH> surface_;
@@ -396,7 +503,12 @@ class Presenter {
   std::string title_, app_id_;
   std::vector<std::uint64_t> mods_;           // compositor's advertised XRGB8888 modifiers
   const DmabufFrameFn* frame_fn_ = nullptr;   // per-tick producer (animated loop)
+  const InputCallback* input_ = nullptr;      // pointer/key/IME sink (animated loop)
   std::uint32_t comp_name_ = 0, comp_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
+  std::uint32_t seat_name_ = 0, seat_ver_ = 0, ti_name_ = 0, ti_ver_ = 0;
+  double px_ = 0.0, py_ = 0.0;
+  bool pointer_down_ = false;
+  bool want_ime_ = false, ime_bound_ = false;
   int w_ = 0, h_ = 0;
   bool busy_ = false;
   std::uint64_t last_present_ns_ = 0, refresh_ns_ = 0;  // wp_presentation vsync clock

@@ -689,8 +689,9 @@ class JniVm : public Vm {
   // View.draw runs on a real android.graphics.Canvas backed by the Ganesh Vulkan
   // surface (begin_frame → Choreographer.doFrame → View.draw → end_frame), and the
   // resulting modifier-tiled dma-buf is presented via zwp_linux_dmabuf_v1 — no CPU
-  // upload. Input/IME are not yet delivered on this path (the shm path carries them);
-  // gated by ACL_PRESENT_GPU so the mature interactive shm loop stays the default.
+  // upload. Pointer/key input is delivered to the View (via present_dmabuf_loop's
+  // wl_seat wiring); IME on this path is a follow-up. Gated by ACL_PRESENT_GPU so the
+  // mature interactive shm loop stays the default.
   void present_content_loop_gpu(jobject view, int w, int h) {
 #if ACL_HAVE_VULKAN && ACL_HAVE_WCS
     if (!wm::wayland_available()) {
@@ -734,6 +735,58 @@ class JniVm : public Vm {
     }
     clear_exception();
 
+    // Input: pointer -> MotionEvent.dispatchTouchEvent, key -> KeyEvent.dispatchKeyEvent
+    // (same mapping as the shm present_content_loop; IME on this path is a follow-up).
+    jobject motionevent_cls = nullptr, keyevent_cls = nullptr;
+    jmethodID me_obtain = nullptr, me_recycle = nullptr, ke_obtain = nullptr;
+    jmethodID dispatch_touch = nullptr, dispatch_key = nullptr;
+    if (jclass mecls = env_->FindClass("android/view/MotionEvent")) {
+      me_obtain = env_->GetStaticMethodID(mecls, "obtain", "(JJIFFI)Landroid/view/MotionEvent;");
+      me_recycle = env_->GetMethodID(mecls, "recycle", "()V");
+      motionevent_cls = env_->NewGlobalRef(mecls);
+      env_->DeleteLocalRef(mecls);
+    }
+    if (jclass kecls = env_->FindClass("android/view/KeyEvent")) {
+      ke_obtain = env_->GetStaticMethodID(kecls, "obtain", "(II)Landroid/view/KeyEvent;");
+      keyevent_cls = env_->NewGlobalRef(kecls);
+      env_->DeleteLocalRef(kecls);
+    }
+    if (jclass vc = env_->GetObjectClass(view)) {
+      dispatch_touch = env_->GetMethodID(vc, "dispatchTouchEvent", "(Landroid/view/MotionEvent;)Z");
+      dispatch_key = env_->GetMethodID(vc, "dispatchKeyEvent", "(Landroid/view/KeyEvent;)Z");
+      env_->DeleteLocalRef(vc);
+    }
+    clear_exception();
+    std::uint64_t down_time = 0;
+    const wm::InputCallback input = [&, this](const wm::InputEvent& ev) {
+      if (const auto* p = std::get_if<wm::PointerInput>(&ev)) {
+        if (motionevent_cls == nullptr || me_obtain == nullptr || dispatch_touch == nullptr) return;
+        const jint action = p->action == wm::PointerInput::Action::Down ? 0
+                          : p->action == wm::PointerInput::Action::Up   ? 1 : 2;
+        if (action == 0) down_time = frame_index_now();
+        jobject me = env_->CallStaticObjectMethod(
+            static_cast<jclass>(motionevent_cls), me_obtain, static_cast<jlong>(down_time),
+            static_cast<jlong>(frame_index_now()), action, static_cast<jfloat>(p->x),
+            static_cast<jfloat>(p->y), 0);
+        if (me != nullptr) {
+          env_->CallBooleanMethod(view, dispatch_touch, me);
+          if (me_recycle != nullptr) env_->CallVoidMethod(me, me_recycle);
+          env_->DeleteLocalRef(me);
+        }
+        if (env_->ExceptionCheck() == JNI_TRUE) clear_exception();
+      } else if (const auto* k = std::get_if<wm::KeyInput>(&ev)) {
+        if (keyevent_cls == nullptr || ke_obtain == nullptr || dispatch_key == nullptr) return;
+        const jint action = k->action == wm::KeyInput::Action::Down ? 0 : 1;
+        jobject ke = env_->CallStaticObjectMethod(static_cast<jclass>(keyevent_cls), ke_obtain,
+                                                  action, android_keycode(k->keycode));
+        if (ke != nullptr) {
+          env_->CallBooleanMethod(view, dispatch_key, ke);
+          env_->DeleteLocalRef(ke);
+        }
+        if (env_->ExceptionCheck() == JNI_TRUE) clear_exception();
+      }
+    };
+
     const wm::DmabufFrameFn render = [&](int bufidx, const std::vector<std::uint64_t>&,
                                          std::uint64_t frame_time_ns, std::uint64_t idx,
                                          gfx::DmabufFrame* out) -> bool {
@@ -761,16 +814,16 @@ class JniVm : public Vm {
       return true;
     };
     const std::string& pkg = config_.package_name;
-    const wm::InputCallback no_input;  // input is CPU-path-only for now
     const bool ok = wm::present_dmabuf_loop(w, h, pkg.empty() ? "acl" : pkg,
-                                            pkg.empty() ? "org.acl.app" : pkg, render,
-                                            no_input, /*want_ime=*/false,
-                                            config_.present_frames);
+                                            pkg.empty() ? "org.acl.app" : pkg, render, input,
+                                            /*want_ime=*/false, config_.present_frames);
     log::i(kTag, "--present(gpu): View.draw → Ganesh Vulkan → dma-buf → Wayland {} (zero-copy)",
            ok ? "presented" : "did not present");
     if (choreo != nullptr) env_->DeleteLocalRef(choreo);
     if (canvas != nullptr) env_->DeleteLocalRef(canvas);
     if (canvasC != nullptr) env_->DeleteLocalRef(canvasC);
+    if (motionevent_cls != nullptr) env_->DeleteGlobalRef(motionevent_cls);
+    if (keyevent_cls != nullptr) env_->DeleteGlobalRef(keyevent_cls);
 #else
     (void)view; (void)w; (void)h;
 #endif
