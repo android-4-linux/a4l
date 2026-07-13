@@ -107,6 +107,8 @@ public final class HostBootstrap {
         // AppContext has a null base (super(null)), so Context methods not overridden here
         // would NPE. Device-protected (direct-boot) storage isn't modeled → plain storage.
         @Override public boolean isDeviceProtectedStorage() { return false; }
+        @Override public boolean isRestricted() { return false; }  // TextView.readTextAppearance
+        @Override public boolean canLoadUnsafeResources() { return true; }  // same, @hide
         private android.content.ContentResolver resolver;  // one per context (PhoneWindow, apps)
         @Override public android.content.ContentResolver getContentResolver() {
             if (resolver == null) resolver = new AppContentResolver(this);
