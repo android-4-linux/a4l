@@ -9,8 +9,18 @@ cc_library_shared {
     name: "libacl_graphics_jni",
     host_supported: true,
     device_supported: false,
-    srcs: ["graphics_jni.cpp"],
-    header_libs: ["jni_headers"],
+    srcs: [
+        "graphics_jni.cpp",
+        "gpu_dmabuf.cpp",
+    ],
+    header_libs: [
+        "jni_headers",
+        "vulkan_headers",
+        "libdrm_headers",
+    ],
+    host_ldlibs: [
+        "-ldl",
+    ],
     static_libs: [
         "libskia",
         "libwebp-decode",
@@ -35,6 +45,7 @@ cc_library_shared {
     ],
     include_dirs: [
         "external/skia",
+        "external/skia/include",
         "external/skia/include/core",
         "external/skia/include/config",
         "external/skia/include/gpu",

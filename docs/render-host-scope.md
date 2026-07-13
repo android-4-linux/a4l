@@ -162,6 +162,18 @@ is correct + working.** GPU-native therefore forks:
   wrap it as an Android-Skia Ganesh `SkSurface` (`GrBackendTexture`+`GrVkImageInfo`), route the
   `Canvas`'s `nInitRaster` to it, render + export fd + present via `present_dmabuf` — no CPU upload.
   A perf optimization over the working S3b loop, not a correctness fix.
+  **STEP 2 SCAFFOLD + BLOCKER FOUND (2026-07-12):** `tools/aosp/graphics_jni/gpu_dmabuf.cpp` (in
+  `libacl_graphics_jni`) is the self-contained GPU renderer — Vulkan device via
+  `dlopen`(libvulkan)+`GrVkGetProc` (no `-lvulkan`), modifier selection, a modifier-tiled
+  dma-buf-exported `VkImage`+fd, and `GrDirectContext::MakeVulkan` — **all verified working** (AMD
+  tiled modifier, fd exported). `acl_graphics_gpu_render()` is wired into `graphics_present_demo`
+  (gated `ACL_ART_GRAPHICS_GPU`) → `present_dmabuf`. **BLOCKER:** android-13 Ganesh's
+  `SkSurface::MakeFromBackendTexture` **rejects a `DRM_FORMAT_MODIFIER` dma-buf image as a render
+  target** (tiled AND linear — its `GrVkCaps` lacks the modifier RT support m150 has). So direct GPU
+  render into the dma-buf isn't possible on android-13 Skia. **FIX (next):** the gfx_vk copy pattern —
+  render into a Skia-owned OPTIMAL `SkSurface` (`MakeRenderTarget`, works, proven by
+  `acl_ganesh_probe`) → `vkCmdCopyImage` into the dma-buf `VkImage` (GPU→GPU, no CPU) → export +
+  present. ~80 lines; everything else is done. (Alternatively S4b breadth, which needs no GPU path.)
 - **S4b — breadth (runs real apps, into Gate G2).** No Skia rebuild: grow graphics ops
   (paths/text/drawBitmap/clip/transform) + Paint setters as real apps hit them, and drive the loop
   from a real `View.draw`/`onDraw` traversal (acl already has the View-traversal driver from Phase 2).

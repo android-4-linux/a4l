@@ -1393,6 +1393,55 @@ class ArtVm final : public JniVm {
     constexpr int W = 480, H = 320;
     constexpr jint kBg = 0xFF204060, kFg = 0xFFCC8844;
 
+    // S4a: GPU-native zero-copy path. libacl_graphics_jni renders the scene with Android's
+    // Skia Ganesh Vulkan STRAIGHT into a modifier-tiled dma-buf VkImage (no CPU upload);
+    // acl presents the exported fd. Gated by ACL_ART_GRAPHICS_GPU.
+    if (const char* gpu = std::getenv("ACL_ART_GRAPHICS_GPU"); gpu != nullptr && *gpu != '\0') {
+      struct AclDmabuf {
+        int fd;
+        std::uint32_t width, height, plane_count;
+        std::uint32_t offsets[4], strides[4];
+        std::uint64_t modifier;
+        std::uint32_t drm_format;
+      };
+      auto render = reinterpret_cast<bool (*)(int, int, std::uint32_t, int, int, int, int,
+                                              std::uint32_t, AclDmabuf*)>(
+          ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_render"));
+      if (render == nullptr) {
+        log::w(kTag, "graphics demo(gpu): acl_graphics_gpu_render missing");
+        return;
+      }
+      AclDmabuf f{};
+      if (!render(W, H, static_cast<std::uint32_t>(kBg), 80, 60, 400, 260,
+                  static_cast<std::uint32_t>(kFg), &f) || f.fd < 0) {
+        log::w(kTag, "graphics demo(gpu): GPU render failed");
+        return;
+      }
+      log::i(kTag, "graphics demo(gpu): Android Skia Ganesh Vulkan rendered into dma-buf "
+                   "(modifier=0x{:x}, {} plane(s))", f.modifier, f.plane_count);
+      wm::DmabufRenderFn present = [&](const std::vector<std::uint64_t>&,
+                                       gfx::DmabufFrame* out) -> bool {
+        gfx::DmabufFrame fr{};
+        fr.fd = f.fd;
+        fr.width = f.width;
+        fr.height = f.height;
+        fr.plane_count = f.plane_count;
+        for (std::uint32_t i = 0; i < f.plane_count && i < 4; ++i) {
+          fr.planes[i].offset = f.offsets[i];
+          fr.planes[i].stride = f.strides[i];
+        }
+        fr.modifier = f.modifier;
+        fr.drm_format = f.drm_format;
+        fr.modifier_tiled = f.modifier != 0;
+        *out = fr;
+        return true;
+      };
+      const bool ok = wm::present_dmabuf(present, "acl graphics (GPU)", "com.acl.graphics", 3);
+      log::i(kTag, "graphics demo(gpu): android.graphics Skia → Ganesh Vulkan → dma-buf → "
+                   "Wayland {} (zero-copy)", ok ? "presented" : "not presented");
+      return;
+    }
+
     const auto jfail = [&](const char* what) {
       if (env->ExceptionCheck()) env->ExceptionDescribe();
       env->ExceptionClear();
