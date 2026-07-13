@@ -52,6 +52,7 @@
 #include "SkSamplingOptions.h"
 #include "SkShader.h"
 #include "SkTileMode.h"
+#include "SkTextBlob.h"
 #include "SkTypeface.h"
 
 namespace {
@@ -274,21 +275,91 @@ void Canvas_nDrawRoundRect(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jf
 // nDrawText(String): draw text[start,end) at (x,y) using the Paint's SkFont + SkPaint.
 // Latin/default-font path via SkCanvas::drawSimpleText — no Minikin/HarfBuzz shaping yet, so
 // char indices are treated as UTF-8 byte offsets (correct for ASCII, the common case).
+// Draw UTF-16 units [off, off+cnt) at (x,y) with the Paint's SkFont + SkPaint. No
+// Minikin/HarfBuzz shaping yet — Skia does simple per-glyph layout (fine for Latin;
+// complex scripts/RTL/bidi are a later shaping pass). The char[]/String draw + run
+// variants all funnel here (context + RTL args are ignored without shaping).
+void draw_utf16(SkCanvas* c, AclPaint* ap, const jchar* chars, int len, int off, int cnt,
+                jfloat x, jfloat y) {
+  if (c == nullptr || ap == nullptr || chars == nullptr) return;
+  const int s = off < 0 ? 0 : off;
+  const int n = (s + cnt > len) ? (len - s) : cnt;
+  if (n > 0)
+    c->drawSimpleText(chars + s, static_cast<std::size_t>(n) * 2, SkTextEncoding::kUTF16, x, y,
+                      ap->font, ap->paint);
+}
+// nDrawText(String, start, end)
 void Canvas_nDrawText(JNIEnv* env, jclass, jlong canvas, jstring text, jint start, jint end,
                       jfloat x, jfloat y, jint /*flags*/, jlong paint) {
+  if (text == nullptr) return;
+  const jchar* chars = env->GetStringChars(text, nullptr);
+  if (chars != nullptr) {
+    draw_utf16(reinterpret_cast<SkCanvas*>(canvas), reinterpret_cast<AclPaint*>(paint),
+               chars, env->GetStringLength(text), start, end - start, x, y);
+    env->ReleaseStringChars(text, chars);
+  }
+}
+// nDrawText(char[], index, count)
+void Canvas_nDrawTextChars(JNIEnv* env, jclass, jlong canvas, jcharArray text, jint index,
+                           jint count, jfloat x, jfloat y, jint /*flags*/, jlong paint) {
+  if (text == nullptr) return;
+  jchar* chars = env->GetCharArrayElements(text, nullptr);
+  if (chars != nullptr) {
+    draw_utf16(reinterpret_cast<SkCanvas*>(canvas), reinterpret_cast<AclPaint*>(paint),
+               chars, env->GetArrayLength(text), index, count, x, y);
+    env->ReleaseCharArrayElements(text, chars, JNI_ABORT);
+  }
+}
+// nDrawTextRun(String, start, end, contextStart, contextEnd, x, y, isRtl, paint)
+void Canvas_nDrawTextRunString(JNIEnv* env, jclass, jlong canvas, jstring text, jint start, jint end,
+                               jint, jint, jfloat x, jfloat y, jboolean, jlong paint) {
+  if (text == nullptr) return;
+  const jchar* chars = env->GetStringChars(text, nullptr);
+  if (chars != nullptr) {
+    draw_utf16(reinterpret_cast<SkCanvas*>(canvas), reinterpret_cast<AclPaint*>(paint),
+               chars, env->GetStringLength(text), start, end - start, x, y);
+    env->ReleaseStringChars(text, chars);
+  }
+}
+// nDrawTextRun(char[], start, count, contextStart, contextCount, x, y, isRtl, paint, precomputed)
+void Canvas_nDrawTextRunChars(JNIEnv* env, jclass, jlong canvas, jcharArray text, jint start,
+                              jint count, jint, jint, jfloat x, jfloat y, jboolean, jlong paint,
+                              jlong) {
+  if (text == nullptr) return;
+  jchar* chars = env->GetCharArrayElements(text, nullptr);
+  if (chars != nullptr) {
+    draw_utf16(reinterpret_cast<SkCanvas*>(canvas), reinterpret_cast<AclPaint*>(paint),
+               chars, env->GetArrayLength(text), start, count, x, y);
+    env->ReleaseCharArrayElements(text, chars, JNI_ABORT);
+  }
+}
+// nDrawGlyphs(glyphIds, positions, glyphIdStart, positionStart, glyphCount, font, paint):
+// pre-shaped glyphs (PrecomputedText path). Positions are absolute (x,y) pairs.
+void Canvas_nDrawGlyphs(JNIEnv* env, jclass, jlong canvas, jintArray glyphIds, jfloatArray positions,
+                        jint glyphIdStart, jint positionStart, jint glyphCount, jlong /*font*/,
+                        jlong paint) {
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
-  if (c == nullptr || ap == nullptr || text == nullptr) return;
-  const char* utf8 = env->GetStringUTFChars(text, nullptr);
-  if (utf8 == nullptr) return;
-  const int len = static_cast<int>(std::strlen(utf8));
-  const int s = start < 0 ? 0 : start;
-  const int e = end > len ? len : end;
-  if (e > s)
-    c->drawSimpleText(utf8 + s, static_cast<std::size_t>(e - s), SkTextEncoding::kUTF8, x, y,
-                      ap->font, ap->paint);
-  env->ReleaseStringUTFChars(text, utf8);
+  if (c == nullptr || ap == nullptr || glyphIds == nullptr || positions == nullptr || glyphCount <= 0)
+    return;
+  jint* gids = env->GetIntArrayElements(glyphIds, nullptr);
+  jfloat* pos = env->GetFloatArrayElements(positions, nullptr);
+  if (gids != nullptr && pos != nullptr) {
+    SkTextBlobBuilder builder;
+    const SkTextBlobBuilder::RunBuffer& run = builder.allocRunPos(ap->font, glyphCount);
+    for (int i = 0; i < glyphCount; ++i) {
+      run.glyphs[i] = static_cast<uint16_t>(gids[glyphIdStart + i]);
+      run.points()[i] = SkPoint::Make(pos[positionStart + 2 * i], pos[positionStart + 2 * i + 1]);
+    }
+    if (sk_sp<SkTextBlob> blob = builder.make()) c->drawTextBlob(blob, 0, 0, ap->paint);
+  }
+  if (gids != nullptr) env->ReleaseIntArrayElements(glyphIds, gids, JNI_ABORT);
+  if (pos != nullptr) env->ReleaseFloatArrayElements(positions, pos, JNI_ABORT);
 }
+// Text-on-path isn't modeled (SkCanvas dropped drawTextOnPath) — accepted, not drawn.
+void Canvas_nDrawTextOnPathChars(JNIEnv*, jclass, jlong, jcharArray, jint, jint, jlong, jfloat,
+                                 jfloat, jint, jlong) {}
+void Canvas_nDrawTextOnPathString(JNIEnv*, jclass, jlong, jstring, jlong, jfloat, jfloat, jint, jlong) {}
 
 // nDrawBitmap(left,top): draw a Bitmap at (left,top). paintOrZero may be 0 (no paint).
 void Canvas_nDrawBitmap(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, jfloat left, jfloat top,
@@ -523,6 +594,91 @@ void Matrix_nSetConcat(jlong obj, jlong a, jlong b) {
   auto* B = reinterpret_cast<SkMatrix*>(b);
   if (m != nullptr && A != nullptr && B != nullptr) m->setConcat(*A, *B);
 }
+// The set/pre/post transform API — all @CriticalNative (handle + primitives), SkMatrix ops.
+#define MTX(p) auto* m = reinterpret_cast<SkMatrix*>(p); if (m == nullptr) return
+void Matrix_nSetTranslate(jlong p, jfloat dx, jfloat dy) { MTX(p); m->setTranslate(dx, dy); }
+void Matrix_nSetScale4(jlong p, jfloat sx, jfloat sy, jfloat px, jfloat py) { MTX(p); m->setScale(sx, sy, px, py); }
+void Matrix_nSetScale2(jlong p, jfloat sx, jfloat sy) { MTX(p); m->setScale(sx, sy); }
+void Matrix_nSetRotate3(jlong p, jfloat d, jfloat px, jfloat py) { MTX(p); m->setRotate(d, px, py); }
+void Matrix_nSetRotate1(jlong p, jfloat d) { MTX(p); m->setRotate(d); }
+void Matrix_nSetSkew4(jlong p, jfloat kx, jfloat ky, jfloat px, jfloat py) { MTX(p); m->setSkew(kx, ky, px, py); }
+void Matrix_nSetSkew2(jlong p, jfloat kx, jfloat ky) { MTX(p); m->setSkew(kx, ky); }
+void Matrix_nSetSinCos4(jlong p, jfloat s, jfloat c, jfloat px, jfloat py) { MTX(p); m->setSinCos(s, c, px, py); }
+void Matrix_nSetSinCos2(jlong p, jfloat s, jfloat c) { MTX(p); m->setSinCos(s, c); }
+void Matrix_nPreTranslate(jlong p, jfloat dx, jfloat dy) { MTX(p); m->preTranslate(dx, dy); }
+void Matrix_nPreScale4(jlong p, jfloat sx, jfloat sy, jfloat px, jfloat py) { MTX(p); m->preScale(sx, sy, px, py); }
+void Matrix_nPreScale2(jlong p, jfloat sx, jfloat sy) { MTX(p); m->preScale(sx, sy); }
+void Matrix_nPreRotate3(jlong p, jfloat d, jfloat px, jfloat py) { MTX(p); m->preRotate(d, px, py); }
+void Matrix_nPreRotate1(jlong p, jfloat d) { MTX(p); m->preRotate(d); }
+void Matrix_nPreSkew4(jlong p, jfloat kx, jfloat ky, jfloat px, jfloat py) { MTX(p); m->preSkew(kx, ky, px, py); }
+void Matrix_nPreSkew2(jlong p, jfloat kx, jfloat ky) { MTX(p); m->preSkew(kx, ky); }
+void Matrix_nPreConcat(jlong p, jlong o) { MTX(p); if (auto* mo = reinterpret_cast<SkMatrix*>(o)) m->preConcat(*mo); }
+void Matrix_nPostTranslate(jlong p, jfloat dx, jfloat dy) { MTX(p); m->postTranslate(dx, dy); }
+void Matrix_nPostScale4(jlong p, jfloat sx, jfloat sy, jfloat px, jfloat py) { MTX(p); m->postScale(sx, sy, px, py); }
+void Matrix_nPostScale2(jlong p, jfloat sx, jfloat sy) { MTX(p); m->postScale(sx, sy); }
+void Matrix_nPostRotate3(jlong p, jfloat d, jfloat px, jfloat py) { MTX(p); m->postRotate(d, px, py); }
+void Matrix_nPostRotate1(jlong p, jfloat d) { MTX(p); m->postRotate(d); }
+void Matrix_nPostSkew4(jlong p, jfloat kx, jfloat ky, jfloat px, jfloat py) { MTX(p); m->postSkew(kx, ky, px, py); }
+void Matrix_nPostSkew2(jlong p, jfloat kx, jfloat ky) { MTX(p); m->postSkew(kx, ky); }
+void Matrix_nPostConcat(jlong p, jlong o) { MTX(p); if (auto* mo = reinterpret_cast<SkMatrix*>(o)) m->postConcat(*mo); }
+#undef MTX
+jboolean Matrix_nInvert(jlong p, jlong inv) {
+  auto* m = reinterpret_cast<SkMatrix*>(p); auto* i = reinterpret_cast<SkMatrix*>(inv);
+  return (m != nullptr && i != nullptr && m->invert(i)) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean Matrix_nIsIdentity(jlong p) { auto* m = reinterpret_cast<SkMatrix*>(p); return (m != nullptr && m->isIdentity()) ? JNI_TRUE : JNI_FALSE; }
+jboolean Matrix_nIsAffine(jlong p) { auto* m = reinterpret_cast<SkMatrix*>(p); return (m != nullptr && !m->hasPerspective()) ? JNI_TRUE : JNI_FALSE; }
+jboolean Matrix_nRectStaysRect(jlong p) { auto* m = reinterpret_cast<SkMatrix*>(p); return (m != nullptr && m->rectStaysRect()) ? JNI_TRUE : JNI_FALSE; }
+jboolean Matrix_nEquals(jlong a, jlong b) { auto* ma = reinterpret_cast<SkMatrix*>(a); auto* mb = reinterpret_cast<SkMatrix*>(b); return (ma != nullptr && mb != nullptr && *ma == *mb) ? JNI_TRUE : JNI_FALSE; }
+jfloat Matrix_nMapRadius(jlong p, jfloat r) { auto* m = reinterpret_cast<SkMatrix*>(p); return m != nullptr ? m->mapRadius(r) : r; }
+// Object-arg variants (normal natives). RectF has float left/top/right/bottom.
+void read_rectf(JNIEnv* env, jobject rect, SkRect* out) {
+  jclass c = env->GetObjectClass(rect);
+  out->fLeft = env->GetFloatField(rect, env->GetFieldID(c, "left", "F"));
+  out->fTop = env->GetFloatField(rect, env->GetFieldID(c, "top", "F"));
+  out->fRight = env->GetFloatField(rect, env->GetFieldID(c, "right", "F"));
+  out->fBottom = env->GetFloatField(rect, env->GetFieldID(c, "bottom", "F"));
+}
+void write_rectf(JNIEnv* env, jobject rect, const SkRect& r) {
+  jclass c = env->GetObjectClass(rect);
+  env->SetFloatField(rect, env->GetFieldID(c, "left", "F"), r.fLeft);
+  env->SetFloatField(rect, env->GetFieldID(c, "top", "F"), r.fTop);
+  env->SetFloatField(rect, env->GetFieldID(c, "right", "F"), r.fRight);
+  env->SetFloatField(rect, env->GetFieldID(c, "bottom", "F"), r.fBottom);
+}
+jboolean Matrix_nMapRect(JNIEnv* env, jclass, jlong p, jobject dst, jobject src) {
+  auto* m = reinterpret_cast<SkMatrix*>(p);
+  if (m == nullptr || dst == nullptr || src == nullptr) return JNI_FALSE;
+  SkRect s; read_rectf(env, src, &s);
+  SkRect d; const bool rectStays = m->mapRect(&d, s);
+  write_rectf(env, dst, d);
+  return rectStays ? JNI_TRUE : JNI_FALSE;
+}
+void Matrix_nMapPoints(JNIEnv* env, jclass, jlong p, jfloatArray dst, jint dstIndex,
+                       jfloatArray src, jint srcIndex, jint count, jboolean isPts) {
+  auto* m = reinterpret_cast<SkMatrix*>(p);
+  if (m == nullptr || dst == nullptr || src == nullptr || count <= 0) return;
+  jfloat* s = env->GetFloatArrayElements(src, nullptr);
+  jfloat* d = env->GetFloatArrayElements(dst, nullptr);
+  if (s != nullptr && d != nullptr) {
+    std::vector<SkPoint> pts(count);
+    for (int i = 0; i < count; ++i) pts[i] = SkPoint::Make(s[srcIndex + 2 * i], s[srcIndex + 2 * i + 1]);
+    if (isPts) m->mapPoints(pts.data(), pts.data(), count);
+    else m->mapVectors(pts.data(), pts.data(), count);
+    for (int i = 0; i < count; ++i) { d[dstIndex + 2 * i] = pts[i].fX; d[dstIndex + 2 * i + 1] = pts[i].fY; }
+  }
+  if (s != nullptr) env->ReleaseFloatArrayElements(src, s, JNI_ABORT);
+  if (d != nullptr) env->ReleaseFloatArrayElements(dst, d, 0);
+}
+jboolean Matrix_nSetRectToRect(JNIEnv* env, jclass, jlong p, jobject src, jobject dst, jint stf) {
+  auto* m = reinterpret_cast<SkMatrix*>(p);
+  if (m == nullptr || src == nullptr || dst == nullptr) return JNI_FALSE;
+  SkRect s, d; read_rectf(env, src, &s); read_rectf(env, dst, &d);
+  return m->setRectToRect(s, d, static_cast<SkMatrix::ScaleToFit>(stf)) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean Matrix_nSetPolyToPoly(JNIEnv*, jclass, jlong, jfloatArray, jint, jfloatArray, jint, jint) {
+  return JNI_FALSE;  // rarely used; not modeled
+}
 
 // ── Shader / gradients (LinearGradient, RadialGradient over SkGradientShader) ────
 // Shader.TileMode: CLAMP=0, REPEAT=1, MIRROR=2 (SkTileMode matches; DECAL=3 unused here).
@@ -751,6 +907,12 @@ jlong Paint_nInitWithPaint(JNIEnv*, jclass, jlong src) {
   auto* s = reinterpret_cast<AclPaint*>(src);
   return reinterpret_cast<jlong>(s != nullptr ? new AclPaint(*s) : new AclPaint());
 }
+// Paint.set(Paint): copy src into dst.
+void Paint_nSet(jlong dst, jlong src) {
+  auto* d = reinterpret_cast<AclPaint*>(dst);
+  auto* s = reinterpret_cast<AclPaint*>(src);
+  if (d != nullptr && s != nullptr) *d = *s;
+}
 // Mechanical SkPaint/SkFont getters+setters (all @CriticalNative — handle-only). Batched
 // so Material/TextView construction and text layout resolve without one-off UnsatisfiedLinks.
 #define ACLP(ptr) auto* ap = reinterpret_cast<AclPaint*>(ptr)
@@ -838,6 +1000,135 @@ jfloat Paint_nGetFontMetrics(JNIEnv* env, jclass, jlong p, jobject fm) {
 }
 jboolean Paint_nHasGlyph(JNIEnv*, jclass, jlong p, jint, jstring) {
   return reinterpret_cast<AclPaint*>(p) != nullptr ? JNI_TRUE : JNI_FALSE;
+}
+// Advance width of UTF-16 units [start, offset) — text run measurement for layout.
+jfloat Paint_nGetRunAdvance(JNIEnv* env, jclass, jlong p, jcharArray text, jint start, jint /*end*/,
+                            jint /*ctxStart*/, jint /*ctxEnd*/, jboolean /*isRtl*/, jint offset) {
+  auto* ap = reinterpret_cast<AclPaint*>(p);
+  if (ap == nullptr || text == nullptr) return 0;
+  jchar* chars = env->GetCharArrayElements(text, nullptr);
+  if (chars == nullptr) return 0;
+  const jsize len = env->GetArrayLength(text);
+  const int s = start < 0 ? 0 : start;
+  const int o = offset > len ? len : offset;
+  float adv = 0;
+  if (o > s)
+    adv = ap->font.measureText(chars + s, static_cast<std::size_t>(o - s) * 2,
+                               SkTextEncoding::kUTF16, nullptr, &ap->paint);
+  env->ReleaseCharArrayElements(text, chars, JNI_ABORT);
+  return adv;
+}
+// Offset whose advance from start is closest to `advance` (per-unit walk).
+jint Paint_nGetOffsetForAdvance(JNIEnv* env, jclass, jlong p, jcharArray text, jint start, jint end,
+                                jint, jint, jboolean, jfloat advance) {
+  auto* ap = reinterpret_cast<AclPaint*>(p);
+  if (ap == nullptr || text == nullptr) return start;
+  jchar* chars = env->GetCharArrayElements(text, nullptr);
+  if (chars == nullptr) return start;
+  const jsize len = env->GetArrayLength(text);
+  const int s = start < 0 ? 0 : start;
+  const int e = end > len ? len : end;
+  float acc = 0; int off = s;
+  for (int i = s; i < e; ++i) {
+    const float w = ap->font.measureText(chars + i, 2, SkTextEncoding::kUTF16, nullptr, &ap->paint);
+    if (acc + w * 0.5f > advance) break;
+    acc += w; off = i + 1;
+  }
+  env->ReleaseCharArrayElements(text, chars, JNI_ABORT);
+  return off;
+}
+void fill_metrics_int(JNIEnv* env, AclPaint* ap, jobject fmi) {
+  if (fmi == nullptr) return;
+  SkFontMetrics m; ap->font.getMetrics(&m);
+  static jfieldID ft = nullptr, fa, fd, fb, fl;
+  if (ft == nullptr) {
+    jclass c = env->GetObjectClass(fmi);
+    ft = env->GetFieldID(c, "top", "I"); fa = env->GetFieldID(c, "ascent", "I");
+    fd = env->GetFieldID(c, "descent", "I"); fb = env->GetFieldID(c, "bottom", "I");
+    fl = env->GetFieldID(c, "leading", "I");
+  }
+  env->SetIntField(fmi, ft, static_cast<jint>(std::floor(m.fTop)));
+  env->SetIntField(fmi, fa, static_cast<jint>(std::floor(m.fAscent)));
+  env->SetIntField(fmi, fd, static_cast<jint>(std::ceil(m.fDescent)));
+  env->SetIntField(fmi, fb, static_cast<jint>(std::ceil(m.fBottom)));
+  env->SetIntField(fmi, fl, static_cast<jint>(std::ceil(m.fLeading)));
+}
+void Paint_nGetFontMetricsIntForTextChars(JNIEnv* env, jclass, jlong p, jcharArray, jint, jint,
+                                          jint, jint, jboolean, jobject fmi) {
+  if (auto* ap = reinterpret_cast<AclPaint*>(p)) fill_metrics_int(env, ap, fmi);
+}
+void Paint_nGetFontMetricsIntForTextString(JNIEnv* env, jclass, jlong p, jstring, jint, jint,
+                                           jint, jint, jboolean, jobject fmi) {
+  if (auto* ap = reinterpret_cast<AclPaint*>(p)) fill_metrics_int(env, ap, fmi);
+}
+void Paint_nGetCharArrayBounds(JNIEnv* env, jclass, jlong p, jcharArray text, jint index, jint count,
+                               jint, jobject rect) {
+  auto* ap = reinterpret_cast<AclPaint*>(p);
+  if (ap == nullptr || text == nullptr || rect == nullptr) return;
+  jchar* chars = env->GetCharArrayElements(text, nullptr);
+  if (chars == nullptr) return;
+  const jsize len = env->GetArrayLength(text);
+  const int i = index < 0 ? 0 : index;
+  const int cnt = (i + count > len) ? (len - i) : count;
+  SkRect b{};
+  if (cnt > 0)
+    ap->font.measureText(chars + i, static_cast<std::size_t>(cnt) * 2, SkTextEncoding::kUTF16,
+                         &b, &ap->paint);
+  env->ReleaseCharArrayElements(text, chars, JNI_ABORT);
+  static jfieldID fl = nullptr, ft, fr, fb;
+  if (fl == nullptr) {
+    jclass c = env->GetObjectClass(rect);
+    fl = env->GetFieldID(c, "left", "I"); ft = env->GetFieldID(c, "top", "I");
+    fr = env->GetFieldID(c, "right", "I"); fb = env->GetFieldID(c, "bottom", "I");
+  }
+  env->SetIntField(rect, fl, static_cast<jint>(std::floor(b.fLeft)));
+  env->SetIntField(rect, ft, static_cast<jint>(std::floor(b.fTop)));
+  env->SetIntField(rect, fr, static_cast<jint>(std::ceil(b.fRight)));
+  env->SetIntField(rect, fb, static_cast<jint>(std::ceil(b.fBottom)));
+}
+// Cursor motion: step one unit toward the run direction (no grapheme clustering).
+// (long, text, contextStart, contextEnd, dir, offset, cursorOpt)
+jint Paint_nGetTextRunCursorChars(JNIEnv*, jclass, jlong, jcharArray, jint, jint, jint,
+                                  jint offset, jint opt) {
+  return opt == 0 /*AFTER*/ ? offset + 1 : (opt == 2 /*BEFORE*/ ? offset - 1 : offset);
+}
+jint Paint_nGetTextRunCursorString(JNIEnv*, jclass, jlong, jstring, jint, jint, jint,
+                                   jint offset, jint opt) {
+  return opt == 0 ? offset + 1 : (opt == 2 ? offset - 1 : offset);
+}
+jint Paint_nBreakTextChars(JNIEnv* env, jclass, jlong p, jcharArray text, jint index, jint count,
+                           jfloat /*maxWidth*/, jint /*bidiFlags*/, jfloatArray measured) {
+  auto* ap = reinterpret_cast<AclPaint*>(p);
+  const int n = count < 0 ? -count : count;
+  if (ap != nullptr && text != nullptr && measured != nullptr && env->GetArrayLength(measured) > 0) {
+    jchar* chars = env->GetCharArrayElements(text, nullptr);
+    if (chars != nullptr) {
+      const jsize len = env->GetArrayLength(text);
+      const int i = index < 0 ? 0 : index;
+      const int cnt = (i + n > len) ? (len - i) : n;
+      const float w = cnt > 0 ? ap->font.measureText(chars + i, static_cast<std::size_t>(cnt) * 2,
+                                                      SkTextEncoding::kUTF16, nullptr, &ap->paint) : 0;
+      env->SetFloatArrayRegion(measured, 0, 1, &w);
+      env->ReleaseCharArrayElements(text, chars, JNI_ABORT);
+    }
+  }
+  return n;  // best-effort: everything fits (no wrapping in the measure stub)
+}
+jint Paint_nBreakTextString(JNIEnv* env, jclass, jlong p, jstring text, jboolean, jfloat, jint,
+                            jfloatArray measured) {
+  auto* ap = reinterpret_cast<AclPaint*>(p);
+  if (text == nullptr) return 0;
+  const jsize n = env->GetStringLength(text);
+  if (ap != nullptr && measured != nullptr && env->GetArrayLength(measured) > 0) {
+    const jchar* chars = env->GetStringChars(text, nullptr);
+    if (chars != nullptr) {
+      const float w = n > 0 ? ap->font.measureText(chars, static_cast<std::size_t>(n) * 2,
+                                                   SkTextEncoding::kUTF16, nullptr, &ap->paint) : 0;
+      env->SetFloatArrayRegion(measured, 0, 1, &w);
+      env->ReleaseStringChars(text, chars);
+    }
+  }
+  return n;
 }
 #undef ACLP
 jlong Paint_nGetNativeFinalizer(JNIEnv*, jclass) {
@@ -1657,6 +1948,45 @@ void Typeface_nativeForceSetStaticFinalField(JNIEnv* env, jclass clazz, jstring 
 void Typeface_nativeAddFontCollections(JNIEnv*, jclass, jlong) {}
 void Typeface_nativeWarmUpCache(JNIEnv*, jclass, jstring) {}
 
+// ── android.graphics.Interpolator (legacy keyframe interpolator) ─────────────────
+// Skia dropped SkInterpolator; acl keeps the first keyframe's values and returns them
+// statically (animations don't advance in a single-frame render). Enough to inflate
+// views that reference an interpolator.
+struct AclInterpolator { int valueCount = 1; std::vector<float> firstValues; };
+jlong Interpolator_nativeConstructor(JNIEnv*, jclass, jint valueCount, jint /*frameCount*/) {
+  auto* it = new AclInterpolator();
+  it->valueCount = valueCount > 0 ? valueCount : 1;
+  it->firstValues.assign(it->valueCount, 0.0f);
+  return reinterpret_cast<jlong>(it);
+}
+void Interpolator_nativeDestructor(JNIEnv*, jclass, jlong p) { delete reinterpret_cast<AclInterpolator*>(p); }
+void Interpolator_nativeReset(JNIEnv*, jclass, jlong p, jint valueCount, jint /*frameCount*/) {
+  if (auto* it = reinterpret_cast<AclInterpolator*>(p)) {
+    it->valueCount = valueCount > 0 ? valueCount : 1;
+    it->firstValues.assign(it->valueCount, 0.0f);
+  }
+}
+void Interpolator_nativeSetKeyFrame(JNIEnv* env, jclass, jlong p, jint index, jint /*msec*/,
+                                    jfloatArray values, jfloatArray /*blend*/) {
+  auto* it = reinterpret_cast<AclInterpolator*>(p);
+  if (it != nullptr && index == 0 && values != nullptr) {
+    const jsize n = env->GetArrayLength(values);
+    it->firstValues.resize(n);
+    env->GetFloatArrayRegion(values, 0, n, it->firstValues.data());
+  }
+}
+void Interpolator_nativeSetRepeatMirror(JNIEnv*, jclass, jlong, jfloat, jboolean) {}
+jint Interpolator_nativeTimeToValues(JNIEnv* env, jclass, jlong p, jint /*msec*/, jfloatArray values) {
+  auto* it = reinterpret_cast<AclInterpolator*>(p);
+  if (it != nullptr && values != nullptr && !it->firstValues.empty()) {
+    const jsize n = env->GetArrayLength(values);
+    const jsize cnt = n < static_cast<jsize>(it->firstValues.size())
+                          ? n : static_cast<jsize>(it->firstValues.size());
+    env->SetFloatArrayRegion(values, 0, cnt, it->firstValues.data());
+  }
+  return 0;  // NORMAL
+}
+
 // com.android.internal.util.VirtualRefBasePtr — the tiny ref-counting wrapper Java uses
 // for the VectorDrawable tree (normally in libhwui). Drives our VirtualLightRefBase.
 void VirtualRefBasePtr_nIncStrong(JNIEnv*, jclass, jlong ptr) {
@@ -1705,6 +2035,41 @@ const JNINativeMethod kMatrix[] = {
     {"nReset", "(J)V", reinterpret_cast<void*>(Matrix_nReset)},
     {"nSet", "(JJ)V", reinterpret_cast<void*>(Matrix_nSet)},
     {"nSetConcat", "(JJJ)V", reinterpret_cast<void*>(Matrix_nSetConcat)},
+    {"nSetTranslate", "(JFF)V", reinterpret_cast<void*>(Matrix_nSetTranslate)},
+    {"nSetScale", "(JFFFF)V", reinterpret_cast<void*>(Matrix_nSetScale4)},
+    {"nSetScale", "(JFF)V", reinterpret_cast<void*>(Matrix_nSetScale2)},
+    {"nSetRotate", "(JFFF)V", reinterpret_cast<void*>(Matrix_nSetRotate3)},
+    {"nSetRotate", "(JF)V", reinterpret_cast<void*>(Matrix_nSetRotate1)},
+    {"nSetSkew", "(JFFFF)V", reinterpret_cast<void*>(Matrix_nSetSkew4)},
+    {"nSetSkew", "(JFF)V", reinterpret_cast<void*>(Matrix_nSetSkew2)},
+    {"nSetSinCos", "(JFFFF)V", reinterpret_cast<void*>(Matrix_nSetSinCos4)},
+    {"nSetSinCos", "(JFF)V", reinterpret_cast<void*>(Matrix_nSetSinCos2)},
+    {"nPreTranslate", "(JFF)V", reinterpret_cast<void*>(Matrix_nPreTranslate)},
+    {"nPreScale", "(JFFFF)V", reinterpret_cast<void*>(Matrix_nPreScale4)},
+    {"nPreScale", "(JFF)V", reinterpret_cast<void*>(Matrix_nPreScale2)},
+    {"nPreRotate", "(JFFF)V", reinterpret_cast<void*>(Matrix_nPreRotate3)},
+    {"nPreRotate", "(JF)V", reinterpret_cast<void*>(Matrix_nPreRotate1)},
+    {"nPreSkew", "(JFFFF)V", reinterpret_cast<void*>(Matrix_nPreSkew4)},
+    {"nPreSkew", "(JFF)V", reinterpret_cast<void*>(Matrix_nPreSkew2)},
+    {"nPreConcat", "(JJ)V", reinterpret_cast<void*>(Matrix_nPreConcat)},
+    {"nPostTranslate", "(JFF)V", reinterpret_cast<void*>(Matrix_nPostTranslate)},
+    {"nPostScale", "(JFFFF)V", reinterpret_cast<void*>(Matrix_nPostScale4)},
+    {"nPostScale", "(JFF)V", reinterpret_cast<void*>(Matrix_nPostScale2)},
+    {"nPostRotate", "(JFFF)V", reinterpret_cast<void*>(Matrix_nPostRotate3)},
+    {"nPostRotate", "(JF)V", reinterpret_cast<void*>(Matrix_nPostRotate1)},
+    {"nPostSkew", "(JFFFF)V", reinterpret_cast<void*>(Matrix_nPostSkew4)},
+    {"nPostSkew", "(JFF)V", reinterpret_cast<void*>(Matrix_nPostSkew2)},
+    {"nPostConcat", "(JJ)V", reinterpret_cast<void*>(Matrix_nPostConcat)},
+    {"nInvert", "(JJ)Z", reinterpret_cast<void*>(Matrix_nInvert)},
+    {"nIsIdentity", "(J)Z", reinterpret_cast<void*>(Matrix_nIsIdentity)},
+    {"nIsAffine", "(J)Z", reinterpret_cast<void*>(Matrix_nIsAffine)},
+    {"nRectStaysRect", "(J)Z", reinterpret_cast<void*>(Matrix_nRectStaysRect)},
+    {"nEquals", "(JJ)Z", reinterpret_cast<void*>(Matrix_nEquals)},
+    {"nMapRadius", "(JF)F", reinterpret_cast<void*>(Matrix_nMapRadius)},
+    {"nMapRect", "(JLandroid/graphics/RectF;Landroid/graphics/RectF;)Z", reinterpret_cast<void*>(Matrix_nMapRect)},
+    {"nMapPoints", "(J[FI[FIIZ)V", reinterpret_cast<void*>(Matrix_nMapPoints)},
+    {"nSetRectToRect", "(JLandroid/graphics/RectF;Landroid/graphics/RectF;I)Z", reinterpret_cast<void*>(Matrix_nSetRectToRect)},
+    {"nSetPolyToPoly", "(J[FI[FII)Z", reinterpret_cast<void*>(Matrix_nSetPolyToPoly)},
 };
 const JNINativeMethod kBaseCanvas[] = {
     {"nDrawColor", "(JII)V", reinterpret_cast<void*>(Canvas_nDrawColor)},
@@ -1714,6 +2079,12 @@ const JNINativeMethod kBaseCanvas[] = {
     {"nDrawCircle", "(JFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawCircle)},
     {"nDrawRoundRect", "(JFFFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawRoundRect)},
     {"nDrawText", "(JLjava/lang/String;IIFFIJ)V", reinterpret_cast<void*>(Canvas_nDrawText)},
+    {"nDrawText", "(J[CIIFFIJ)V", reinterpret_cast<void*>(Canvas_nDrawTextChars)},
+    {"nDrawTextRun", "(JLjava/lang/String;IIIIFFZJ)V", reinterpret_cast<void*>(Canvas_nDrawTextRunString)},
+    {"nDrawTextRun", "(J[CIIIIFFZJJ)V", reinterpret_cast<void*>(Canvas_nDrawTextRunChars)},
+    {"nDrawGlyphs", "(J[I[FIIIJJ)V", reinterpret_cast<void*>(Canvas_nDrawGlyphs)},
+    {"nDrawTextOnPath", "(J[CIIJFFIJ)V", reinterpret_cast<void*>(Canvas_nDrawTextOnPathChars)},
+    {"nDrawTextOnPath", "(JLjava/lang/String;JFFIJ)V", reinterpret_cast<void*>(Canvas_nDrawTextOnPathString)},
     {"nDrawBitmap", "(JJFFJIII)V", reinterpret_cast<void*>(Canvas_nDrawBitmap)},
     {"nDrawBitmap", "(JJFFFFFFFFJII)V", reinterpret_cast<void*>(Canvas_nDrawBitmapRect)},
     {"nDrawPath", "(JJJ)V", reinterpret_cast<void*>(Canvas_nDrawPath)},
@@ -1739,6 +2110,7 @@ const JNINativeMethod kPath[] = {
 const JNINativeMethod kPaint[] = {
     {"nInit", "()J", reinterpret_cast<void*>(Paint_nInit)},
     {"nInitWithPaint", "(J)J", reinterpret_cast<void*>(Paint_nInitWithPaint)},
+    {"nSet", "(JJ)V", reinterpret_cast<void*>(Paint_nSet)},
     {"nGetTextSize", "(J)F", reinterpret_cast<void*>(Paint_nGetTextSize)},
     {"nGetStyle", "(J)I", reinterpret_cast<void*>(Paint_nGetStyle)},
     {"nGetStrokeCap", "(J)I", reinterpret_cast<void*>(Paint_nGetStrokeCap)},
@@ -1789,6 +2161,15 @@ const JNINativeMethod kPaint[] = {
     {"nGetFillPath", "(JJJ)Z", reinterpret_cast<void*>(Paint_nGetFillPath)},
     {"nGetFontMetrics", "(JLandroid/graphics/Paint$FontMetrics;)F", reinterpret_cast<void*>(Paint_nGetFontMetrics)},
     {"nHasGlyph", "(JILjava/lang/String;)Z", reinterpret_cast<void*>(Paint_nHasGlyph)},
+    {"nGetRunAdvance", "(J[CIIIIZI)F", reinterpret_cast<void*>(Paint_nGetRunAdvance)},
+    {"nGetOffsetForAdvance", "(J[CIIIIZF)I", reinterpret_cast<void*>(Paint_nGetOffsetForAdvance)},
+    {"nGetFontMetricsIntForText", "(J[CIIIIZLandroid/graphics/Paint$FontMetricsInt;)V", reinterpret_cast<void*>(Paint_nGetFontMetricsIntForTextChars)},
+    {"nGetFontMetricsIntForText", "(JLjava/lang/String;IIIIZLandroid/graphics/Paint$FontMetricsInt;)V", reinterpret_cast<void*>(Paint_nGetFontMetricsIntForTextString)},
+    {"nGetCharArrayBounds", "(J[CIIILandroid/graphics/Rect;)V", reinterpret_cast<void*>(Paint_nGetCharArrayBounds)},
+    {"nGetTextRunCursor", "(J[CIIIII)I", reinterpret_cast<void*>(Paint_nGetTextRunCursorChars)},
+    {"nGetTextRunCursor", "(JLjava/lang/String;IIIII)I", reinterpret_cast<void*>(Paint_nGetTextRunCursorString)},
+    {"nBreakText", "(J[CIIFI[F)I", reinterpret_cast<void*>(Paint_nBreakTextChars)},
+    {"nBreakText", "(JLjava/lang/String;ZFI[F)I", reinterpret_cast<void*>(Paint_nBreakTextString)},
     {"nGetNativeFinalizer", "()J", reinterpret_cast<void*>(Paint_nGetNativeFinalizer)},
     {"nSetColor", "(JI)V", reinterpret_cast<void*>(Paint_nSetColor)},
     {"nReset", "(J)V", reinterpret_cast<void*>(Paint_nReset)},
@@ -2001,6 +2382,14 @@ const JNINativeMethod kRegion[] = {
     {"nativeWriteToParcel", "(JLandroid/os/Parcel;)Z", reinterpret_cast<void*>(Region_nativeWriteToParcel)},
     {"nativeToString", "(J)Ljava/lang/String;", reinterpret_cast<void*>(Region_nativeToString)},
 };
+const JNINativeMethod kInterpolator[] = {
+    {"nativeConstructor", "(II)J", reinterpret_cast<void*>(Interpolator_nativeConstructor)},
+    {"nativeDestructor", "(J)V", reinterpret_cast<void*>(Interpolator_nativeDestructor)},
+    {"nativeReset", "(JII)V", reinterpret_cast<void*>(Interpolator_nativeReset)},
+    {"nativeSetKeyFrame", "(JII[F[F)V", reinterpret_cast<void*>(Interpolator_nativeSetKeyFrame)},
+    {"nativeSetRepeatMirror", "(JFZ)V", reinterpret_cast<void*>(Interpolator_nativeSetRepeatMirror)},
+    {"nativeTimeToValues", "(JI[F)I", reinterpret_cast<void*>(Interpolator_nativeTimeToValues)},
+};
 const JNINativeMethod kVirtualRefBasePtr[] = {
     {"nIncStrong", "(J)V", reinterpret_cast<void*>(VirtualRefBasePtr_nIncStrong)},
     {"nDecStrong", "(J)V", reinterpret_cast<void*>(VirtualRefBasePtr_nDecStrong)},
@@ -2136,6 +2525,7 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/fonts/FontFamily$Builder", kFontFamilyBuilder, n(kFontFamilyBuilder)) && ok;
   ok = reg(env, "android/graphics/fonts/FontFamily", kFontFamily, n(kFontFamily)) && ok;
   ok = reg(env, "android/graphics/fonts/Font", kFont, n(kFont)) && ok;
+  ok = reg(env, "android/graphics/Interpolator", kInterpolator, n(kInterpolator)) && ok;
   ok = reg(env, "com/android/internal/util/VirtualRefBasePtr", kVirtualRefBasePtr, n(kVirtualRefBasePtr)) && ok;
   ok = reg(env, "android/util/PathParser", kPathParser, n(kPathParser)) && ok;
   ok = reg(env, "android/graphics/drawable/VectorDrawable", kVectorDrawable, n(kVectorDrawable)) && ok;

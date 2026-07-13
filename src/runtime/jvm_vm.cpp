@@ -526,10 +526,31 @@ class JniVm : public Vm {
   // traversal over the app's view tree renders verifiable output (no compositor).
   void render_content_view(jobject activity) {
     jclass acls = env_->GetObjectClass(activity);
-    jmethodID gcv = env_->GetMethodID(acls, "aclContentView", "()Landroid/view/View;");
+    jobject view = nullptr;
+    // Prefer acl's helper (view-host demo); real Activities lack it — fall back to the
+    // standard decor view: activity.getWindow().getDecorView().
+    if (jmethodID gcv = env_->GetMethodID(acls, "aclContentView", "()Landroid/view/View;");
+        gcv != nullptr) {
+      view = env_->CallObjectMethod(activity, gcv);
+    }
+    clear_exception();
+    if (view == nullptr) {
+      if (jmethodID gw = env_->GetMethodID(acls, "getWindow", "()Landroid/view/Window;");
+          gw != nullptr) {
+        if (jobject window = env_->CallObjectMethod(activity, gw); window != nullptr) {
+          jclass wcls = env_->GetObjectClass(window);
+          if (jmethodID gdv =
+                  env_->GetMethodID(wcls, "getDecorView", "()Landroid/view/View;");
+              gdv != nullptr) {
+            view = env_->CallObjectMethod(window, gdv);
+          }
+          env_->DeleteLocalRef(wcls);
+          env_->DeleteLocalRef(window);
+        }
+      }
+      clear_exception();
+    }
     env_->DeleteLocalRef(acls);
-    if (gcv == nullptr) { clear_exception(); return; }
-    jobject view = env_->CallObjectMethod(activity, gcv);
     if (view == nullptr) { clear_exception(); return; }  // no content view set
 
     const int w = svc::window().display_width();
