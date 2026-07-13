@@ -122,7 +122,19 @@ device-container model (contradicts ADR-1/host-ART, single-process, no-Binder).
   `shared`: libpng, libjpeg, libz, libexpat, libft2, libicuuc, libicui18n, libharfbuzz_ng, libdng_sdk,
   libpiex, liblog, libbase, libcutils — `static_libs:["libskia"]` does NOT auto-pull them). So the
   Skia-on-host linking is solved; the remaining S3 work is the natives themselves.
-- **S4** — present + grow hwui's DisplayList/RenderThread/damage design for device-class performance.
+  **S3 DONE (2026-07-12):** `libacl_graphics_jni` (Soong `cc_library_shared` host,
+  `tools/aosp/graphics_jni/` → `$AOSP/vendor/acl/graphics_jni/`) implements acl's minimal
+  `android.graphics` natives (Bitmap/Canvas/BaseCanvas/Paint/ColorSpace$Rgb) over core Skia, the
+  `@CriticalNative` methods in the **device convention** (handle-only) to match the annotation host
+  ART honors. acl (`ArtVm::load_acl_graphics`, gated `ACL_ART_GRAPHICS_LIB`) `dlopen`s it and calls
+  `register_acl_graphics`. **Verified: real `Bitmap.createBitmap(16,10,ARGB_8888)` → `new Canvas` →
+  `drawColor` → `new Paint().setColor` → `drawRect` → `getPixel` all execute on host ART, rendered by
+  Android's host Skia, pixels correct (`bg=0xff204060 fg=0xffcc8844`)** — no `@CriticalNative`
+  clearing, no AOSP patch, no libhwui rebuild, no container. ~20 natives; the register/ABI mechanism
+  is proven, so the rest is filling in ops.
+- **S4 (S3b next)** — back the `Canvas`'s `SkBitmap` with acl's dma-buf `VkImage` (`GrBackendTexture`
+  over the shared `VkDevice`) so app draws land in the presentable surface → present via
+  `zwp_linux_dmabuf_v1` (built, V2b); then grow hwui's DisplayList/RenderThread/damage design.
 
 The reusable probe `tests/fixtures/art_graphics/Main.java` (real `Bitmap`/`Canvas`/`Paint` via
 reflection) validates whichever backend once S3 lands.

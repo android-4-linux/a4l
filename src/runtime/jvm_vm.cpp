@@ -1342,6 +1342,39 @@ class ArtVm final : public JniVm {
            ok, unavailable);
     populate_system_properties(env);
     load_system_resources(env);
+    load_acl_graphics(env);
+  }
+
+  // P2.4/V3 (render): load acl's own android.graphics natives (libacl_graphics_jni, built
+  // by Soong against Android's host libskia) and register them. Unlike the host
+  // libandroid_runtime graphics umbrella (whose layoutlib build compiles @CriticalNative
+  // natives with the wrong (env,clazz) signature → ABI crash), acl's natives use the DEVICE
+  // convention, matching the framework's @CriticalNative that host ART honors. So real
+  // android.graphics.Bitmap/Canvas/Paint execute on our (Android's) Skia. Opt-in via
+  // ACL_ART_GRAPHICS_LIB (path to libacl_graphics_jni.so); best-effort.
+  void load_acl_graphics(JNIEnv* env) {
+    const char* lib = std::getenv("ACL_ART_GRAPHICS_LIB");
+    if (lib == nullptr || *lib == '\0') return;
+    void* h = ::dlopen(lib, RTLD_NOW | RTLD_GLOBAL);
+    if (h == nullptr) {
+      const char* e = ::dlerror();
+      log::w(kTag, "acl graphics: dlopen({}) failed: {}", lib, e ? e : "?");
+      return;
+    }
+    auto reg = reinterpret_cast<jint (*)(JNIEnv*)>(::dlsym(h, "register_acl_graphics"));
+    if (reg == nullptr) {
+      log::w(kTag, "acl graphics: register_acl_graphics not found in {}", lib);
+      return;
+    }
+    const jint rc = reg(env);
+    if (env->ExceptionCheck() || rc != JNI_OK) {
+      env->ExceptionClear();
+      log::w(kTag, "acl graphics: registration failed (rc={})", rc);
+      return;
+    }
+    log::i(kTag,
+           "acl graphics: android.graphics natives registered on Android host Skia "
+           "(Bitmap/Canvas/Paint)");
   }
 
   // Pre-load the framework's system assets (framework-res.apk = the android:R.* resources)

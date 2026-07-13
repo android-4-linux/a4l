@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: Apache-2.0
+// Provenance: acl P2.4/V3; consumes external/skia libskia (Apache-2.0). No GPL-3.0 sources.
+//
+// libacl_graphics_jni: acl-owned minimal android.graphics natives on Android's host
+// libskia, compiled with the device @CriticalNative convention. acl dlopens it and calls
+// register_acl_graphics. Host-only.
+
+cc_library_shared {
+    name: "libacl_graphics_jni",
+    host_supported: true,
+    device_supported: false,
+    srcs: ["graphics_jni.cpp"],
+    header_libs: ["jni_headers"],
+    static_libs: [
+        "libskia",
+        "libwebp-decode",
+        "libwebp-encode",
+        "libsfntly",
+        "libwuffs_mirror_release_c",
+    ],
+    shared_libs: [
+        "libpng",
+        "libjpeg",
+        "libz",
+        "libexpat",
+        "libft2",
+        "libicuuc",
+        "libicui18n",
+        "libharfbuzz_ng",
+        "libdng_sdk",
+        "libpiex",
+        "liblog",
+        "libbase",
+        "libcutils",
+    ],
+    include_dirs: [
+        "external/skia",
+        "external/skia/include/core",
+        "external/skia/include/config",
+        "external/skia/include/gpu",
+        "external/skia/include/private",
+        "external/skia/include/android",
+        "external/skia/include/encode",
+    ],
+    cflags: [
+        "-Wno-unused-parameter",
+    ],
+}
