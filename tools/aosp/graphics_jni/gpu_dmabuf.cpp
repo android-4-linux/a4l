@@ -25,6 +25,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_set>
 #include <vector>
 
 #include <drm_fourcc.h>
@@ -415,3 +416,37 @@ extern "C" bool acl_graphics_gpu_render(int w, int h, uint32_t bg, int l, int t,
 }
 
 extern "C" bool acl_graphics_gpu_available() { return true; }
+
+// ── S4b: drive the app's REAL android.graphics.Canvas onto the GPU surface ──────────
+// begin_frame prepares the GPU render target and returns its SkCanvas as a handle so the
+// runtime can wrap it in `new android.graphics.Canvas(long)`; the app then issues real
+// Canvas ops (drawColor/drawRect/…) that land on the GPU surface. end_frame flushes Ganesh
+// and vkCmdCopyImages the result into the modifier-tiled dma-buf (same copy path as the
+// hardcoded renderer). The returned SkCanvas is owned by the SkSurface, so it is marked
+// "borrowed" and graphics_jni's Canvas finalizer must NOT delete it.
+namespace {
+std::unordered_set<void*> g_borrowed_canvas;
+}  // namespace
+
+extern "C" bool acl_graphics_canvas_borrowed(void* c) {
+  return g_borrowed_canvas.count(c) != 0;
+}
+
+extern "C" long acl_graphics_gpu_begin_frame(int w, int h) {
+  if (!ensure_ready(w, h)) return 0;
+  if (g.image == VK_NULL_HANDLE && !make_target(w, h, &g.info)) return 0;
+  SkCanvas* c = g.opt->getCanvas();
+  c->clear(SK_ColorTRANSPARENT);
+  g_borrowed_canvas.insert(c);
+  return reinterpret_cast<long>(c);
+}
+
+extern "C" bool acl_graphics_gpu_end_frame(AclDmabuf* out) {
+  if (out == nullptr || !g.ready || !g.opt) return false;
+  GrBackendSurfaceMutableState toSrc(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g.qfam);
+  g.opt->flush(GrFlushInfo{}, &toSrc);
+  g.gr->submit(/*syncCpu=*/true);
+  if (!copy_to_dmabuf()) return false;
+  *out = g.info;
+  return out->fd >= 0;
+}

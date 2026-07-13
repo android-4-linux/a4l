@@ -1393,32 +1393,15 @@ class ArtVm final : public JniVm {
     constexpr int W = 480, H = 320;
     constexpr jint kBg = 0xFF204060, kFg = 0xFFCC8844;
 
-    // S4a: GPU-native zero-copy path. libacl_graphics_jni renders the scene with Android's
-    // Skia Ganesh Vulkan STRAIGHT into a modifier-tiled dma-buf VkImage (no CPU upload);
-    // acl presents the exported fd. Gated by ACL_ART_GRAPHICS_GPU.
-    if (const char* gpu = std::getenv("ACL_ART_GRAPHICS_GPU"); gpu != nullptr && *gpu != '\0') {
-      struct AclDmabuf {
-        int fd;
-        std::uint32_t width, height, plane_count;
-        std::uint32_t offsets[4], strides[4];
-        std::uint64_t modifier;
-        std::uint32_t drm_format;
-      };
-      auto render = reinterpret_cast<bool (*)(int, int, std::uint32_t, int, int, int, int,
-                                              std::uint32_t, AclDmabuf*)>(
-          ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_render"));
-      if (render == nullptr) {
-        log::w(kTag, "graphics demo(gpu): acl_graphics_gpu_render missing");
-        return;
-      }
-      AclDmabuf f{};
-      if (!render(W, H, static_cast<std::uint32_t>(kBg), 80, 60, 400, 260,
-                  static_cast<std::uint32_t>(kFg), &f) || f.fd < 0) {
-        log::w(kTag, "graphics demo(gpu): GPU render failed");
-        return;
-      }
-      log::i(kTag, "graphics demo(gpu): Android Skia Ganesh Vulkan rendered into dma-buf "
-                   "(modifier=0x{:x}, {} plane(s))", f.modifier, f.plane_count);
+    struct AclDmabuf {
+      int fd;
+      std::uint32_t width, height, plane_count;
+      std::uint32_t offsets[4], strides[4];
+      std::uint64_t modifier;
+      std::uint32_t drm_format;
+    };
+    // Present a once-rendered dma-buf frame N times (static demo scene).
+    const auto present_frame = [&](const AclDmabuf& f, const char* title) -> bool {
       wm::DmabufRenderFn present = [&](const std::vector<std::uint64_t>&,
                                        gfx::DmabufFrame* out) -> bool {
         gfx::DmabufFrame fr{};
@@ -1436,7 +1419,78 @@ class ArtVm final : public JniVm {
         *out = fr;
         return true;
       };
-      const bool ok = wm::present_dmabuf(present, "acl graphics (GPU)", "com.acl.graphics", 3);
+      return wm::present_dmabuf(present, title, "com.acl.graphics", 3);
+    };
+
+    // S4b: drive the app's REAL android.graphics.Canvas onto the GPU surface (not a
+    // hardcoded C++ scene). Real Canvas ops → Android Skia Ganesh Vulkan → tiled dma-buf →
+    // Wayland, zero-copy. Gated by ACL_ART_GRAPHICS_GPU_CANVAS.
+    if (const char* gc = std::getenv("ACL_ART_GRAPHICS_GPU_CANVAS");
+        gc != nullptr && *gc != '\0') {
+      auto begin = reinterpret_cast<long (*)(int, int)>(
+          ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_begin_frame"));
+      auto finish = reinterpret_cast<bool (*)(AclDmabuf*)>(
+          ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_end_frame"));
+      if (begin == nullptr || finish == nullptr) {
+        log::w(kTag, "graphics demo(gpu-canvas): begin/end frame missing");
+        return;
+      }
+      const auto jfail2 = [&](const char* what) {
+        if (env->ExceptionCheck()) env->ExceptionDescribe();
+        env->ExceptionClear();
+        log::w(kTag, "graphics demo(gpu-canvas): {} failed", what);
+      };
+      const jlong ch = begin(W, H);
+      if (ch == 0) {
+        log::w(kTag, "graphics demo(gpu-canvas): begin_frame failed");
+        return;
+      }
+      jclass canvasC = env->FindClass("android/graphics/Canvas");
+      jclass paintC = env->FindClass("android/graphics/Paint");
+      if (canvasC == nullptr || paintC == nullptr) return jfail2("FindClass");
+      jobject canvas = env->NewObject(
+          canvasC, env->GetMethodID(canvasC, "<init>", "(J)V"), ch);
+      if (canvas == nullptr) return jfail2("new Canvas(long)");
+      env->CallVoidMethod(canvas, env->GetMethodID(canvasC, "drawColor", "(I)V"), kBg);
+      jobject paint = env->NewObject(paintC, env->GetMethodID(paintC, "<init>", "()V"));
+      env->CallVoidMethod(paint, env->GetMethodID(paintC, "setColor", "(I)V"), kFg);
+      env->CallVoidMethod(
+          canvas, env->GetMethodID(canvasC, "drawRect", "(FFFFLandroid/graphics/Paint;)V"),
+          80.0f, 60.0f, 400.0f, 260.0f, paint);
+      if (env->ExceptionCheck()) return jfail2("draw");
+      AclDmabuf f{};
+      if (!finish(&f) || f.fd < 0) {
+        log::w(kTag, "graphics demo(gpu-canvas): end_frame failed");
+        return;
+      }
+      log::i(kTag, "graphics demo(gpu-canvas): real android.graphics.Canvas → Ganesh Vulkan "
+                   "→ dma-buf (modifier=0x{:x}, {} plane(s))", f.modifier, f.plane_count);
+      const bool ok = present_frame(f, "acl graphics (GPU Canvas)");
+      log::i(kTag, "graphics demo(gpu-canvas): real Canvas → Ganesh Vulkan → dma-buf → "
+                   "Wayland {} (zero-copy)", ok ? "presented" : "not presented");
+      return;
+    }
+
+    // S4a: GPU-native zero-copy path. libacl_graphics_jni renders the scene with Android's
+    // Skia Ganesh Vulkan STRAIGHT into a modifier-tiled dma-buf VkImage (no CPU upload);
+    // acl presents the exported fd. Gated by ACL_ART_GRAPHICS_GPU.
+    if (const char* gpu = std::getenv("ACL_ART_GRAPHICS_GPU"); gpu != nullptr && *gpu != '\0') {
+      auto render = reinterpret_cast<bool (*)(int, int, std::uint32_t, int, int, int, int,
+                                              std::uint32_t, AclDmabuf*)>(
+          ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_render"));
+      if (render == nullptr) {
+        log::w(kTag, "graphics demo(gpu): acl_graphics_gpu_render missing");
+        return;
+      }
+      AclDmabuf f{};
+      if (!render(W, H, static_cast<std::uint32_t>(kBg), 80, 60, 400, 260,
+                  static_cast<std::uint32_t>(kFg), &f) || f.fd < 0) {
+        log::w(kTag, "graphics demo(gpu): GPU render failed");
+        return;
+      }
+      log::i(kTag, "graphics demo(gpu): Android Skia Ganesh Vulkan rendered into dma-buf "
+                   "(modifier=0x{:x}, {} plane(s))", f.modifier, f.plane_count);
+      const bool ok = present_frame(f, "acl graphics (GPU)");
       log::i(kTag, "graphics demo(gpu): android.graphics Skia → Ganesh Vulkan → dma-buf → "
                    "Wayland {} (zero-copy)", ok ? "presented" : "not presented");
       return;

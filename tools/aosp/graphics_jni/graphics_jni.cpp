@@ -35,10 +35,17 @@ struct AclBitmap {
 jclass g_bitmap_class = nullptr;    // global ref, for nativeCreate -> NewObject
 jmethodID g_bitmap_ctor = nullptr;
 
+// A GPU-surface-owned SkCanvas (from gpu_dmabuf.cpp's begin_frame) must not be deleted by
+// the Java Canvas finalizer — the SkSurface owns it. Defined in gpu_dmabuf.cpp (same .so).
+extern "C" bool acl_graphics_canvas_borrowed(void* c);
+
 // NativeAllocationRegistry finalizers (returned as function pointers to Java).
 void free_bitmap(void* p) { delete reinterpret_cast<AclBitmap*>(p); }
 void free_paint(void* p) { delete reinterpret_cast<SkPaint*>(p); }
-void free_canvas(void* p) { delete reinterpret_cast<SkCanvas*>(p); }
+void free_canvas(void* p) {
+  if (acl_graphics_canvas_borrowed(p)) return;  // surface-owned (GPU); not ours to delete
+  delete reinterpret_cast<SkCanvas*>(p);
+}
 void free_colorspace(void* p) { SkSafeUnref(reinterpret_cast<SkColorSpace*>(p)); }
 
 // android.graphics.Bitmap.Config.nativeInt -> SkColorType (ARGB_8888 == 5).
