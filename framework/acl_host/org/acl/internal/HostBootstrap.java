@@ -159,6 +159,11 @@ public final class HostBootstrap {
         @Override public boolean isDeviceProtectedStorage() { return false; }
         @Override public boolean isRestricted() { return false; }  // TextView.readTextAppearance
         @Override public boolean canLoadUnsafeResources() { return true; }  // same, @hide
+        // Grant everything — a single-app host with no permission enforcement (ADR-3).
+        @Override public int checkPermission(String perm, int pid, int uid) { return 0; }  // GRANTED
+        @Override public int checkSelfPermission(String perm) { return 0; }
+        @Override public int checkCallingPermission(String perm) { return 0; }
+        @Override public int checkCallingOrSelfPermission(String perm) { return 0; }
         private android.content.ContentResolver resolver;  // one per context (PhoneWindow, apps)
         @Override public android.content.ContentResolver getContentResolver() {
             if (resolver == null) resolver = new AppContentResolver(this);
@@ -204,6 +209,20 @@ public final class HostBootstrap {
             if ("jobscheduler".equals(name)) {
                 return new AppJobScheduler();  // androidx WorkManager's SystemJobScheduler
             }
+            if ("display".equals(name)) {
+                // DisplayManager(Context); its calls route via DisplayManagerGlobal →
+                // ServiceManager("display") IDisplayManager proxy (registerDisplayListener etc.
+                // become no-ops). Material's NavigationBarItemView registers a DisplayListener.
+                try {
+                    java.lang.reflect.Constructor<?> c =
+                            Class.forName("android.hardware.display.DisplayManager")
+                                    .getDeclaredConstructor(android.content.Context.class);
+                    c.setAccessible(true);
+                    return c.newInstance(this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("notification".equals(name)) {
                 // NotificationManager(Context, Handler); its calls route through the seeded
                 // ServiceManager("notification") → INotificationManager proxy (no-op), so
@@ -239,6 +258,7 @@ public final class HostBootstrap {
             if (serviceClass == android.app.ActivityManager.class) return "activity";
             if (serviceClass == android.app.job.JobScheduler.class) return "jobscheduler";
             if (serviceClass == android.app.NotificationManager.class) return "notification";
+            if ("android.hardware.display.DisplayManager".equals(serviceClass.getName())) return "display";
             // ConnectivityManager compared by name (off this compile classpath, see above).
             if ("android.net.ConnectivityManager".equals(serviceClass.getName())) return "connectivity";
             return null;
@@ -482,6 +502,12 @@ public final class HostBootstrap {
             throws Exception {
         setField(android.app.Activity.class, a, "mActivityInfo",
                  new android.content.pm.ActivityInfo());
+        // The launch Intent — getIntent() is read in onCreate (a null mIntent NPEs).
+        try {
+            setField(android.app.Activity.class, a, "mIntent",
+                     new android.content.Intent(android.content.Intent.ACTION_MAIN));
+        } catch (Throwable ignored) {
+        }
         try {
             setField(android.app.Activity.class, a, "mUiThread", Thread.currentThread());
         } catch (Throwable ignored) {
@@ -652,6 +678,7 @@ public final class HostBootstrap {
         // Activity.setTaskDescription (called during theme init) → ActivityClient →
         // IActivityTaskManager.getActivityClientController() → a nested no-op.
         svc.put("activity_task", "android.app.IActivityTaskManager");
+        svc.put("display", "android.hardware.display.IDisplayManager");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},
