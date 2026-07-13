@@ -41,6 +41,74 @@ public final class HostBootstrap {
         return new ViewContext();
     }
 
+    /**
+     * An app-bound Context: the app's own package + resources (its resources.arsc via an
+     * AssetManager over the APK, plus framework-res for android.R.*), so a real Activity's
+     * onCreate/setContentView/resource lookups resolve. Managers are minimal stubs. This is
+     * the minimal-ContextImpl stand-in (no ActivityThread/LoadedApk).
+     */
+    public static android.content.Context newAppContext(String apkPath, String frameworkResPath,
+                                                        String packageName) {
+        return new AppContext(appResources(apkPath, frameworkResPath), packageName);
+    }
+
+    private static Resources appResources(String apkPath, String frameworkResPath) {
+        try {
+            android.content.res.AssetManager am =
+                    android.content.res.AssetManager.class.getDeclaredConstructor().newInstance();
+            java.lang.reflect.Method add =
+                    android.content.res.AssetManager.class.getMethod("addAssetPath", String.class);
+            if (frameworkResPath != null) add.invoke(am, frameworkResPath);  // android.R.*
+            if (apkPath != null) add.invoke(am, apkPath);                    // the app's arsc
+            return new Resources(am, Resources.getSystem().getDisplayMetrics(),
+                                 Resources.getSystem().getConfiguration());
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: app resources failed: " + t);
+            return Resources.getSystem();
+        }
+    }
+
+    static final class AppContext extends ContextWrapper {
+        private final Resources res;
+        private final String pkg;
+        private Resources.Theme theme;
+        AppContext(Resources res, String pkg) { super(null); this.res = res; this.pkg = pkg; }
+        @Override public Resources getResources() { return res; }
+        @Override public String getPackageName() { return pkg; }
+        @Override public android.content.Context getApplicationContext() { return this; }
+        public int getDisplayId() { return 0; }
+        @Override public android.os.Looper getMainLooper() {
+            return android.os.Looper.getMainLooper();
+        }
+        @Override public android.content.pm.ApplicationInfo getApplicationInfo() {
+            android.content.pm.ApplicationInfo ai = new android.content.pm.ApplicationInfo();
+            ai.packageName = pkg;
+            return ai;
+        }
+        @Override public Resources.Theme getTheme() {
+            if (theme == null) theme = res.newTheme();
+            return theme;
+        }
+        @Override public Object getSystemService(String name) {
+            if ("layout_inflater".equals(name)) {
+                try {
+                    return Class.forName("com.android.internal.policy.PhoneLayoutInflater")
+                            .getConstructor(android.content.Context.class).newInstance(this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
+            return null;
+        }
+    }
+
+    /** Attach a real Activity to a base context (set mBase + mActivityInfo + a PhoneWindow). */
+    public static void attachActivityContext(android.app.Activity a, android.content.Context ctx)
+            throws Exception {
+        setField(ContextWrapper.class, a, "mBase", ctx);
+        attachActivity(a, ctx);
+    }
+
     // Lightweight Activity attach: a real Activity is normally attach()'d by ActivityThread
     // (mActivityInfo, mWindow=PhoneWindow, mApplication, …) before onCreate. We can't stand up
     // ActivityThread, so seed the minimum onCreate/setContentView need via reflection: a
@@ -50,13 +118,19 @@ public final class HostBootstrap {
             throws Exception {
         setField(android.app.Activity.class, a, "mActivityInfo",
                  new android.content.pm.ActivityInfo());
-        Object window = Class.forName("com.android.internal.policy.PhoneWindow")
-                .getConstructor(android.content.Context.class).newInstance(ctx);
-        setField(android.app.Activity.class, a, "mWindow", window);
         try {
-            setField(android.app.Activity.class, a, "mApplication", null);
             setField(android.app.Activity.class, a, "mUiThread", Thread.currentThread());
         } catch (Throwable ignored) {
+        }
+        // PhoneWindow is best-effort: its ctor reads settings via getContentResolver (which our
+        // minimal Context lacks). Needed for setContentView but not for early onCreate; don't
+        // let it fail the attach.
+        try {
+            Object window = Class.forName("com.android.internal.policy.PhoneWindow")
+                    .getConstructor(android.content.Context.class).newInstance(ctx);
+            setField(android.app.Activity.class, a, "mWindow", window);
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: PhoneWindow deferred: " + t);
         }
     }
 

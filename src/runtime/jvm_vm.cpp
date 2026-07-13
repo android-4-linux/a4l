@@ -190,6 +190,7 @@ class JniVm : public Vm {
       result = fail_with_exception("instantiate " + std::string(activity_class));
     } else {
       log::i(kTag, "launching Activity {}", activity_class);
+      attach_app_context(activity);  // host ART: give the Activity a real app Context
       log_context(activity);
       // onCreate(null) -> onStart() -> onResume(), the documented launch order.
       result = call_lifecycle(cls, activity, "onCreate", "(Landroid/os/Bundle;)V", true);
@@ -204,6 +205,44 @@ class JniVm : public Vm {
     env_->DeleteLocalRef(activity_cls);
     env_->DeleteLocalRef(cls);
     return result;
+  }
+
+  // Host ART: give the Activity a real app Context (its package + resources.arsc) and attach
+  // it (mBase + mActivityInfo + PhoneWindow), via acl's runtime bootstrap. No-op on the shim
+  // path (HostBootstrap absent) or if the app class/resources aren't available.
+  void attach_app_context(jobject activity) {
+    jclass boot = env_->FindClass("org/acl/internal/HostBootstrap");
+    if (boot == nullptr) { clear_exception(); return; }
+    const std::string apk = config_.classpath.empty() ? std::string() : config_.classpath.front();
+    const char* fwres = std::getenv("ACL_ART_FRAMEWORK_RES");
+    jstring j_apk = env_->NewStringUTF(apk.c_str());
+    jstring j_fw = env_->NewStringUTF(fwres != nullptr ? fwres : "");
+    jstring j_pkg = env_->NewStringUTF(config_.package_name.c_str());
+    jobject ctx = env_->CallStaticObjectMethod(
+        boot,
+        env_->GetStaticMethodID(
+            boot, "newAppContext",
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Landroid/content/Context;"),
+        j_apk, j_fw, j_pkg);
+    if (ctx != nullptr && env_->ExceptionCheck() != JNI_TRUE) {
+      env_->CallStaticVoidMethod(
+          boot,
+          env_->GetStaticMethodID(boot, "attachActivityContext",
+                                  "(Landroid/app/Activity;Landroid/content/Context;)V"),
+          activity, ctx);
+    }
+    if (env_->ExceptionCheck() == JNI_TRUE) {
+      env_->ExceptionDescribe();
+      env_->ExceptionClear();
+      log::w(kTag, "attach app context: failed (continuing)");
+    } else {
+      log::i(kTag, "attach app context: package={} resources bound", config_.package_name);
+    }
+    env_->DeleteLocalRef(j_apk);
+    env_->DeleteLocalRef(j_fw);
+    env_->DeleteLocalRef(j_pkg);
+    if (ctx != nullptr) env_->DeleteLocalRef(ctx);
+    env_->DeleteLocalRef(boot);
   }
 
   // The media-browse API family a hosted service uses: the framework
