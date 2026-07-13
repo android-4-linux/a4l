@@ -1495,7 +1495,25 @@ class ArtVm final : public JniVm {
            ok, unavailable);
     populate_system_properties(env);
     load_system_resources(env);
+    register_no_binder(env);
     load_acl_graphics(env);
+  }
+
+  // acl has no Binder (ADR-3): stub the ServiceManager entry point so the framework's
+  // Binder path degrades gracefully instead of crashing with UnsatisfiedLinkError.
+  // BinderInternal.getContextObject() → null makes ServiceManager.getService() return
+  // null, and framework callers (ViewConfiguration, WindowManagerGlobal, …) fall back to
+  // their no-service defaults. The Java-visible Manager APIs are served by svc/, not Binder.
+  void register_no_binder(JNIEnv* env) {
+    jclass c = env->FindClass("com/android/internal/os/BinderInternal");
+    if (c == nullptr) { env->ExceptionClear(); return; }
+    JNINativeMethod m[] = {
+        {const_cast<char*>("getContextObject"), const_cast<char*>("()Landroid/os/IBinder;"),
+         reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jobject { return nullptr; })},
+    };
+    if (env->RegisterNatives(c, m, 1) != JNI_OK) env->ExceptionClear();
+    env->DeleteLocalRef(c);
+    log::i(kTag, "ART native floor: BinderInternal.getContextObject stubbed (no Binder, ADR-3)");
   }
 
   // P2.4/V3 (render): load acl's own android.graphics natives (libacl_graphics_jni, built
