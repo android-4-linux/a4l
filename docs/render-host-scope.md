@@ -140,10 +140,23 @@ device-container model (contradicts ADR-1/host-ART, single-process, no-Binder).
   via `present_dmabuf`. **Verified LIVE against GNOME Shell/Mutter: `app → android.graphics → Android's
   Skia → dma-buf → Wayland`, 3 clean frames.** Unit `[import]` covers the CPU→dma-buf write (163
   assertions); acl suite green (demo opt-in).
-- **S4 (next)** — the GPU-native zero-copy path: back the `Canvas`'s `SkBitmap` with acl's dma-buf
-  `VkImage` (`GrBackendTexture` over a shared `VkDevice` via `GrVkBackendContext`), so Android's Skia
-  renders straight into the presentable surface (no CPU upload); then grow ops (paths/text) + hwui's
-  DisplayList/RenderThread/damage design + drive from a real `View.draw` (into Gate G2).
+### S4 — two tracks (FINDING 2026-07-12)
+**Android's host `libskia` is CPU-only** — zero GPU backend (`nm` on the host `libskia.a`: no `GrGL*`,
+no `GrVk*`, no `MakeVulkan`/`MakeGL`; Vulkan/`GrVk*`/`libvulkan` are gated to `target: { android }`
+in `external/skia/Android.bp`; the host build never needed GPU for layoutlib). Since the app's
+`android.graphics.Canvas` must render through *Android's* Skia (type-compatible with the framework
+natives), **the S3b CPU-render-then-upload loop is not a shortcut — it's the only path today, and it
+is correct + working.** GPU-native therefore forks:
+- **S4a — GPU-native (perf).** Requires **rebuilding Android's host `libskia` with a Vulkan backend**
+  (`external/skia/Android.bp`: lift `vulkan`/`GrVk*`/`libvulkan`/`GrVulkanMemoryAllocator` out of the
+  `target: { android }` gate for the host variant) + a Skia rebuild. Then wrap acl's dma-buf `VkImage`
+  as an Android-Skia Ganesh `SkSurface` (`GrVkBackendContext` over a `VkDevice` shared with acl's gfx,
+  `GrBackendTexture`/`SkSurface::MakeFromBackendTexture`) and route the `Canvas` to it — no CPU upload.
+  A perf optimization over the working S3b loop, not a correctness fix.
+- **S4b — breadth (runs real apps, into Gate G2).** No Skia rebuild: grow graphics ops
+  (paths/text/drawBitmap/clip/transform) + Paint setters as real apps hit them, and drive the loop
+  from a real `View.draw`/`onDraw` traversal (acl already has the View-traversal driver from Phase 2).
+  Then hwui's DisplayList/RenderThread/damage design for device-class behavior.
 
 The reusable probe `tests/fixtures/art_graphics/Main.java` (real `Bitmap`/`Canvas`/`Paint` via
 reflection) validates whichever backend once S3 lands.
