@@ -72,10 +72,17 @@ public final class HostBootstrap {
         private final Resources res;
         private final String pkg;
         private Resources.Theme theme;
+        private android.app.Application application;  // set once createApplication wraps this base
         AppContext(Resources res, String pkg) { super(null); this.res = res; this.pkg = pkg; }
+        void setApplication(android.app.Application a) { this.application = a; }
         @Override public Resources getResources() { return res; }
         @Override public String getPackageName() { return pkg; }
-        @Override public android.content.Context getApplicationContext() { return this; }
+        // Return the Application (not the base) per Android semantics: framework code keys off
+        // it — e.g. WorkManager's on-demand init does getApplicationContext() instanceof
+        // Configuration.Provider, which only holds if the Application flows back here.
+        @Override public android.content.Context getApplicationContext() {
+            return application != null ? application : this;
+        }
         public int getDisplayId() { return 0; }
         @Override public android.os.Looper getMainLooper() {
             return android.os.Looper.getMainLooper();
@@ -112,6 +119,25 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("connectivity".equals(name)) {
+                // ConnectivityManager(Context, IConnectivityManager) — pass a no-Binder proxy so
+                // its queries return defaults (WorkManager's NetworkStateTracker requires a
+                // non-null ConnectivityManager). NOTE: on an apex-split host image the real
+                // ConnectivityManager lives in the framework-connectivity mainline module and is
+                // NOT on $BOOT (only stub jars have it) → ClassNotFoundException; this wiring
+                // activates once that module is added to the runtime boot classpath (or a
+                // clean-room shim is vendored). Reflective for the same reason.
+                try {
+                    Class<?> cm = Class.forName("android.net.ConnectivityManager");
+                    Class<?> icm = Class.forName("android.net.IConnectivityManager");
+                    java.lang.reflect.Constructor<?> c =
+                            cm.getDeclaredConstructor(android.content.Context.class, icm);
+                    c.setAccessible(true);
+                    return c.newInstance(this, noop(icm));
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             return null;
         }
         // getSystemService(Class) → getSystemServiceName(Class) → getSystemService(String).
@@ -119,29 +145,32 @@ public final class HostBootstrap {
         // (remaining Managers are svc/-routed later, ADR-2). @hide → compiled vs classes.jar.
         @Override public String getSystemServiceName(Class<?> serviceClass) {
             if (serviceClass == android.app.ActivityManager.class) return "activity";
+            // ConnectivityManager compared by name (off this compile classpath, see above).
+            if ("android.net.ConnectivityManager".equals(serviceClass.getName())) return "connectivity";
             return null;
         }
 
-        // No broadcast infrastructure yet — accept registrations as no-ops (return the sticky
-        // intent as absent) so apps that listen for connectivity/battery/etc. boot. Broadcasts
-        // are an svc/ concern later.
+        // No broadcast infrastructure yet — accept registrations as no-ops. Return an EMPTY
+        // Intent (not null) so sticky-broadcast reads (receiver==null, e.g. WorkManager's
+        // battery/storage trackers reading ACTION_BATTERY_CHANGED) get defaults instead of an
+        // NPE. Broadcasts are an svc/ concern later.
         @Override public android.content.Intent registerReceiver(
                 android.content.BroadcastReceiver r, android.content.IntentFilter f) {
-            return null;
+            return new android.content.Intent();
         }
         @Override public android.content.Intent registerReceiver(
                 android.content.BroadcastReceiver r, android.content.IntentFilter f, int flags) {
-            return null;
+            return new android.content.Intent();
         }
         @Override public android.content.Intent registerReceiver(
                 android.content.BroadcastReceiver r, android.content.IntentFilter f,
                 String perm, android.os.Handler h) {
-            return null;
+            return new android.content.Intent();
         }
         @Override public android.content.Intent registerReceiver(
                 android.content.BroadcastReceiver r, android.content.IntentFilter f,
                 String perm, android.os.Handler h, int flags) {
-            return null;
+            return new android.content.Intent();
         }
         @Override public void unregisterReceiver(android.content.BroadcastReceiver r) {}
         @Override public void sendBroadcast(android.content.Intent i) {}
@@ -232,6 +261,7 @@ public final class HostBootstrap {
                 ? (android.app.Application) Class.forName(appClass).getConstructor().newInstance()
                 : new android.app.Application();
         setField(ContextWrapper.class, app, "mBase", base);
+        if (base instanceof AppContext) ((AppContext) base).setApplication(app);
         app.onCreate();  // sets the app's own singleton; may throw on a not-yet-supported API
         return app;
     }
