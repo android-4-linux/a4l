@@ -23,6 +23,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -65,9 +66,12 @@ struct Gpu {
   uint32_t qfam = UINT32_MAX;
   VkImage image = VK_NULL_HANDLE;
   VkDeviceMemory memory = VK_NULL_HANDLE;
+  VkDeviceSize mem_size = 0;
+  VkImageUsageFlags usage = 0;
   int fd = -1;
   sk_sp<GrDirectContext> gr;
-  sk_sp<SkSurface> opt;  // Skia-owned optimal render target (copy src)
+  sk_sp<SkSurface> opt;     // Skia-owned optimal render target (copy-path src)
+  sk_sp<SkSurface> direct;  // dma-buf VkImage wrapped as SkSurface (zero-copy direct path)
   GrVkExtensions ext;
   VkCommandPool pool = VK_NULL_HANDLE;
   VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -191,6 +195,7 @@ bool make_target(int w, int h, AclDmabuf* out) {
              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  g.usage = ci.usage;
   if (VKD.vkCreateImage(g.device, &ci, nullptr, &g.image) != VK_SUCCESS) { std::fprintf(stderr, "acl-gpu: createImage fail\n"); return false; }
 
   const VkImageAspectFlagBits planeAspect[4] = {
@@ -219,6 +224,7 @@ bool make_target(int w, int h, AclDmabuf* out) {
   ded.image = g.image;
   VkExportMemoryAllocateInfo exp{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO, &ded,
                                  VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
+  g.mem_size = reqs.size;
   VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &exp, reqs.size, mt};
   if (VKD.vkAllocateMemory(g.device, &mai, nullptr, &g.memory) != VK_SUCCESS) { std::fprintf(stderr, "acl-gpu: allocMem fail\n"); return false; }
   if (VKD.vkBindImageMemory(g.device, g.image, g.memory, 0) != VK_SUCCESS) { std::fprintf(stderr, "acl-gpu: bind fail\n"); return false; }
@@ -331,6 +337,38 @@ bool copy_to_dmabuf() {
   return true;
 }
 
+// Direct (zero-copy) path: wrap the modifier-tiled dma-buf VkImage itself as a Ganesh
+// SkSurface so Skia renders STRAIGHT into the exported image — no optimal surface, no
+// vkCmdCopyImage. Whether android-13 GrVkCaps accepts a DRM_FORMAT_MODIFIER image as a
+// render target is the open question this path answers; falls back to the copy path if not.
+bool make_direct_surface() {
+  if (g.direct) return true;
+  GrVkAlloc alloc;
+  alloc.fMemory = g.memory;
+  alloc.fOffset = 0;
+  alloc.fSize = g.mem_size;
+  alloc.fFlags = 0;
+  GrVkImageInfo info{};
+  info.fImage = g.image;
+  info.fAlloc = alloc;
+  info.fImageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+  info.fImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  info.fFormat = kVkFormat;
+  info.fImageUsageFlags = g.usage;
+  info.fSampleCount = 1;
+  info.fLevelCount = 1;
+  info.fCurrentQueueFamily = g.qfam;
+  info.fSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  GrBackendTexture bt(g.w, g.h, info);
+  g.direct = SkSurface::MakeFromBackendTexture(g.gr.get(), bt, kTopLeft_GrSurfaceOrigin, 1,
+                                               kBGRA_8888_SkColorType, nullptr, nullptr);
+  if (!g.direct) {
+    std::fprintf(stderr, "acl-gpu: MakeFromBackendTexture(direct tiled) fail\n");
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 // Render a scene GPU-native into a modifier-tiled dma-buf and export it; acl presents the fd.
@@ -344,6 +382,23 @@ extern "C" bool acl_graphics_gpu_render(int w, int h, uint32_t bg, int l, int t,
     if (!make_target(w, h, &g.info)) return false;
   }
   *out = g.info;
+
+  // Prefer the zero-copy direct path when ACL_GPU_DIRECT is set AND Skia accepts the
+  // modifier-tiled image as a render target; otherwise use the proven copy path.
+  const bool want_direct = std::getenv("ACL_GPU_DIRECT") != nullptr;
+  if (want_direct && make_direct_surface()) {
+    SkCanvas* canvas = g.direct->getCanvas();
+    canvas->clear(static_cast<SkColor>(bg));
+    SkPaint paint;
+    paint.setColor(static_cast<SkColor>(fg));
+    paint.setAntiAlias(false);
+    canvas->drawRect(SkRect::MakeLTRB(l, t, r, b), paint);
+    // Hand the image to the compositor in GENERAL layout, released from our queue family.
+    GrBackendSurfaceMutableState toGeneral(VK_IMAGE_LAYOUT_GENERAL, g.qfam);
+    g.direct->flush(GrFlushInfo{}, &toGeneral);
+    g.gr->submit(/*syncCpu=*/true);
+    return out->fd >= 0;
+  }
 
   SkCanvas* canvas = g.opt->getCanvas();
   canvas->clear(static_cast<SkColor>(bg));
