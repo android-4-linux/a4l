@@ -20,6 +20,11 @@ public final class HostBootstrap {
     private HostBootstrap() {}
 
     private static boolean sInited = false;
+    // The app's manifest theme (style resId), applied to every app Context's theme.
+    private static int appThemeResId = 0;
+
+    /** Set the app's manifest theme resId; applied when a Context resolves its theme. */
+    public static void setAppTheme(int resId) { appThemeResId = resId; }
 
     /** Idempotent: prepare the main Looper and seed a no-Binder ServiceManager. */
     public static synchronized void init() {
@@ -108,8 +113,18 @@ public final class HostBootstrap {
             return resolver;
         }
         @Override public Resources.Theme getTheme() {
-            if (theme == null) theme = res.newTheme();
+            if (theme == null) {
+                theme = res.newTheme();
+                // Apply the app's manifest theme so decor/layout inflation resolves theme
+                // attributes (a bare newTheme() has no styles → InflateException).
+                if (appThemeResId != 0) {
+                    try { theme.applyStyle(appThemeResId, true); } catch (Throwable ignored) {}
+                }
+            }
             return theme;
+        }
+        @Override public void setTheme(int resId) {
+            if (resId != 0) { appThemeResId = resId; theme = null; }  // re-resolve on next getTheme
         }
         @Override public Object getSystemService(String name) {
             if ("layout_inflater".equals(name)) {
@@ -410,6 +425,9 @@ public final class HostBootstrap {
             Object window = Class.forName("com.android.internal.policy.PhoneWindow")
                     .getConstructor(android.content.Context.class).newInstance(ctx);
             setField(android.app.Activity.class, a, "mWindow", window);
+            // Activity implements Window.Callback; real Activity.attach() wires it so the
+            // window routes events to the Activity (AppCompat requires a non-null callback).
+            ((android.view.Window) window).setCallback(a);
         } catch (Throwable t) {
             Throwable cause = (t instanceof java.lang.reflect.InvocationTargetException
                     && t.getCause() != null) ? t.getCause() : t;
@@ -526,6 +544,10 @@ public final class HostBootstrap {
         if (java.util.List.class.isAssignableFrom(rt)) return new java.util.ArrayList<>();
         if (java.util.Map.class.isAssignableFrom(rt)) return new java.util.HashMap<>();
         if (java.util.Set.class.isAssignableFrom(rt)) return new java.util.HashSet<>();
+        // A Binder method that returns another Binder interface (e.g. IActivityTaskManager.
+        // getActivityClientController → IActivityClientController) → a nested no-op, so the
+        // caller's follow-up call doesn't NPE. IBinder stays null (callers null-check it).
+        if (rt.isInterface() && rt != android.os.IBinder.class) return noop(rt);
         return null;
     }
 
@@ -544,6 +566,9 @@ public final class HostBootstrap {
         // host notification daemon (svc/notify → org.freedesktop.Notifications) instead of a
         // no-op proxy.
         svc.put("notification", "android.app.INotificationManager");
+        // Activity.setTaskDescription (called during theme init) → ActivityClient →
+        // IActivityTaskManager.getActivityClientController() → a nested no-op.
+        svc.put("activity_task", "android.app.IActivityTaskManager");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},

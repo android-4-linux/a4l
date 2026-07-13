@@ -223,6 +223,14 @@ class JniVm : public Vm {
     jstring j_fw = env_->NewStringUTF(fwres != nullptr ? fwres : "");
     jstring j_pkg = env_->NewStringUTF(config_.package_name.c_str());
 
+    // The app's manifest theme, applied to the app Context (so decor/layout inflation
+    // resolves framework + app theme attributes). Set before any Context is built.
+    if (jmethodID set_theme = env_->GetStaticMethodID(boot, "setAppTheme", "(I)V")) {
+      env_->CallStaticVoidMethod(boot, set_theme,
+                                 static_cast<jint>(config_.application_theme));
+    }
+    clear_exception();
+
     // The app's Application, created once (its onCreate sets the app's singleton).
     if (app_application_ == nullptr) {
       jstring j_app = env_->NewStringUTF(config_.application_name.c_str());

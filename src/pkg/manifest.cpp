@@ -303,6 +303,8 @@ class AxmlParser {
     } else if (elem == "application") {
       if (const Attr* a = find(attrs, "name"))
         out_.application_name = resolve_class_name(out_.package, a->string_value);
+      // android:theme is a resource reference; its typed data IS the style resId.
+      if (const Attr* a = find(attrs, "theme")) out_.application_theme = a->data;
     } else if (elem == "activity" || elem == "activity-alias") {
       current_ = Activity{};
       have_activity_ = true;

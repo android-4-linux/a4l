@@ -48,6 +48,7 @@ struct Manifest {
   std::optional<std::int32_t> target_sdk;
   std::optional<std::int32_t> compile_sdk;
   std::string application_name;  // <application android:name>, FQ-resolved (empty if none)
+  std::uint32_t application_theme = 0;  // <application android:theme> style resId (0 if none)
   std::vector<Activity> activities;
 
   // First activity marked as a launcher, or nullptr.
