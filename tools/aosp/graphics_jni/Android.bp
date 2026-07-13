@@ -56,4 +56,12 @@ cc_library_shared {
     cflags: [
         "-Wno-unused-parameter",
     ],
+    // ART loads host libandroid_runtime.so first; it exports CPU-only (SK_SUPPORT_GPU=0)
+    // Skia symbols that would interpose ours. -Bsymbolic binds our statically-linked,
+    // Vulkan-enabled Skia calls to OUR OWN definitions, so MakeRenderTarget/MakeVulkan hit
+    // the GPU build. Exported entrypoints (register_acl_graphics, acl_read_bitmap,
+    // acl_graphics_gpu_render) stay dlsym-visible.
+    ldflags: [
+        "-Wl,-Bsymbolic",
+    ],
 }
