@@ -1650,6 +1650,29 @@ class ArtVm final : public JniVm {
     }
     env->ExceptionClear();
 
+    // Path: a filled cyan triangle in the bottom-right (clear of the circle at x<48).
+    bool path_ok_call = false;
+    if (jclass pathC = env->FindClass("android/graphics/Path")) {
+      jobject path = env->NewObject(pathC, env->GetMethodID(pathC, "<init>", "()V"));
+      const jmethodID moveTo = env->GetMethodID(pathC, "moveTo", "(FF)V");
+      const jmethodID lineTo = env->GetMethodID(pathC, "lineTo", "(FF)V");
+      const jmethodID close = env->GetMethodID(pathC, "close", "()V");
+      const jmethodID drawPath = env->GetMethodID(
+          canvasC, "drawPath", "(Landroid/graphics/Path;Landroid/graphics/Paint;)V");
+      if (path != nullptr && moveTo != nullptr && drawPath != nullptr) {
+        env->CallVoidMethod(path, moveTo, 50.0f, 50.0f);
+        env->CallVoidMethod(path, lineTo, 62.0f, 50.0f);
+        env->CallVoidMethod(path, lineTo, 56.0f, 62.0f);
+        env->CallVoidMethod(path, close);
+        env->CallVoidMethod(paint, setColor, static_cast<jint>(0xFF00FFFF));  // cyan
+        env->CallVoidMethod(canvas, drawPath, path, paint);
+        path_ok_call = env->ExceptionCheck() == JNI_FALSE;
+      }
+      if (path != nullptr) env->DeleteLocalRef(path);
+      env->DeleteLocalRef(pathC);
+    }
+    env->ExceptionClear();
+
     auto read = reinterpret_cast<bool (*)(long, std::uint32_t*, int, int)>(
         ::dlsym(RTLD_DEFAULT, "acl_read_bitmap"));
     if (read == nullptr) { log::w(kTag, "graphics ops: acl_read_bitmap missing"); return; }
@@ -1671,15 +1694,17 @@ class ArtVm final : public JniVm {
     const bool text_ok = text_ok_call && text_px > 0;
     const bool bmp_ok = bmp_ok_call && at(4, 42) == 0xFFFF00FFu;  // magenta bitmap at (2,40)
     const bool measure_ok = advance > 0.0f && bounds_w > 0;
+    const bool path_ok = path_ok_call && at(55, 53) == 0xFF00FFFFu;  // cyan inside the triangle
     log::i(kTag,
-           "graphics ops: circle={} bg={} clip={} text={} ({}px) bitmap={} (0x{:08x}) "
-           "measure={} (adv={:.1f} w={})",
-           center_red, bg_black, clip_green, text_ok, text_px, bmp_ok, at(4, 42), measure_ok,
-           advance, bounds_w);
+           "graphics ops: circle={} bg={} clip={} text={} ({}px) bitmap={} measure={} "
+           "(adv={:.1f} w={}) path={} (0x{:08x})",
+           center_red, bg_black, clip_green, text_ok, text_px, bmp_ok, measure_ok, advance,
+           bounds_w, path_ok, at(55, 53));
     log::i(kTag,
-           "graphics ops: transform/clip + geometry + text + bitmap + measure {} (real Canvas, "
-           "Android Skia)",
-           (center_red && bg_black && clip_green && clip_edge && text_ok && bmp_ok && measure_ok)
+           "graphics ops: transform/clip + geometry + text + bitmap + measure + path {} "
+           "(real Canvas, Android Skia)",
+           (center_red && bg_black && clip_green && clip_edge && text_ok && bmp_ok && measure_ok &&
+            path_ok)
                ? "PASS"
                : "MISMATCH");
     env->DeleteLocalRef(canvas);

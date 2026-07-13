@@ -32,6 +32,8 @@
 #include "SkImage.h"
 #include "SkImageInfo.h"
 #include "SkPaint.h"
+#include "SkPath.h"
+#include "SkPathTypes.h"
 #include "SkRect.h"
 #include "SkRefCnt.h"
 #include "SkSamplingOptions.h"
@@ -90,6 +92,7 @@ void free_canvas(void* p) {
   if (acl_graphics_canvas_borrowed(p)) return;  // surface-owned (GPU); not ours to delete
   delete reinterpret_cast<SkCanvas*>(p);
 }
+void free_path(void* p) { delete reinterpret_cast<SkPath*>(p); }
 void free_colorspace(void* p) { SkSafeUnref(reinterpret_cast<SkColorSpace*>(p)); }
 
 // android.graphics.Bitmap.Config.nativeInt -> SkColorType (ARGB_8888 == 5).
@@ -271,6 +274,64 @@ void Canvas_nDrawBitmapRect(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, j
     c->drawImageRect(img.get(), SkRect::MakeLTRB(sl, st, sr, sb), SkRect::MakeLTRB(dl, dt, dr, db),
                      SkSamplingOptions(), ap != nullptr ? &ap->paint : nullptr,
                      SkCanvas::kStrict_SrcRectConstraint);
+}
+
+void Canvas_nDrawPath(JNIEnv*, jclass, jlong canvas, jlong path, jlong paint) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* sp = reinterpret_cast<SkPath*>(path);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  if (c != nullptr && sp != nullptr) c->drawPath(*sp, ap != nullptr ? ap->paint : SkPaint());
+}
+
+// ── Path (android.graphics.Path over SkPath) ────────────────────────────────────
+// Geometry mutators are the NORMAL JNI convention here (not @CriticalNative in this
+// framework version); nReset/nRewind/nSetFillType ARE @CriticalNative (handle-only).
+jlong Path_nInit(JNIEnv*, jclass) { return reinterpret_cast<jlong>(new SkPath()); }
+jlong Path_nGetFinalizer(JNIEnv*, jclass) { return reinterpret_cast<jlong>(&free_path); }
+void Path_nMoveTo(JNIEnv*, jclass, jlong p, jfloat x, jfloat y) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->moveTo(x, y);
+}
+void Path_nLineTo(JNIEnv*, jclass, jlong p, jfloat x, jfloat y) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->lineTo(x, y);
+}
+void Path_nQuadTo(JNIEnv*, jclass, jlong p, jfloat x1, jfloat y1, jfloat x2, jfloat y2) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->quadTo(x1, y1, x2, y2);
+}
+void Path_nCubicTo(JNIEnv*, jclass, jlong p, jfloat x1, jfloat y1, jfloat x2, jfloat y2, jfloat x3,
+                   jfloat y3) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->cubicTo(x1, y1, x2, y2, x3, y3);
+}
+void Path_nClose(JNIEnv*, jclass, jlong p) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->close();
+}
+// Path.Direction: CW=0, CCW=1 (SkPathDirection matches).
+void Path_nAddRect(JNIEnv*, jclass, jlong p, jfloat l, jfloat t, jfloat r, jfloat b, jint dir) {
+  if (auto* s = reinterpret_cast<SkPath*>(p))
+    s->addRect(SkRect::MakeLTRB(l, t, r, b), static_cast<SkPathDirection>(dir));
+}
+void Path_nAddOval(JNIEnv*, jclass, jlong p, jfloat l, jfloat t, jfloat r, jfloat b, jint dir) {
+  if (auto* s = reinterpret_cast<SkPath*>(p))
+    s->addOval(SkRect::MakeLTRB(l, t, r, b), static_cast<SkPathDirection>(dir));
+}
+void Path_nAddCircle(JNIEnv*, jclass, jlong p, jfloat x, jfloat y, jfloat radius, jint dir) {
+  if (auto* s = reinterpret_cast<SkPath*>(p))
+    s->addCircle(x, y, radius, static_cast<SkPathDirection>(dir));
+}
+void Path_nAddRoundRect(JNIEnv*, jclass, jlong p, jfloat l, jfloat t, jfloat r, jfloat b, jfloat rx,
+                        jfloat ry, jint dir) {
+  if (auto* s = reinterpret_cast<SkPath*>(p))
+    s->addRoundRect(SkRect::MakeLTRB(l, t, r, b), rx, ry, static_cast<SkPathDirection>(dir));
+}
+// @CriticalNative — handle-only.
+void Path_nReset(jlong p) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->reset();
+}
+void Path_nRewind(jlong p) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->rewind();
+}
+// Path.FillType: WINDING=0, EVEN_ODD=1, INVERSE_WINDING=2, INVERSE_EVEN_ODD=3 (SkPathFillType matches).
+void Path_nSetFillType(jlong p, jint ft) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->setFillType(static_cast<SkPathFillType>(ft));
 }
 
 // ── Canvas transform/clip — all @CriticalNative (handle-only, no JNIEnv/jclass) ──
@@ -497,6 +558,24 @@ const JNINativeMethod kBaseCanvas[] = {
     {"nDrawText", "(JLjava/lang/String;IIFFIJ)V", reinterpret_cast<void*>(Canvas_nDrawText)},
     {"nDrawBitmap", "(JJFFJIII)V", reinterpret_cast<void*>(Canvas_nDrawBitmap)},
     {"nDrawBitmap", "(JJFFFFFFFFJII)V", reinterpret_cast<void*>(Canvas_nDrawBitmapRect)},
+    {"nDrawPath", "(JJJ)V", reinterpret_cast<void*>(Canvas_nDrawPath)},
+};
+const JNINativeMethod kPath[] = {
+    {"nInit", "()J", reinterpret_cast<void*>(Path_nInit)},
+    {"nGetFinalizer", "()J", reinterpret_cast<void*>(Path_nGetFinalizer)},
+    {"nMoveTo", "(JFF)V", reinterpret_cast<void*>(Path_nMoveTo)},
+    {"nLineTo", "(JFF)V", reinterpret_cast<void*>(Path_nLineTo)},
+    {"nQuadTo", "(JFFFF)V", reinterpret_cast<void*>(Path_nQuadTo)},
+    {"nCubicTo", "(JFFFFFF)V", reinterpret_cast<void*>(Path_nCubicTo)},
+    {"nClose", "(J)V", reinterpret_cast<void*>(Path_nClose)},
+    {"nAddRect", "(JFFFFI)V", reinterpret_cast<void*>(Path_nAddRect)},
+    {"nAddOval", "(JFFFFI)V", reinterpret_cast<void*>(Path_nAddOval)},
+    {"nAddCircle", "(JFFFI)V", reinterpret_cast<void*>(Path_nAddCircle)},
+    {"nAddRoundRect", "(JFFFFFFI)V", reinterpret_cast<void*>(Path_nAddRoundRect)},
+    // @CriticalNative (handle-only).
+    {"nReset", "(J)V", reinterpret_cast<void*>(Path_nReset)},
+    {"nRewind", "(J)V", reinterpret_cast<void*>(Path_nRewind)},
+    {"nSetFillType", "(JI)V", reinterpret_cast<void*>(Path_nSetFillType)},
 };
 const JNINativeMethod kPaint[] = {
     {"nInit", "()J", reinterpret_cast<void*>(Paint_nInit)},
@@ -568,6 +647,7 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/Bitmap", kBitmap, n(kBitmap)) && ok;
   ok = reg(env, "android/graphics/Canvas", kCanvas, n(kCanvas)) && ok;
   ok = reg(env, "android/graphics/BaseCanvas", kBaseCanvas, n(kBaseCanvas)) && ok;
+  ok = reg(env, "android/graphics/Path", kPath, n(kPath)) && ok;
   ok = reg(env, "android/graphics/Paint", kPaint, n(kPaint)) && ok;
   ok = reg(env, "android/graphics/ColorSpace$Rgb", kColorSpaceRgb, n(kColorSpaceRgb)) && ok;
   return ok ? JNI_OK : JNI_ERR;
