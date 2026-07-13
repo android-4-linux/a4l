@@ -423,6 +423,17 @@ void Canvas_nGetMatrix(jlong canvas, jlong matrix) {
   auto* m = reinterpret_cast<SkMatrix*>(matrix);
   if (c != nullptr && m != nullptr) *m = c->getTotalMatrix();
 }
+// @CriticalNative — true if the rect/path is wholly outside the current clip (cull hint).
+// ViewGroup.drawChild calls this per child.
+jboolean Canvas_nQuickRejectRect(jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  return (c != nullptr && c->quickReject(SkRect::MakeLTRB(l, t, r, b))) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean Canvas_nQuickRejectPath(jlong canvas, jlong path) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* p = reinterpret_cast<SkPath*>(path);
+  return (c != nullptr && p != nullptr && c->quickReject(*p)) ? JNI_TRUE : JNI_FALSE;
+}
 
 // ── Matrix (android.graphics.Matrix over SkMatrix) — 9-value layout matches get9/set9 ──
 jlong Matrix_nCreate(JNIEnv*, jclass, jlong src) {
@@ -858,6 +869,8 @@ const JNINativeMethod kCanvas[] = {
     {"nConcat", "(JJ)V", reinterpret_cast<void*>(Canvas_nConcat)},
     {"nSetMatrix", "(JJ)V", reinterpret_cast<void*>(Canvas_nSetMatrix)},
     {"nGetMatrix", "(JJ)V", reinterpret_cast<void*>(Canvas_nGetMatrix)},
+    {"nQuickReject", "(JFFFF)Z", reinterpret_cast<void*>(Canvas_nQuickRejectRect)},
+    {"nQuickReject", "(JJ)Z", reinterpret_cast<void*>(Canvas_nQuickRejectPath)},
 };
 const JNINativeMethod kMatrix[] = {
     {"nCreate", "(J)J", reinterpret_cast<void*>(Matrix_nCreate)},

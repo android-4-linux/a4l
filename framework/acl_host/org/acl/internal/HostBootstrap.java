@@ -42,12 +42,18 @@ public final class HostBootstrap {
     }
 
     static final class ViewContext extends ContextWrapper {
+        private Resources.Theme theme;
         ViewContext() { super(null); }
         @Override public Resources getResources() { return Resources.getSystem(); }
         // getDisplayId() is @hide; overrides at runtime by signature. DEFAULT_DISPLAY = 0.
         public int getDisplayId() { return 0; }
         @Override public Object getSystemService(String name) { return null; }
-        @Override public Resources.Theme getTheme() { return null; }
+        // A real (empty) Theme from the system Resources — View/ViewGroup constructors call
+        // context.obtainStyledAttributes(), which delegates to getTheme().
+        @Override public Resources.Theme getTheme() {
+            if (theme == null) theme = Resources.getSystem().newTheme();
+            return theme;
+        }
         @Override public android.os.Looper getMainLooper() {
             return android.os.Looper.getMainLooper();
         }
