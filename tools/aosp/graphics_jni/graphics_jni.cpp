@@ -29,6 +29,7 @@
 #include "SkFontMetrics.h"
 #include "SkFontMgr.h"
 #include "SkFontTypes.h"
+#include "SkGradientShader.h"
 #include "SkImage.h"
 #include "SkImageInfo.h"
 #include "SkMatrix.h"
@@ -38,6 +39,8 @@
 #include "SkRect.h"
 #include "SkRefCnt.h"
 #include "SkSamplingOptions.h"
+#include "SkShader.h"
+#include "SkTileMode.h"
 #include "SkTypeface.h"
 
 namespace {
@@ -95,6 +98,7 @@ void free_canvas(void* p) {
 }
 void free_path(void* p) { delete reinterpret_cast<SkPath*>(p); }
 void free_matrix(void* p) { delete reinterpret_cast<SkMatrix*>(p); }
+void free_shader(void* p) { SkSafeUnref(reinterpret_cast<SkShader*>(p)); }
 void free_colorspace(void* p) { SkSafeUnref(reinterpret_cast<SkColorSpace*>(p)); }
 
 // android.graphics.Bitmap.Config.nativeInt -> SkColorType (ARGB_8888 == 5).
@@ -434,6 +438,73 @@ void Matrix_nSetConcat(jlong obj, jlong a, jlong b) {
   if (m != nullptr && A != nullptr && B != nullptr) m->setConcat(*A, *B);
 }
 
+// ── Shader / gradients (LinearGradient, RadialGradient over SkGradientShader) ────
+// Shader.TileMode: CLAMP=0, REPEAT=1, MIRROR=2 (SkTileMode matches; DECAL=3 unused here).
+SkTileMode tile_mode(jint m) {
+  switch (m) {
+    case 1: return SkTileMode::kRepeat;
+    case 2: return SkTileMode::kMirror;
+    default: return SkTileMode::kClamp;
+  }
+}
+// Decode a ColorLong[] (Android wide-color) to SkColor[]. For the sRGB color space (the
+// common case) the ARGB int is packed in the high 32 bits; wide-gamut inputs degrade to
+// their sRGB bits (full half-float decode is future work).
+std::vector<SkColor> decode_colors(JNIEnv* env, jlongArray arr) {
+  std::vector<SkColor> out;
+  if (arr == nullptr) return out;
+  const jsize n = env->GetArrayLength(arr);
+  std::vector<jlong> cl(static_cast<std::size_t>(n));
+  if (n > 0) env->GetLongArrayRegion(arr, 0, n, cl.data());
+  out.reserve(static_cast<std::size_t>(n));
+  for (jsize i = 0; i < n; ++i)
+    out.push_back(static_cast<SkColor>(static_cast<std::uint32_t>(
+        static_cast<std::uint64_t>(cl[i]) >> 32)));
+  return out;
+}
+std::vector<SkScalar> read_positions(JNIEnv* env, jfloatArray arr) {
+  std::vector<SkScalar> pos;
+  if (arr == nullptr) return pos;
+  const jsize n = env->GetArrayLength(arr);
+  pos.resize(static_cast<std::size_t>(n));
+  if (n > 0) env->GetFloatArrayRegion(arr, 0, n, pos.data());
+  return pos;
+}
+
+// LinearGradient.nativeCreate is an INSTANCE native (JNIEnv*, jobject, ...).
+jlong LinearGradient_nativeCreate(JNIEnv* env, jobject, jlong matrix, jfloat x0, jfloat y0,
+                                  jfloat x1, jfloat y1, jlongArray colorsArr, jfloatArray posArr,
+                                  jint tileMode, jlong /*colorSpaceHandle*/) {
+  const std::vector<SkColor> colors = decode_colors(env, colorsArr);
+  if (colors.size() < 2) return 0;
+  const std::vector<SkScalar> pos = read_positions(env, posArr);
+  const SkPoint pts[2] = {{x0, y0}, {x1, y1}};
+  sk_sp<SkShader> sh = SkGradientShader::MakeLinear(
+      pts, colors.data(), pos.empty() ? nullptr : pos.data(),
+      static_cast<int>(colors.size()), tile_mode(tileMode), 0,
+      reinterpret_cast<const SkMatrix*>(matrix));
+  return reinterpret_cast<jlong>(sh.release());
+}
+
+// RadialGradient.nativeCreate is a STATIC native (JNIEnv*, jclass, ...). Two-point conical
+// covers both the simple radial (startRadius 0, start==end) and the general case.
+jlong RadialGradient_nativeCreate(JNIEnv* env, jclass, jlong matrix, jfloat sx, jfloat sy,
+                                  jfloat sr, jfloat ex, jfloat ey, jfloat er, jlongArray colorsArr,
+                                  jfloatArray posArr, jint tileMode, jlong /*colorSpaceHandle*/) {
+  const std::vector<SkColor> colors = decode_colors(env, colorsArr);
+  if (colors.size() < 2) return 0;
+  const std::vector<SkScalar> pos = read_positions(env, posArr);
+  sk_sp<SkShader> sh = SkGradientShader::MakeTwoPointConical(
+      {sx, sy}, sr, {ex, ey}, er, colors.data(), pos.empty() ? nullptr : pos.data(),
+      static_cast<int>(colors.size()), tile_mode(tileMode), 0,
+      reinterpret_cast<const SkMatrix*>(matrix));
+  return reinterpret_cast<jlong>(sh.release());
+}
+
+jlong Shader_nativeGetFinalizer(JNIEnv*, jclass) {
+  return reinterpret_cast<jlong>(&free_shader);
+}
+
 // ── Paint ─────────────────────────────────────────────────────────────────────
 jlong Paint_nInit(JNIEnv*, jclass) {
   auto* ap = new AclPaint();
@@ -491,6 +562,12 @@ void Paint_nSetStrokeCap(jlong paintPtr, jint cap) {
 void Paint_nSetAntiAlias(jlong paintPtr, jboolean aa) {
   auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
   if (ap != nullptr) ap->paint.setAntiAlias(aa != JNI_FALSE);
+}
+// @CriticalNative — set the paint's shader (handle-only); returns the shader handle.
+jlong Paint_nSetShader(jlong paintPtr, jlong shader) {
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap != nullptr) ap->paint.setShader(sk_ref_sp(reinterpret_cast<SkShader*>(shader)));
+  return shader;
 }
 // @CriticalNative — text size in pixels (into the SkFont; SkPaint no longer holds it).
 void Paint_nSetTextSize(jlong paintPtr, jfloat textSize) {
@@ -662,12 +739,22 @@ const JNINativeMethod kPaint[] = {
     {"nSetStrokeCap", "(JI)V", reinterpret_cast<void*>(Paint_nSetStrokeCap)},
     {"nSetAntiAlias", "(JZ)V", reinterpret_cast<void*>(Paint_nSetAntiAlias)},
     {"nSetTextSize", "(JF)V", reinterpret_cast<void*>(Paint_nSetTextSize)},
+    {"nSetShader", "(JJ)J", reinterpret_cast<void*>(Paint_nSetShader)},
     {"nGetFontMetricsInt", "(JLandroid/graphics/Paint$FontMetricsInt;)I",
      reinterpret_cast<void*>(Paint_nGetFontMetricsInt)},
     {"nGetTextAdvances", "(JLjava/lang/String;IIIII[FI)F",
      reinterpret_cast<void*>(Paint_nGetTextAdvances)},
     {"nGetStringBounds", "(JLjava/lang/String;IIILandroid/graphics/Rect;)V",
      reinterpret_cast<void*>(Paint_nGetStringBounds)},
+};
+const JNINativeMethod kShader[] = {
+    {"nativeGetFinalizer", "()J", reinterpret_cast<void*>(Shader_nativeGetFinalizer)},
+};
+const JNINativeMethod kLinearGradient[] = {
+    {"nativeCreate", "(JFFFF[J[FIJ)J", reinterpret_cast<void*>(LinearGradient_nativeCreate)},
+};
+const JNINativeMethod kRadialGradient[] = {
+    {"nativeCreate", "(JFFFFFF[J[FIJ)J", reinterpret_cast<void*>(RadialGradient_nativeCreate)},
 };
 const JNINativeMethod kColorSpaceRgb[] = {
     {"nativeCreate", "(FFFFFFF[F)J", reinterpret_cast<void*>(ColorSpaceRgb_nativeCreate)},
@@ -721,6 +808,9 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/Path", kPath, n(kPath)) && ok;
   ok = reg(env, "android/graphics/Matrix", kMatrix, n(kMatrix)) && ok;
   ok = reg(env, "android/graphics/Paint", kPaint, n(kPaint)) && ok;
+  ok = reg(env, "android/graphics/Shader", kShader, n(kShader)) && ok;
+  ok = reg(env, "android/graphics/LinearGradient", kLinearGradient, n(kLinearGradient)) && ok;
+  ok = reg(env, "android/graphics/RadialGradient", kRadialGradient, n(kRadialGradient)) && ok;
   ok = reg(env, "android/graphics/ColorSpace$Rgb", kColorSpaceRgb, n(kColorSpaceRgb)) && ok;
   return ok ? JNI_OK : JNI_ERR;
 }

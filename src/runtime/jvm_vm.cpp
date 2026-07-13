@@ -1699,6 +1699,34 @@ class ArtVm final : public JniVm {
     }
     env->ExceptionClear();
 
+    // Gradient: a horizontal red→blue LinearGradient filling a rect in the left strip
+    // (x0..14, y16..40) — clear of the circle (x≥16) and bitmap (y≥40).
+    bool grad_ok_call = false;
+    if (jclass lgC = env->FindClass("android/graphics/LinearGradient")) {
+      jclass tmC = env->FindClass("android/graphics/Shader$TileMode");
+      jobject clamp = env->GetStaticObjectField(
+          tmC, env->GetStaticFieldID(tmC, "CLAMP", "Landroid/graphics/Shader$TileMode;"));
+      jmethodID lgCtor =
+          env->GetMethodID(lgC, "<init>", "(FFFFIILandroid/graphics/Shader$TileMode;)V");
+      jmethodID setShader = env->GetMethodID(
+          paintC, "setShader", "(Landroid/graphics/Shader;)Landroid/graphics/Shader;");
+      if (lgCtor != nullptr && setShader != nullptr) {
+        jobject grad = env->NewObject(lgC, lgCtor, 0.0f, 28.0f, 14.0f, 28.0f,
+                                      static_cast<jint>(0xFFFF0000), static_cast<jint>(0xFF0000FF),
+                                      clamp);
+        if (grad != nullptr) {
+          env->CallObjectMethod(paint, setShader, grad);
+          env->CallVoidMethod(canvas, drawRect, 0.0f, 16.0f, 14.0f, 40.0f, paint);
+          env->CallObjectMethod(paint, setShader, static_cast<jobject>(nullptr));  // clear
+          grad_ok_call = env->ExceptionCheck() == JNI_FALSE;
+          env->DeleteLocalRef(grad);
+        }
+      }
+      env->DeleteLocalRef(tmC);
+      env->DeleteLocalRef(lgC);
+    }
+    env->ExceptionClear();
+
     auto read = reinterpret_cast<bool (*)(long, std::uint32_t*, int, int)>(
         ::dlsym(RTLD_DEFAULT, "acl_read_bitmap"));
     if (read == nullptr) { log::w(kTag, "graphics ops: acl_read_bitmap missing"); return; }
@@ -1722,16 +1750,20 @@ class ArtVm final : public JniVm {
     const bool measure_ok = advance > 0.0f && bounds_w > 0;
     const bool path_ok = path_ok_call && at(55, 53) == 0xFF00FFFFu;  // cyan inside the triangle
     const bool matrix_ok = matrix_ok_call && at(5, 55) == 0xFFFFFF00u;  // yellow in scaled rect
+    // Gradient: left end reddish (R>B), right end bluish (B>R).
+    const auto R = [](std::uint32_t p) { return (p >> 16) & 0xffu; };
+    const auto B = [](std::uint32_t p) { return p & 0xffu; };
+    const bool grad_ok = grad_ok_call && R(at(1, 28)) > B(at(1, 28)) && B(at(12, 28)) > R(at(12, 28));
     log::i(kTag,
-           "graphics ops: circle={} bg={} clip={} text={} ({}px) bitmap={} measure={} "
-           "(adv={:.1f} w={}) path={} matrix={} (0x{:08x})",
-           center_red, bg_black, clip_green, text_ok, text_px, bmp_ok, measure_ok, advance,
-           bounds_w, path_ok, matrix_ok, at(5, 55));
+           "graphics ops: circle={} clip={} text={} ({}px) bitmap={} measure={} path={} "
+           "matrix={} gradient={} (l=0x{:08x} r=0x{:08x})",
+           center_red, clip_green, text_ok, text_px, bmp_ok, measure_ok, path_ok, matrix_ok,
+           grad_ok, at(1, 28), at(12, 28));
     log::i(kTag,
-           "graphics ops: geometry + text + bitmap + measure + path + matrix {} "
+           "graphics ops: geometry + text + bitmap + measure + path + matrix + gradient {} "
            "(real Canvas, Android Skia)",
            (center_red && bg_black && clip_green && clip_edge && text_ok && bmp_ok && measure_ok &&
-            path_ok && matrix_ok)
+            path_ok && matrix_ok && grad_ok)
                ? "PASS"
                : "MISMATCH");
     env->DeleteLocalRef(canvas);
