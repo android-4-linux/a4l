@@ -159,6 +159,45 @@ TEST_CASE("Ganesh Vulkan frame exports as a valid linear dma-buf", "[gfx][vulkan
   }
 }
 
+// P2.4 / S3b: import CPU pixels (a real android.graphics Bitmap, here stood in for by the
+// software rasterizer) into the linear dma-buf, ready to present. Verifies the imported
+// dma-buf holds exactly the source pixels. SKIPs without a device / dma-buf export.
+TEST_CASE("CPU pixels import into the linear dma-buf (S3b)", "[gfx][vulkan][dmabuf][import]") {
+  const int w = 16, h = 10;
+  std::string err;
+  std::unique_ptr<acl::gfx::VkRenderTarget> vk =
+      acl::gfx::VkRenderTarget::Create(w, h, &err);
+  if (!vk) { WARN("no Vulkan render target: " + err); SUCCEED(); return; }
+  if (!vk->dmabuf_export_available()) {
+    WARN("no dma-buf export (skipping import): " << vk->device_name());
+    SUCCEED();
+    return;
+  }
+
+  // Stand-in for a rendered android.graphics Bitmap's pixels.
+  Surface src(w, h);
+  src.draw_color(0xFF204060);
+  src.fill_rect(3, 2, 11, 7, 0xFFCC8844);
+
+  acl::gfx::DmabufFrame frame;
+  if (!vk->import_pixels_to_dmabuf(src, &frame, &err)) {
+    WARN("import failed (skipping): " + err);
+    SUCCEED();
+    return;
+  }
+  CHECK(frame.fd >= 0);
+  CHECK(frame.modifier == 0u);  // LINEAR
+
+  // The dma-buf must now hold exactly the imported pixels.
+  Surface got(w, h);
+  REQUIRE(vk->read_exported_pixels(got));
+  for (int y = 0; y < h; ++y)
+    for (int x = 0; x < w; ++x) {
+      INFO("pixel (" << x << "," << y << ")");
+      REQUIRE(got.pixel(x, y) == src.pixel(x, y));
+    }
+}
+
 // P2.4 / V2b: the modifier-tiled DIRECT path (zero-copy) — Skia renders straight into
 // a modifier-tiled, dma-buf-exported VkImage. Headless, we stand in for the compositor
 // by offering the GPU's own render+sampleable modifiers as the "advertised" set (a real

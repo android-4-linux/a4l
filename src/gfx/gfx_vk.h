@@ -100,6 +100,12 @@ class VkRenderTarget {
   // is the headless verification that the dma-buf holds the rendered pixels.
   bool read_exported_pixels(Surface& out);
 
+  // S3b (P2.4): import CPU pixels (a real android.graphics Bitmap rendered by Android's
+  // Skia → gfx::Surface) into the linear dma-buf, ready to present via zwp_linux_dmabuf_v1.
+  // Writes the export image's host-visible memory (respecting stride); fills *out. Closes
+  // the render loop today; the GPU-native zero-copy path (Ganesh into the dma-buf) is S4.
+  bool import_pixels_to_dmabuf(const Surface& src, DmabufFrame* out, std::string* error);
+
   // True when the device offers the DRM-format-modifier extensions
   // (VK_EXT_image_drm_format_modifier + VK_KHR_image_format_list) — i.e. the
   // modifier-tiled direct path is possible.
@@ -134,6 +140,10 @@ class VkRenderTarget {
 
  private:
   VkRenderTarget();
+
+  // Build the linear dma-buf-exported image + fd once (shared by the GPU-copy and
+  // CPU-import paths).
+  bool ensure_linear_export(std::string* error);
 
   struct Impl;
   std::unique_ptr<Impl> impl_;

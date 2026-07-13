@@ -292,6 +292,137 @@ bool VkRenderTarget::render_rect(Surface& out, std::uint32_t bg_argb, int left,
   return true;
 }
 
+// Create the linear, dma-buf-exported destination image + its memory (once), and export
+// the fd. Allocates host-visible memory when available so the export is mmap-verifiable
+// AND writable (S3b: acl uploads android.graphics CPU pixels into it). The compositor
+// imports the fd via GPU regardless. Shared by render_and_export_linear (GPU copy in) and
+// import_pixels_to_dmabuf (CPU write in).
+bool VkRenderTarget::ensure_linear_export(std::string* error) {
+  Impl& vk_ = *impl_;
+  const auto fail = [&](std::string_view msg) {
+    if (error) *error = std::string(msg);
+    return false;
+  };
+  if (vk_.export_image) return true;
+  if (!vk_.dmabuf_export_ok) return fail("dma-buf export extensions unavailable");
+
+  constexpr vk::ExternalMemoryImageCreateInfo ext_img{
+      vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT};
+  vk::ImageCreateInfo ci;
+  ci.imageType = vk::ImageType::e2D;
+  ci.format = kVkFormat;
+  ci.extent = vk::Extent3D{static_cast<std::uint32_t>(width_),
+                           static_cast<std::uint32_t>(height_), 1};
+  ci.mipLevels = 1;
+  ci.arrayLayers = 1;
+  ci.samples = vk::SampleCountFlagBits::e1;
+  ci.tiling = vk::ImageTiling::eLinear;
+  ci.usage = vk::ImageUsageFlagBits::eTransferDst;
+  ci.sharingMode = vk::SharingMode::eExclusive;
+  ci.initialLayout = vk::ImageLayout::eUndefined;
+  ci.setPNext(&ext_img);
+  auto rv = vk_.device->createImageUnique(ci);
+  if (rv.result != vk::Result::eSuccess) return fail("vkCreateImage (linear) failed");
+  vk_.export_image = std::move(rv.value);
+
+  const vk::SubresourceLayout layout = vk_.device->getImageSubresourceLayout(
+      *vk_.export_image, {vk::ImageAspectFlagBits::eColor, 0, 0});
+
+  // Memory: prefer host-visible+coherent (so we can mmap read/write), else any.
+  const vk::MemoryRequirements reqs =
+      vk_.device->getImageMemoryRequirements(*vk_.export_image);
+  const vk::PhysicalDeviceMemoryProperties mem_props = vk_.phys_dev.getMemoryProperties();
+  std::uint32_t mem_type = UINT32_MAX;
+  bool host_visible = false;
+  for (std::uint32_t j = 0; j < mem_props.memoryTypeCount; ++j) {
+    if (!(reqs.memoryTypeBits & (1u << j))) continue;
+    const vk::MemoryPropertyFlags f = mem_props.memoryTypes.at(j).propertyFlags;
+    if ((f & vk::MemoryPropertyFlagBits::eHostVisible) &&
+        (f & vk::MemoryPropertyFlagBits::eHostCoherent)) {
+      mem_type = j;
+      host_visible = true;
+      break;
+    }
+    if (mem_type == UINT32_MAX) mem_type = j;  // fallback: first compatible
+  }
+  if (mem_type == UINT32_MAX) return fail("no compatible memory type");
+
+  vk::MemoryDedicatedAllocateInfo dedicated{*vk_.export_image};
+  vk::ExportMemoryAllocateInfo export_mem{
+      vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT};
+  export_mem.pNext = &dedicated;
+  vk::MemoryAllocateInfo mem_ai{reqs.size, mem_type};
+  mem_ai.setPNext(&export_mem);
+  auto mrv = vk_.device->allocateMemoryUnique(mem_ai);
+  if (mrv.result != vk::Result::eSuccess) return fail("vkAllocateMemory failed");
+  vk_.export_memory = std::move(mrv.value);
+  if (vk_.device->bindImageMemory(*vk_.export_image, *vk_.export_memory, 0) !=
+      vk::Result::eSuccess)
+    return fail("vkBindImageMemory failed");
+
+  auto get_fd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
+      vkGetDeviceProcAddr(*vk_.device, "vkGetMemoryFdKHR"));
+  if (!get_fd) return fail("vkGetMemoryFdKHR unavailable");
+  const VkMemoryGetFdInfoKHR fd_info{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, nullptr,
+                                     *vk_.export_memory,
+                                     VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
+  int raw_fd = -1;
+  if (static_cast<vk::Result>(get_fd(*vk_.device, &fd_info, &raw_fd)) != vk::Result::eSuccess)
+    return fail("vkGetMemoryFdKHR failed");
+  vk_.export_fd = raw_fd;
+
+  vk_.frame = DmabufFrame{};
+  vk_.frame.fd = raw_fd;
+  vk_.frame.width = static_cast<std::uint32_t>(width_);
+  vk_.frame.height = static_cast<std::uint32_t>(height_);
+  vk_.frame.plane_count = 1;
+  vk_.frame.planes[0] = {static_cast<std::uint32_t>(layout.offset),
+                         static_cast<std::uint32_t>(layout.rowPitch)};
+  vk_.frame.modifier = static_cast<std::uint64_t>(DRM_FORMAT_MOD_LINEAR);
+  vk_.frame.drm_format = kDrmFormat;
+  vk_.frame.mem_size = reqs.size;
+  vk_.frame.host_mapped = host_visible;
+  vk_.frame.modifier_tiled = false;
+
+  const vk::CommandBufferAllocateInfo cb_ai{*vk_.cmd_pool, vk::CommandBufferLevel::ePrimary, 1};
+  auto crv = vk_.device->allocateCommandBuffersUnique(cb_ai);
+  if (crv.result != vk::Result::eSuccess) return fail("vkAllocateCommandBuffers failed");
+  vk_.copy_cmd = std::move(crv.value.front());
+  auto frv = vk_.device->createFenceUnique({});
+  if (frv.result != vk::Result::eSuccess) return fail("vkCreateFence failed");
+  vk_.copy_fence = std::move(frv.value);
+  return true;
+}
+
+// S3b: import CPU pixels (a rendered android.graphics Bitmap → gfx::Surface) into the
+// linear dma-buf by writing its host-visible memory, and hand back the frame to present.
+// The GPU-native zero-copy path (hwui/Ganesh rendering straight into the dma-buf) is S4;
+// this closes the loop today. Requires host-visible export memory (frame.host_mapped).
+bool VkRenderTarget::import_pixels_to_dmabuf(const Surface& src, DmabufFrame* out,
+                                             std::string* error) {
+  Impl& vk_ = *impl_;
+  const auto fail = [&](std::string_view msg) {
+    if (error) *error = std::string(msg);
+    return false;
+  };
+  if (src.width() != width_ || src.height() != height_) return fail("size mismatch");
+  if (!ensure_linear_export(error)) return false;
+  if (!vk_.frame.host_mapped) return fail("export memory not host-visible");
+
+  auto mrv = vk_.device->mapMemory(*vk_.export_memory, 0, vk_.frame.mem_size);
+  if (mrv.result != vk::Result::eSuccess) return fail("vkMapMemory failed");
+  auto* base = static_cast<std::uint8_t*>(mrv.value);
+  const std::uint32_t* pix = src.data();
+  for (int y = 0; y < height_; ++y) {
+    std::memcpy(base + vk_.frame.offset() + static_cast<std::size_t>(y) * vk_.frame.stride(),
+                pix + static_cast<std::size_t>(y) * width_,
+                static_cast<std::size_t>(width_) * sizeof(std::uint32_t));
+  }
+  vk_.device->unmapMemory(*vk_.export_memory);
+  if (out) *out = vk_.frame;
+  return true;
+}
+
 // Create the linear, dma-buf-exported destination image + its memory, and export the
 // fd. Allocates host-visible memory when available so the export is mmap-verifiable
 // (the compositor imports the fd via GPU regardless). Idempotent-ish: builds once.
@@ -312,97 +443,7 @@ bool VkRenderTarget::render_and_export_linear(std::uint32_t bg_argb, int left, i
   vk_.last_rendered = vk_.surface.get();
 
   // ── 2. Build the linear exported image (once) ──────────────────────────────
-  if (!vk_.export_image) {
-    constexpr vk::ExternalMemoryImageCreateInfo ext_img{
-        vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT};
-    vk::ImageCreateInfo ci;
-    ci.imageType = vk::ImageType::e2D;
-    ci.format = kVkFormat;
-    ci.extent = vk::Extent3D{static_cast<std::uint32_t>(width_),
-                             static_cast<std::uint32_t>(height_), 1};
-    ci.mipLevels = 1;
-    ci.arrayLayers = 1;
-    ci.samples = vk::SampleCountFlagBits::e1;
-    ci.tiling = vk::ImageTiling::eLinear;
-    ci.usage = vk::ImageUsageFlagBits::eTransferDst;
-    ci.sharingMode = vk::SharingMode::eExclusive;
-    ci.initialLayout = vk::ImageLayout::eUndefined;
-    ci.setPNext(&ext_img);
-    auto rv = vk_.device->createImageUnique(ci);
-    if (rv.result != vk::Result::eSuccess) return fail("vkCreateImage (linear) failed");
-    vk_.export_image = std::move(rv.value);
-
-    const vk::SubresourceLayout layout = vk_.device->getImageSubresourceLayout(
-        *vk_.export_image, {vk::ImageAspectFlagBits::eColor, 0, 0});
-
-    // Memory: prefer host-visible+coherent (so we can mmap-verify), else any.
-    const vk::MemoryRequirements reqs =
-        vk_.device->getImageMemoryRequirements(*vk_.export_image);
-    const vk::PhysicalDeviceMemoryProperties mem_props = vk_.phys_dev.getMemoryProperties();
-    std::uint32_t mem_type = UINT32_MAX;
-    bool host_visible = false;
-    for (std::uint32_t j = 0; j < mem_props.memoryTypeCount; ++j) {
-      if (!(reqs.memoryTypeBits & (1u << j))) continue;
-      const vk::MemoryPropertyFlags f = mem_props.memoryTypes.at(j).propertyFlags;
-      if ((f & vk::MemoryPropertyFlagBits::eHostVisible) &&
-          (f & vk::MemoryPropertyFlagBits::eHostCoherent)) {
-        mem_type = j;
-        host_visible = true;
-        break;
-      }
-      if (mem_type == UINT32_MAX) mem_type = j;  // fallback: first compatible
-    }
-    if (mem_type == UINT32_MAX) return fail("no compatible memory type");
-
-    vk::MemoryDedicatedAllocateInfo dedicated{*vk_.export_image};
-    vk::ExportMemoryAllocateInfo export_mem{
-        vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT};
-    export_mem.pNext = &dedicated;
-    vk::MemoryAllocateInfo mem_ai{reqs.size, mem_type};
-    mem_ai.setPNext(&export_mem);
-    auto mrv = vk_.device->allocateMemoryUnique(mem_ai);
-    if (mrv.result != vk::Result::eSuccess) return fail("vkAllocateMemory failed");
-    vk_.export_memory = std::move(mrv.value);
-    if (vk_.device->bindImageMemory(*vk_.export_image, *vk_.export_memory, 0) !=
-        vk::Result::eSuccess)
-      return fail("vkBindImageMemory failed");
-
-    // Export the dma-buf fd.
-    auto get_fd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
-        vkGetDeviceProcAddr(*vk_.device, "vkGetMemoryFdKHR"));
-    if (!get_fd) return fail("vkGetMemoryFdKHR unavailable");
-    const VkMemoryGetFdInfoKHR fd_info{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, nullptr,
-                                       *vk_.export_memory,
-                                       VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
-    int raw_fd = -1;
-    if (static_cast<vk::Result>(get_fd(*vk_.device, &fd_info, &raw_fd)) !=
-        vk::Result::eSuccess)
-      return fail("vkGetMemoryFdKHR failed");
-    vk_.export_fd = raw_fd;
-
-    vk_.frame = DmabufFrame{};
-    vk_.frame.fd = raw_fd;
-    vk_.frame.width = static_cast<std::uint32_t>(width_);
-    vk_.frame.height = static_cast<std::uint32_t>(height_);
-    vk_.frame.plane_count = 1;
-    vk_.frame.planes[0] = {static_cast<std::uint32_t>(layout.offset),
-                           static_cast<std::uint32_t>(layout.rowPitch)};
-    vk_.frame.modifier = static_cast<std::uint64_t>(DRM_FORMAT_MOD_LINEAR);
-    vk_.frame.drm_format = kDrmFormat;
-    vk_.frame.mem_size = reqs.size;
-    vk_.frame.host_mapped = host_visible;
-    vk_.frame.modifier_tiled = false;
-
-    // Command buffer + fence for the copy pass.
-    const vk::CommandBufferAllocateInfo cb_ai{*vk_.cmd_pool,
-                                              vk::CommandBufferLevel::ePrimary, 1};
-    auto crv = vk_.device->allocateCommandBuffersUnique(cb_ai);
-    if (crv.result != vk::Result::eSuccess) return fail("vkAllocateCommandBuffers failed");
-    vk_.copy_cmd = std::move(crv.value.front());
-    auto frv = vk_.device->createFenceUnique({});
-    if (frv.result != vk::Result::eSuccess) return fail("vkCreateFence failed");
-    vk_.copy_fence = std::move(frv.value);
-  }
+  if (!ensure_linear_export(error)) return false;
 
   // ── 3. Flush the Skia surface into TRANSFER_SRC_OPTIMAL ────────────────────
   const skgpu::MutableTextureState transfer_src = skgpu::MutableTextureStates::MakeVulkan(
