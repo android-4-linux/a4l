@@ -278,3 +278,49 @@ system compositor is the first target; the probe is run manually (no `meson test
 compositor isn't in CI). **NEXT = V2b-ci**: a libwayland-server test compositor (extending
 `close_compositor`) that advertises a modifier set + asserts the received plane params, for
 deterministic CI coverage. Then V3 (android.graphics natives compose onto the gfx surface).
+
+## V3 / S3 RESULT (2026-07-12) — done; real android.graphics on Android host Skia, CPU loop live
+The architecture settled (user, 2026-07-12): acl is a **host translation layer**, so we **re-own
+android.graphics** rather than register host `libandroid_runtime`'s graphics natives (its layoutlib
+build compiles the framework's `@CriticalNative` methods with the wrong ABI → crash). `libacl_graphics_jni`
+(Soong `cc_library_shared`, host; source in `tools/aosp/graphics_jni/`, built in `$AOSP/vendor/acl/`)
+provides ~22 acl-owned Bitmap/Canvas/Paint/ColorSpace natives over **Android's optimized host Skia**,
+with the `@CriticalNative` methods written **handle-only (device convention)** to match the annotation
+host ART honors — no `@CriticalNative` surgery, no AOSP patch. acl `dlopen`s it and calls
+`register_acl_graphics`. **CPU loop closed live (S3b, commit c7f0d98):** a real
+`Bitmap.createBitmap → Canvas → drawColor → Paint → drawRect` on host ART → `acl_read_bitmap` →
+`gfx::Surface` → `import_pixels_to_dmabuf` → `present_dmabuf`; 3 clean frames on GNOME Shell.
+
+## S4a RESULT (2026-07-12) — done; GPU-NATIVE ZERO-COPY loop live on GNOME Shell
+The perf path: render GPU-native (no CPU upload). Enabling this needed Android's host libskia built
+with Ganesh Vulkan (it ships CPU-only — `SK_SUPPORT_GPU 0` on host; patch at
+`tools/aosp/patches/external-skia-host-vulkan.patch`, ~287 GPU srcs + VMA, GL excluded). Then
+`gpu_dmabuf.cpp` (in `libacl_graphics_jni`) renders the scene with Ganesh into a Skia-owned **optimal**
+`SkSurface` (`MakeRenderTarget`), `vkCmdCopyImage`s it into a modifier-**tiled**, dma-buf-exported
+`VkImage` (GPU→GPU), and exports the fd; `ArtVm::graphics_present_demo` (gated `ACL_ART_GRAPHICS_GPU`)
+presents it via `wm::present_dmabuf`.
+
+**The in-process blocker and its two root causes (commit 2a8d836).** `MakeRenderTarget` returned null
+**in-process** (inside acl/ART) while the identical call worked **standalone** against the same libskia:
+1. **Symbol interposition — the real cause.** ART loads host `libandroid_runtime.so` first; it exports
+   63 CPU-only (`SK_SUPPORT_GPU 0`) Skia symbols. `libacl_graphics_jni.so` statically links the
+   Vulkan-enabled Skia but also exported ~144 Skia symbols at default visibility, so its own
+   `SkSurface::MakeRenderTarget` bound to `libandroid_runtime`'s CPU-only build → null. Standalone there
+   is no such lib. **Fix: `ldflags: ["-Wl,-Bsymbolic"]`** — bind our Skia calls to our own GPU
+   definitions first; the `dlsym` entrypoints stay exported. (Diagnose with
+   `nm -D --defined-only <so> | grep 'GrDirectContext\|SkSurface'`.)
+2. **Inconsistent Vulkan dispatch.** An ad-hoc dlopen + hand-resolved function pointers left Skia's
+   device calls on a different dispatch than ours (the "VkDevice dispatch handle not found" teardown
+   symptom). **Fix: Vulkan-Hpp default dynamic dispatcher, full 3-stage init** —
+   `VKD.init(gipa)` → create instance → `VKD.init(vk::Instance(i))` → create device →
+   `VKD.init(vk::Device(d))`; Skia's `GrVkGetProc` returns `VKD.vkGetDeviceProcAddr/vkGetInstanceProcAddr`,
+   so every call (ours and Skia's) shares one dispatch. AOSP's vulkan-headers lacks the no-arg `init()`,
+   so `dlopen(libvulkan.so.1)` + `dlsym(vkGetInstanceProcAddr)` supplies `gipa` (pattern from
+   ivi-homescreen `vulkan_drm_backend.cc`; the earlier ganesh_probe segfault did only one init stage).
+
+**Verified live on GNOME Shell/Mutter:** app → android.graphics → Android host Skia Ganesh Vulkan
+(GPU render) → single-plane **tiled** modifier `0x200000000401b03` dma-buf → `zwp_linux_dmabuf_v1`,
+zero-copy, 3 clean frames. Run `/tmp/acl/run_demo_gpu.sh` (`ACL_ART_GRAPHICS_GPU=1`).
+**NEXT S4a options:** (a) try the **direct** tiled `MakeFromBackendTexture` path now that in-process
+Skia-GPU works — may drop the `vkCmdCopyImage` copy pass; (b) S4b breadth (grow Canvas ops + drive
+from a real `View.draw`).
