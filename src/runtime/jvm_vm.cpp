@@ -22,6 +22,9 @@
 #include <jni.h>
 
 #include "acl_config.h"
+#if ACL_HAVE_SDBUS
+#include "svc/net/connectivity_jni.h"
+#endif
 #include "audio/audio.h"
 #include "gfx/gfx.h"
 #if ACL_HAVE_VULKAN
@@ -1577,6 +1580,11 @@ class ArtVm final : public JniVm {
     register_no_binder(env);
     bootstrap_host_env(env);
     load_acl_graphics(env);
+#if ACL_HAVE_SDBUS
+    // Bind android.net.ConnectivityManager (acl clean-room shim on the boot classpath)
+    // to the svc/net host connectivity backend (systemd-networkd/NetworkManager/ConnMan).
+    acl::net::register_connectivity_natives(env);
+#endif
   }
 
   // Run acl's host-ART runtime bootstrap (org.acl.internal.HostBootstrap.init) if injected on

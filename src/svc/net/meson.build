@@ -9,9 +9,11 @@
 # picks which backends compile in (auto = all, probe at runtime).
 net_lib = static_library(
   'acl_svc_net',
-  files('net_backend.cpp'),
+  files('net_backend.cpp', 'connectivity_jni.cpp'),
   include_directories : [config_inc, core_inc],
-  dependencies : [fmt_dep, sdbus_dep],   # fmt via log/log.h; sdbus-c++ D-Bus client
+  # fmt via log/log.h; sdbus-c++ D-Bus client; jni_dep for the ConnectivityManager
+  # native seam (jni.h only — all JNI calls go through the passed-in JNIEnv*).
+  dependencies : [fmt_dep, sdbus_dep, jni_dep],
 )
 module_libs += net_lib
 

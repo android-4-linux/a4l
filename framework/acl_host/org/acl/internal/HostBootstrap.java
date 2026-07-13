@@ -120,20 +120,13 @@ public final class HostBootstrap {
                 }
             }
             if ("connectivity".equals(name)) {
-                // ConnectivityManager(Context, IConnectivityManager) — pass a no-Binder proxy so
-                // its queries return defaults (WorkManager's NetworkStateTracker requires a
-                // non-null ConnectivityManager). NOTE: on an apex-split host image the real
-                // ConnectivityManager lives in the framework-connectivity mainline module and is
-                // NOT on $BOOT (only stub jars have it) → ClassNotFoundException; this wiring
-                // activates once that module is added to the runtime boot classpath (or a
-                // clean-room shim is vendored). Reflective for the same reason.
+                // acl's clean-room android.net.ConnectivityManager (on the boot classpath via
+                // this bootstrap jar, backed by svc/net) has a public no-arg ctor. Reflective
+                // so HostBootstrap need not compile against the shim's signature (it compiles
+                // against the framework classes.jar, whose ConnectivityManager differs).
                 try {
-                    Class<?> cm = Class.forName("android.net.ConnectivityManager");
-                    Class<?> icm = Class.forName("android.net.IConnectivityManager");
-                    java.lang.reflect.Constructor<?> c =
-                            cm.getDeclaredConstructor(android.content.Context.class, icm);
-                    c.setAccessible(true);
-                    return c.newInstance(this, noop(icm));
+                    return Class.forName("android.net.ConnectivityManager")
+                            .getConstructor().newInstance();
                 } catch (Throwable t) {
                     return null;
                 }
