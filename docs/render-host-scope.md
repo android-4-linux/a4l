@@ -147,12 +147,15 @@ in `external/skia/Android.bp`; the host build never needed GPU for layoutlib). S
 `android.graphics.Canvas` must render through *Android's* Skia (type-compatible with the framework
 natives), **the S3b CPU-render-then-upload loop is not a shortcut — it's the only path today, and it
 is correct + working.** GPU-native therefore forks:
-- **S4a — GPU-native (perf).** Requires **rebuilding Android's host `libskia` with a Vulkan backend**
-  (`external/skia/Android.bp`: lift `vulkan`/`GrVk*`/`libvulkan`/`GrVulkanMemoryAllocator` out of the
-  `target: { android }` gate for the host variant) + a Skia rebuild. Then wrap acl's dma-buf `VkImage`
-  as an Android-Skia Ganesh `SkSurface` (`GrVkBackendContext` over a `VkDevice` shared with acl's gfx,
-  `GrBackendTexture`/`SkSurface::MakeFromBackendTexture`) and route the `Canvas` to it — no CPU upload.
-  A perf optimization over the working S3b loop, not a correctness fix.
+- **S4a — GPU-native (perf).** **Step 1 DONE (2026-07-12):** Android's host `libskia` now builds with
+  the Ganesh Vulkan backend (`tools/aosp/patches/external-skia-host-vulkan.patch`: host
+  `SkUserConfig.h` `SK_SUPPORT_GPU 1`+`SK_VULKAN`+`SK_USE_VMA`; the ~287-file GPU src set + VMA +
+  Vulkan headers added to `libskia`'s `host_linux` block, GL excluded → Vulkan-only). Verified:
+  `GrDirectContext::MakeVulkan` defined, 578 `GrVk*` symbols; `libacl_graphics_jni` rebuilds clean.
+  Skia calls Vulkan via consumer-provided `GrVkGetProc` (no vk loader linked). **Step 2 (next):** wrap
+  acl's dma-buf `VkImage` as an Android-Skia Ganesh `SkSurface` (`GrVkBackendContext` over a `VkDevice`
+  shared with acl's gfx, `GrBackendTexture`/`SkSurface::MakeFromBackendTexture`) and route the `Canvas`
+  to it — no CPU upload. A perf optimization over the working S3b loop, not a correctness fix.
 - **S4b — breadth (runs real apps, into Gate G2).** No Skia rebuild: grow graphics ops
   (paths/text/drawBitmap/clip/transform) + Paint setters as real apps hit them, and drive the loop
   from a real `View.draw`/`onDraw` traversal (acl already has the View-traversal driver from Phase 2).
