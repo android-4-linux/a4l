@@ -90,8 +90,12 @@ public final class HostBootstrap {
         @Override public android.content.pm.ApplicationInfo getApplicationInfo() {
             android.content.pm.ApplicationInfo ai = new android.content.pm.ApplicationInfo();
             ai.packageName = pkg;
+            ai.processName = pkg;   // single-process; WorkManager compares against this
             return ai;
         }
+        // AppContext has a null base (super(null)), so Context methods not overridden here
+        // would NPE. Device-protected (direct-boot) storage isn't modeled → plain storage.
+        @Override public boolean isDeviceProtectedStorage() { return false; }
         @Override public Resources.Theme getTheme() {
             if (theme == null) theme = res.newTheme();
             return theme;
@@ -119,6 +123,23 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("jobscheduler".equals(name)) {
+                return new AppJobScheduler();  // androidx WorkManager's SystemJobScheduler
+            }
+            if ("notification".equals(name)) {
+                // NotificationManager(Context, Handler); its calls route through the seeded
+                // ServiceManager("notification") → INotificationManager proxy (no-op), so
+                // createNotificationChannels etc. are accepted and dropped (no notif host yet).
+                try {
+                    java.lang.reflect.Constructor<?> c = android.app.NotificationManager.class
+                            .getDeclaredConstructor(android.content.Context.class,
+                                    android.os.Handler.class);
+                    c.setAccessible(true);
+                    return c.newInstance(this, null);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("connectivity".equals(name)) {
                 // acl's clean-room android.net.ConnectivityManager (on the boot classpath via
                 // this bootstrap jar, backed by svc/net) has a public no-arg ctor. Reflective
@@ -138,6 +159,8 @@ public final class HostBootstrap {
         // (remaining Managers are svc/-routed later, ADR-2). @hide → compiled vs classes.jar.
         @Override public String getSystemServiceName(Class<?> serviceClass) {
             if (serviceClass == android.app.ActivityManager.class) return "activity";
+            if (serviceClass == android.app.job.JobScheduler.class) return "jobscheduler";
+            if (serviceClass == android.app.NotificationManager.class) return "notification";
             // ConnectivityManager compared by name (off this compile classpath, see above).
             if ("android.net.ConnectivityManager".equals(serviceClass.getName())) return "connectivity";
             return null;
@@ -208,6 +231,34 @@ public final class HostBootstrap {
             d.mkdirs();
             return d;
         }
+        @Override public java.io.File getNoBackupFilesDir() {
+            java.io.File d = new java.io.File(System.getProperty("java.io.tmpdir"),
+                                              "acl-nobackup-" + pkg);
+            d.mkdirs();
+            return d;
+        }
+        // Room/SQLite (androidx WorkManager's WorkDatabase) — back onto the host libsqlite
+        // in a temp databases dir. No app sandbox yet; a per-package dir suffices.
+        @Override public java.io.File getDatabasePath(String name) {
+            java.io.File d = new java.io.File(System.getProperty("java.io.tmpdir"),
+                                              "acl-db-" + pkg);
+            d.mkdirs();
+            return new java.io.File(d, name);
+        }
+        @Override public android.database.sqlite.SQLiteDatabase openOrCreateDatabase(
+                String name, int mode, android.database.sqlite.SQLiteDatabase.CursorFactory f) {
+            return android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(
+                    getDatabasePath(name).getPath(), f);
+        }
+        @Override public android.database.sqlite.SQLiteDatabase openOrCreateDatabase(
+                String name, int mode, android.database.sqlite.SQLiteDatabase.CursorFactory f,
+                android.database.DatabaseErrorHandler eh) {
+            return android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(
+                    getDatabasePath(name).getPath(), f, eh);
+        }
+        @Override public boolean deleteDatabase(String name) {
+            return getDatabasePath(name).delete();
+        }
         // The app classloader (HostBootstrap is injected on the app classpath, so its loader
         // sees the app classes) — resource/XML inflation resolves app classes through this.
         @Override public ClassLoader getClassLoader() {
@@ -229,6 +280,18 @@ public final class HostBootstrap {
         @Override public android.content.pm.PackageInfo getPackageInfo(String p, int flags)
                 throws android.content.pm.PackageManager.NameNotFoundException {
             throw new android.content.pm.PackageManager.NameNotFoundException(p);
+        }
+    }
+
+    // acl has no JobScheduler service (ADR-3). Accept schedules (RESULT_SUCCESS) and
+    // report no pending jobs so androidx WorkManager's SystemJobScheduler initializes;
+    // the jobs are dropped (WorkManager also runs an in-process GreedyScheduler).
+    static final class AppJobScheduler extends StubJobScheduler {
+        @Override public int schedule(android.app.job.JobInfo job) {
+            return android.app.job.JobScheduler.RESULT_SUCCESS;
+        }
+        @Override public java.util.List getAllPendingJobs() {
+            return new java.util.ArrayList();
         }
     }
 
@@ -255,8 +318,44 @@ public final class HostBootstrap {
                 : new android.app.Application();
         setField(ContextWrapper.class, app, "mBase", base);
         if (base instanceof AppContext) ((AppContext) base).setApplication(app);
+        seedActivityThread(pkg);
         app.onCreate();  // sets the app's own singleton; may throw on a not-yet-supported API
         return app;
+    }
+
+    // Allocate an instance without running its constructor (no side effects) — for seeding
+    // hollow framework singletons acl doesn't fully stand up.
+    private static Object allocateHollow(Class<?> c) throws Exception {
+        Class<?> u = Class.forName("sun.misc.Unsafe");
+        java.lang.reflect.Field tf = u.getDeclaredField("theUnsafe");
+        tf.setAccessible(true);
+        Object unsafe = tf.get(null);
+        return u.getMethod("allocateInstance", Class.class).invoke(unsafe, c);
+    }
+
+    // Seed a minimal ActivityThread so Application.getProcessName() (→ ActivityThread.
+    // currentProcessName() → mBoundApplication.processName) is non-null — androidx
+    // WorkManager requires it. acl has no real ActivityThread (ADR-2/3); this is a hollow
+    // instance (Unsafe-allocated, no ctor) carrying only the process name + appInfo.
+    static void seedActivityThread(String pkg) {
+        try {
+            Class<?> at = Class.forName("android.app.ActivityThread");
+            if (at.getMethod("currentActivityThread").invoke(null) != null) return;
+            Object atInst = allocateHollow(at);
+            Class<?> abd = Class.forName("android.app.ActivityThread$AppBindData");
+            Object abdInst = allocateHollow(abd);
+            setField(abd, abdInst, "processName", pkg);
+            android.content.pm.ApplicationInfo ai = new android.content.pm.ApplicationInfo();
+            ai.packageName = pkg;
+            ai.processName = pkg;
+            setField(abd, abdInst, "appInfo", ai);
+            setField(at, atInst, "mBoundApplication", abdInst);
+            java.lang.reflect.Field s = at.getDeclaredField("sCurrentActivityThread");
+            s.setAccessible(true);
+            s.set(null, atInst);
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: seedActivityThread failed: " + t);
+        }
     }
 
     // Lightweight Activity attach: a real Activity is normally attach()'d by ActivityThread
@@ -330,6 +429,60 @@ public final class HostBootstrap {
                 (p, method, a) -> defaultValue(method.getReturnType()));
     }
 
+    // INotificationManager translated to the host notification daemon (svc/notify).
+    // enqueue → NotifyBridge.nNotify (host Notify), cancel → nClose; per-app-id → server-id
+    // map keeps replace/cancel coherent. Channel ops and everything else default.
+    private static Object makeNotificationHandler(Class<?> iface) {
+        final java.util.Map<Integer, Long> ids = new java.util.concurrent.ConcurrentHashMap<>();
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    switch (method.getName()) {
+                        case "enqueueNotificationWithTag": {
+                            // (String pkg, String opPkg, String tag, int id, Notification n, int user)
+                            String pkg = (String) a[0];
+                            int id = (Integer) a[3];
+                            String[] tt = notificationTitleText(a[4]);
+                            long prev = ids.getOrDefault(id, 0L);
+                            long server = NotifyBridge.nNotify(pkg, (int) prev, tt[0], tt[1]);
+                            if (server != 0) ids.put(id, server);
+                            return null;
+                        }
+                        case "cancelNotificationWithTag": {
+                            Long server = ids.remove((Integer) a[3]);
+                            if (server != null) NotifyBridge.nClose(server);
+                            return null;
+                        }
+                        case "cancelAllNotifications": {
+                            for (Long s : ids.values()) NotifyBridge.nClose(s);
+                            ids.clear();
+                            return null;
+                        }
+                        default:
+                            return defaultValue(method.getReturnType());
+                    }
+                });
+    }
+
+    // Read android.title / android.text out of a Notification's extras Bundle (reflectively —
+    // HostBootstrap compiles against the framework classes.jar).
+    private static String[] notificationTitleText(Object notification) {
+        String title = "", text = "";
+        try {
+            Object extras = notification.getClass().getField("extras").get(notification);
+            if (extras != null) {
+                java.lang.reflect.Method getCs =
+                        extras.getClass().getMethod("getCharSequence", String.class);
+                Object t = getCs.invoke(extras, "android.title");
+                Object x = getCs.invoke(extras, "android.text");
+                if (t != null) title = t.toString();
+                if (x != null) text = x.toString();
+            }
+        } catch (Throwable ignored) {
+        }
+        return new String[]{title, text};
+    }
+
     private static Object defaultValue(Class<?> rt) {
         if (rt == boolean.class) return false;
         if (rt == int.class || rt == long.class || rt == short.class || rt == byte.class
@@ -353,6 +506,10 @@ public final class HostBootstrap {
         // through ServiceManager.getService("activity") → IActivityManager; a defaulting proxy
         // (empty process list, etc.) is enough for boot-time probes like isAcraProcess.
         svc.put("activity", "android.app.IActivityManager");
+        // NotificationManager routes through INotificationManager; acl translates it to the
+        // host notification daemon (svc/notify → org.freedesktop.Notifications) instead of a
+        // no-op proxy.
+        svc.put("notification", "android.app.INotificationManager");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},
@@ -363,7 +520,8 @@ public final class HostBootstrap {
                         String ifaceName = svc.get(name);
                         if (ifaceName == null) return null;
                         Class<?> iface = Class.forName(ifaceName);
-                        final Object localIface = noop(iface);
+                        final Object localIface = "notification".equals(name)
+                                ? makeNotificationHandler(iface) : noop(iface);
                         final String descriptor = ifaceName;  // AIDL DESCRIPTOR == interface FQN
                         // Proxy IBinder (an interface) rather than new Binder() — the latter
                         // needs Binder natives. asInterface() calls queryLocalInterface and

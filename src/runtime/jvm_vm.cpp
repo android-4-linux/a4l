@@ -24,6 +24,7 @@
 #include "acl_config.h"
 #if ACL_HAVE_SDBUS
 #include "svc/net/connectivity_jni.h"
+#include "svc/notify/notify_jni.h"
 #endif
 #include "audio/audio.h"
 #include "gfx/gfx.h"
@@ -1584,6 +1585,9 @@ class ArtVm final : public JniVm {
     // Bind android.net.ConnectivityManager (acl clean-room shim on the boot classpath)
     // to the svc/net host connectivity backend (systemd-networkd/NetworkManager/ConnMan).
     acl::net::register_connectivity_natives(env);
+    // Bind org.acl.internal.NotifyBridge (INotificationManager translation) to the
+    // svc/notify host backend (org.freedesktop.Notifications).
+    acl::notify::register_notify_natives(env);
 #endif
   }
 

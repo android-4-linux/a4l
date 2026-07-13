@@ -5,10 +5,11 @@
 # PackageManager, Clipboard, SharedPreferences, ContentResolver, notifications.
 svc_sources = files('svc.cpp')
 
-# svc/net connectivity backend (host D-Bus → ConnectivityManager) builds when
-# sdbus-c++ is present; its own static lib + dev probe tool, wired via net/meson.build.
+# svc/net + svc/notify host D-Bus backends (ConnectivityManager / NotificationManager)
+# build when sdbus-c++ is present; each its own static lib + dev probe tool.
 if have_sdbus
   subdir('net')
+  subdir('notify')
 endif
 
 # Automotive vehicle services (svc/car) compile in ONLY under the automotive
