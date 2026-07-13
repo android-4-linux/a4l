@@ -79,12 +79,44 @@ modifiers. Then build `wl_buffer`s from the `DmabufFrame` (one `add()` per plane
 (extending the existing `close_compositor`) that *advertises* a modifier set (making the direct
 path engage) and asserts the received plane params — deterministic, no GPU-import dependency.
 
-### V3 — android.graphics natives compose onto the gfx surface
-Register the host-exported graphics native floor (`register_android_graphics_classes` /
-`_Bitmap` / `_Canvas` / `_Graphics` — the same LayoutlibLoader host block that exported the
-resources floor in R1) in ArtVm, and route a real `android.graphics.Canvas`'s draws onto the
-gfx Ganesh surface (or, minimally, copy a rendered `Bitmap`'s pixels into it). **Gate:** a real
-framework `Bitmap`/`Canvas` op executes on host ART and its pixels reach the gfx surface.
+### V3 — real android.graphics onto the gfx surface (RE-SCOPED 2026-07-12)
+**Decided (user): acl is a host translation layer (host-translation-layer style), not a device container. Render via
+Android's own Skia, backed by our Vulkan-dmabuf present.** See memory `render-architecture-decision`.
+
+**Dead end found — DON'T reuse the host libandroid_runtime graphics natives directly.** ArtVm CAN
+register the graphics umbrella (`register_android_graphics_classes` + `SkGraphics::Init`, needs a
+`graphics_native_classes` CSV + canonical registration order — ColorSpace before Graphics, etc.),
+but EXECUTING Bitmap/Canvas crashes: the **target** framework dex carries `@CriticalNative` (real
+host ART honors it → critical calling convention, handle-only), while the **host** libandroid_runtime
+is the **layoutlib** variant that compiles `@CriticalNative` natives with the normal `(env,clazz,handle)`
+signature (`graphics_jni_helpers.h`: `#ifdef __ANDROID__` empty, else `JNIEnv*,jclass` — *"Host targets
+(layoutlib) do not differentiate between regular and critical native methods"*). → ABI mismatch →
+null-deref in `Bitmap_isImmutable`. (`@FastNative`, which AssetManager/resources use, keeps the normal
+signature, so R1/R3 are unaffected.) The real hwui-Vulkan (`libhwui.so`) + device libandroid_runtime
+are device-only (bionic) binaries; the host lib has NO Vulkan hwui pipeline. Rejected: clearing
+`@CriticalNative` (user concern), porting libhwui to host (heavy + still fights it), and the
+device-container model (contradicts ADR-1/host-ART, single-process, no-Binder).
+
+**CHOSEN — the clean split (S1–S4):** Android's Skia renders; acl's Vulkan-dmabuf is the backend.
+- **S1 ✅** — build Android's android-13 host `libskia.a` (`m out/soong/.intermediates/external/skia/
+  libskia/linux_glibc_x86_64_static/libskia.a` after `lunch aosp_x86_64-eng`; 97MB). android-13 Skia
+  is an OLDER API than m150 (`GrDirectContext::MakeVulkan`, `SkSurface::MakeRenderTarget`,
+  `GrVkBackendContext`).
+- **S2** — acl's gfx present backend is **pure Vulkan (no Skia in meson — avoids Android Skia's
+  jpeg/ft2/icu/… dep tree)**: allocate the dma-buf-exported `VkImage`, export fd, present. Expose the
+  `VkDevice`/queue + `VkImage` (`GrVkImageInfo`-shaped) handles.
+- **S3** — `libacl_graphics_jni`: a Soong module compiling the **known-good host graphics JNI source
+  set** (the LayoutlibLoader srcs — `Bitmap/Canvas/Paint.cpp` + `GraphicsJNI`, already host-built for
+  layoutlib) against host `libskia`, with `CRITICAL_JNI_PARAMS` overridden to the **device** convention
+  (our own shadow header — matching `@CriticalNative`, NOT clearing it). acl shares one `VkDevice` with
+  it (via `GrVkBackendContext`); the graphics natives wrap acl's dma-buf `VkImage` as the `Canvas`'s
+  `SkSurface` (`GrBackendTexture`/`SkSurface::MakeFromBackendTexture`) and render straight in. ONE Skia
+  in the render path (hidden in the Soong lib → no ODR). **Gate:** a real `android.graphics.Canvas`
+  draws on host ART into acl's dma-buf VkImage.
+- **S4** — present + grow hwui's DisplayList/RenderThread/damage design for device-class performance.
+
+The reusable probe `tests/fixtures/art_graphics/Main.java` (real `Bitmap`/`Canvas`/`Paint` via
+reflection) validates whichever backend once S3 lands.
 
 ### V4 — View → frame → present (end-to-end)
 A real (or minimal) `View.draw(Canvas)` → the gfx Ganesh surface → dma-buf present, driven by a
