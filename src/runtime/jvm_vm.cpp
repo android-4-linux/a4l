@@ -1510,7 +1510,22 @@ class ArtVm final : public JniVm {
     populate_system_properties(env);
     load_system_resources(env);
     register_no_binder(env);
+    bootstrap_host_env(env);
     load_acl_graphics(env);
+  }
+
+  // Run acl's host-ART runtime bootstrap (org.acl.internal.HostBootstrap.init) if injected on
+  // the classpath: prepare the main Looper (any Activity/Handler needs it) and seed a
+  // no-Binder ServiceManager. Runs on EVERY host-ART boot, before app code, so the normal
+  // launcher-Activity flow (not just the view-host demo) gets the environment.
+  void bootstrap_host_env(JNIEnv* env) {
+    jclass boot = env->FindClass("org/acl/internal/HostBootstrap");
+    if (boot == nullptr) { env->ExceptionClear(); return; }
+    if (jmethodID init = env->GetStaticMethodID(boot, "init", "()V"))
+      env->CallStaticVoidMethod(boot, init);
+    if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
+    env->DeleteLocalRef(boot);
+    log::i(kTag, "host bootstrap: main Looper + no-Binder ServiceManager ready");
   }
 
   // acl has no Binder (ADR-3): stub the ServiceManager entry point so the framework's
