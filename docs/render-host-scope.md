@@ -174,6 +174,18 @@ is correct + working.** GPU-native therefore forks:
   render into a Skia-owned OPTIMAL `SkSurface` (`MakeRenderTarget`, works, proven by
   `acl_ganesh_probe`) → `vkCmdCopyImage` into the dma-buf `VkImage` (GPU→GPU, no CPU) → export +
   present. ~80 lines; everything else is done. (Alternatively S4b breadth, which needs no GPU path.)
+  **STEP 2 IN-PROCESS BLOCKER (2026-07-12, the real one):** the copy pass is written, but blocked by a
+  Skia-GPU-under-ART issue. Diagnosed: the `GrDirectContext`(Vulkan) is **fully valid in-process**
+  (`maxTextureSize=16384`, not abandoned); raw Vulkan (device, dma-buf image, memory, fd) all work
+  in-process; **but `SkSurface::MakeRenderTarget` / `MakeFromBackendTexture` silently return null
+  in-process** while the identical calls **work standalone** (`acl_ganesh_probe`, same libskia). So the
+  earlier "android-13 can't render tiled" was a MISREAD — the tiled wrap failed for this same in-process
+  reason. Vulkan validation shows no error at the call (only a teardown `GrVkGpu::finishOutstandingGpu
+  Work` "VkDevice dispatch handle not found" artifact), so Skia's `GrVkCaps` is silently rejecting the
+  render target under ART. Loader-handle (`RTLD_DEFAULT` vs `dlopen`) didn't change it. **NEXT:** a Skia
+  debug build (for the reject reason) or VMA/ART-memory tracing; suspects = ART's low-4GB region-space
+  reservation vs Skia/VMA allocation, or a Skia-GPU global-state clash with acl's separately-linked m150
+  Skia. Until then, the **live CPU-native loop (S3b) is the working render path.**
 - **S4b — breadth (runs real apps, into Gate G2).** No Skia rebuild: grow graphics ops
   (paths/text/drawBitmap/clip/transform) + Paint setters as real apps hit them, and drive the loop
   from a real `View.draw`/`onDraw` traversal (acl already has the View-traversal driver from Phase 2).

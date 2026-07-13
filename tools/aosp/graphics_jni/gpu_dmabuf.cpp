@@ -60,8 +60,11 @@ struct Gpu {
   VkDeviceMemory memory = VK_NULL_HANDLE;
   int fd = -1;
   sk_sp<GrDirectContext> gr;
-  sk_sp<SkSurface> surface;
+  sk_sp<SkSurface> opt;  // Skia-owned optimal render target (android-13 can't render to dma-buf)
   GrVkExtensions ext;
+  VkCommandPool pool = VK_NULL_HANDLE;
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  VkFence fence = VK_NULL_HANDLE;
   AclDmabuf info{};
   int w = 0, h = 0;
   bool ready = false;
@@ -77,11 +80,18 @@ F ldd(const char* name) {
 }
 
 bool init_device() {
-  g.loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
-  if (g.loader == nullptr) g.loader = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-  if (g.loader == nullptr) { std::fprintf(stderr,"acl-gpu: no libvulkan\n"); return false; }
+  // Use the loader already in the process (acl links libvulkan) so there's ONE Vulkan
+  // dispatch/loader — a separate dlopen'd handle gives an inconsistent device dispatch
+  // under ART ("VkDevice dispatch handle not found"). Fall back to dlopen if not present.
   g.gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
-      dlsym(g.loader, "vkGetInstanceProcAddr"));
+      dlsym(RTLD_DEFAULT, "vkGetInstanceProcAddr"));
+  if (g.gipa == nullptr) {
+    g.loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_GLOBAL);
+    if (g.loader == nullptr) g.loader = dlopen("libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
+    if (g.loader == nullptr) { std::fprintf(stderr, "acl-gpu: no libvulkan\n"); return false; }
+    g.gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        dlsym(g.loader, "vkGetInstanceProcAddr"));
+  }
   if (g.gipa == nullptr) return false;
 
   auto vkCreateInstance = ldi<PFN_vkCreateInstance>(nullptr, "vkCreateInstance");
@@ -258,26 +268,10 @@ bool make_target(int w, int h, AclDmabuf* out) {
   out->plane_count = plane_count;
   out->modifier = modifier;
   out->drm_format = kDrmFormat;
-
-  // Wrap the VkImage as an Android-Skia Ganesh SkSurface.
-  GrVkImageInfo info{};
-  info.fImage = g.image;
-  info.fAlloc.fMemory = g.memory;
-  info.fAlloc.fOffset = 0;
-  info.fAlloc.fSize = reqs.size;
-  info.fImageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-  info.fImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  info.fFormat = kVkFormat;
-  info.fImageUsageFlags = ci.usage;
-  info.fSampleCount = 1;
-  info.fLevelCount = 1;
-  info.fCurrentQueueFamily = g.qfam;
-  GrBackendTexture bt(w, h, info);
-  g.surface = SkSurface::MakeFromBackendTexture(
-      g.gr.get(), bt, kTopLeft_GrSurfaceOrigin, /*sampleCnt=*/1, kBGRA_8888_SkColorType,
-      nullptr, nullptr);
-  if (!g.surface) std::fprintf(stderr,"acl-gpu: MakeFromBackendTexture fail\n");
-  return g.surface != nullptr;
+  // NOTE: the dma-buf image is a plain VkImage, NOT wrapped as a Ganesh render target —
+  // android-13 Ganesh can't render into a DRM_FORMAT_MODIFIER image. It's the vkCmdCopyImage
+  // DST; the scene is rendered into g.opt (a Skia-owned optimal surface) and copied here.
+  return true;
 }
 
 bool ensure_ready(int w, int h) {
@@ -289,11 +283,10 @@ bool ensure_ready(int w, int h) {
     if (dev != VK_NULL_HANDLE) return g.gdpa(dev, name);
     return g.gipa(inst, name);
   };
-  const char* exts[] = {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
-                        VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
-                        VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
-                        VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME};
-  g.ext.init(gp, g.instance, g.phys, 0, nullptr, 4, exts);
+  // Tell Skia about NO device extensions: it only renders the plain OPTIMAL surface (Skia's
+  // GrVkCaps mishandles VK_EXT_image_drm_format_modifier and breaks MakeRenderTarget). The
+  // dma-buf image + fd are created with raw Vulkan below, using the device's real extensions.
+  g.ext.init(gp, g.instance, g.phys, 0, nullptr, 0, nullptr);
   GrVkBackendContext bc{};
   bc.fInstance = g.instance;
   bc.fPhysicalDevice = g.phys;
@@ -305,9 +298,94 @@ bool ensure_ready(int w, int h) {
   bc.fGetProc = gp;
   g.gr = GrDirectContext::MakeVulkan(bc);
   if (!g.gr) { std::fprintf(stderr,"acl-gpu: MakeVulkan fail\n"); return false; }
+  std::fprintf(stderr,"acl-gpu: ctx ok, maxTexSize=%d abandoned=%d\n", g.gr->maxTextureSize(), g.gr->abandoned());
+
+  // Skia-owned OPTIMAL render target — the scene renders here (Ganesh can render it), then
+  // gets vkCmdCopyImage'd into the dma-buf. kTopLeft so the copy is not vertically flipped.
+  g.opt = SkSurface::MakeRenderTarget(
+      g.gr.get(), SkBudgeted::kYes,
+      SkImageInfo::Make(w, h, kBGRA_8888_SkColorType, kPremul_SkAlphaType));
+  if (!g.opt) { std::fprintf(stderr, "acl-gpu: MakeRenderTarget fail\n"); return false; }
+
+  // Command pool + buffer + fence for the copy pass.
+  auto vkCreateCommandPool = ldd<PFN_vkCreateCommandPool>("vkCreateCommandPool");
+  auto vkAllocateCommandBuffers = ldd<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers");
+  auto vkCreateFence = ldd<PFN_vkCreateFence>("vkCreateFence");
+  VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+  pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+  pci.queueFamilyIndex = g.qfam;
+  if (vkCreateCommandPool(g.device, &pci, nullptr, &g.pool) != VK_SUCCESS) return false;
+  VkCommandBufferAllocateInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+  cbi.commandPool = g.pool;
+  cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  cbi.commandBufferCount = 1;
+  if (vkAllocateCommandBuffers(g.device, &cbi, &g.cmd) != VK_SUCCESS) return false;
+  VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  if (vkCreateFence(g.device, &fci, nullptr, &g.fence) != VK_SUCCESS) return false;
+
   g.w = w;
   g.h = h;
   g.ready = true;
+  return true;
+}
+
+// Copy the just-rendered optimal Skia image into the dma-buf image and block on the GPU.
+bool copy_to_dmabuf() {
+  auto vkBeginCommandBuffer = ldd<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer");
+  auto vkEndCommandBuffer = ldd<PFN_vkEndCommandBuffer>("vkEndCommandBuffer");
+  auto vkResetCommandBuffer = ldd<PFN_vkResetCommandBuffer>("vkResetCommandBuffer");
+  auto vkCmdPipelineBarrier = ldd<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+  auto vkCmdCopyImage = ldd<PFN_vkCmdCopyImage>("vkCmdCopyImage");
+  auto vkQueueSubmit = ldd<PFN_vkQueueSubmit>("vkQueueSubmit");
+  auto vkWaitForFences = ldd<PFN_vkWaitForFences>("vkWaitForFences");
+  auto vkResetFences = ldd<PFN_vkResetFences>("vkResetFences");
+
+  // The optimal Skia image, flushed to TRANSFER_SRC_OPTIMAL by the caller.
+  GrBackendTexture bt = g.opt->getBackendTexture(SkSurface::kFlushRead_BackendHandleAccess);
+  GrVkImageInfo si{};
+  if (!bt.getVkImageInfo(&si)) { std::fprintf(stderr, "acl-gpu: getVkImageInfo fail\n"); return false; }
+
+  vkResetCommandBuffer(g.cmd, 0);
+  VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  vkBeginCommandBuffer(g.cmd, &bi);
+  const VkImageSubresourceRange color{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  VkImageMemoryBarrier toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+  toDst.srcAccessMask = 0;
+  toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  toDst.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  toDst.image = g.image;
+  toDst.subresourceRange = color;
+  vkCmdPipelineBarrier(g.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       0, 0, nullptr, 0, nullptr, 1, &toDst);
+  VkImageCopy region{};
+  region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  region.extent = {static_cast<uint32_t>(g.w), static_cast<uint32_t>(g.h), 1};
+  vkCmdCopyImage(g.cmd, si.fImage, static_cast<VkImageLayout>(si.fImageLayout), g.image,
+                 VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+  VkImageMemoryBarrier toExt{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+  toExt.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  toExt.dstAccessMask = 0;
+  toExt.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+  toExt.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  toExt.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  toExt.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  toExt.image = g.image;
+  toExt.subresourceRange = color;
+  vkCmdPipelineBarrier(g.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                       0, 0, nullptr, 0, nullptr, 1, &toExt);
+  vkEndCommandBuffer(g.cmd);
+
+  VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  submit.commandBufferCount = 1;
+  submit.pCommandBuffers = &g.cmd;
+  if (vkQueueSubmit(g.queue, 1, &submit, g.fence) != VK_SUCCESS) return false;
+  vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+  vkResetFences(g.device, 1, &g.fence);
   return true;
 }
 
@@ -321,23 +399,24 @@ extern "C" bool acl_graphics_gpu_render(int w, int h, uint32_t bg, int l, int t,
   std::memset(out, 0, sizeof(*out));
   out->fd = -1;
   if (!ensure_ready(w, h)) return false;
-  if (!g.surface) {
+  if (g.image == VK_NULL_HANDLE) {
     if (!make_target(w, h, &g.info)) return false;
   }
   *out = g.info;
 
-  SkCanvas* canvas = g.surface->getCanvas();
+  // 1. Render the scene into the Skia-owned optimal surface (Ganesh Vulkan).
+  SkCanvas* canvas = g.opt->getCanvas();
   canvas->clear(static_cast<SkColor>(bg));
   SkPaint paint;
   paint.setColor(static_cast<SkColor>(fg));
   paint.setAntiAlias(false);
   canvas->drawRect(SkRect::MakeLTRB(l, t, r, b), paint);
 
-  // Flush + leave the image in GENERAL for the compositor to sample; block on the GPU so
-  // the dma-buf holds a complete frame (implicit dma-buf sync on present).
-  GrBackendSurfaceMutableState toPresent(VK_IMAGE_LAYOUT_GENERAL, g.qfam);
-  g.surface->flush(GrFlushInfo{}, &toPresent);
+  // 2. Flush it into TRANSFER_SRC_OPTIMAL, then GPU-copy it into the dma-buf image.
+  GrBackendSurfaceMutableState toSrc(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g.qfam);
+  g.opt->flush(GrFlushInfo{}, &toSrc);
   g.gr->submit(/*syncCpu=*/true);
+  if (!copy_to_dmabuf()) return false;
   return out->fd >= 0;
 }
 
