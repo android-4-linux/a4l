@@ -1673,6 +1673,32 @@ class ArtVm final : public JniVm {
     }
     env->ExceptionClear();
 
+    // Matrix: concat a 2×-scale + translate (via setValues) and draw a rect through it —
+    // rect(0,0,3,3) → device (2,52)-(8,58), a clear region below the bitmap and circle.
+    bool matrix_ok_call = false;
+    if (jclass matrixC = env->FindClass("android/graphics/Matrix")) {
+      jobject m = env->NewObject(matrixC, env->GetMethodID(matrixC, "<init>", "()V"));
+      const jmethodID setValues = env->GetMethodID(matrixC, "setValues", "([F)V");
+      const jmethodID concat =
+          env->GetMethodID(canvasC, "concat", "(Landroid/graphics/Matrix;)V");
+      if (m != nullptr && setValues != nullptr && concat != nullptr) {
+        const jfloat vals[9] = {2, 0, 2, 0, 2, 52, 0, 0, 1};  // scale 2, translate (2,52)
+        jfloatArray arr = env->NewFloatArray(9);
+        env->SetFloatArrayRegion(arr, 0, 9, vals);
+        env->CallVoidMethod(m, setValues, arr);
+        env->CallIntMethod(canvas, save);
+        env->CallVoidMethod(canvas, concat, m);
+        env->CallVoidMethod(paint, setColor, static_cast<jint>(0xFFFFFF00));  // yellow
+        env->CallVoidMethod(canvas, drawRect, 0.0f, 0.0f, 3.0f, 3.0f, paint);
+        env->CallVoidMethod(canvas, restore);
+        matrix_ok_call = env->ExceptionCheck() == JNI_FALSE;
+        env->DeleteLocalRef(arr);
+      }
+      if (m != nullptr) env->DeleteLocalRef(m);
+      env->DeleteLocalRef(matrixC);
+    }
+    env->ExceptionClear();
+
     auto read = reinterpret_cast<bool (*)(long, std::uint32_t*, int, int)>(
         ::dlsym(RTLD_DEFAULT, "acl_read_bitmap"));
     if (read == nullptr) { log::w(kTag, "graphics ops: acl_read_bitmap missing"); return; }
@@ -1695,16 +1721,17 @@ class ArtVm final : public JniVm {
     const bool bmp_ok = bmp_ok_call && at(4, 42) == 0xFFFF00FFu;  // magenta bitmap at (2,40)
     const bool measure_ok = advance > 0.0f && bounds_w > 0;
     const bool path_ok = path_ok_call && at(55, 53) == 0xFF00FFFFu;  // cyan inside the triangle
+    const bool matrix_ok = matrix_ok_call && at(5, 55) == 0xFFFFFF00u;  // yellow in scaled rect
     log::i(kTag,
            "graphics ops: circle={} bg={} clip={} text={} ({}px) bitmap={} measure={} "
-           "(adv={:.1f} w={}) path={} (0x{:08x})",
+           "(adv={:.1f} w={}) path={} matrix={} (0x{:08x})",
            center_red, bg_black, clip_green, text_ok, text_px, bmp_ok, measure_ok, advance,
-           bounds_w, path_ok, at(55, 53));
+           bounds_w, path_ok, matrix_ok, at(5, 55));
     log::i(kTag,
-           "graphics ops: transform/clip + geometry + text + bitmap + measure + path {} "
+           "graphics ops: geometry + text + bitmap + measure + path + matrix {} "
            "(real Canvas, Android Skia)",
            (center_red && bg_black && clip_green && clip_edge && text_ok && bmp_ok && measure_ok &&
-            path_ok)
+            path_ok && matrix_ok)
                ? "PASS"
                : "MISMATCH");
     env->DeleteLocalRef(canvas);

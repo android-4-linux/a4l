@@ -31,6 +31,7 @@
 #include "SkFontTypes.h"
 #include "SkImage.h"
 #include "SkImageInfo.h"
+#include "SkMatrix.h"
 #include "SkPaint.h"
 #include "SkPath.h"
 #include "SkPathTypes.h"
@@ -93,6 +94,7 @@ void free_canvas(void* p) {
   delete reinterpret_cast<SkCanvas*>(p);
 }
 void free_path(void* p) { delete reinterpret_cast<SkPath*>(p); }
+void free_matrix(void* p) { delete reinterpret_cast<SkMatrix*>(p); }
 void free_colorspace(void* p) { SkSafeUnref(reinterpret_cast<SkColorSpace*>(p)); }
 
 // android.graphics.Bitmap.Config.nativeInt -> SkColorType (ARGB_8888 == 5).
@@ -374,6 +376,63 @@ jboolean Canvas_nClipRect(jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b, 
               regionOp == 0 ? SkClipOp::kDifference : SkClipOp::kIntersect, /*doAA=*/false);
   return c->isClipEmpty() ? JNI_FALSE : JNI_TRUE;
 }
+// @CriticalNative — concat the CTM with the Matrix.
+void Canvas_nConcat(jlong canvas, jlong matrix) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* m = reinterpret_cast<SkMatrix*>(matrix);
+  if (c != nullptr && m != nullptr) c->concat(*m);
+}
+// @CriticalNative — replace the CTM with the Matrix (matrix==0 → identity).
+void Canvas_nSetMatrix(jlong canvas, jlong matrix) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  if (c == nullptr) return;
+  c->resetMatrix();
+  if (auto* m = reinterpret_cast<SkMatrix*>(matrix)) c->concat(*m);
+}
+// @CriticalNative — read the CTM into the Matrix.
+void Canvas_nGetMatrix(jlong canvas, jlong matrix) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* m = reinterpret_cast<SkMatrix*>(matrix);
+  if (c != nullptr && m != nullptr) *m = c->getTotalMatrix();
+}
+
+// ── Matrix (android.graphics.Matrix over SkMatrix) — 9-value layout matches get9/set9 ──
+jlong Matrix_nCreate(JNIEnv*, jclass, jlong src) {
+  auto* s = reinterpret_cast<SkMatrix*>(src);
+  return reinterpret_cast<jlong>(s != nullptr ? new SkMatrix(*s) : new SkMatrix());
+}
+jlong Matrix_nGetNativeFinalizer(JNIEnv*, jclass) { return reinterpret_cast<jlong>(&free_matrix); }
+// @FastNative
+void Matrix_nGetValues(JNIEnv* env, jclass, jlong obj, jfloatArray values) {
+  auto* m = reinterpret_cast<SkMatrix*>(obj);
+  if (m == nullptr || values == nullptr) return;
+  float buf[9];
+  m->get9(buf);
+  env->SetFloatArrayRegion(values, 0, 9, buf);
+}
+// @FastNative
+void Matrix_nSetValues(JNIEnv* env, jclass, jlong obj, jfloatArray values) {
+  auto* m = reinterpret_cast<SkMatrix*>(obj);
+  if (m == nullptr || values == nullptr) return;
+  float buf[9];
+  env->GetFloatArrayRegion(values, 0, 9, buf);
+  m->set9(buf);
+}
+// @CriticalNative — handle-only.
+void Matrix_nReset(jlong obj) {
+  if (auto* m = reinterpret_cast<SkMatrix*>(obj)) m->reset();
+}
+void Matrix_nSet(jlong obj, jlong other) {
+  auto* m = reinterpret_cast<SkMatrix*>(obj);
+  auto* o = reinterpret_cast<SkMatrix*>(other);
+  if (m != nullptr && o != nullptr) *m = *o;
+}
+void Matrix_nSetConcat(jlong obj, jlong a, jlong b) {
+  auto* m = reinterpret_cast<SkMatrix*>(obj);
+  auto* A = reinterpret_cast<SkMatrix*>(a);
+  auto* B = reinterpret_cast<SkMatrix*>(b);
+  if (m != nullptr && A != nullptr && B != nullptr) m->setConcat(*A, *B);
+}
 
 // ── Paint ─────────────────────────────────────────────────────────────────────
 jlong Paint_nInit(JNIEnv*, jclass) {
@@ -547,6 +606,18 @@ const JNINativeMethod kCanvas[] = {
     {"nScale", "(JFF)V", reinterpret_cast<void*>(Canvas_nScale)},
     {"nRotate", "(JF)V", reinterpret_cast<void*>(Canvas_nRotate)},
     {"nClipRect", "(JFFFFI)Z", reinterpret_cast<void*>(Canvas_nClipRect)},
+    {"nConcat", "(JJ)V", reinterpret_cast<void*>(Canvas_nConcat)},
+    {"nSetMatrix", "(JJ)V", reinterpret_cast<void*>(Canvas_nSetMatrix)},
+    {"nGetMatrix", "(JJ)V", reinterpret_cast<void*>(Canvas_nGetMatrix)},
+};
+const JNINativeMethod kMatrix[] = {
+    {"nCreate", "(J)J", reinterpret_cast<void*>(Matrix_nCreate)},
+    {"nGetNativeFinalizer", "()J", reinterpret_cast<void*>(Matrix_nGetNativeFinalizer)},
+    {"nGetValues", "(J[F)V", reinterpret_cast<void*>(Matrix_nGetValues)},
+    {"nSetValues", "(J[F)V", reinterpret_cast<void*>(Matrix_nSetValues)},
+    {"nReset", "(J)V", reinterpret_cast<void*>(Matrix_nReset)},
+    {"nSet", "(JJ)V", reinterpret_cast<void*>(Matrix_nSet)},
+    {"nSetConcat", "(JJJ)V", reinterpret_cast<void*>(Matrix_nSetConcat)},
 };
 const JNINativeMethod kBaseCanvas[] = {
     {"nDrawColor", "(JII)V", reinterpret_cast<void*>(Canvas_nDrawColor)},
@@ -648,6 +719,7 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/Canvas", kCanvas, n(kCanvas)) && ok;
   ok = reg(env, "android/graphics/BaseCanvas", kBaseCanvas, n(kBaseCanvas)) && ok;
   ok = reg(env, "android/graphics/Path", kPath, n(kPath)) && ok;
+  ok = reg(env, "android/graphics/Matrix", kMatrix, n(kMatrix)) && ok;
   ok = reg(env, "android/graphics/Paint", kPaint, n(kPaint)) && ok;
   ok = reg(env, "android/graphics/ColorSpace$Rgb", kColorSpaceRgb, n(kColorSpaceRgb)) && ok;
   return ok ? JNI_OK : JNI_ERR;
