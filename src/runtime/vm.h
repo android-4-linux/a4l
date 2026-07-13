@@ -38,6 +38,7 @@ struct VmConfig {
   std::vector<std::string> classpath;       // app dex (extracted from the APK)
   std::string cache_dir;                     // DEX->OAT / dalvik-cache
   std::string package_name;                  // manifest package, injected into Context
+  std::string application_name;              // <application android:name>, created before the Activity
   std::vector<std::string> options;          // raw VM options (-Xmx..., -verbose:gc)
   bool present = false;                       // present the rendered content view via wm/ (--present)
   std::uint64_t present_frames = 0;           // continuous-present frame budget (0 = until close; --present-frames)

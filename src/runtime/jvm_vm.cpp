@@ -218,6 +218,30 @@ class JniVm : public Vm {
     jstring j_apk = env_->NewStringUTF(apk.c_str());
     jstring j_fw = env_->NewStringUTF(fwres != nullptr ? fwres : "");
     jstring j_pkg = env_->NewStringUTF(config_.package_name.c_str());
+
+    // The app's Application, created once (its onCreate sets the app's singleton).
+    if (app_application_ == nullptr) {
+      jstring j_app = env_->NewStringUTF(config_.application_name.c_str());
+      jobject app = env_->CallStaticObjectMethod(
+          boot,
+          env_->GetStaticMethodID(boot, "createApplication",
+                                  "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
+                                  "Ljava/lang/String;)Landroid/app/Application;"),
+          j_app, j_apk, j_fw, j_pkg);
+      if (env_->ExceptionCheck() == JNI_TRUE) {
+        env_->ExceptionDescribe();
+        env_->ExceptionClear();
+        log::w(kTag, "app Application {} onCreate hit a wall (continuing without singleton)",
+               config_.application_name);
+      } else if (app != nullptr) {
+        app_application_ = env_->NewGlobalRef(app);
+        log::i(kTag, "app Application ready: {}",
+               config_.application_name.empty() ? "(default)" : config_.application_name);
+      }
+      if (app != nullptr) env_->DeleteLocalRef(app);
+      env_->DeleteLocalRef(j_app);
+    }
+
     jobject ctx = env_->CallStaticObjectMethod(
         boot,
         env_->GetStaticMethodID(
@@ -227,9 +251,10 @@ class JniVm : public Vm {
     if (ctx != nullptr && env_->ExceptionCheck() != JNI_TRUE) {
       env_->CallStaticVoidMethod(
           boot,
-          env_->GetStaticMethodID(boot, "attachActivityContext",
-                                  "(Landroid/app/Activity;Landroid/content/Context;)V"),
-          activity, ctx);
+          env_->GetStaticMethodID(
+              boot, "attachActivityContext",
+              "(Landroid/app/Activity;Landroid/content/Context;Landroid/app/Application;)V"),
+          activity, ctx, app_application_);
     }
     if (env_->ExceptionCheck() == JNI_TRUE) {
       env_->ExceptionDescribe();
@@ -244,6 +269,7 @@ class JniVm : public Vm {
     if (ctx != nullptr) env_->DeleteLocalRef(ctx);
     env_->DeleteLocalRef(boot);
   }
+  jobject app_application_ = nullptr;  // the app's Application, created once (host ART)
 
   // The media-browse API family a hosted service uses: the framework
   // android.service.media.MediaBrowserService, or the support-library
@@ -1616,7 +1642,21 @@ class ArtVm final : public JniVm {
     } else {
       env->ExceptionClear();
     }
-    log::i(kTag, "ART native floor: Binder/BinderInternal stubbed (no Binder, ADR-3)");
+    // android.os.Process thread ops touch device-only natives on background HandlerThreads
+    // (e.g. SharedPreferences' queued-work looper). No-op them so those threads don't crash.
+    if (jclass c = env->FindClass("android/os/Process")) {
+      JNINativeMethod m[] = {
+          {const_cast<char*>("setThreadPriority"), const_cast<char*>("(I)V"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jint) {})},
+          {const_cast<char*>("setThreadPriority"), const_cast<char*>("(II)V"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jint, jint) {})},
+      };
+      if (env->RegisterNatives(c, m, 2) != JNI_OK) env->ExceptionClear();
+      env->DeleteLocalRef(c);
+    } else {
+      env->ExceptionClear();
+    }
+    log::i(kTag, "ART native floor: Binder/BinderInternal/Process stubbed (no Binder, ADR-3)");
   }
 
   // P2.4/V3 (render): load acl's own android.graphics natives (libacl_graphics_jni, built

@@ -300,6 +300,9 @@ class AxmlParser {
     } else if (elem == "uses-sdk") {
       if (const Attr* a = find(attrs, "minSdkVersion")) out_.min_sdk = a->as_int();
       if (const Attr* a = find(attrs, "targetSdkVersion")) out_.target_sdk = a->as_int();
+    } else if (elem == "application") {
+      if (const Attr* a = find(attrs, "name"))
+        out_.application_name = resolve_class_name(out_.package, a->string_value);
     } else if (elem == "activity" || elem == "activity-alias") {
       current_ = Activity{};
       have_activity_ = true;

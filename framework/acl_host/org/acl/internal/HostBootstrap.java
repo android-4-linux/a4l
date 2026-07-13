@@ -100,13 +100,77 @@ public final class HostBootstrap {
             }
             return null;
         }
+
+        // File-backed SharedPreferences (real android.app.SharedPreferencesImpl over a temp
+        // dir) — apps read/write prefs in Application.onCreate. No app data dir yet, so a temp.
+        private final java.util.Map<String, android.content.SharedPreferences> prefs =
+                new java.util.HashMap<>();
+        private java.io.File prefsDir;
+        @Override public android.content.SharedPreferences getSharedPreferences(String name,
+                int mode) {
+            android.content.SharedPreferences sp = prefs.get(name);
+            if (sp != null) return sp;
+            try {
+                if (prefsDir == null) {
+                    prefsDir = new java.io.File(System.getProperty("java.io.tmpdir"),
+                                                "acl-prefs-" + pkg);
+                    prefsDir.mkdirs();
+                }
+                java.io.File f = new java.io.File(prefsDir, name + ".xml");
+                java.lang.reflect.Constructor<?> ctor =
+                        Class.forName("android.app.SharedPreferencesImpl")
+                                .getDeclaredConstructor(java.io.File.class, int.class);
+                ctor.setAccessible(true);
+                sp = (android.content.SharedPreferences) ctor.newInstance(f, mode);
+                prefs.put(name, sp);
+            } catch (Throwable t) {
+                System.err.println("acl HostBootstrap: getSharedPreferences failed: " + t);
+            }
+            return sp;
+        }
+        @Override public java.io.File getFilesDir() {
+            java.io.File d = new java.io.File(System.getProperty("java.io.tmpdir"),
+                                              "acl-files-" + pkg);
+            d.mkdirs();
+            return d;
+        }
+        @Override public java.io.File getCacheDir() {
+            java.io.File d = new java.io.File(System.getProperty("java.io.tmpdir"),
+                                              "acl-cache-" + pkg);
+            d.mkdirs();
+            return d;
+        }
+        // The app classloader (HostBootstrap is injected on the app classpath, so its loader
+        // sees the app classes) — resource/XML inflation resolves app classes through this.
+        @Override public ClassLoader getClassLoader() {
+            return getClass().getClassLoader();
+        }
     }
 
-    /** Attach a real Activity to a base context (set mBase + mActivityInfo + a PhoneWindow). */
-    public static void attachActivityContext(android.app.Activity a, android.content.Context ctx)
-            throws Exception {
+    /** Attach a real Activity: base context + mActivityInfo + PhoneWindow + the app Application. */
+    public static void attachActivityContext(android.app.Activity a, android.content.Context ctx,
+            android.app.Application app) throws Exception {
         setField(ContextWrapper.class, a, "mBase", ctx);
+        if (app != null) {
+            try { setField(android.app.Activity.class, a, "mApplication", app); }
+            catch (Throwable ignored) {}
+        }
         attachActivity(a, ctx);
+    }
+
+    // Create + run the app's Application (the singleton real apps set in Application.onCreate,
+    // e.g. FDroidApp.INSTANCE). ActivityThread normally does this; we construct it, bind an app
+    // Context, and call onCreate. Returns the Application (acl also sets it as Activity.mApplication
+    // so getApplication()/getApplicationContext() work). appClass empty → a bare Application.
+    public static android.app.Application createApplication(String appClass, String apkPath,
+            String frameworkResPath, String pkg) throws Exception {
+        android.content.Context base = newAppContext(apkPath, frameworkResPath, pkg);
+        android.app.Application app = (appClass != null && !appClass.isEmpty())
+                ? (android.app.Application) Class.forName(appClass).getConstructor().newInstance()
+                : new android.app.Application();
+        setField(ContextWrapper.class, app, "mBase", base);
+        app.onCreate();  // sets the app's own singleton; may throw on a not-yet-supported API
+        return app;
     }
 
     // Lightweight Activity attach: a real Activity is normally attach()'d by ActivityThread
