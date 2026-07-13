@@ -97,19 +97,33 @@ public class Main {
         f.set(null, proxy);
     }
 
-    public static void main(String[] args) throws Exception {
+    // Framework setup an unmodified app would get from the runtime/ActivityThread: a
+    // no-Binder ServiceManager, a main Looper. Idempotent.
+    static void bootstrap() throws Exception {
         seedNoBinderServiceManager();
         if (android.os.Looper.myLooper() == null) android.os.Looper.prepareMainLooper();
-        final int W = 240, H = 160;
-        DrawView v = new DrawView(new ViewContext());
-        v.measure(View.MeasureSpec.makeMeasureSpec(W, View.MeasureSpec.EXACTLY),
-                  View.MeasureSpec.makeMeasureSpec(H, View.MeasureSpec.EXACTLY));
-        v.layout(0, 0, W, H);
+    }
 
+    // acl-driven GPU path: acl calls this factory, then drives the returned View through
+    // present_content_loop_gpu (begin_frame → View.draw on the Ganesh Vulkan Canvas →
+    // end_frame → tiled dma-buf → Wayland). Mirrors an app's setContentView; acl presents.
+    public static View aclCreateContentView(int w, int h) throws Exception {
+        bootstrap();
+        DrawView v = new DrawView(new ViewContext());
+        v.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+                  View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY));
+        v.layout(0, 0, w, h);
+        return v;
+    }
+
+    public static void main(String[] args) throws Exception {
+        // Software readback path — a pixel ORACLE for the View traversal, not the product
+        // path. The product path is acl-driven GPU (aclCreateContentView + present loop).
+        final int W = 240, H = 160;
+        View v = aclCreateContentView(W, H);
         Bitmap bmp = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bmp);
         v.draw(canvas);
-
         int center = bmp.getPixel(W / 2, H / 2);
         int corner = bmp.getPixel(2, 2);
         System.out.println(String.format(

@@ -692,6 +692,7 @@ class JniVm : public Vm {
   // upload. Pointer/key input is delivered to the View (via present_dmabuf_loop's
   // wl_seat wiring); IME on this path is a follow-up. Gated by ACL_PRESENT_GPU so the
   // mature interactive shm loop stays the default.
+ protected:  // ArtVm's view-host demo drives this directly
   void present_content_loop_gpu(jobject view, int w, int h) {
 #if ACL_HAVE_VULKAN && ACL_HAVE_WCS
     if (!wm::wayland_available()) {
@@ -724,13 +725,19 @@ class JniVm : public Vm {
     jmethodID draw = env_->GetMethodID(vcls, "draw", "(Landroid/graphics/Canvas;)V");
     env_->DeleteLocalRef(vcls);
 
+    // Optional Choreographer pump (acl's shim exposes aclDoFrame). On host ART the REAL
+    // Choreographer is present: its getInstance() needs a vsync native (DisplayEventReceiver)
+    // and has no aclDoFrame — so tolerate both (clear the exception, skip it). The loop still
+    // re-draws the View each vsync tick; a static View just repaints identically.
     jobject choreo = nullptr;
     jmethodID do_frame = nullptr;
     if (jclass ch_cls = env_->FindClass("android/view/Choreographer")) {
       if (jmethodID gi = env_->GetStaticMethodID(ch_cls, "getInstance",
-                                                 "()Landroid/view/Choreographer;"))
+                                                 "()Landroid/view/Choreographer;")) {
         choreo = env_->CallStaticObjectMethod(ch_cls, gi);
-      do_frame = env_->GetMethodID(ch_cls, "aclDoFrame", "(J)J");
+        if (env_->ExceptionCheck() == JNI_TRUE) { env_->ExceptionClear(); choreo = nullptr; }
+      }
+      if (choreo != nullptr) do_frame = env_->GetMethodID(ch_cls, "aclDoFrame", "(J)J");
       env_->DeleteLocalRef(ch_cls);
     }
     clear_exception();
@@ -829,6 +836,7 @@ class JniVm : public Vm {
 #endif
   }
 
+ private:
   // Map a Linux evdev scancode to an Android KeyEvent keycode (a small practical
   // subset; unmapped keys become KEYCODE_UNKNOWN=0). Mirrors Android's Generic.kl.
   static jint android_keycode(std::uint32_t evdev) {
@@ -1583,6 +1591,42 @@ class ArtVm final : public JniVm {
            "(Bitmap/Canvas/Paint)");
     graphics_ops_check(env);
     graphics_present_demo(env);
+    graphics_view_demo(env);
+  }
+
+  // App path (GPU): host a REAL android.view.View and present it GPU-native. The app class
+  // named by ACL_ART_VIEW_HOST provides `static View aclCreateContentView(int,int)` (its
+  // framework setup + a laid-out content view); acl drives it through the Ganesh Vulkan
+  // present loop (begin_frame → View.draw on the GPU Canvas → end_frame → tiled dma-buf →
+  // Wayland). The real android.graphics natives render the app's onDraw — no software path.
+  void graphics_view_demo([[maybe_unused]] JNIEnv* env) {
+#if ACL_HAVE_VULKAN && ACL_HAVE_WCS
+    const char* host = std::getenv("ACL_ART_VIEW_HOST");
+    if (host == nullptr || *host == '\0') return;
+    constexpr int W = 480, H = 320;
+    jclass cls = env->FindClass(to_jni_name(host).c_str());
+    if (cls == nullptr) { env->ExceptionClear(); log::w(kTag, "view host: class {} not found", host); return; }
+    jmethodID factory = env->GetStaticMethodID(cls, "aclCreateContentView",
+                                               "(II)Landroid/view/View;");
+    if (factory == nullptr) {
+      env->ExceptionClear();
+      log::w(kTag, "view host: {}.aclCreateContentView(int,int) missing", host);
+      env->DeleteLocalRef(cls);
+      return;
+    }
+    jobject view = env->CallStaticObjectMethod(cls, factory, W, H);
+    if (view == nullptr || env->ExceptionCheck() == JNI_TRUE) {
+      if (env->ExceptionCheck()) env->ExceptionDescribe();
+      env->ExceptionClear();
+      log::w(kTag, "view host: aclCreateContentView failed");
+      env->DeleteLocalRef(cls);
+      return;
+    }
+    log::i(kTag, "view host: {} content view created; presenting GPU-native", host);
+    present_content_loop_gpu(view, W, H);
+    env->DeleteLocalRef(view);
+    env->DeleteLocalRef(cls);
+#endif
   }
 
   // Exercise the Canvas transform/clip + geometry natives on a REAL android.graphics.Canvas
