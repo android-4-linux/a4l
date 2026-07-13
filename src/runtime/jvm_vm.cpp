@@ -1589,6 +1589,14 @@ class ArtVm final : public JniVm {
     register_no_binder(env);
     bootstrap_host_env(env);
     load_acl_graphics(env);
+    // Seed default typefaces now that the graphics Font/Typeface natives are registered
+    // (the system font map isn't pushed to a standalone run).
+    if (jclass boot = env->FindClass("org/acl/internal/HostBootstrap"); boot != nullptr) {
+      if (jmethodID m = env->GetStaticMethodID(boot, "seedTypefaces", "()V"))
+        env->CallStaticVoidMethod(boot, m);
+      if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+      env->DeleteLocalRef(boot);
+    }
 #if ACL_HAVE_SDBUS
     // Bind android.net.ConnectivityManager (acl clean-room shim on the boot classpath)
     // to the svc/net host connectivity backend (systemd-networkd/NetworkManager/ConnMan).

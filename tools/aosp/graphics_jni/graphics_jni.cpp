@@ -30,6 +30,8 @@
 #include "SkClipOp.h"
 #include "SkColor.h"
 #include "SkColorSpace.h"
+#include "SkData.h"
+#include "SkFontStyle.h"
 #include "SkFont.h"
 #include "SkFontMetrics.h"
 #include "SkFontMgr.h"
@@ -1517,6 +1519,144 @@ void Region_scale(JNIEnv* env, jobject o, jfloat scale, jobject dst) {
   if (auto* d = (dst != nullptr ? region_of(env, dst) : r)) *d = out;
 }
 
+// ── Typeface / Font / FontFamily (android.graphics.Typeface + .fonts.*) ──────────
+// Backed by SkTypeface. acl ships a single bundled font (default_typeface); Fonts and
+// FontFamilies loaded from a path/buffer use SkTypeface::MakeFromFile/MakeFromData, else
+// fall back to it. Typeface's native handle is an SkTypeface* (+1 ref, released by the
+// nativeGetReleaseFunc registry). The default typefaces are seeded from Java (HostBootstrap
+// .seedTypefaces) since the system font map isn't pushed to a standalone run.
+struct AclFont { sk_sp<SkTypeface> tf; int weight = 400; bool italic = false; };
+struct AclFontFamily { std::vector<sk_sp<SkTypeface>> fonts; };
+
+void free_typeface(void* p) { SkSafeUnref(reinterpret_cast<SkTypeface*>(p)); }
+void free_font(void* p) { delete reinterpret_cast<AclFont*>(p); }
+void free_fontfamily(void* p) { delete reinterpret_cast<AclFontFamily*>(p); }
+
+// android.graphics.fonts.Font$Builder
+jlong FontBuilder_nInitBuilder(JNIEnv*, jclass) { return reinterpret_cast<jlong>(new AclFont()); }
+void FontBuilder_nAddAxis(JNIEnv*, jclass, jlong, jint, jfloat) {}
+jlong FontBuilder_nBuild(JNIEnv* env, jclass, jlong builder, jobject buffer, jstring path,
+                        jstring /*localeList*/, jint weight, jboolean italic, jint ttc) {
+  auto* f = reinterpret_cast<AclFont*>(builder);
+  if (f == nullptr) f = new AclFont();
+  sk_sp<SkTypeface> tf;
+  if (path != nullptr) {
+    const char* s = env->GetStringUTFChars(path, nullptr);
+    if (s != nullptr) { tf = SkTypeface::MakeFromFile(s, ttc); env->ReleaseStringUTFChars(path, s); }
+  }
+  if (!tf && buffer != nullptr) {
+    void* addr = env->GetDirectBufferAddress(buffer);
+    const jlong cap = env->GetDirectBufferCapacity(buffer);
+    if (addr != nullptr && cap > 0)
+      tf = SkTypeface::MakeFromData(SkData::MakeWithCopy(addr, static_cast<size_t>(cap)), ttc);
+  }
+  if (!tf) tf = default_typeface();
+  f->tf = tf; f->weight = weight; f->italic = italic;
+  return reinterpret_cast<jlong>(f);
+}
+jlong FontBuilder_nGetReleaseNativeFont(JNIEnv*, jclass) { return reinterpret_cast<jlong>(&free_font); }
+jlong FontBuilder_nClone(JNIEnv*, jclass, jlong fontPtr, jlong, jint weight, jboolean italic, jint) {
+  auto* src = reinterpret_cast<AclFont*>(fontPtr);
+  auto* f = new AclFont();
+  f->tf = src != nullptr ? src->tf : default_typeface();
+  f->weight = weight; f->italic = italic;
+  return reinterpret_cast<jlong>(f);
+}
+// android.graphics.fonts.FontFamily$Builder
+jlong FontFamilyBuilder_nInitBuilder(JNIEnv*, jclass) { return reinterpret_cast<jlong>(new AclFontFamily()); }
+void FontFamilyBuilder_nAddFont(JNIEnv*, jclass, jlong builder, jlong fontPtr) {
+  auto* fam = reinterpret_cast<AclFontFamily*>(builder);
+  auto* f = reinterpret_cast<AclFont*>(fontPtr);
+  if (fam != nullptr && f != nullptr) fam->fonts.push_back(f->tf);
+}
+jlong FontFamilyBuilder_nBuild(JNIEnv*, jclass, jlong builder, jstring, jint, jboolean) { return builder; }
+jlong FontFamilyBuilder_nGetReleaseNativeFamily(JNIEnv*, jclass) { return reinterpret_cast<jlong>(&free_fontfamily); }
+// android.graphics.fonts.FontFamily
+jint FontFamily_nGetFontSize(JNIEnv*, jclass, jlong fam) {
+  auto* f = reinterpret_cast<AclFontFamily*>(fam); return f != nullptr ? static_cast<jint>(f->fonts.size()) : 0;
+}
+jlong FontFamily_nGetFont(JNIEnv*, jclass, jlong fam, jint i) {
+  auto* f = reinterpret_cast<AclFontFamily*>(fam);
+  if (f == nullptr || i < 0 || i >= static_cast<jint>(f->fonts.size())) return 0;
+  auto* out = new AclFont(); out->tf = f->fonts[i];
+  return reinterpret_cast<jlong>(out);
+}
+jstring FontFamily_nGetLangTags(JNIEnv* env, jclass, jlong) { return env->NewStringUTF(""); }
+jint FontFamily_nGetVariant(JNIEnv*, jclass, jlong) { return 0; }
+// android.graphics.fonts.Font (the immutable Font; native instance is an AclFont*).
+jlong Font_nGetReleaseNativeFont(JNIEnv*, jclass) { return reinterpret_cast<jlong>(&free_font); }
+jlong Font_nCloneFont(JNIEnv*, jclass, jlong p) {
+  auto* s = reinterpret_cast<AclFont*>(p); auto* f = new AclFont();
+  if (s != nullptr) { f->tf = s->tf; f->weight = s->weight; f->italic = s->italic; }
+  return reinterpret_cast<jlong>(f);
+}
+jint Font_nGetPackedStyle(JNIEnv*, jclass, jlong p) {
+  auto* f = reinterpret_cast<AclFont*>(p);
+  if (f == nullptr) return 400;
+  return (f->weight & 0xFFFF) | (f->italic ? (1 << 16) : 0);
+}
+jint Font_nGetIndex(JNIEnv*, jclass, jlong) { return 0; }
+jint Font_nGetAxisCount(JNIEnv*, jclass, jlong) { return 0; }
+jlong Font_nGetAxisInfo(JNIEnv*, jclass, jlong, jint) { return 0; }
+jstring Font_nGetFontPath(JNIEnv* env, jclass, jlong) { return env->NewStringUTF(""); }
+jstring Font_nGetLocaleList(JNIEnv* env, jclass, jlong) { return env->NewStringUTF(""); }
+jint Font_nGetSourceId(JNIEnv*, jclass, jlong) { return 0; }
+jlong Font_nGetMinikinFontPtr(JNIEnv*, jclass, jlong p) { return p; }
+jlongArray Font_nGetAvailableFontSet(JNIEnv*, jclass) { return nullptr; }
+jobject Font_nNewByteBuffer(JNIEnv*, jclass, jlong) { return nullptr; }
+jlong Font_nGetBufferAddress(JNIEnv*, jclass, jlong) { return 0; }
+jfloat Font_nGetGlyphBounds(JNIEnv*, jclass, jlong, jint, jlong, jobject) { return 0; }
+jfloat Font_nGetFontMetrics(JNIEnv*, jclass, jlong, jlong, jobject) { return 0; }
+
+// android.graphics.Typeface — handle is SkTypeface* (+1 ref).
+jint sk_typeface_style(const SkFontStyle& s) {
+  const bool bold = s.weight() >= SkFontStyle::kBold_Weight;
+  const bool italic = s.slant() != SkFontStyle::kUpright_Slant;
+  return (bold ? 1 : 0) | (italic ? 2 : 0);  // NORMAL=0, BOLD=1, ITALIC=2, BOLD_ITALIC=3
+}
+jlong typeface_ref(SkTypeface* t) {
+  if (t != nullptr) { SkSafeRef(t); return reinterpret_cast<jlong>(t); }
+  return reinterpret_cast<jlong>(default_typeface().release());
+}
+jlong Typeface_nativeGetReleaseFunc(JNIEnv*, jclass) { return reinterpret_cast<jlong>(&free_typeface); }
+jlong Typeface_nativeCreateFromArray(JNIEnv* env, jclass, jlongArray families, jlong, jint, jint) {
+  sk_sp<SkTypeface> tf;
+  if (families != nullptr && env->GetArrayLength(families) > 0) {
+    jlong first = 0; env->GetLongArrayRegion(families, 0, 1, &first);
+    if (auto* fam = reinterpret_cast<AclFontFamily*>(first); fam != nullptr && !fam->fonts.empty())
+      tf = fam->fonts[0];
+  }
+  if (!tf) tf = default_typeface();
+  return reinterpret_cast<jlong>(tf.release());
+}
+jlong Typeface_nativeCreateFromTypeface(JNIEnv*, jclass, jlong ni, jint) { return typeface_ref(reinterpret_cast<SkTypeface*>(ni)); }
+jlong Typeface_nativeCreateFromTypefaceWithExactStyle(JNIEnv*, jclass, jlong ni, jint, jboolean) { return typeface_ref(reinterpret_cast<SkTypeface*>(ni)); }
+jlong Typeface_nativeCreateFromTypefaceWithVariation(JNIEnv*, jclass, jlong ni, jobject) { return typeface_ref(reinterpret_cast<SkTypeface*>(ni)); }
+jlong Typeface_nativeCreateWeightAlias(JNIEnv*, jclass, jlong ni, jint) { return typeface_ref(reinterpret_cast<SkTypeface*>(ni)); }
+jintArray Typeface_nativeGetSupportedAxes(JNIEnv*, jclass, jlong) { return nullptr; }
+void Typeface_nativeSetDefault(JNIEnv*, jclass, jlong) {}
+jint Typeface_nativeGetStyle(JNIEnv*, jclass, jlong ni) {
+  auto* t = reinterpret_cast<SkTypeface*>(ni); return t != nullptr ? sk_typeface_style(t->fontStyle()) : 0;
+}
+jint Typeface_nativeGetWeight(JNIEnv*, jclass, jlong ni) {
+  auto* t = reinterpret_cast<SkTypeface*>(ni); return t != nullptr ? t->fontStyle().weight() : 400;
+}
+jint Typeface_nativeGetFamilySize(JNIEnv*, jclass, jlong) { return 0; }
+jlong Typeface_nativeGetFamily(JNIEnv*, jclass, jlong, jint) { return 0; }
+void Typeface_nativeRegisterGenericFamily(JNIEnv*, jclass, jstring, jlong) {}
+jint Typeface_nativeWriteTypefaces(JNIEnv*, jclass, jobject, jlongArray) { return 0; }
+jlongArray Typeface_nativeReadTypefaces(JNIEnv*, jclass, jobject) { return nullptr; }
+void Typeface_nativeForceSetStaticFinalField(JNIEnv* env, jclass clazz, jstring name, jobject value) {
+  const char* s = env->GetStringUTFChars(name, nullptr);
+  if (s != nullptr) {
+    jfieldID f = env->GetStaticFieldID(clazz, s, "Landroid/graphics/Typeface;");
+    if (f != nullptr) env->SetStaticObjectField(clazz, f, value); else env->ExceptionClear();
+    env->ReleaseStringUTFChars(name, s);
+  }
+}
+void Typeface_nativeAddFontCollections(JNIEnv*, jclass, jlong) {}
+void Typeface_nativeWarmUpCache(JNIEnv*, jclass, jstring) {}
+
 // com.android.internal.util.VirtualRefBasePtr — the tiny ref-counting wrapper Java uses
 // for the VectorDrawable tree (normally in libhwui). Drives our VirtualLightRefBase.
 void VirtualRefBasePtr_nIncStrong(JNIEnv*, jclass, jlong ptr) {
@@ -1780,6 +1920,62 @@ const JNINativeMethod kColorSpaceRgb[] = {
      reinterpret_cast<void*>(ColorSpaceRgb_nativeGetNativeFinalizer)},
 };
 
+const JNINativeMethod kTypeface[] = {
+    {"nativeGetReleaseFunc", "()J", reinterpret_cast<void*>(Typeface_nativeGetReleaseFunc)},
+    {"nativeCreateFromArray", "([JJII)J", reinterpret_cast<void*>(Typeface_nativeCreateFromArray)},
+    {"nativeCreateFromTypeface", "(JI)J", reinterpret_cast<void*>(Typeface_nativeCreateFromTypeface)},
+    {"nativeCreateFromTypefaceWithExactStyle", "(JIZ)J", reinterpret_cast<void*>(Typeface_nativeCreateFromTypefaceWithExactStyle)},
+    {"nativeCreateFromTypefaceWithVariation", "(JLjava/util/List;)J", reinterpret_cast<void*>(Typeface_nativeCreateFromTypefaceWithVariation)},
+    {"nativeCreateWeightAlias", "(JI)J", reinterpret_cast<void*>(Typeface_nativeCreateWeightAlias)},
+    {"nativeGetSupportedAxes", "(J)[I", reinterpret_cast<void*>(Typeface_nativeGetSupportedAxes)},
+    {"nativeSetDefault", "(J)V", reinterpret_cast<void*>(Typeface_nativeSetDefault)},
+    {"nativeGetStyle", "(J)I", reinterpret_cast<void*>(Typeface_nativeGetStyle)},
+    {"nativeGetWeight", "(J)I", reinterpret_cast<void*>(Typeface_nativeGetWeight)},
+    {"nativeGetFamilySize", "(J)I", reinterpret_cast<void*>(Typeface_nativeGetFamilySize)},
+    {"nativeGetFamily", "(JI)J", reinterpret_cast<void*>(Typeface_nativeGetFamily)},
+    {"nativeRegisterGenericFamily", "(Ljava/lang/String;J)V", reinterpret_cast<void*>(Typeface_nativeRegisterGenericFamily)},
+    {"nativeWriteTypefaces", "(Ljava/nio/ByteBuffer;[J)I", reinterpret_cast<void*>(Typeface_nativeWriteTypefaces)},
+    {"nativeReadTypefaces", "(Ljava/nio/ByteBuffer;)[J", reinterpret_cast<void*>(Typeface_nativeReadTypefaces)},
+    {"nativeForceSetStaticFinalField", "(Ljava/lang/String;Landroid/graphics/Typeface;)V", reinterpret_cast<void*>(Typeface_nativeForceSetStaticFinalField)},
+    {"nativeAddFontCollections", "(J)V", reinterpret_cast<void*>(Typeface_nativeAddFontCollections)},
+    {"nativeWarmUpCache", "(Ljava/lang/String;)V", reinterpret_cast<void*>(Typeface_nativeWarmUpCache)},
+};
+const JNINativeMethod kFontBuilder[] = {
+    {"nInitBuilder", "()J", reinterpret_cast<void*>(FontBuilder_nInitBuilder)},
+    {"nAddAxis", "(JIF)V", reinterpret_cast<void*>(FontBuilder_nAddAxis)},
+    {"nBuild", "(JLjava/nio/ByteBuffer;Ljava/lang/String;Ljava/lang/String;IZI)J", reinterpret_cast<void*>(FontBuilder_nBuild)},
+    {"nGetReleaseNativeFont", "()J", reinterpret_cast<void*>(FontBuilder_nGetReleaseNativeFont)},
+    {"nClone", "(JJIZI)J", reinterpret_cast<void*>(FontBuilder_nClone)},
+};
+const JNINativeMethod kFontFamilyBuilder[] = {
+    {"nInitBuilder", "()J", reinterpret_cast<void*>(FontFamilyBuilder_nInitBuilder)},
+    {"nAddFont", "(JJ)V", reinterpret_cast<void*>(FontFamilyBuilder_nAddFont)},
+    {"nBuild", "(JLjava/lang/String;IZ)J", reinterpret_cast<void*>(FontFamilyBuilder_nBuild)},
+    {"nGetReleaseNativeFamily", "()J", reinterpret_cast<void*>(FontFamilyBuilder_nGetReleaseNativeFamily)},
+};
+const JNINativeMethod kFontFamily[] = {
+    {"nGetFontSize", "(J)I", reinterpret_cast<void*>(FontFamily_nGetFontSize)},
+    {"nGetFont", "(JI)J", reinterpret_cast<void*>(FontFamily_nGetFont)},
+    {"nGetLangTags", "(J)Ljava/lang/String;", reinterpret_cast<void*>(FontFamily_nGetLangTags)},
+    {"nGetVariant", "(J)I", reinterpret_cast<void*>(FontFamily_nGetVariant)},
+};
+const JNINativeMethod kFont[] = {
+    {"nGetReleaseNativeFont", "()J", reinterpret_cast<void*>(Font_nGetReleaseNativeFont)},
+    {"nCloneFont", "(J)J", reinterpret_cast<void*>(Font_nCloneFont)},
+    {"nGetPackedStyle", "(J)I", reinterpret_cast<void*>(Font_nGetPackedStyle)},
+    {"nGetIndex", "(J)I", reinterpret_cast<void*>(Font_nGetIndex)},
+    {"nGetAxisCount", "(J)I", reinterpret_cast<void*>(Font_nGetAxisCount)},
+    {"nGetAxisInfo", "(JI)J", reinterpret_cast<void*>(Font_nGetAxisInfo)},
+    {"nGetFontPath", "(J)Ljava/lang/String;", reinterpret_cast<void*>(Font_nGetFontPath)},
+    {"nGetLocaleList", "(J)Ljava/lang/String;", reinterpret_cast<void*>(Font_nGetLocaleList)},
+    {"nGetSourceId", "(J)I", reinterpret_cast<void*>(Font_nGetSourceId)},
+    {"nGetMinikinFontPtr", "(J)J", reinterpret_cast<void*>(Font_nGetMinikinFontPtr)},
+    {"nGetAvailableFontSet", "()[J", reinterpret_cast<void*>(Font_nGetAvailableFontSet)},
+    {"nNewByteBuffer", "(J)Ljava/nio/ByteBuffer;", reinterpret_cast<void*>(Font_nNewByteBuffer)},
+    {"nGetBufferAddress", "(J)J", reinterpret_cast<void*>(Font_nGetBufferAddress)},
+    {"nGetGlyphBounds", "(JIJLandroid/graphics/RectF;)F", reinterpret_cast<void*>(Font_nGetGlyphBounds)},
+    {"nGetFontMetrics", "(JJLandroid/graphics/Paint$FontMetrics;)F", reinterpret_cast<void*>(Font_nGetFontMetrics)},
+};
 const JNINativeMethod kRegion[] = {
     {"isEmpty", "()Z", reinterpret_cast<void*>(Region_isEmpty)},
     {"isRect", "()Z", reinterpret_cast<void*>(Region_isRect)},
@@ -1935,6 +2131,11 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/RadialGradient", kRadialGradient, n(kRadialGradient)) && ok;
   ok = reg(env, "android/graphics/ColorSpace$Rgb", kColorSpaceRgb, n(kColorSpaceRgb)) && ok;
   ok = reg(env, "android/graphics/Region", kRegion, n(kRegion)) && ok;
+  ok = reg(env, "android/graphics/Typeface", kTypeface, n(kTypeface)) && ok;
+  ok = reg(env, "android/graphics/fonts/Font$Builder", kFontBuilder, n(kFontBuilder)) && ok;
+  ok = reg(env, "android/graphics/fonts/FontFamily$Builder", kFontFamilyBuilder, n(kFontFamilyBuilder)) && ok;
+  ok = reg(env, "android/graphics/fonts/FontFamily", kFontFamily, n(kFontFamily)) && ok;
+  ok = reg(env, "android/graphics/fonts/Font", kFont, n(kFont)) && ok;
   ok = reg(env, "com/android/internal/util/VirtualRefBasePtr", kVirtualRefBasePtr, n(kVirtualRefBasePtr)) && ok;
   ok = reg(env, "android/util/PathParser", kPathParser, n(kPathParser)) && ok;
   ok = reg(env, "android/graphics/drawable/VectorDrawable", kVectorDrawable, n(kVectorDrawable)) && ok;

@@ -26,6 +26,56 @@ public final class HostBootstrap {
     /** Set the app's manifest theme resId; applied when a Context resolves its theme. */
     public static void setAppTheme(int resId) { appThemeResId = resId; }
 
+    // Seed the default typefaces from acl's bundled font. The system font map is normally
+    // pushed to the process by the framework at boot (SharedMemory); a standalone run has
+    // none, leaving Typeface.DEFAULT/sDefaults null, so create()/text rendering would NPE.
+    // Build one Typeface (via the acl graphics Font/Typeface natives) and install it as the
+    // default + the common family names. Runs once, after the graphics natives are registered.
+    public static void seedTypefaces() {
+        try {
+            Class<?> tfc = Class.forName("android.graphics.Typeface");
+            // Build the default Typeface directly from acl's bundled native SkTypeface:
+            // nativeCreateFromArray(empty) returns default_typeface(), then wrap it with the
+            // private Typeface(long) ctor. Avoids Typeface.createFromFile's Java font-loading
+            // path (Font.Builder mmap), which fails silently on this host and returns DEFAULT.
+            java.lang.reflect.Method createArr = tfc.getDeclaredMethod(
+                    "nativeCreateFromArray", long[].class, long.class, int.class, int.class);
+            createArr.setAccessible(true);
+            long ni = (Long) createArr.invoke(null, new long[0], 0L, 400, 0);
+            java.lang.reflect.Constructor<?> ctor = tfc.getDeclaredConstructor(long.class);
+            ctor.setAccessible(true);
+            Object tf = ctor.newInstance(ni);
+            if (tf == null) return;
+            java.lang.reflect.Method setDefault = tfc.getDeclaredMethod("setDefault", tfc);
+            setDefault.setAccessible(true);
+            setDefault.invoke(null, tf);
+            // Public static final Typeface fields — set via the native (bypasses final).
+            java.lang.reflect.Method force =
+                    tfc.getDeclaredMethod("nativeForceSetStaticFinalField", String.class, tfc);
+            force.setAccessible(true);
+            for (String f : new String[]{"DEFAULT", "DEFAULT_BOLD", "SANS_SERIF", "SERIF", "MONOSPACE"})
+                force.invoke(null, f, tf);
+            Object arr = java.lang.reflect.Array.newInstance(tfc, 4);
+            for (int i = 0; i < 4; i++) java.lang.reflect.Array.set(arr, i, tf);
+            java.lang.reflect.Field sDefaults = tfc.getDeclaredField("sDefaults");
+            sDefaults.setAccessible(true);
+            sDefaults.set(null, arr);
+            java.lang.reflect.Field smf = tfc.getDeclaredField("sSystemFontMap");
+            smf.setAccessible(true);
+            Object mapObj = smf.get(null);
+            if (mapObj instanceof java.util.Map) {
+                @SuppressWarnings("unchecked")
+                java.util.Map<String, Object> m = (java.util.Map<String, Object>) mapObj;
+                for (String n : new String[]{"sans-serif", "serif", "monospace", "default",
+                        "sans-serif-medium", "sans-serif-light", "sans-serif-condensed",
+                        "sans-serif-black", "sans-serif-thin", "cursive", "casual"})
+                    m.put(n, tf);
+            }
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: seedTypefaces failed: " + t);
+        }
+    }
+
     /** Idempotent: prepare the main Looper and seed a no-Binder ServiceManager. */
     public static synchronized void init() {
         if (sInited) return;
