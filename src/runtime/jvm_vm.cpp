@@ -1383,6 +1383,12 @@ class ArtVm final : public JniVm {
     if (const char* fw = std::getenv("ACL_ART_FRAMEWORK"); fw != nullptr && *fw != '\0') {
       cp.emplace_back(fw);
     }
+    // acl's host-ART runtime bootstrap DEX (org.acl.internal.HostBootstrap): the framework
+    // environment (main Looper, no-Binder ServiceManager, minimal Context) an app expects
+    // the runtime to provide. Injected ahead of the app so a pure app needs no setup.
+    if (const char* hb = std::getenv("ACL_ART_HOST_BOOTSTRAP"); hb != nullptr && *hb != '\0') {
+      cp.emplace_back(hb);
+    }
     cp.insert(cp.end(), config_.classpath.begin(), config_.classpath.end());
 
     std::vector<std::string> option_strings;
@@ -1594,38 +1600,55 @@ class ArtVm final : public JniVm {
     graphics_view_demo(env);
   }
 
-  // App path (GPU): host a REAL android.view.View and present it GPU-native. The app class
-  // named by ACL_ART_VIEW_HOST provides `static View aclCreateContentView(int,int)` (its
-  // framework setup + a laid-out content view); acl drives it through the Ganesh Vulkan
-  // present loop (begin_frame → View.draw on the GPU Canvas → end_frame → tiled dma-buf →
-  // Wayland). The real android.graphics natives render the app's onDraw — no software path.
+  // App path (GPU): host a REAL android.view.View and present it GPU-native. The app
+  // provides ONLY a View subclass (ACL_ART_VIEW_HOST) — like a real app's custom View. acl's
+  // runtime bootstrap (org.acl.internal.HostBootstrap) supplies the framework environment
+  // (main Looper, no-Binder ServiceManager, minimal Context); acl constructs the View,
+  // measures/lays it out, and drives it through the Ganesh Vulkan present loop (begin_frame →
+  // View.draw on the GPU Canvas → end_frame → tiled dma-buf → Wayland). No software path.
   void graphics_view_demo([[maybe_unused]] JNIEnv* env) {
 #if ACL_HAVE_VULKAN && ACL_HAVE_WCS
     const char* host = std::getenv("ACL_ART_VIEW_HOST");
     if (host == nullptr || *host == '\0') return;
     constexpr int W = 480, H = 320;
-    jclass cls = env->FindClass(to_jni_name(host).c_str());
-    if (cls == nullptr) { env->ExceptionClear(); log::w(kTag, "view host: class {} not found", host); return; }
-    jmethodID factory = env->GetStaticMethodID(cls, "aclCreateContentView",
-                                               "(II)Landroid/view/View;");
-    if (factory == nullptr) {
+
+    // Runtime bootstrap: main Looper + no-Binder ServiceManager + a Context factory.
+    jclass boot = env->FindClass("org/acl/internal/HostBootstrap");
+    if (boot == nullptr) {
       env->ExceptionClear();
-      log::w(kTag, "view host: {}.aclCreateContentView(int,int) missing", host);
-      env->DeleteLocalRef(cls);
+      log::w(kTag, "view host: HostBootstrap not on classpath (ACL_ART_HOST_BOOTSTRAP?)");
       return;
     }
-    jobject view = env->CallStaticObjectMethod(cls, factory, W, H);
+    env->CallStaticVoidMethod(boot, env->GetStaticMethodID(boot, "init", "()V"));
+    jobject ctx = env->CallStaticObjectMethod(
+        boot, env->GetStaticMethodID(boot, "newContext", "()Landroid/content/Context;"));
+    if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
+
+    jclass vcls = env->FindClass(to_jni_name(host).c_str());
+    jmethodID vctor = vcls ? env->GetMethodID(vcls, "<init>", "(Landroid/content/Context;)V")
+                           : nullptr;
+    jobject view = vctor ? env->NewObject(vcls, vctor, ctx) : nullptr;
     if (view == nullptr || env->ExceptionCheck() == JNI_TRUE) {
       if (env->ExceptionCheck()) env->ExceptionDescribe();
       env->ExceptionClear();
-      log::w(kTag, "view host: aclCreateContentView failed");
-      env->DeleteLocalRef(cls);
+      log::w(kTag, "view host: could not construct View {}", host);
+      env->DeleteLocalRef(boot);
       return;
     }
-    log::i(kTag, "view host: {} content view created; presenting GPU-native", host);
+    // measure(EXACTLY W, EXACTLY H) + layout(0,0,W,H) — MeasureSpec.EXACTLY == 1<<30.
+    constexpr jint kExactly = 1 << 30;
+    jmethodID measure = env->GetMethodID(vcls, "measure", "(II)V");
+    jmethodID layout = env->GetMethodID(vcls, "layout", "(IIII)V");
+    env->CallVoidMethod(view, measure, static_cast<jint>((W & 0x3FFFFFFF) | kExactly),
+                        static_cast<jint>((H & 0x3FFFFFFF) | kExactly));
+    env->CallVoidMethod(view, layout, 0, 0, W, H);
+    if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
+
+    log::i(kTag, "view host: {} constructed + laid out; presenting GPU-native", host);
     present_content_loop_gpu(view, W, H);
     env->DeleteLocalRef(view);
-    env->DeleteLocalRef(cls);
+    env->DeleteLocalRef(vcls);
+    env->DeleteLocalRef(boot);
 #endif
   }
 
