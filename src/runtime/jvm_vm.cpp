@@ -1625,6 +1625,71 @@ class ArtVm final : public JniVm {
     if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
 
     jclass vcls = env->FindClass(to_jni_name(host).c_str());
+    if (vcls == nullptr) { env->ExceptionClear(); log::w(kTag, "view host: {} not found", host); env->DeleteLocalRef(boot); return; }
+
+    // Activity probe: real apps enter via an Activity (onCreate → setContentView), not a
+    // directly-constructible View. Map the first wall of the Activity/Window frontier.
+    if (jclass actC = env->FindClass("android/app/Activity")) {
+      const bool is_activity = env->IsAssignableFrom(vcls, actC) == JNI_TRUE;
+      env->DeleteLocalRef(actC);
+      if (is_activity) {
+        log::i(kTag, "view host: {} is an Activity — attach + onCreate", host);
+        jobject act = env->NewObject(vcls, env->GetMethodID(vcls, "<init>", "()V"));
+        // Lightweight attach (HostBootstrap: mActivityInfo + PhoneWindow), then onCreate.
+        env->CallStaticVoidMethod(
+            boot,
+            env->GetStaticMethodID(boot, "attachActivity",
+                                   "(Landroid/app/Activity;Landroid/content/Context;)V"),
+            act, ctx);
+        if (act != nullptr && env->ExceptionCheck() != JNI_TRUE) {
+          env->CallVoidMethod(act, env->GetMethodID(vcls, "onCreate", "(Landroid/os/Bundle;)V"),
+                              static_cast<jobject>(nullptr));
+        }
+        if (env->ExceptionCheck() == JNI_TRUE) {
+          env->ExceptionDescribe();
+          env->ExceptionClear();
+          log::w(kTag, "view host: Activity attach/onCreate hit a wall (Window/attach frontier; "
+                       "docs/app-path-scope.md)");
+          if (act != nullptr) env->DeleteLocalRef(act);
+          env->DeleteLocalRef(vcls);
+          env->DeleteLocalRef(boot);
+          return;
+        }
+        // Content view = the Window's decor view (root of the installed hierarchy).
+        jclass actClass = env->GetObjectClass(act);
+        jobject window = env->CallObjectMethod(
+            act, env->GetMethodID(actClass, "getWindow", "()Landroid/view/Window;"));
+        jobject decor = window != nullptr
+            ? env->CallObjectMethod(window, env->GetMethodID(env->GetObjectClass(window),
+                                    "getDecorView", "()Landroid/view/View;"))
+            : nullptr;
+        if (decor == nullptr || env->ExceptionCheck() == JNI_TRUE) {
+          if (env->ExceptionCheck()) env->ExceptionDescribe();
+          env->ExceptionClear();
+          log::w(kTag, "view host: Activity has no decor view to present");
+          env->DeleteLocalRef(act);
+          env->DeleteLocalRef(vcls);
+          env->DeleteLocalRef(boot);
+          return;
+        }
+        jclass dcls = env->GetObjectClass(decor);
+        constexpr jint kExactlyA = 1 << 30;
+        env->CallVoidMethod(decor, env->GetMethodID(dcls, "measure", "(II)V"),
+                            static_cast<jint>((W & 0x3FFFFFFF) | kExactlyA),
+                            static_cast<jint>((H & 0x3FFFFFFF) | kExactlyA));
+        env->CallVoidMethod(decor, env->GetMethodID(dcls, "layout", "(IIII)V"), 0, 0, W, H);
+        if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
+        log::i(kTag, "view host: Activity {} content view ready; presenting GPU-native", host);
+        present_content_loop_gpu(decor, W, H);
+        env->DeleteLocalRef(act);
+        env->DeleteLocalRef(vcls);
+        env->DeleteLocalRef(boot);
+        return;
+      }
+    } else {
+      env->ExceptionClear();
+    }
+
     jmethodID vctor = vcls ? env->GetMethodID(vcls, "<init>", "(Landroid/content/Context;)V")
                            : nullptr;
     jobject view = vctor ? env->NewObject(vcls, vctor, ctx) : nullptr;

@@ -41,13 +41,50 @@ public final class HostBootstrap {
         return new ViewContext();
     }
 
+    // Lightweight Activity attach: a real Activity is normally attach()'d by ActivityThread
+    // (mActivityInfo, mWindow=PhoneWindow, mApplication, …) before onCreate. We can't stand up
+    // ActivityThread, so seed the minimum onCreate/setContentView need via reflection: a
+    // default ActivityInfo and a PhoneWindow bound to the context. Returns the Activity so the
+    // caller can drive onCreate then read getWindow().getDecorView() as the content view.
+    public static void attachActivity(android.app.Activity a, android.content.Context ctx)
+            throws Exception {
+        setField(android.app.Activity.class, a, "mActivityInfo",
+                 new android.content.pm.ActivityInfo());
+        Object window = Class.forName("com.android.internal.policy.PhoneWindow")
+                .getConstructor(android.content.Context.class).newInstance(ctx);
+        setField(android.app.Activity.class, a, "mWindow", window);
+        try {
+            setField(android.app.Activity.class, a, "mApplication", null);
+            setField(android.app.Activity.class, a, "mUiThread", Thread.currentThread());
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void setField(Class<?> c, Object obj, String name, Object val) throws Exception {
+        java.lang.reflect.Field f = c.getDeclaredField(name);
+        f.setAccessible(true);
+        f.set(obj, val);
+    }
+
     static final class ViewContext extends ContextWrapper {
         private Resources.Theme theme;
         ViewContext() { super(null); }
         @Override public Resources getResources() { return Resources.getSystem(); }
         // getDisplayId() is @hide; overrides at runtime by signature. DEFAULT_DISPLAY = 0.
         public int getDisplayId() { return 0; }
-        @Override public Object getSystemService(String name) { return null; }
+        @Override public Object getSystemService(String name) {
+            // PhoneWindow/setContentView needs a LayoutInflater (LayoutInflater.from →
+            // getSystemService(LAYOUT_INFLATER_SERVICE)). Concrete impl is internal.
+            if ("layout_inflater".equals(name)) {
+                try {
+                    return Class.forName("com.android.internal.policy.PhoneLayoutInflater")
+                            .getConstructor(android.content.Context.class).newInstance(this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
+            return null;
+        }
         // A real (empty) Theme from the system Resources — View/ViewGroup constructors call
         // context.obtainStyledAttributes(), which delegates to getTheme().
         @Override public Resources.Theme getTheme() {

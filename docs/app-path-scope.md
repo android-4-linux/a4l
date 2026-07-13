@@ -73,3 +73,40 @@ acl's *own* view traversal (the `present_content_loop` path) can keep using a mi
 that avoids this coupling. The service/hwui walls here are specifically about hosting
 *unmodified third-party* Views — the real target, and genuinely a framework-bootstrap effort,
 not a graphics one.
+
+## Update: View + ViewGroup work GPU-native; the runtime provides the environment
+
+Cleared to a **working GPU app path**: a real `android.view.View` (and a `ViewGroup` hierarchy)
+constructs, measures, lays out, and draws on host ART, presented GPU-native (Ganesh Vulkan →
+tiled dma-buf → Wayland). What made it work:
+- **RenderNode shim** (93 natives) + **no-Binder stubs** (`getContextObject`, `getCallingUid`,
+  `getNativeBBinderHolder`/`getNativeFinalizer`) — see commits.
+- **`org.acl.internal.HostBootstrap`** — an acl runtime bootstrap DEX injected onto the
+  classpath (`ACL_ART_HOST_BOOTSTRAP`): `init()` (main Looper + no-Binder ServiceManager with
+  local interface-proxy stubs) and a minimal `Context` (`getResources`=system, `getTheme`=empty
+  system theme, `getMainLooper`, `getApplicationInfo`, `getSystemService(layout_inflater)`).
+- **`Canvas.nQuickReject`** for `ViewGroup.drawChild` culling.
+- The app provides **only a View subclass**; acl constructs it with the runtime Context and
+  drives `present_content_loop_gpu` (`ArtVm::graphics_view_demo`, `ACL_ART_VIEW_HOST`).
+
+## Next frontier: the Activity / Window layer (mapped, not yet cleared)
+
+Real apps enter via an `Activity` whose `onCreate` calls `setContentView` — not a
+directly-constructible View. A real `Activity` is `attach()`'d by `ActivityThread` before
+`onCreate`; we can't stand up `ActivityThread`, so `HostBootstrap.attachActivity` seeds the
+minimum by reflection (`mActivityInfo`, a `PhoneWindow`). The probe (`ACL_ART_VIEW_HOST` = an
+Activity → `ArtVm::graphics_view_demo` attach+onCreate, harness `run_hb.sh act`) walked these
+walls in order:
+1. `Activity.onCreate` reads `mActivityInfo.parentActivityName` → set a default `ActivityInfo`.
+2. `PhoneWindow`'s ctor → `LayoutInflater.from(context)` → `getSystemService(layout_inflater)` →
+   return a `com.android.internal.policy.PhoneLayoutInflater`.
+3. `PhoneWindow` → `context.getContentResolver()` → **null (current wall)**; needs a real-ish
+   `ContentResolver` (reads system settings: font scale, etc.).
+
+Behind #3 lie more interlocking pieces (a `ContextImpl`/`ContentResolver`, `setContentView` →
+`DecorView` install, theme/resource lookups, `getSystemService` Managers → `svc/`). This is the
+Activity/Window bootstrap (ADR-1/ADR-2) — a dedicated multi-step effort, best approached by
+standing up a minimal `ContextImpl` (real `ContentResolver` + Managers) rather than field-poking
+a bare `Activity`. Until then, the GPU app path is exercised by constructing the app's content
+View directly (which works). Fixtures: `MainActivity` (probe), `Panel`/`Tile` (ViewGroup),
+`DrawView` (single View).
