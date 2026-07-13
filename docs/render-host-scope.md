@@ -321,6 +321,16 @@ presents it via `wm::present_dmabuf`.
 **Verified live on GNOME Shell/Mutter:** app → android.graphics → Android host Skia Ganesh Vulkan
 (GPU render) → single-plane **tiled** modifier `0x200000000401b03` dma-buf → `zwp_linux_dmabuf_v1`,
 zero-copy, 3 clean frames. Run `/tmp/acl/run_demo_gpu.sh` (`ACL_ART_GRAPHICS_GPU=1`).
-**NEXT S4a options:** (a) try the **direct** tiled `MakeFromBackendTexture` path now that in-process
-Skia-GPU works — may drop the `vkCmdCopyImage` copy pass; (b) S4b breadth (grow Canvas ops + drive
-from a real `View.draw`).
+
+**Direct tiled path tested — android-13 caps gap confirmed.** Wrapping the modifier-tiled dma-buf
+`VkImage` itself as a Ganesh `SkSurface` (`MakeFromBackendTexture`) to drop the `vkCmdCopyImage` pass
+**fails on android-13 Skia** — and now that the in-process bug is fixed, this is a genuine caps gap, not
+the old symptom: `MakeRenderTarget` succeeds in-process while `MakeFromBackendTexture(tiled)` returns
+null. Confirmed in `external/skia`: `GrVkCaps` derives all format renderability from
+`VK_IMAGE_TILING_OPTIMAL` only (`GrVkCaps.cpp:1337`) — DRM-modifier render targets aren't a supported
+configuration in this Skia (newer milestones added it). So the copy path (optimal SkSurface →
+`vkCmdCopyImage` → tiled dma-buf) is the android-13 answer: still zero CPU upload, one cheap GPU→GPU
+blit. `make_direct_surface()` is gated behind `ACL_GPU_DIRECT` (off by default) and falls back to the
+copy path — forward-compat for a future Skia bump. **NEXT:** (a) S4b breadth (grow Canvas ops + drive
+from a real `View.draw`) — the natural next; (b) optionally bump host Skia to a milestone with
+modifier-RT support for a true zero-copy direct path.
