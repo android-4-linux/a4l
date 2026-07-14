@@ -121,6 +121,42 @@ public final class HostBootstrap {
         }
         seedSqliteDefaults();
         seedContentService();
+        seedVirtualInputDevice();
+    }
+
+    // KeyCharacterMap.load(VIRTUAL_KEYBOARD) → InputManager.getInputDevice(-1) → null (no input
+    // service) → UnavailableException, which takes down PhoneWindow.preparePanel (menu setup) and
+    // any KeyEvent character mapping. Seed InputManager's device cache with a virtual keyboard
+    // whose KeyCharacterMap is an empty one built via the native parcel format — no native helper:
+    // android::KeyCharacterMap::readFromParcel reads {cString name, int type, bool overlay, and
+    // three int counts}; writeCString("") is four zero bytes == writeInt(0), and writeBool ==
+    // writeInt32, so the whole record is a run of ints.
+    private static void seedVirtualInputDevice() {
+        try {
+            android.os.Parcel p = android.os.Parcel.obtain();
+            p.writeInt(0);  // loadFileName "" (writeCString)
+            p.writeInt(4);  // KeyboardType::FULL
+            p.writeInt(0);  // mLayoutOverlayApplied = false
+            p.writeInt(0);  // numKeys
+            p.writeInt(0);  // numKeysByScanCode
+            p.writeInt(0);  // numKeysByUsageCode
+            p.setDataPosition(0);
+            android.view.KeyCharacterMap kcm = android.view.KeyCharacterMap.CREATOR.createFromParcel(p);
+            p.recycle();
+            android.view.InputDevice dev = new android.view.InputDevice(
+                    android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, "acl Virtual", 0, 0,
+                    "acl-virtual", false, android.view.InputDevice.SOURCE_KEYBOARD,
+                    android.view.InputDevice.KEYBOARD_TYPE_ALPHABETIC, kcm,
+                    false, false, false, false, false);
+            Object im = Class.forName("android.hardware.input.InputManager")
+                    .getMethod("getInstance").invoke(null);
+            android.util.SparseArray<android.view.InputDevice> devices = new android.util.SparseArray<>();
+            devices.put(android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, dev);
+            // A non-null mInputDevices makes populateInputDevicesLocked skip the input service.
+            setField(im.getClass(), im, "mInputDevices", devices);
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: virtual input device seed skipped: " + t);
+        }
     }
 
     // ContentResolver.getContentService() reads ServiceManager.getService("content") → null (no
