@@ -353,7 +353,10 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
       log::i(kTag, "input: synthetic TAP down at ({},{})", tap_x, tap_y);
       present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Down, tap_x, tap_y});
       tap_state = 1;
-    } else if (s->frames == static_cast<std::uint64_t>(tap_frame) + 2 && tap_state == 1) {
+    } else if (s->frames == static_cast<std::uint64_t>(tap_frame) + 2 && tap_state == 1
+               && std::getenv("ACL_TEST_HOLD") == nullptr) {
+      // ACL_TEST_HOLD keeps the pointer down (no Up) so the pressed state / ripple persists for a
+      // screen capture; otherwise release to complete the tap (fires the composable's onClick).
       present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Up, tap_x, tap_y});
       log::i(kTag, "input: synthetic TAP up");
       tap_state = 2;

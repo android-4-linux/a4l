@@ -50,6 +50,7 @@
 #include "SkFontMgr.h"
 #include "SkFontTypes.h"
 #include "SkGradientShader.h"
+#include "SkRuntimeEffect.h"
 #include "SkImage.h"
 #include "SkImageInfo.h"
 #include "SkMatrix.h"
@@ -3049,6 +3050,106 @@ const JNINativeMethod kLineBreaker[] = {
     {"nGetReleaseResultFunc", "()J", reinterpret_cast<void*>(LineBreaker_nGetReleaseResultFunc)},
 };
 
+// ── android.graphics.RuntimeShader (AGSL/SkSL runtime effects) ─────────────────────────────────
+// The Material touch ripple (RippleShader), blur, and app custom shaders build an SkRuntimeEffect
+// from an AGSL program, push uniforms, then make an SkShader. acl backs it with Skia's
+// SkRuntimeEffect + SkRuntimeShaderBuilder. If the AGSL doesn't compile under this Skia (version
+// skew), the builder keeps a null effect and makeShader yields a transparent shader so the draw
+// completes without crashing (the effect just doesn't paint). All natives are normal JNI.
+struct AclRuntimeShaderBuilder {
+  sk_sp<SkRuntimeEffect> effect;
+  SkRuntimeShaderBuilder* builder = nullptr;
+  ~AclRuntimeShaderBuilder() { delete builder; }
+};
+extern "C" void acl_free_runtime_builder(void* p) { delete reinterpret_cast<AclRuntimeShaderBuilder*>(p); }
+
+jlong RuntimeShader_nGetFinalizer(JNIEnv*, jclass) {
+  return reinterpret_cast<jlong>(&acl_free_runtime_builder);
+}
+jlong RuntimeShader_nCreateBuilder(JNIEnv* env, jclass, jstring agsl) {
+  auto* b = new AclRuntimeShaderBuilder();
+  if (agsl != nullptr) {
+    const char* s = env->GetStringUTFChars(agsl, nullptr);
+    if (s != nullptr) {
+      SkRuntimeEffect::Result r = SkRuntimeEffect::MakeForShader(SkString(s));
+      env->ReleaseStringUTFChars(agsl, s);
+      if (r.effect != nullptr) {
+        b->effect = r.effect;
+        b->builder = new SkRuntimeShaderBuilder(r.effect);
+      }
+    }
+  }
+  return reinterpret_cast<jlong>(b);
+}
+jlong RuntimeShader_nCreateShader(JNIEnv*, jclass, jlong builderPtr, jlong matrixPtr) {
+  auto* b = reinterpret_cast<AclRuntimeShaderBuilder*>(builderPtr);
+  sk_sp<SkShader> shader;
+  if (b != nullptr && b->builder != nullptr) {
+    shader = b->builder->makeShader(reinterpret_cast<const SkMatrix*>(matrixPtr));
+  }
+  if (shader == nullptr) shader = SkShaders::Color(SK_ColorTRANSPARENT);  // never crash the draw
+  return reinterpret_cast<jlong>(shader.release());  // freed by the Shader finalizer (free_shader)
+}
+// uniform(name).set(vals, count): count is the ELEMENT count; a size mismatch is silently ignored
+// (Skia returns false without writing), so a stale/absent uniform never corrupts state.
+void RuntimeShader_nUpdateUniformsFloatArr(JNIEnv* env, jclass, jlong bp, jstring name,
+                                           jfloatArray values, jboolean /*isColor*/) {
+  auto* b = reinterpret_cast<AclRuntimeShaderBuilder*>(bp);
+  if (b == nullptr || b->builder == nullptr || name == nullptr || values == nullptr) return;
+  const char* nm = env->GetStringUTFChars(name, nullptr);
+  const jsize n = env->GetArrayLength(values);
+  jfloat* v = env->GetFloatArrayElements(values, nullptr);
+  if (nm != nullptr && v != nullptr) b->builder->uniform(nm).set(v, static_cast<int>(n));
+  if (v != nullptr) env->ReleaseFloatArrayElements(values, v, JNI_ABORT);
+  if (nm != nullptr) env->ReleaseStringUTFChars(name, nm);
+}
+void RuntimeShader_nUpdateUniformsFloats(JNIEnv* env, jclass, jlong bp, jstring name, jfloat f1,
+                                         jfloat f2, jfloat f3, jfloat f4, jint count) {
+  auto* b = reinterpret_cast<AclRuntimeShaderBuilder*>(bp);
+  if (b == nullptr || b->builder == nullptr || name == nullptr) return;
+  const char* nm = env->GetStringUTFChars(name, nullptr);
+  const float vals[4] = {f1, f2, f3, f4};
+  if (nm != nullptr) b->builder->uniform(nm).set(vals, (count > 0 && count <= 4) ? count : 1);
+  if (nm != nullptr) env->ReleaseStringUTFChars(name, nm);
+}
+void RuntimeShader_nUpdateUniformsIntArr(JNIEnv* env, jclass, jlong bp, jstring name, jintArray values) {
+  auto* b = reinterpret_cast<AclRuntimeShaderBuilder*>(bp);
+  if (b == nullptr || b->builder == nullptr || name == nullptr || values == nullptr) return;
+  const char* nm = env->GetStringUTFChars(name, nullptr);
+  const jsize n = env->GetArrayLength(values);
+  jint* v = env->GetIntArrayElements(values, nullptr);
+  if (nm != nullptr && v != nullptr) b->builder->uniform(nm).set(reinterpret_cast<const int*>(v), static_cast<int>(n));
+  if (v != nullptr) env->ReleaseIntArrayElements(values, v, JNI_ABORT);
+  if (nm != nullptr) env->ReleaseStringUTFChars(name, nm);
+}
+void RuntimeShader_nUpdateUniformsInts(JNIEnv* env, jclass, jlong bp, jstring name, jint i1, jint i2,
+                                       jint i3, jint i4, jint count) {
+  auto* b = reinterpret_cast<AclRuntimeShaderBuilder*>(bp);
+  if (b == nullptr || b->builder == nullptr || name == nullptr) return;
+  const char* nm = env->GetStringUTFChars(name, nullptr);
+  const int vals[4] = {i1, i2, i3, i4};
+  if (nm != nullptr) b->builder->uniform(nm).set(vals, (count > 0 && count <= 4) ? count : 1);
+  if (nm != nullptr) env->ReleaseStringUTFChars(name, nm);
+}
+void RuntimeShader_nUpdateShader(JNIEnv* env, jclass, jlong bp, jstring name, jlong shaderPtr) {
+  auto* b = reinterpret_cast<AclRuntimeShaderBuilder*>(bp);
+  if (b == nullptr || b->builder == nullptr || name == nullptr) return;
+  const char* nm = env->GetStringUTFChars(name, nullptr);
+  if (nm != nullptr) b->builder->child(nm) = sk_ref_sp(reinterpret_cast<SkShader*>(shaderPtr));
+  if (nm != nullptr) env->ReleaseStringUTFChars(name, nm);
+}
+
+const JNINativeMethod kRuntimeShader[] = {
+    {"nativeGetFinalizer", "()J", reinterpret_cast<void*>(RuntimeShader_nGetFinalizer)},
+    {"nativeCreateBuilder", "(Ljava/lang/String;)J", reinterpret_cast<void*>(RuntimeShader_nCreateBuilder)},
+    {"nativeCreateShader", "(JJ)J", reinterpret_cast<void*>(RuntimeShader_nCreateShader)},
+    {"nativeUpdateUniforms", "(JLjava/lang/String;[FZ)V", reinterpret_cast<void*>(RuntimeShader_nUpdateUniformsFloatArr)},
+    {"nativeUpdateUniforms", "(JLjava/lang/String;FFFFI)V", reinterpret_cast<void*>(RuntimeShader_nUpdateUniformsFloats)},
+    {"nativeUpdateUniforms", "(JLjava/lang/String;[I)V", reinterpret_cast<void*>(RuntimeShader_nUpdateUniformsIntArr)},
+    {"nativeUpdateUniforms", "(JLjava/lang/String;IIIII)V", reinterpret_cast<void*>(RuntimeShader_nUpdateUniformsInts)},
+    {"nativeUpdateShader", "(JLjava/lang/String;J)V", reinterpret_cast<void*>(RuntimeShader_nUpdateShader)},
+};
+
 const JNINativeMethod kCanvas[] = {
     {"nInitRaster", "(J)J", reinterpret_cast<void*>(Canvas_nInitRaster)},
     {"nGetNativeFinalizer", "()J", reinterpret_cast<void*>(Canvas_nGetNativeFinalizer)},
@@ -3708,6 +3809,8 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   reg(env, "android/graphics/text/MeasuredText$Builder", kMeasuredTextBuilder, n(kMeasuredTextBuilder));
   reg(env, "android/graphics/text/MeasuredText", kMeasuredText, n(kMeasuredText));
   reg(env, "android/graphics/text/LineBreaker", kLineBreaker, n(kLineBreaker));
+  // RuntimeShader (AGSL) — Material ripple / custom shaders. Best-effort.
+  reg(env, "android/graphics/RuntimeShader", kRuntimeShader, n(kRuntimeShader));
   ok = reg(env, "android/graphics/BaseCanvas", kBaseCanvas, n(kBaseCanvas)) && ok;
   ok = reg(env, "android/graphics/Path", kPath, n(kPath)) && ok;
   ok = reg(env, "android/graphics/ImageDecoder", kImageDecoder, n(kImageDecoder)) && ok;
