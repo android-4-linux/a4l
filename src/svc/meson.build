@@ -12,6 +12,7 @@ if have_sdbus
   subdir('notify')
   subdir('battery')
   subdir('bluetooth')
+  subdir('storage')
 endif
 
 # Automotive vehicle services (svc/car) compile in ONLY under the automotive

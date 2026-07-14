@@ -423,6 +423,18 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("storage".equals(name)) {
+                // The real android.os.storage.StorageManager(Context, Looper); its ctor resolves
+                // ServiceManager.getServiceOrThrow("mount") — seeded above → getVolumeList works.
+                try {
+                    java.lang.reflect.Constructor<?> c = Class.forName("android.os.storage.StorageManager")
+                            .getDeclaredConstructor(android.content.Context.class, android.os.Looper.class);
+                    c.setAccessible(true);
+                    return c.newInstance(this, android.os.Looper.getMainLooper());
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             return null;
         }
         // getSystemService(Class) → getSystemServiceName(Class) → getSystemService(String).
@@ -439,6 +451,7 @@ public final class HostBootstrap {
             // ConnectivityManager compared by name (off this compile classpath, see above).
             if ("android.net.ConnectivityManager".equals(serviceClass.getName())) return "connectivity";
             if ("android.bluetooth.BluetoothManager".equals(serviceClass.getName())) return "bluetooth";
+            if (serviceClass == android.os.storage.StorageManager.class) return "storage";
             return null;
         }
 
@@ -1080,6 +1093,27 @@ public final class HostBootstrap {
                 });
     }
 
+    // IStorageManager translated to the app's StorageVolume list (svc/storage): getVolumeList →
+    // the primary emulated volume (app external root) + host UDisks2 removable media; everything
+    // else defaults. getVolumeList's signature is (int userId, String pkg, int flags) across the
+    // levels we target, but callers vary — build the list off the current app context regardless
+    // of args. Without this, StorageManager.mStorageManager stays null and getExternalStorageState
+    // NPEs (a2dp.Vol).
+    private static Object makeStorageHandler(Class<?> iface) {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    final String mn = method.getName();
+                    if ("getVolumeList".equals(mn)) {
+                        android.content.Context ctx = sAppContext;
+                        return ctx != null ? StorageBridge.getVolumeList(ctx)
+                                : java.lang.reflect.Array.newInstance(
+                                        Class.forName("android.os.storage.StorageVolume"), 0);
+                    }
+                    return defaultValue(method.getReturnType());
+                });
+    }
+
     // A DisplayInfo carrying acl's output metrics (Wayland output; 60Hz mode). Used both to
     // build the attach Display and as the IDisplayManager.getDisplayInfo result so every
     // Display object (Compose's, RecyclerView's, …) is valid.
@@ -1189,6 +1223,10 @@ public final class HostBootstrap {
         // AudioManager routes stream volume through IAudioService; acl translates it to the host
         // PipeWire master volume (svc/audio → default sink) instead of a no-op.
         svc.put("audio", "android.media.IAudioService");
+        // StorageManager / Environment.getExternalStorageState resolve ServiceManager.getService
+        // ("mount") → IStorageManager; acl translates getVolumeList to the app's primary emulated
+        // volume + host UDisks2 removable media (svc/storage) instead of leaving it null (NPE).
+        svc.put("mount", "android.os.storage.IStorageManager");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},
@@ -1202,7 +1240,8 @@ public final class HostBootstrap {
                         final Object localIface = "notification".equals(name)
                                 ? makeNotificationHandler(iface)
                                 : "display".equals(name) ? makeDisplayHandler(iface)
-                                : "audio".equals(name) ? makeAudioHandler(iface) : noop(iface);
+                                : "audio".equals(name) ? makeAudioHandler(iface)
+                                : "mount".equals(name) ? makeStorageHandler(iface) : noop(iface);
                         final String descriptor = ifaceName;  // AIDL DESCRIPTOR == interface FQN
                         // Proxy IBinder (an interface) rather than new Binder() — the latter
                         // needs Binder natives. asInterface() calls queryLocalInterface and

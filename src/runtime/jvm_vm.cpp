@@ -27,6 +27,7 @@
 #include "svc/bluetooth/bt_jni.h"
 #include "svc/net/connectivity_jni.h"
 #include "svc/notify/notify_jni.h"
+#include "svc/storage/storage_jni.h"
 #endif
 #if ACL_HAVE_PIPEWIRE
 #include "audio/audio_jni.h"
@@ -2045,6 +2046,9 @@ class ArtVm final : public JniVm {
     // Bind org.acl.internal.BluetoothBridge (android.bluetooth.* shims) to the svc/bluetooth
     // host BlueZ backend (org.bluez).
     acl::bt::register_bt_natives(env);
+    // Bind org.acl.internal.StorageBridge (StorageManager/IStorageManager.getVolumeList) to the
+    // svc/storage host UDisks2 backend (removable media).
+    acl::storage::register_storage_natives(env);
 #endif
 #if ACL_HAVE_PIPEWIRE
     // Bind org.acl.internal.AudioBridge (AudioManager master volume) to the host PipeWire
