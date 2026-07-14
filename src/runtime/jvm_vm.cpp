@@ -148,11 +148,17 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
         static_cast<jlong>(present_now_ns()), action, static_cast<jfloat>(p->x),
         static_cast<jfloat>(p->y), 0);
     if (me != nullptr) {
-      env->CallBooleanMethod(s->view, s->dispatch_touch, me);
+      const jboolean handled = env->CallBooleanMethod(s->view, s->dispatch_touch, me);
+      static int idiag = 0;
+      if (idiag < 24) {
+        log::i(kTag, "input: pointer action={} ({},{}) -> dispatchTouchEvent handled={}",
+               action, p->x, p->y, handled == JNI_TRUE);
+        ++idiag;
+      }
       if (s->me_recycle != nullptr) env->CallVoidMethod(me, s->me_recycle);
       env->DeleteLocalRef(me);
     }
-    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+    if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
   } else if (const auto* k = std::get_if<wm::KeyInput>(&ev)) {
     if (s->keyevent_cls == nullptr || s->ke_obtain == nullptr || s->dispatch_key == nullptr) return;
     const jint action = k->action == wm::KeyInput::Action::Down ? 0 : 1;
@@ -327,6 +333,32 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   if (s == nullptr || !s->presenter) return;
   static int tdiag = 0;
   if (tdiag < 4) { log::i(kTag, "PresentDriver.nTraverse: entered (frame {})", s->frames); ++tdiag; }
+  // DIAG: env-gated synthetic tap (ACL_TEST_TAP="x,y[,frame]") — inject Down then Up at the point
+  // on frame N (default 120) to exercise the input -> hit-test -> recompose chain without a live
+  // pointer. Down and Up two frames apart so Compose registers a full press+release.
+  static float tap_x = -1.f, tap_y = -1.f;
+  static long tap_frame = 120;
+  static int tap_state = 0;
+  static bool tap_parsed = false;
+  if (!tap_parsed) {
+    tap_parsed = true;
+    if (const char* t = std::getenv("ACL_TEST_TAP")) {
+      float x = 0, y = 0;
+      long fr = 120;
+      if (std::sscanf(t, "%f,%f,%ld", &x, &y, &fr) >= 2) { tap_x = x; tap_y = y; tap_frame = fr; }
+    }
+  }
+  if (tap_x >= 0.f) {
+    if (s->frames == static_cast<std::uint64_t>(tap_frame) && tap_state == 0) {
+      log::i(kTag, "input: synthetic TAP down at ({},{})", tap_x, tap_y);
+      present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Down, tap_x, tap_y});
+      tap_state = 1;
+    } else if (s->frames == static_cast<std::uint64_t>(tap_frame) + 2 && tap_state == 1) {
+      present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Up, tap_x, tap_y});
+      log::i(kTag, "input: synthetic TAP up");
+      tap_state = 2;
+    }
+  }
   if (s->gpu_begin(s->w, s->h) == 0) { log::w(kTag, "PresentDriver.nTraverse: gpu_begin=0"); return; }  // clear + re-arm
   const bool diag = tdiag <= 4;
   if (s->m_measure != nullptr && s->m_layout != nullptr) {

@@ -1124,6 +1124,14 @@ public final class HostBootstrap {
             try { setField(vriCls, vri, "mWindowCallbacks", new java.util.ArrayList<>()); } catch (Throwable ignored) {}
             try { setField(vriCls, vri, "mThread", Thread.currentThread()); } catch (Throwable ignored) {}
             try { setField(vriCls, vri, "mTraversalScheduled", Boolean.TRUE); } catch (Throwable ignored) {}
+            // Touch dispatch goes through View.removeCallbacks -> mViewRootImpl.mChoreographer
+            // .removeCallbacks (e.g. Compose's AndroidComposeView.handleMotionEvent); the hollow
+            // ViewRootImpl's mChoreographer is null -> NPE before hit-testing. Seed the main
+            // thread's Choreographer so pointer events reach the Compose hit-test / onClick.
+            try {
+                setField(vriCls, vri, "mChoreographer",
+                        android.view.Choreographer.getInstance());
+            } catch (Throwable ignored) {}
             android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
             Class<?> aiCls = Class.forName("android.view.View$AttachInfo");
             java.lang.reflect.Constructor<?> aiCtor = aiCls.getDeclaredConstructor(
