@@ -1009,6 +1009,20 @@ public final class HostBootstrap {
             setField(android.app.Activity.class, a, "mUiThread", Thread.currentThread());
         } catch (Throwable ignored) {
         }
+        // Activity.startActivityForResult (used by rememberLauncherForActivityResult and any
+        // startActivity) reads mMainThread.getApplicationThread() then mInstrumentation.execStartActivity
+        // -> the real path needs an ActivityManager (Binder) acl has no v1. Seed the hollow
+        // ActivityThread (so mMainThread isn't null) and a no-op Instrumentation that suppresses the
+        // launch: acl can't host external activities (file pickers, browsers), so a tap on such a
+        // button becomes a safe no-op instead of crashing the app on an uncaught NPE.
+        try {
+            Object at = Class.forName("android.app.ActivityThread")
+                    .getMethod("currentActivityThread").invoke(null);
+            if (at != null) setField(android.app.Activity.class, a, "mMainThread", at);
+        } catch (Throwable ignored) {}
+        try {
+            setField(android.app.Activity.class, a, "mInstrumentation", new NoopInstrumentation());
+        } catch (Throwable ignored) {}
         // PhoneWindow is best-effort: its ctor reads settings via getContentResolver (which our
         // minimal Context lacks). Needed for setContentView but not for early onCreate; don't
         // let it fail the attach.
@@ -1094,6 +1108,34 @@ public final class HostBootstrap {
             System.out.println("acl HostBootstrap: lifecycle " + cur + " -> " + now);
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: ensureResumed skipped: " + t);
+        }
+    }
+
+    // Instrumentation that suppresses activity launches. acl has no ActivityManager to start another
+    // activity (external file picker, browser, or a second in-app Activity), so execStartActivity
+    // returning null makes startActivityForResult a no-op — no result is delivered and the app
+    // survives the tap instead of NPE-ing on the missing ApplicationThread/ActivityManager.
+    static final class NoopInstrumentation extends android.app.Instrumentation {
+        private android.app.Instrumentation.ActivityResult suppress(android.content.Intent intent) {
+            System.out.println("acl HostBootstrap: startActivity suppressed (no external-activity host): " + intent);
+            return null;
+        }
+        @Override public android.app.Instrumentation.ActivityResult execStartActivity(
+                android.content.Context who, android.os.IBinder contextThread, android.os.IBinder token,
+                android.app.Activity target, android.content.Intent intent, int requestCode,
+                android.os.Bundle options) {
+            return suppress(intent);
+        }
+        @Override public android.app.Instrumentation.ActivityResult execStartActivity(
+                android.content.Context who, android.os.IBinder contextThread, android.os.IBinder token,
+                String target, android.content.Intent intent, int requestCode, android.os.Bundle options) {
+            return suppress(intent);
+        }
+        @Override public android.app.Instrumentation.ActivityResult execStartActivity(
+                android.content.Context who, android.os.IBinder contextThread, android.os.IBinder token,
+                String target, android.content.Intent intent, int requestCode, android.os.Bundle options,
+                android.os.UserHandle user) {
+            return suppress(intent);
         }
     }
 
