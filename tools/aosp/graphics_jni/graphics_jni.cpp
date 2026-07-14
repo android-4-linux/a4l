@@ -2899,6 +2899,8 @@ const JNINativeMethod kRegion[] = {
 };
 const JNINativeMethod kHardwareRenderer[] = {
     {"nSetRtAnimationsEnabled", "(Z)V", reinterpret_cast<void*>(HardwareRenderer_nSetRtAnimationsEnabled)},
+    // ViewRootImpl.<init> -> HighContrastTextManager sets this (a static debug toggle); no-op.
+    {"nSetHighContrastText", "(Z)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jboolean) {})},
 };
 const JNINativeMethod kDisplayEventReceiver[] = {
     {"nativeInit", "(Ljava/lang/ref/WeakReference;Landroid/os/MessageQueue;II)J", reinterpret_cast<void*>(DisplayEventReceiver_nativeInit)},
@@ -2986,6 +2988,109 @@ const JNINativeMethod kVectorDrawable[] = {
     {"nSetTrimPathOffset", "(JF)V", reinterpret_cast<void*>(VD_nSetTrimPathOffset)},
 };
 
+// ── SurfaceControl no-op floor ──────────────────────────────────────────────────────────────
+// The host libandroid_runtime ships NO SurfaceControl natives (no SurfaceFlinger/gui), and
+// android.view.WindowManagerImpl/WindowManagerGlobal are final, so Dialog/PopupWindow/Toast
+// unavoidably reach ViewRootImpl.setView -> SurfaceControl. Register no-op natives so that path
+// SURVIVES (the view is held by WindowManagerGlobal but no real surface is produced); acl renders
+// such secondary windows itself (overlay pass). SurfaceControl$Transaction.<clinit> feeds the
+// finalizer into a NativeAllocationRegistry, which REQUIRES a non-zero free-function pointer, so
+// sc_free is a real function. Native handles are a fixed non-zero sentinel and ops are no-ops, so
+// the no-op free is safe (no per-object allocation, no aliasing/double-free). Only a curated subset
+// is registered — an unregistered native throws UnsatisfiedLinkError only if actually called, so
+// the set is grown empirically to whatever setView + the first traversal touch.
+int g_sc_dummy = 0;
+void sc_free(void*) {}
+jlong sc_handle() { return reinterpret_cast<jlong>(&g_sc_dummy); }
+
+jlong SC_nGetNativeTransactionFinalizer(JNIEnv*, jclass) { return reinterpret_cast<jlong>(&sc_free); }
+jlong SC_nCreateTransaction(JNIEnv*, jclass) { return sc_handle(); }
+jlong SC_nCreate(JNIEnv*, jclass, jobject, jstring, jint, jint, jint, jint, jlong, jobject) { return sc_handle(); }
+jlong SC_nReadFromParcel(JNIEnv*, jclass, jobject) { return sc_handle(); }
+jlong SC_nReadTransactionFromParcel(JNIEnv*, jclass, jobject) { return sc_handle(); }
+jlong SC_nCopyFromSurfaceControl(JNIEnv*, jclass, jlong) { return sc_handle(); }
+jlong SC_nMirrorSurface(JNIEnv*, jclass, jlong) { return sc_handle(); }
+jlong SC_nGetTransactionId(JNIEnv*, jclass, jlong) { return 0; }
+void SC_nApplyTransaction(JNIEnv*, jclass, jlong, jboolean) {}
+void SC_nMergeTransaction(JNIEnv*, jclass, jlong, jlong) {}
+void SC_nClearTransaction(JNIEnv*, jclass, jlong) {}
+void SC_nSetAnimationTransaction(JNIEnv*, jclass, jlong) {}
+void SC_nWriteToParcel(JNIEnv*, jclass, jlong, jobject) {}
+void SC_nWriteTransactionToParcel(JNIEnv*, jclass, jlong, jobject) {}
+void SC_nRelease(JNIEnv*, jclass, jlong) {}
+void SC_nDisconnect(JNIEnv*, jclass, jlong) {}
+void SC_nUpdateDefaultBufferSize(JNIEnv*, jclass, jlong, jint, jint) {}
+void SC_nReparent(JNIEnv*, jclass, jlong, jlong, jlong) {}
+void SC_nSetLayer(JNIEnv*, jclass, jlong, jlong, jint) {}
+void SC_nSetRelativeLayer(JNIEnv*, jclass, jlong, jlong, jlong, jint) {}
+void SC_nSetPosition(JNIEnv*, jclass, jlong, jlong, jfloat, jfloat) {}
+void SC_nSetScale(JNIEnv*, jclass, jlong, jlong, jfloat, jfloat) {}
+void SC_nSetSize(JNIEnv*, jclass, jlong, jlong, jint, jint) {}
+void SC_nSetAlpha(JNIEnv*, jclass, jlong, jlong, jfloat) {}
+void SC_nSetMatrix(JNIEnv*, jclass, jlong, jlong, jfloat, jfloat, jfloat, jfloat) {}
+void SC_nSetFlags(JNIEnv*, jclass, jlong, jlong, jint, jint) {}
+void SC_nSetWindowCrop(JNIEnv*, jclass, jlong, jlong, jint, jint, jint, jint) {}
+void SC_nSetCornerRadius(JNIEnv*, jclass, jlong, jlong, jfloat) {}
+void SC_nSetBackgroundBlurRadius(JNIEnv*, jclass, jlong, jlong, jint) {}
+void SC_nSetLayerStack(JNIEnv*, jclass, jlong, jlong, jint) {}
+void SC_nSetTransparentRegionHint(JNIEnv*, jclass, jlong, jlong, jobject) {}
+void SC_nSetTrustedOverlay(JNIEnv*, jclass, jlong, jlong, jboolean) {}
+void SC_nSetGeometry(JNIEnv*, jclass, jlong, jlong, jobject, jobject, jlong) {}
+void SC_nSetColor(JNIEnv*, jclass, jlong, jlong, jfloatArray) {}
+void SC_nSetColorTransform(JNIEnv*, jclass, jlong, jlong, jfloatArray, jfloatArray) {}
+void SC_nSetColorSpaceAgnostic(JNIEnv*, jclass, jlong, jlong, jboolean) {}
+void SC_nSetFrameRateSelectionPriority(JNIEnv*, jclass, jlong, jlong, jint) {}
+void SC_nSetDropInputMode(JNIEnv*, jclass, jlong, jlong, jint) {}
+
+// android.view.SurfaceSession (ViewRootImpl creates one) — no-op create/destroy.
+jlong SS_nCreate(JNIEnv*, jclass) { return sc_handle(); }
+void SS_nDestroy(JNIEnv*, jclass, jlong) {}
+const JNINativeMethod kSurfaceSession[] = {
+    {"nativeCreate", "()J", reinterpret_cast<void*>(SS_nCreate)},
+    {"nativeDestroy", "(J)V", reinterpret_cast<void*>(SS_nDestroy)},
+};
+
+const JNINativeMethod kSurfaceControl[] = {
+    {"nativeGetNativeTransactionFinalizer", "()J", reinterpret_cast<void*>(SC_nGetNativeTransactionFinalizer)},
+    {"nativeCreateTransaction", "()J", reinterpret_cast<void*>(SC_nCreateTransaction)},
+    {"nativeCreate", "(Landroid/view/SurfaceSession;Ljava/lang/String;IIIIJLandroid/os/Parcel;)J", reinterpret_cast<void*>(SC_nCreate)},
+    {"nativeReadFromParcel", "(Landroid/os/Parcel;)J", reinterpret_cast<void*>(SC_nReadFromParcel)},
+    {"nativeReadTransactionFromParcel", "(Landroid/os/Parcel;)J", reinterpret_cast<void*>(SC_nReadTransactionFromParcel)},
+    {"nativeCopyFromSurfaceControl", "(J)J", reinterpret_cast<void*>(SC_nCopyFromSurfaceControl)},
+    {"nativeMirrorSurface", "(J)J", reinterpret_cast<void*>(SC_nMirrorSurface)},
+    {"nativeGetTransactionId", "(J)J", reinterpret_cast<void*>(SC_nGetTransactionId)},
+    {"nativeApplyTransaction", "(JZ)V", reinterpret_cast<void*>(SC_nApplyTransaction)},
+    {"nativeMergeTransaction", "(JJ)V", reinterpret_cast<void*>(SC_nMergeTransaction)},
+    {"nativeClearTransaction", "(J)V", reinterpret_cast<void*>(SC_nClearTransaction)},
+    {"nativeSetAnimationTransaction", "(J)V", reinterpret_cast<void*>(SC_nSetAnimationTransaction)},
+    {"nativeWriteToParcel", "(JLandroid/os/Parcel;)V", reinterpret_cast<void*>(SC_nWriteToParcel)},
+    {"nativeWriteTransactionToParcel", "(JLandroid/os/Parcel;)V", reinterpret_cast<void*>(SC_nWriteTransactionToParcel)},
+    {"nativeRelease", "(J)V", reinterpret_cast<void*>(SC_nRelease)},
+    {"nativeDisconnect", "(J)V", reinterpret_cast<void*>(SC_nDisconnect)},
+    {"nativeUpdateDefaultBufferSize", "(JII)V", reinterpret_cast<void*>(SC_nUpdateDefaultBufferSize)},
+    {"nativeReparent", "(JJJ)V", reinterpret_cast<void*>(SC_nReparent)},
+    {"nativeSetLayer", "(JJI)V", reinterpret_cast<void*>(SC_nSetLayer)},
+    {"nativeSetRelativeLayer", "(JJJI)V", reinterpret_cast<void*>(SC_nSetRelativeLayer)},
+    {"nativeSetPosition", "(JJFF)V", reinterpret_cast<void*>(SC_nSetPosition)},
+    {"nativeSetScale", "(JJFF)V", reinterpret_cast<void*>(SC_nSetScale)},
+    {"nativeSetSize", "(JJII)V", reinterpret_cast<void*>(SC_nSetSize)},
+    {"nativeSetAlpha", "(JJF)V", reinterpret_cast<void*>(SC_nSetAlpha)},
+    {"nativeSetMatrix", "(JJFFFF)V", reinterpret_cast<void*>(SC_nSetMatrix)},
+    {"nativeSetFlags", "(JJII)V", reinterpret_cast<void*>(SC_nSetFlags)},
+    {"nativeSetWindowCrop", "(JJIIII)V", reinterpret_cast<void*>(SC_nSetWindowCrop)},
+    {"nativeSetCornerRadius", "(JJF)V", reinterpret_cast<void*>(SC_nSetCornerRadius)},
+    {"nativeSetBackgroundBlurRadius", "(JJI)V", reinterpret_cast<void*>(SC_nSetBackgroundBlurRadius)},
+    {"nativeSetLayerStack", "(JJI)V", reinterpret_cast<void*>(SC_nSetLayerStack)},
+    {"nativeSetTransparentRegionHint", "(JJLandroid/graphics/Region;)V", reinterpret_cast<void*>(SC_nSetTransparentRegionHint)},
+    {"nativeSetTrustedOverlay", "(JJZ)V", reinterpret_cast<void*>(SC_nSetTrustedOverlay)},
+    {"nativeSetGeometry", "(JJLandroid/graphics/Rect;Landroid/graphics/Rect;J)V", reinterpret_cast<void*>(SC_nSetGeometry)},
+    {"nativeSetColor", "(JJ[F)V", reinterpret_cast<void*>(SC_nSetColor)},
+    {"nativeSetColorTransform", "(JJ[F[F)V", reinterpret_cast<void*>(SC_nSetColorTransform)},
+    {"nativeSetColorSpaceAgnostic", "(JJZ)V", reinterpret_cast<void*>(SC_nSetColorSpaceAgnostic)},
+    {"nativeSetFrameRateSelectionPriority", "(JJI)V", reinterpret_cast<void*>(SC_nSetFrameRateSelectionPriority)},
+    {"nativeSetDropInputMode", "(JJI)V", reinterpret_cast<void*>(SC_nSetDropInputMode)},
+};
+
 bool reg(JNIEnv* env, const char* cls, const JNINativeMethod* m, jint n) {
   jclass c = env->FindClass(cls);
   if (c == nullptr) {
@@ -3062,5 +3167,10 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "com/android/internal/util/VirtualRefBasePtr", kVirtualRefBasePtr, n(kVirtualRefBasePtr)) && ok;
   ok = reg(env, "android/util/PathParser", kPathParser, n(kPathParser)) && ok;
   ok = reg(env, "android/graphics/drawable/VectorDrawable", kVectorDrawable, n(kVectorDrawable)) && ok;
+  // SurfaceControl no-op floor is best-effort — it must not gate the graphics floor (a failure
+  // here would skip the font seam + demos in load_acl_graphics). Absent -> dialogs still crash;
+  // present -> ViewRootImpl.setView survives. Grown empirically against a real Dialog.
+  reg(env, "android/view/SurfaceControl", kSurfaceControl, n(kSurfaceControl));
+  reg(env, "android/view/SurfaceSession", kSurfaceSession, n(kSurfaceSession));
   return ok ? JNI_OK : JNI_ERR;
 }

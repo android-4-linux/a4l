@@ -340,6 +340,10 @@ public final class HostBootstrap {
         // this context needs a real Display (Wayland output metrics).
         @Override public android.view.Display getDisplay() { return buildDisplay(); }
         public android.view.Display getDisplayNoVerify() { return buildDisplay(); }
+        // ContextWrapper delegates this to a null base on this context; ViewRootImpl.<init>
+        // (Dialog/PopupWindow add path) reads getBasePackageName(), so a null-base delegation
+        // would NPE. Return the app package (getOpPackageName is already overridden below).
+        public String getBasePackageName() { return pkg; }
         @Override public android.os.Looper getMainLooper() {
             return android.os.Looper.getMainLooper();
         }
@@ -546,6 +550,9 @@ public final class HostBootstrap {
             if ("android.net.ConnectivityManager".equals(serviceClass.getName())) return "connectivity";
             if ("android.bluetooth.BluetoothManager".equals(serviceClass.getName())) return "bluetooth";
             if (serviceClass == android.os.storage.StorageManager.class) return "storage";
+            // ViewRootImpl.<init> reads getSystemService(AudioManager.class) (navigation sound
+            // effects); map it so the Dialog/PopupWindow add path gets a real AudioManager.
+            if (serviceClass == android.media.AudioManager.class) return "audio";
             return null;
         }
 
