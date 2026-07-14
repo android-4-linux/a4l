@@ -18,8 +18,8 @@ int main() {
   std::printf("  address      = %s\n", s.address.c_str());
   std::printf("  name         = %s\n", s.name.c_str());
   std::printf("  discovering  = %s\n", s.discovering ? "true" : "false");
-  std::printf("  bonded (%zu):\n", s.bonded.size());
-  for (const acl::bt::BtDevice& d : s.bonded)
+  std::printf("  devices (%zu):\n", s.devices.size());
+  for (const acl::bt::BtDevice& d : s.devices)
     std::printf("    %s  \"%s\"  class=0x%x  bond=%d  connected=%s\n", d.address.c_str(),
                 d.name.c_str(), d.cls, d.bond_state, d.connected ? "y" : "n");
   return 0;

@@ -5,7 +5,7 @@
 package android.bluetooth;
 
 /** A remote device, keyed by address; properties resolve from the cached BlueZ Device1. */
-public final class BluetoothDevice {
+public final class BluetoothDevice implements android.os.Parcelable {
     public static final int BOND_NONE = 10;
     public static final int BOND_BONDING = 11;
     public static final int BOND_BONDED = 12;
@@ -44,4 +44,17 @@ public final class BluetoothDevice {
         return (o instanceof BluetoothDevice) && mAddress.equals(((BluetoothDevice) o).mAddress);
     }
     @Override public int hashCode() { return mAddress.hashCode(); }
+
+    // Parcelable so it can ride as EXTRA_DEVICE in ACTION_FOUND / ACTION_BOND_STATE_CHANGED.
+    @Override public int describeContents() { return 0; }
+    @Override public void writeToParcel(android.os.Parcel out, int flags) { out.writeString(mAddress); }
+    public static final android.os.Parcelable.Creator<BluetoothDevice> CREATOR =
+            new android.os.Parcelable.Creator<BluetoothDevice>() {
+                @Override public BluetoothDevice createFromParcel(android.os.Parcel in) {
+                    return new BluetoothDevice(in.readString());
+                }
+                @Override public BluetoothDevice[] newArray(int size) {
+                    return new BluetoothDevice[size];
+                }
+            };
 }

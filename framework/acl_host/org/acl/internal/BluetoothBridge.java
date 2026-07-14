@@ -3,6 +3,9 @@
 // clean-room android.bluetooth.* shims. No GPL-3.0 sources.
 package org.acl.internal;
 
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+
 /**
  * The native bridge from the clean-room {@code android.bluetooth.*} shims to the acl
  * svc/bluetooth host BlueZ backend. All values are read off the backend's cached BlueZ object
@@ -20,6 +23,7 @@ public final class BluetoothBridge {
     static native String nDeviceName(String address);
     static native int nDeviceClass(String address);
     static native int nDeviceBondState(String address);  // BluetoothDevice.BOND_* (10/11/12)
+    static native String[] nAllDevices();       // paired + discovered (for ACTION_FOUND diffing)
     static native boolean nSetPowered(boolean on);
     static native boolean nStartDiscovery();
     static native boolean nStopDiscovery();
@@ -59,4 +63,70 @@ public final class BluetoothBridge {
     public static boolean stopDiscovery() {
         try { return nStopDiscovery(); } catch (Throwable t) { return false; }
     }
+    public static String[] allDevices() {
+        try { String[] a = nAllDevices(); return a != null ? a : new String[0]; }
+        catch (Throwable t) { return new String[0]; }
+    }
+
+    // ── P2 broadcasts ────────────────────────────────────────────────────────────────────
+    // The native svc/bluetooth backend fires onBluetoothChanged() on the D-Bus thread when the
+    // adapter/devices change; hop to the app main thread and diff against the last-seen state to
+    // emit the android.bluetooth ACTION_* broadcasts through the app Context's receiver bus.
+    private static android.os.Handler sMain;
+    private static boolean sInitialized;
+    private static int sPrevState = BluetoothAdapter.STATE_OFF;
+    private static boolean sPrevDiscovering;
+    private static java.util.HashSet<String> sSeen = new java.util.HashSet<>();
+
+    /** Called from the native change sink (D-Bus thread). */
+    public static void onBluetoothChanged() {
+        android.os.Handler h;
+        synchronized (BluetoothBridge.class) {
+            if (sMain == null) sMain = new android.os.Handler(android.os.Looper.getMainLooper());
+            h = sMain;
+        }
+        h.post(new Runnable() { @Override public void run() { deliverChanges(); } });
+    }
+
+    private static void deliverChanges() {  // main thread
+        final int state = adapterState();
+        final boolean discovering = isDiscovering();
+        final String[] all = allDevices();
+        final java.util.HashSet<String> now = new java.util.HashSet<>();
+        for (String a : all) now.add(a);
+
+        if (!sInitialized) {  // baseline; don't replay the current world as "changes"
+            sInitialized = true;
+            sPrevState = state;
+            sPrevDiscovering = discovering;
+            sSeen = now;
+            return;
+        }
+
+        if (state != sPrevState) {
+            android.content.Intent i = new android.content.Intent(BluetoothAdapter.ACTION_STATE_CHANGED);
+            i.putExtra(BluetoothAdapter.EXTRA_PREVIOUS_STATE, sPrevState);
+            i.putExtra(BluetoothAdapter.EXTRA_STATE, state);
+            HostBootstrap.deliverBroadcast(i);
+            sPrevState = state;
+        }
+        if (discovering != sPrevDiscovering) {
+            HostBootstrap.deliverBroadcast(new android.content.Intent(discovering
+                    ? BluetoothAdapter.ACTION_DISCOVERY_STARTED
+                    : BluetoothAdapter.ACTION_DISCOVERY_FINISHED));
+            sPrevDiscovering = discovering;
+        }
+        // Newly-seen devices → ACTION_FOUND (getRemoteDevice yields a Parcelable BluetoothDevice).
+        final BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+        for (String addr : all) {
+            if (!sSeen.contains(addr)) {
+                android.content.Intent i = new android.content.Intent(BluetoothDevice.ACTION_FOUND);
+                i.putExtra(BluetoothDevice.EXTRA_DEVICE, adapter.getRemoteDevice(addr));
+                i.putExtra(BluetoothDevice.EXTRA_NAME, deviceName(addr));
+                HostBootstrap.deliverBroadcast(i);
+            }
+        }
+        sSeen = now;
+    }
 }
+

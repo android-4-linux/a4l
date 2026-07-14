@@ -22,15 +22,47 @@ std::unique_ptr<IBtBackend>& backend() {
   return b;
 }
 
+// For the async change sink: the backend fires it on the D-Bus event-loop thread, so we attach
+// that thread to the JVM (as a daemon, once) and ping BluetoothBridge.onBluetoothChanged(),
+// which hops to the app main thread to diff + deliver the ACTION_* broadcasts (P2).
+JavaVM* g_vm = nullptr;
+jclass g_bridge_cls = nullptr;      // global ref
+jmethodID g_on_changed = nullptr;   // static void onBluetoothChanged()
+
+void bt_sink(const AndroidBtState&) {
+  if (g_vm == nullptr || g_bridge_cls == nullptr || g_on_changed == nullptr) return;
+  JNIEnv* e = nullptr;
+  if (g_vm->GetEnv(reinterpret_cast<void**>(&e), JNI_VERSION_1_6) != JNI_OK) {
+    if (g_vm->AttachCurrentThreadAsDaemon(reinterpret_cast<void**>(&e), nullptr) != JNI_OK) return;
+  }
+  e->CallStaticVoidMethod(g_bridge_cls, g_on_changed);
+  if (e->ExceptionCheck() == JNI_TRUE) e->ExceptionClear();
+}
+
 // Look up one bonded device by address in the current snapshot.
 const BtDevice* find_device(const AndroidBtState& s, JNIEnv* env, jstring jaddr) {
   if (jaddr == nullptr) return nullptr;
   const char* c = env->GetStringUTFChars(jaddr, nullptr);
   const std::string addr(c != nullptr ? c : "");
   if (c != nullptr) env->ReleaseStringUTFChars(jaddr, c);
-  for (const BtDevice& d : s.bonded)
+  for (const BtDevice& d : s.devices)
     if (d.address == addr) return &d;
   return nullptr;
+}
+
+// Build a String[] of the addresses in `s` selected by `pred(device)`.
+template <class Pred>
+jobjectArray addresses(JNIEnv* env, const AndroidBtState& s, Pred pred) {
+  std::vector<const BtDevice*> sel;
+  for (const BtDevice& d : s.devices)
+    if (pred(d)) sel.push_back(&d);
+  jclass str_cls = env->FindClass("java/lang/String");
+  jobjectArray arr = env->NewObjectArray(static_cast<jsize>(sel.size()), str_cls, nullptr);
+  if (arr != nullptr)
+    for (jsize i = 0; i < static_cast<jsize>(sel.size()); ++i)
+      env->SetObjectArrayElement(arr, i, env->NewStringUTF(sel[i]->address.c_str()));
+  env->DeleteLocalRef(str_cls);
+  return arr;
 }
 
 // BluetoothAdapter.getState() (STATE_OFF when no adapter/backend).
@@ -54,13 +86,13 @@ jboolean JNICALL n_is_discovering(JNIEnv*, jclass) {
 jobjectArray JNICALL n_bonded_addresses(JNIEnv* env, jclass) {
   const IBtBackend* b = backend().get();
   const AndroidBtState s = b != nullptr ? b->snapshot() : AndroidBtState{};
-  jclass str_cls = env->FindClass("java/lang/String");
-  jobjectArray arr = env->NewObjectArray(static_cast<jsize>(s.bonded.size()), str_cls, nullptr);
-  if (arr != nullptr)
-    for (jsize i = 0; i < static_cast<jsize>(s.bonded.size()); ++i)
-      env->SetObjectArrayElement(arr, i, env->NewStringUTF(s.bonded[i].address.c_str()));
-  env->DeleteLocalRef(str_cls);
-  return arr;
+  return addresses(env, s, [](const BtDevice& d) { return d.bond_state == kBondBonded; });
+}
+// All known device addresses (paired + discovered) — for ACTION_FOUND diffing (P2).
+jobjectArray JNICALL n_all_devices(JNIEnv* env, jclass) {
+  const IBtBackend* b = backend().get();
+  const AndroidBtState s = b != nullptr ? b->snapshot() : AndroidBtState{};
+  return addresses(env, s, [](const BtDevice&) { return true; });
 }
 jstring JNICALL n_device_name(JNIEnv* env, jclass, jstring addr) {
   const IBtBackend* b = backend().get();
@@ -116,6 +148,8 @@ void register_bt_natives(JNIEnv* env) {
        reinterpret_cast<void*>(&n_is_discovering)},
       {const_cast<char*>("nBondedAddresses"), const_cast<char*>("()[Ljava/lang/String;"),
        reinterpret_cast<void*>(&n_bonded_addresses)},
+      {const_cast<char*>("nAllDevices"), const_cast<char*>("()[Ljava/lang/String;"),
+       reinterpret_cast<void*>(&n_all_devices)},
       {const_cast<char*>("nDeviceName"), const_cast<char*>("(Ljava/lang/String;)Ljava/lang/String;"),
        reinterpret_cast<void*>(&n_device_name)},
       {const_cast<char*>("nDeviceClass"), const_cast<char*>("(Ljava/lang/String;)I"),
@@ -132,9 +166,17 @@ void register_bt_natives(JNIEnv* env) {
   if (env->RegisterNatives(cls, m, sizeof(m) / sizeof(m[0])) != JNI_OK) {
     env->ExceptionClear();
     log::w(kTag, "RegisterNatives(BluetoothBridge) failed");
-  } else {
-    log::i(kTag, "bluetooth natives registered (backend: {})", backend()->name());
+    env->DeleteLocalRef(cls);
+    return;
   }
+  log::i(kTag, "bluetooth natives registered (backend: {})", backend()->name());
+
+  // Arm the async change sink → BluetoothBridge.onBluetoothChanged() (P2 broadcasts).
+  env->GetJavaVM(&g_vm);
+  g_bridge_cls = static_cast<jclass>(env->NewGlobalRef(cls));
+  g_on_changed = env->GetStaticMethodID(cls, "onBluetoothChanged", "()V");
+  if (g_on_changed != nullptr && backend()) backend()->set_sink(&bt_sink);
+  else env->ExceptionClear();
   env->DeleteLocalRef(cls);
 }
 

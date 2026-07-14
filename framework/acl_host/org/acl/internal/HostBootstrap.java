@@ -202,7 +202,23 @@ public final class HostBootstrap {
      */
     public static android.content.Context newAppContext(String apkPath, String frameworkResPath,
                                                         String packageName) {
-        return new AppContext(appResources(apkPath, frameworkResPath), packageName);
+        AppContext c = new AppContext(appResources(apkPath, frameworkResPath), packageName);
+        sAppContext = c;  // the current app context, for acl-sourced broadcasts (battery/bluetooth)
+        return c;
+    }
+
+    private static AppContext sAppContext;
+
+    /** Deliver an acl-sourced Intent to the app context's registered receivers (main thread). */
+    public static void deliverBroadcast(android.content.Intent intent) {
+        final AppContext c = sAppContext;
+        if (c == null || intent == null) return;
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            c.deliverBroadcast(intent);
+        } else {
+            new android.os.Handler(android.os.Looper.getMainLooper())
+                    .post(new Runnable() { @Override public void run() { c.deliverBroadcast(intent); } });
+        }
     }
 
     private static Resources appResources(String apkPath, String frameworkResPath) {
@@ -419,8 +435,15 @@ public final class HostBootstrap {
         // served from the host UPower backend (svc/battery via BatteryBridge); other actions get
         // an empty Intent. A receiver registered for the battery action is delivered the current
         // state once (sticky semantics). General broadcasts remain an svc/ concern.
+        // Registered {receiver, filter} pairs — a minimal broadcast bus for the events acl
+        // actually sources (battery, bluetooth). deliverBroadcast fans an Intent to matches.
+        private final java.util.List<Object[]> receivers = new java.util.ArrayList<>();
+
         private android.content.Intent stickyFor(android.content.BroadcastReceiver r,
                                                  android.content.IntentFilter f) {
+            if (r != null && f != null) {
+                synchronized (receivers) { receivers.add(new Object[] { r, f }); }
+            }
             android.content.Intent sticky = new android.content.Intent();
             if (f != null && f.hasAction(android.content.Intent.ACTION_BATTERY_CHANGED)) {
                 try { sticky = BatteryBridge.batteryIntent(); } catch (Throwable ignored) {}
@@ -429,6 +452,25 @@ public final class HostBootstrap {
                 }
             }
             return sticky;
+        }
+
+        // Fan `intent` out to every registered receiver whose filter carries its action. Callers
+        // deliver on the main thread (HostBootstrap.deliverBroadcast).
+        void deliverBroadcast(android.content.Intent intent) {
+            if (intent == null || intent.getAction() == null) return;
+            final String action = intent.getAction();
+            final java.util.List<android.content.BroadcastReceiver> targets = new java.util.ArrayList<>();
+            synchronized (receivers) {
+                for (Object[] e : receivers) {
+                    if (((android.content.IntentFilter) e[1]).hasAction(action)) {
+                        targets.add((android.content.BroadcastReceiver) e[0]);
+                    }
+                }
+            }
+            android.util.Log.i("acl.broadcast", "deliver " + action + " -> " + targets.size() + " receiver(s)");
+            for (android.content.BroadcastReceiver r : targets) {
+                try { r.onReceive(this, intent); } catch (Throwable ignored) {}
+            }
         }
         @Override public android.content.Intent registerReceiver(
                 android.content.BroadcastReceiver r, android.content.IntentFilter f) {
@@ -448,9 +490,15 @@ public final class HostBootstrap {
                 String perm, android.os.Handler h, int flags) {
             return stickyFor(r, f);
         }
-        @Override public void unregisterReceiver(android.content.BroadcastReceiver r) {}
-        @Override public void sendBroadcast(android.content.Intent i) {}
-        @Override public void sendBroadcast(android.content.Intent i, String perm) {}
+        @Override public void unregisterReceiver(android.content.BroadcastReceiver r) {
+            synchronized (receivers) {
+                for (java.util.Iterator<Object[]> it = receivers.iterator(); it.hasNext();) {
+                    if (it.next()[0] == r) it.remove();
+                }
+            }
+        }
+        @Override public void sendBroadcast(android.content.Intent i) { deliverBroadcast(i); }
+        @Override public void sendBroadcast(android.content.Intent i, String perm) { deliverBroadcast(i); }
 
         // Main-thread dispatch: ContextWrapper delegates these to the (null) base, so views that
         // post to the main thread (ListView/RecyclerView.getMainExecutor, etc.) NPE. Back them

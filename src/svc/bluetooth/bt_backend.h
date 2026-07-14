@@ -37,12 +37,12 @@ struct BtDevice {
 
 // The Android-visible adapter truth, independent of the host daemon.
 struct AndroidBtState {
-  bool present = false;         // an adapter exists at all
-  int state = kStateOff;        // STATE_ON when Powered, else STATE_OFF
-  std::string address;          // getAddress()
-  std::string name;             // getName() (Alias)
-  bool discovering = false;     // isDiscovering()
-  std::vector<BtDevice> bonded; // getBondedDevices() (Paired devices)
+  bool present = false;          // an adapter exists at all
+  int state = kStateOff;         // STATE_ON when Powered, else STATE_OFF
+  std::string address;           // getAddress()
+  std::string name;              // getName() (Alias)
+  bool discovering = false;      // isDiscovering()
+  std::vector<BtDevice> devices; // all known devices; getBondedDevices() filters bond_state
 };
 
 // A backend owns a D-Bus proxy to the host Bluetooth daemon. snapshot() answers the

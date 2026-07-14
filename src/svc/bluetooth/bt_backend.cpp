@@ -161,16 +161,14 @@ class BlueZBackend : public IBtBackend {
         }
         if (auto dv = ifaces.find("org.bluez.Device1"); dv != ifaces.end()) {
           const PropMap& p = dv->second;
-          if (get_bool(p, "Paired")) {
-            BtDevice d;
-            d.address = get_str(p, "Address");
-            d.name = get_str(p, "Alias");
-            if (d.name.empty()) d.name = get_str(p, "Name");
-            d.cls = static_cast<int>(get_u32(p, "Class"));
-            d.bond_state = kBondBonded;
-            d.connected = get_bool(p, "Connected");
-            st.bonded.push_back(std::move(d));
-          }
+          BtDevice d;
+          d.address = get_str(p, "Address");
+          d.name = get_str(p, "Alias");
+          if (d.name.empty()) d.name = get_str(p, "Name");
+          d.cls = static_cast<int>(get_u32(p, "Class"));
+          d.bond_state = get_bool(p, "Paired") ? kBondBonded : kBondNone;
+          d.connected = get_bool(p, "Connected");
+          st.devices.push_back(std::move(d));  // all devices; JNI filters bonded
         }
       }
     } catch (const sdbus::Error& e) {
