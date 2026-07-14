@@ -378,6 +378,21 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   const std::uint64_t ops_before = drawops ? drawops() : 0;
   if (s->m_draw != nullptr && s->canvas != nullptr) env->CallVoidMethod(s->view, s->m_draw, s->canvas);
   if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); return; }
+  // Overlay pass: composite any Dialog/PopupWindow decors (WindowManagerGlobal.mViews) over the
+  // Activity in the same surface. HostBootstrap owns the enumeration/measure/layout/draw.
+  static jclass overlay_cls = nullptr;
+  static jmethodID overlay_present = nullptr;
+  if (overlay_present == nullptr) {
+    if (jclass b = env->FindClass("org/acl/internal/HostBootstrap")) {
+      overlay_cls = static_cast<jclass>(env->NewGlobalRef(b));
+      overlay_present = env->GetStaticMethodID(b, "presentOverlays", "(Landroid/graphics/Canvas;II)V");
+      env->DeleteLocalRef(b);
+    }
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  }
+  if (overlay_present != nullptr && s->canvas != nullptr)
+    env->CallStaticVoidMethod(overlay_cls, overlay_present, s->canvas, s->w, s->h);
+  if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
   static auto rnodes = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_rendernodes"));
   static auto recstats = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_recstats"));
   if (diag) {

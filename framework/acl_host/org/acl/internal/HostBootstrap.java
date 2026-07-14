@@ -532,12 +532,14 @@ public final class HostBootstrap {
                 }
             }
             if ("window".equals(name)) {
-                // Dialog/PopupWindow/Toast: Window.setWindowManager casts the result to the
-                // concrete (final) WindowManagerImpl and calls createLocalWindowManager, so we
-                // must return a real one. Seed WindowManagerGlobal's no-Binder session first so
-                // the subsequent addView -> ViewRootImpl.setView doesn't NPE on a null session.
+                // Dialog/PopupWindow/Toast: Window.setWindowManager casts to the final WindowManagerImpl
+                // (can't subclass) + calls createLocalWindowManager, so return a real one. Its addView
+                // -> WindowManagerGlobal.addView lands the decor in mViews; acl composites from there
+                // (presentOverlays) and the compat-delegate seed keeps ViewRootImpl.setView from
+                // crashing on device-only compat paths.
                 try {
                     seedWindowManagerGlobal();
+                    seedCompatCallbacks();
                     return Class.forName("android.view.WindowManagerImpl")
                             .getConstructor(android.content.Context.class).newInstance(this);
                 } catch (Throwable t) {
@@ -970,6 +972,7 @@ public final class HostBootstrap {
     // caller can drive onCreate then read getWindow().getDecorView() as the content view.
     public static void attachActivity(android.app.Activity a, android.content.Context ctx)
             throws Exception {
+        seedCompatCallbacks();  // before any Dialog: keep opt-in compat changes off (crash-free)
         // Real Activity.attach() applies the activity/app theme from ActivityInfo.getThemeResource()
         // before onCreate; layout inflation (obtainStyledAttributes) then resolves framework + app
         // attributes off it. Without it the Activity's ContextThemeWrapper theme is bare (Themes=[])
@@ -1139,6 +1142,77 @@ public final class HostBootstrap {
         }
     }
 
+    // ── Overlay windows (Dialog / PopupWindow / Toast) ────────────────────────────────────────────
+    // acl runs a single Wayland surface for the Activity. A Dialog/PopupWindow adds its decor via
+    // WindowManager.addView. AclWindowManager (below) intercepts that and records the decor here
+    // instead of building a real ViewRootImpl; the present loop composites the list over the
+    // Activity. Add order == Z order (last = topmost). removeView drops it (stops drawing).
+    // WindowManagerImpl is final and WindowManagerGlobal's ctor private, so acl can't intercept
+    // addView — it reads WindowManagerGlobal.mViews (where addView lands the decor) live each frame.
+    private static final java.util.WeakHashMap<android.view.View, Boolean> sOverlayAttached =
+            new java.util.WeakHashMap<>();
+
+    public static void presentOverlays(android.graphics.Canvas canvas, int w, int h) {
+        if (canvas == null) return;
+        try {
+            Class<?> wmgCls = Class.forName("android.view.WindowManagerGlobal");
+            Object wmg = wmgCls.getMethod("getInstance").invoke(null);
+            java.util.List<?> views = new java.util.ArrayList<>((java.util.List<?>) getField(wmgCls, wmg, "mViews"));
+            java.util.List<?> params = new java.util.ArrayList<>((java.util.List<?>) getField(wmgCls, wmg, "mParams"));
+            java.util.List<?> roots = new java.util.ArrayList<>((java.util.List<?>) getField(wmgCls, wmg, "mRoots"));
+            for (int i = 0; i < views.size() && i < params.size(); i++) {
+                android.view.View v = (android.view.View) views.get(i);
+                android.view.WindowManager.LayoutParams lp =
+                        (android.view.WindowManager.LayoutParams) params.get(i);
+                if (v == null || lp == null) continue;
+                if (i < roots.size()) neuterViewRoot(roots.get(i));
+                if (!Boolean.TRUE.equals(sOverlayAttached.get(v))) {
+                    if (!v.isAttachedToWindow()) attachDecorToWindow(v);
+                    sOverlayAttached.put(v, Boolean.TRUE);
+                }
+                if ((lp.flags & 2 /*FLAG_DIM_BEHIND*/) != 0) {
+                    int a = (int) (Math.max(0f, Math.min(1f, lp.dimAmount)) * 255f);
+                    canvas.drawColor(a << 24);  // black scrim behind the dialog
+                }
+                drawOverlayView(canvas, v, lp, w, h);
+            }
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: presentOverlays: " + t);
+        }
+    }
+
+    // Stop a Dialog's real ViewRootImpl from ever scheduling its own traversal (acl drives render).
+    private static void neuterViewRoot(Object vri) {
+        if (vri == null) return;
+        try { setField(Class.forName("android.view.ViewRootImpl"), vri, "mTraversalScheduled", Boolean.TRUE); }
+        catch (Throwable ignored) {}
+    }
+
+    // Measure/layout the overlay decor per its LayoutParams (MATCH/WRAP/exact + gravity) and draw it.
+    private static void drawOverlayView(android.graphics.Canvas canvas, android.view.View v,
+            android.view.WindowManager.LayoutParams lp, int w, int h) {
+        final int MATCH = -1, WRAP = -2;
+        int wspec = measureSpec(lp.width, w, MATCH, WRAP);
+        int hspec = measureSpec(lp.height, h, MATCH, WRAP);
+        v.measure(wspec, hspec);
+        int mw = v.getMeasuredWidth(), mh = v.getMeasuredHeight();
+        if (mw <= 0 || mh <= 0) return;
+        v.layout(0, 0, mw, mh);
+        int gravity = lp.gravity == 0 ? android.view.Gravity.CENTER : lp.gravity;
+        android.graphics.Rect out = new android.graphics.Rect();
+        android.view.Gravity.apply(gravity, mw, mh, new android.graphics.Rect(0, 0, w, h), lp.x, lp.y, out);
+        int save = canvas.save();
+        canvas.translate(out.left, out.top);
+        v.draw(canvas);
+        canvas.restoreToCount(save);
+    }
+
+    private static int measureSpec(int lpDim, int avail, int match, int wrap) {
+        if (lpDim == match) return android.view.View.MeasureSpec.makeMeasureSpec(avail, android.view.View.MeasureSpec.EXACTLY);
+        if (lpDim == wrap) return android.view.View.MeasureSpec.makeMeasureSpec(avail, android.view.View.MeasureSpec.AT_MOST);
+        return android.view.View.MeasureSpec.makeMeasureSpec(lpDim, android.view.View.MeasureSpec.EXACTLY);
+    }
+
     public static void attachDecorToWindow(android.view.View decor) {
         if (decor == null) return;
         try {
@@ -1249,6 +1323,12 @@ public final class HostBootstrap {
                     && t.getCause() != null) ? t.getCause() : t;
             System.err.println("acl HostBootstrap: attachDecorToWindow deferred: " + c);
         }
+    }
+
+    private static Object getField(Class<?> c, Object obj, String name) throws Exception {
+        java.lang.reflect.Field f = c.getDeclaredField(name);
+        f.setAccessible(true);
+        return f.get(obj);
     }
 
     private static void setField(Class<?> c, Object obj, String name, Object val) throws Exception {
@@ -1394,10 +1474,50 @@ public final class HostBootstrap {
         sWmgSeeded = true;
         try {
             Class<?> wmg = Class.forName("android.view.WindowManagerGlobal");
-            Object session = noop(Class.forName("android.view.IWindowSession"));
-            setStaticField(wmg, "sWindowSession", session);
+            setStaticField(wmg, "sWindowSession", makeWindowSession());
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: seedWindowManagerGlobal failed: " + t);
+        }
+    }
+
+    // A no-Binder IWindowSession for the addView -> ViewRootImpl.setView path (Dialog/PopupWindow).
+    // addToDisplayAsUser/relayout must return ADD_OKAY (0) AND fill the outSizeCompatScale float[]
+    // with 1.0 — a default-0 leaves ViewRootImpl.mInvCompatScale = 1/0 = Infinity, corrupting layout.
+    private static Object makeWindowSession() throws Exception {
+        Class<?> iface = Class.forName("android.view.IWindowSession");
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    String n = method.getName();
+                    if (n.startsWith("addToDisplay") || n.startsWith("relayout")) {
+                        if (a != null) for (Object arg : a)
+                            if (arg instanceof float[] && ((float[]) arg).length > 0) ((float[]) arg)[0] = 1.0f;
+                        return method.getReturnType() == void.class ? null : Integer.valueOf(0);
+                    }
+                    return defaultValue(method.getReturnType());
+                });
+    }
+
+    // Install a compat-change delegate so android.compat.Compatibility.isChangeEnabled(id) returns
+    // FALSE (old behavior) instead of the framework default TRUE ("No Compatibility callbacks set!").
+    // The default-TRUE drives device-only paths off-device — e.g. ViewRootImpl.getViewBoundsSandboxing
+    // Enabled() then calls PackageManager.queryApplicationProperty and throws a boot-classloader
+    // NoClassDefFoundError during a Dialog's setView, which was silently killing every Dialog. acl is
+    // not a real device, so disabling all opt-in compat changes is the correct + crash-free default.
+    private static boolean sCompatSeeded;
+    static synchronized void seedCompatCallbacks() {
+        if (sCompatSeeded) return;
+        sCompatSeeded = true;
+        try {
+            Class<?> compat = Class.forName("android.compat.Compatibility");
+            Class<?> delegateCls = Class.forName("android.compat.Compatibility$BehaviorChangeDelegate");
+            Object delegate = java.lang.reflect.Proxy.newProxyInstance(
+                    delegateCls.getClassLoader(), new Class<?>[]{delegateCls},
+                    (p, m, a) -> m.getName().equals("isChangeEnabled")
+                            ? Boolean.FALSE : defaultValue(m.getReturnType()));
+            compat.getMethod("setBehaviorChangeDelegate", delegateCls).invoke(null, delegate);
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: seedCompatCallbacks failed: " + t);
         }
     }
 
