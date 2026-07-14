@@ -28,6 +28,9 @@
 #include "svc/net/connectivity_jni.h"
 #include "svc/notify/notify_jni.h"
 #endif
+#if ACL_HAVE_PIPEWIRE
+#include "audio/audio_jni.h"
+#endif
 #include "audio/audio.h"
 #include "gfx/gfx.h"
 #if ACL_HAVE_VULKAN
@@ -2042,6 +2045,11 @@ class ArtVm final : public JniVm {
     // Bind org.acl.internal.BluetoothBridge (android.bluetooth.* shims) to the svc/bluetooth
     // host BlueZ backend (org.bluez).
     acl::bt::register_bt_natives(env);
+#endif
+#if ACL_HAVE_PIPEWIRE
+    // Bind org.acl.internal.AudioBridge (AudioManager master volume) to the host PipeWire
+    // default sink.
+    acl::audio::register_audio_natives(env);
 #endif
 #if ACL_HAVE_VULKAN && ACL_HAVE_WCS
     // Bind org.acl.internal.PresentDriver's native seam (the Looper-driven present, approach A).

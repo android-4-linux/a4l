@@ -411,6 +411,18 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("audio".equals(name)) {
+                // The real android.media.AudioManager (on the boot classpath); its stream-volume
+                // calls route through the seeded IAudioService → svc/audio → host PipeWire.
+                try {
+                    java.lang.reflect.Constructor<?> c = android.media.AudioManager.class
+                            .getDeclaredConstructor(android.content.Context.class);
+                    c.setAccessible(true);
+                    return c.newInstance(this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             return null;
         }
         // getSystemService(Class) → getSystemServiceName(Class) → getSystemService(String).
@@ -1044,6 +1056,30 @@ public final class HostBootstrap {
                 });
     }
 
+    // IAudioService translated to the host PipeWire master volume (svc/audio → default sink):
+    // stream get/set/adjust/mute route to AudioBridge; everything else defaults. The stream type
+    // (arg 0) is passed through but currently maps to the one master output.
+    private static Object makeAudioHandler(Class<?> iface) {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    switch (method.getName()) {
+                        case "getStreamVolume":    return AudioBridge.getVolume((Integer) a[0]);
+                        case "getStreamMaxVolume": return AudioBridge.maxVolume((Integer) a[0]);
+                        case "getStreamMinVolume": return AudioBridge.minVolume((Integer) a[0]);
+                        case "isStreamMute":       return AudioBridge.isMuted((Integer) a[0]);
+                        case "setStreamVolume":    // (int stream, int index, int flags, String pkg)
+                            AudioBridge.setVolume((Integer) a[0], (Integer) a[1]);
+                            return null;
+                        case "adjustStreamVolume": // (int stream, int direction, int flags, String pkg)
+                            AudioBridge.adjust((Integer) a[0], (Integer) a[1]);
+                            return null;
+                        default:
+                            return defaultValue(method.getReturnType());
+                    }
+                });
+    }
+
     // A DisplayInfo carrying acl's output metrics (Wayland output; 60Hz mode). Used both to
     // build the attach Display and as the IDisplayManager.getDisplayInfo result so every
     // Display object (Compose's, RecyclerView's, …) is valid.
@@ -1150,6 +1186,9 @@ public final class HostBootstrap {
         // InputManager.getInstance() resolves ServiceManager.getService("input") during the first
         // traversal (input-device / ViewConfiguration queries); a no-Binder proxy suffices.
         svc.put("input", "android.hardware.input.IInputManager");
+        // AudioManager routes stream volume through IAudioService; acl translates it to the host
+        // PipeWire master volume (svc/audio → default sink) instead of a no-op.
+        svc.put("audio", "android.media.IAudioService");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},
@@ -1162,7 +1201,8 @@ public final class HostBootstrap {
                         Class<?> iface = Class.forName(ifaceName);
                         final Object localIface = "notification".equals(name)
                                 ? makeNotificationHandler(iface)
-                                : "display".equals(name) ? makeDisplayHandler(iface) : noop(iface);
+                                : "display".equals(name) ? makeDisplayHandler(iface)
+                                : "audio".equals(name) ? makeAudioHandler(iface) : noop(iface);
                         final String descriptor = ifaceName;  // AIDL DESCRIPTOR == interface FQN
                         // Proxy IBinder (an interface) rather than new Binder() — the latter
                         // needs Binder natives. asInterface() calls queryLocalInterface and
