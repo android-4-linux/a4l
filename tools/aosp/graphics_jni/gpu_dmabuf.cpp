@@ -458,6 +458,31 @@ extern "C" long acl_graphics_gpu_begin_frame(int w, int h) {
 // Flush the shared optimal surface and copy it into dma-buf image `buffer_index` (0..1),
 // returning that buffer's descriptor. The animated loop alternates buffer_index so the
 // compositor can hold one image while the next is rendered — no in-flight overwrite.
+// DIAG: dump the just-flushed optimal surface to a PPM at $ACL_GPU_DUMP (overwritten each frame, so
+// the file holds the most-recent presented frame). PPM keeps this encoder-free; convert externally.
+static void maybe_dump_frame() {
+  const char* path = std::getenv("ACL_GPU_DUMP");
+  if (path == nullptr || *path == '\0' || !g.opt) return;
+  const int w = g.w, h = g.h;
+  std::vector<std::uint32_t> px(static_cast<std::size_t>(w) * h);
+  SkImageInfo info = SkImageInfo::Make(w, h, kBGRA_8888_SkColorType, kUnpremul_SkAlphaType);
+  if (!g.opt->readPixels(info, px.data(), static_cast<std::size_t>(w) * 4, 0, 0)) return;
+  FILE* f = std::fopen(path, "wb");
+  if (f == nullptr) return;
+  std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+  std::vector<std::uint8_t> row(static_cast<std::size_t>(w) * 3);
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      std::uint32_t p = px[static_cast<std::size_t>(y) * w + x];  // BGRA in memory (little-endian)
+      row[x * 3 + 0] = static_cast<std::uint8_t>((p >> 16) & 0xff);  // R
+      row[x * 3 + 1] = static_cast<std::uint8_t>((p >> 8) & 0xff);   // G
+      row[x * 3 + 2] = static_cast<std::uint8_t>(p & 0xff);          // B
+    }
+    std::fwrite(row.data(), 1, row.size(), f);
+  }
+  std::fclose(f);
+}
+
 extern "C" bool acl_graphics_gpu_end_frame(int buffer_index, AclDmabuf* out) {
   if (out == nullptr || !g.ready || !g.opt) return false;
   if (buffer_index < 0 || buffer_index >= kBuffers) buffer_index = 0;
@@ -466,6 +491,7 @@ extern "C" bool acl_graphics_gpu_end_frame(int buffer_index, AclDmabuf* out) {
   GrBackendSurfaceMutableState toSrc(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g.qfam);
   g.opt->flush(GrFlushInfo{}, &toSrc);
   g.gr->submit(/*syncCpu=*/true);
+  maybe_dump_frame();
   if (!copy_to_dmabuf(t)) return false;
   *out = t.info;
   return out->fd >= 0;

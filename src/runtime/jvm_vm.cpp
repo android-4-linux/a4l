@@ -108,7 +108,8 @@ struct PresentSession {
   std::unique_ptr<wm::IPresenter> presenter;
   JavaVM* vm = nullptr;
   jobject view = nullptr;    // global ref to the decor View
-  jobject canvas = nullptr;  // global ref to the android.graphics.Canvas over the GPU SkCanvas
+  jobject canvas = nullptr;  // global ref to the RecordingCanvas over the GPU SkCanvas
+  jobject root_node = nullptr;  // global ref to the present-root RenderNode backing `canvas`
   int w = 0, h = 0;
   jint wspec = 0, hspec = 0;  // MeasureSpec.EXACTLY(w/h)
   long (*gpu_begin)(int, int) = nullptr;
@@ -242,12 +243,48 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env, jclass, jobject view, jint w, jin
   // Wrap the persistent GPU SkCanvas once (begin_frame clears it each tick, same handle).
   const jlong ch = s->gpu_begin(w, h);
   if (ch != 0) {
-    if (jclass canvasC = env->FindClass("android/graphics/Canvas")) {
-      if (jmethodID cctor = env->GetMethodID(canvasC, "<init>", "(J)V")) {
-        jobject c = env->NewObject(canvasC, cctor, ch);
-        if (c != nullptr) { s->canvas = env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+    // Compose paints via Canvas.drawRenderNode, which requires an isHardwareAccelerated()
+    // RecordingCanvas — a plain Canvas throws. So back the frame with a "present-root" RenderNode:
+    // graphics_jni maps that node's RecordingCanvas onto the GPU SkCanvas (ch), so its draws land
+    // immediately AND Compose's RenderNode layers replay through it. Classic Views also draw fine
+    // (RecordingCanvas.drawRect -> BaseRecordingCanvas.nDraw* -> same immediate GPU path).
+    if (auto set_present =
+            reinterpret_cast<void (*)(jlong)>(::dlsym(RTLD_DEFAULT, "acl_graphics_set_present_canvas")))
+      set_present(ch);
+    bool recording = false;
+    if (jclass rnC = env->FindClass("android/graphics/RenderNode")) {
+      jmethodID rnCtor = env->GetMethodID(rnC, "<init>", "(Ljava/lang/String;)V");
+      jmethodID beginRec =
+          env->GetMethodID(rnC, "beginRecording", "(II)Landroid/graphics/RecordingCanvas;");
+      if (rnCtor != nullptr && beginRec != nullptr) {
+        jstring nm = env->NewStringUTF("acl$present$root");
+        jobject node = env->NewObject(rnC, rnCtor, nm);
+        env->DeleteLocalRef(nm);
+        if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
+        if (node != nullptr && env->ExceptionCheck() == JNI_FALSE) {
+          jobject c = env->CallObjectMethod(node, beginRec, w, h);
+          if (c != nullptr && env->ExceptionCheck() == JNI_FALSE) {
+            s->canvas = env->NewGlobalRef(c);
+            s->root_node = env->NewGlobalRef(node);
+            recording = true;
+            env->DeleteLocalRef(c);
+          }
+          env->DeleteLocalRef(node);
+        }
       }
-      env->DeleteLocalRef(canvasC);
+      env->DeleteLocalRef(rnC);
+    }
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+    // Fallback: no RecordingCanvas (older/odd framework) — a plain Canvas still renders classic Views.
+    if (!recording) {
+      if (jclass canvasC = env->FindClass("android/graphics/Canvas")) {
+        if (jmethodID cctor = env->GetMethodID(canvasC, "<init>", "(J)V")) {
+          jobject c = env->NewObject(canvasC, cctor, ch);
+          if (c != nullptr) { s->canvas = env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+        }
+        env->DeleteLocalRef(canvasC);
+      }
+      log::w(kTag, "PresentDriver.nOpen: RecordingCanvas unavailable; Compose layers will not replay");
     }
   }
   if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
@@ -307,8 +344,14 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   if (s->m_draw != nullptr && s->canvas != nullptr) env->CallVoidMethod(s->view, s->m_draw, s->canvas);
   if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); return; }
   static auto rnodes = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_rendernodes"));
-  if (diag) log::i(kTag, "PresentDriver.nTraverse: drawn ({} draw ops this frame, {} RenderNodes created)",
-                   drawops ? drawops() - ops_before : 0, rnodes ? rnodes() : 0);
+  static auto recstats = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_recstats"));
+  if (diag) {
+    const std::uint64_t rs = recstats ? recstats() : 0;
+    log::i(kTag, "PresentDriver.nTraverse: drawn ({} draw ops this frame, {} RenderNodes created; "
+                 "rec begins={} finishes={} replays={})",
+           drawops ? drawops() - ops_before : 0, rnodes ? rnodes() : 0,
+           (rs >> 40) & 0xfffff, (rs >> 20) & 0xfffff, rs & 0xfffff);
+  }
   const int bufidx = s->presenter->next_buffer();
   if (bufidx < 0) { if (diag) log::w(kTag, "PresentDriver.nTraverse: no free buffer"); return; }
   PresentDmabuf f{};
@@ -338,6 +381,7 @@ void JNICALL PresentDriver_nClose(JNIEnv* env, jclass, jlong sp) {
   s->presenter.reset();  // tears down the surface + disconnects
   if (s->view != nullptr) env->DeleteGlobalRef(s->view);
   if (s->canvas != nullptr) env->DeleteGlobalRef(s->canvas);
+  if (s->root_node != nullptr) env->DeleteGlobalRef(s->root_node);
   if (s->motionevent_cls != nullptr) env->DeleteGlobalRef(s->motionevent_cls);
   if (s->keyevent_cls != nullptr) env->DeleteGlobalRef(s->keyevent_cls);
   delete s;
@@ -536,6 +580,18 @@ class JniVm : public Vm {
         result = call_lifecycle(cls, activity, "onStart", "()V", false);
       if (result.is_ok())
         result = call_lifecycle(cls, activity, "onResume", "()V", false);
+      // androidx ComponentActivity's LifecycleRegistry only reaches RESUMED via the framework's
+      // Application.dispatchActivityResumed path, which acl's stub Application doesn't complete —
+      // force it so lifecycle-gated Compose content (LaunchedEffect / collectAsStateWithLifecycle /
+      // ViewModels) actually composes. Best-effort; ignore if HostBootstrap/androidx is absent.
+      if (result.is_ok()) {
+        if (jclass boot = env_->FindClass("org/acl/internal/HostBootstrap")) {
+          if (jmethodID er = env_->GetStaticMethodID(boot, "ensureResumed", "(Ljava/lang/Object;)V"))
+            env_->CallStaticVoidMethod(boot, er, activity);
+          env_->DeleteLocalRef(boot);
+        }
+        clear_exception();
+      }
       if (result.is_ok()) render_content_view(activity);
       env_->DeleteLocalRef(activity);
     }

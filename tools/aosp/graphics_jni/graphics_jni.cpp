@@ -25,11 +25,14 @@
 #include <ctime>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
 #include "SkBitmap.h"
 #include "SkCanvas.h"
+#include "SkPicture.h"
+#include "SkPictureRecorder.h"
 #include "SkClipOp.h"
 #include "SkColor.h"
 #include "SkColorSpace.h"
@@ -54,6 +57,8 @@
 #include "SkColorFilter.h"
 #include "SkPath.h"
 #include "SkPathMeasure.h"
+#include "SkPathOps.h"
+#include "SkRRect.h"
 #include "SkPathTypes.h"
 #include "SkRegion.h"
 #include "utils/SkParsePath.h"
@@ -100,6 +105,11 @@ struct AclRenderNode {
   int layerType = 0, spotShadowColor = 0, ambientShadowColor = 0;
   bool clipToBounds = true, clipToOutline = false, allowForceDark = true;
   bool hasOverlappingRendering = true;
+  // RenderNode record/replay (Compose renders its content into RenderNode layers). picture is
+  // the recorded display list (from beginRecording/endRecording); is_present_root marks acl's
+  // top-level node whose RecordingCanvas draws immediately onto the GPU SkCanvas (not a picture).
+  sk_sp<SkPicture> picture;
+  bool is_present_root = false;
 };
 
 // A shared default typeface for text, resolved once. The AOSP host Skia default SkFontMgr
@@ -144,12 +154,16 @@ jmethodID g_bitmap_ctor = nullptr;
 // A GPU-surface-owned SkCanvas (from gpu_dmabuf.cpp's begin_frame) must not be deleted by
 // the Java Canvas finalizer — the SkSurface owns it. Defined in gpu_dmabuf.cpp (same .so).
 extern "C" bool acl_graphics_canvas_borrowed(void* c);
+// A RenderNode recording canvas is owned by its SkPictureRecorder (see the RenderNode record/
+// replay block) — the Canvas finalizer must not delete it. Defined below.
+bool is_recording_canvas(void* p);
 
 // NativeAllocationRegistry finalizers (returned as function pointers to Java).
 void free_bitmap(void* p) { delete reinterpret_cast<AclBitmap*>(p); }
 void free_paint(void* p) { delete reinterpret_cast<AclPaint*>(p); }
 void free_canvas(void* p) {
   if (acl_graphics_canvas_borrowed(p)) return;  // surface-owned (GPU); not ours to delete
+  if (is_recording_canvas(p)) return;           // owned by its SkPictureRecorder; not ours
   delete reinterpret_cast<SkCanvas*>(p);
 }
 void free_path(void* p) { delete reinterpret_cast<SkPath*>(p); }
@@ -240,6 +254,38 @@ jint Bitmap_nativeConfig(JNIEnv*, jclass, jlong ptr) {
 jboolean Bitmap_nativeIsImmutable(jlong ptr) {
   auto* w = reinterpret_cast<AclBitmap*>(ptr);
   return (w != nullptr && w->immutable) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean Bitmap_nativeIsBackedByAshmem(jlong) { return JNI_FALSE; }  // @CriticalNative
+
+// Bitmap lifecycle natives Compose's VectorPainter/DrawCache exercises (draws each vector into a
+// cache Bitmap, then draws that). prepareToDraw is a GPU-upload hint (the draw path uploads
+// anyway); generationId lets Compose detect pixel changes (SkBitmap tracks it); reconfigure resizes
+// the cache. All normal JNI (env/jclass).
+void Bitmap_nativePrepareToDraw(JNIEnv*, jclass, jlong) {}
+jint Bitmap_nativeGenerationId(JNIEnv*, jclass, jlong ptr) {
+  auto* w = reinterpret_cast<AclBitmap*>(ptr);
+  return w ? static_cast<jint>(w->bitmap.getGenerationID()) : 0;
+}
+jint Bitmap_nativeRowBytes(JNIEnv*, jclass, jlong ptr) {
+  auto* w = reinterpret_cast<AclBitmap*>(ptr);
+  return w ? static_cast<jint>(w->bitmap.rowBytes()) : 0;
+}
+void Bitmap_nativeSetImmutable(JNIEnv*, jclass, jlong ptr) {
+  if (auto* w = reinterpret_cast<AclBitmap*>(ptr)) w->immutable = true;
+}
+void Bitmap_nativeSetHasMipMap(JNIEnv*, jclass, jlong, jboolean) {}
+void Bitmap_nativeSetPremultiplied(JNIEnv*, jclass, jlong, jboolean) {}
+void Bitmap_nativeSetColorSpace(JNIEnv*, jclass, jlong, jlong) {}
+void Bitmap_nativeRecycle(JNIEnv*, jclass, jlong ptr) {
+  if (auto* w = reinterpret_cast<AclBitmap*>(ptr)) w->bitmap.reset();
+}
+void Bitmap_nativeReconfigure(JNIEnv*, jclass, jlong ptr, jint w, jint h, jint config, jboolean) {
+  auto* b = reinterpret_cast<AclBitmap*>(ptr);
+  if (b == nullptr) return;
+  SkColorType ct = kN32_SkColorType;
+  if (config == 1) ct = kAlpha_8_SkColorType;
+  else if (config == 3) ct = kRGB_565_SkColorType;
+  b->bitmap.allocPixels(SkImageInfo::Make(w, h, ct, kPremul_SkAlphaType));
 }
 
 // ── Canvas / BaseCanvas ─────────────────────────────────────────────────────────
@@ -525,7 +571,114 @@ jfloatArray Path_nApproximate(JNIEnv* env, jclass, jlong p, jfloat error) {
   env->SetFloatArrayRegion(arr, 0, static_cast<jsize>(out.size()), out.data());
   return arr;
 }
+// Relative + arc + compound path ops — Compose vector graphics (Material icons, shapes, clip paths)
+// build geometry through these. All normal JNI (env/jclass) except the two boolean queries below.
+void Path_nRMoveTo(JNIEnv*, jclass, jlong p, jfloat dx, jfloat dy) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->rMoveTo(dx, dy);
+}
+void Path_nRLineTo(JNIEnv*, jclass, jlong p, jfloat dx, jfloat dy) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->rLineTo(dx, dy);
+}
+void Path_nRQuadTo(JNIEnv*, jclass, jlong p, jfloat dx1, jfloat dy1, jfloat dx2, jfloat dy2) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->rQuadTo(dx1, dy1, dx2, dy2);
+}
+void Path_nRCubicTo(JNIEnv*, jclass, jlong p, jfloat x1, jfloat y1, jfloat x2, jfloat y2, jfloat x3, jfloat y3) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->rCubicTo(x1, y1, x2, y2, x3, y3);
+}
+void Path_nArcTo(JNIEnv*, jclass, jlong p, jfloat l, jfloat t, jfloat r, jfloat b, jfloat start,
+                 jfloat sweep, jboolean forceMoveTo) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->arcTo(SkRect::MakeLTRB(l, t, r, b), start, sweep, forceMoveTo);
+}
+void Path_nAddArc(JNIEnv*, jclass, jlong p, jfloat l, jfloat t, jfloat r, jfloat b, jfloat start, jfloat sweep) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->addArc(SkRect::MakeLTRB(l, t, r, b), start, sweep);
+}
+void Path_nAddRoundRect8(JNIEnv* env, jclass, jlong p, jfloat l, jfloat t, jfloat r, jfloat b,
+                         jfloatArray radii, jint dir) {
+  auto* s = reinterpret_cast<SkPath*>(p);
+  if (s == nullptr || radii == nullptr) return;
+  jfloat rad[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  const jsize n = env->GetArrayLength(radii);
+  env->GetFloatArrayRegion(radii, 0, n < 8 ? n : 8, rad);
+  const SkVector v[4] = {{rad[0], rad[1]}, {rad[2], rad[3]}, {rad[4], rad[5]}, {rad[6], rad[7]}};
+  SkRRect rr;
+  rr.setRectRadii(SkRect::MakeLTRB(l, t, r, b), v);
+  s->addRRect(rr, static_cast<SkPathDirection>(dir));
+}
+void Path_nAddPath(JNIEnv*, jclass, jlong p, jlong src) {
+  auto* s = reinterpret_cast<SkPath*>(p);
+  auto* q = reinterpret_cast<SkPath*>(src);
+  if (s && q) s->addPath(*q);
+}
+void Path_nAddPathOffset(JNIEnv*, jclass, jlong p, jlong src, jfloat dx, jfloat dy) {
+  auto* s = reinterpret_cast<SkPath*>(p);
+  auto* q = reinterpret_cast<SkPath*>(src);
+  if (s && q) s->addPath(*q, dx, dy);
+}
+void Path_nAddPathMatrix(JNIEnv*, jclass, jlong p, jlong src, jlong m) {
+  auto* s = reinterpret_cast<SkPath*>(p);
+  auto* q = reinterpret_cast<SkPath*>(src);
+  auto* mat = reinterpret_cast<SkMatrix*>(m);
+  if (s && q && mat) s->addPath(*q, *mat);
+}
+void Path_nOffset(JNIEnv*, jclass, jlong p, jfloat dx, jfloat dy) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->offset(dx, dy);
+}
+void Path_nSet(JNIEnv*, jclass, jlong p, jlong src) {
+  auto* s = reinterpret_cast<SkPath*>(p);
+  auto* q = reinterpret_cast<SkPath*>(src);
+  if (s && q) *s = *q;
+}
+void Path_nTransform(JNIEnv*, jclass, jlong p, jlong m) {
+  auto* s = reinterpret_cast<SkPath*>(p);
+  auto* mat = reinterpret_cast<SkMatrix*>(m);
+  if (s && mat) s->transform(*mat);
+}
+void Path_nTransformDst(JNIEnv*, jclass, jlong p, jlong m, jlong dst) {
+  auto* s = reinterpret_cast<SkPath*>(p);
+  auto* mat = reinterpret_cast<SkMatrix*>(m);
+  auto* d = reinterpret_cast<SkPath*>(dst);
+  if (s && mat && d) s->transform(*mat, d);
+}
+void Path_nSetLastPoint(JNIEnv*, jclass, jlong p, jfloat x, jfloat y) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->setLastPt(x, y);
+}
+void Path_nIncReserve(JNIEnv*, jclass, jlong p, jint n) {
+  if (auto* s = reinterpret_cast<SkPath*>(p)) s->incReserve(static_cast<int>(n));
+}
+void Path_nComputeBounds(JNIEnv* env, jclass, jlong p, jobject rectf) {
+  if (rectf == nullptr) return;
+  auto* s = reinterpret_cast<SkPath*>(p);
+  const SkRect b = s ? s->computeTightBounds() : SkRect::MakeEmpty();
+  jclass c = env->GetObjectClass(rectf);
+  env->SetFloatField(rectf, env->GetFieldID(c, "left", "F"), b.fLeft);
+  env->SetFloatField(rectf, env->GetFieldID(c, "top", "F"), b.fTop);
+  env->SetFloatField(rectf, env->GetFieldID(c, "right", "F"), b.fRight);
+  env->SetFloatField(rectf, env->GetFieldID(c, "bottom", "F"), b.fBottom);
+}
+jboolean Path_nIsRect(JNIEnv* env, jclass, jlong p, jobject rectf) {
+  auto* s = reinterpret_cast<SkPath*>(p);
+  if (s == nullptr) return JNI_FALSE;
+  SkRect r;
+  const bool isr = s->isRect(&r);
+  if (isr && rectf != nullptr) {
+    jclass c = env->GetObjectClass(rectf);
+    env->SetFloatField(rectf, env->GetFieldID(c, "left", "F"), r.fLeft);
+    env->SetFloatField(rectf, env->GetFieldID(c, "top", "F"), r.fTop);
+    env->SetFloatField(rectf, env->GetFieldID(c, "right", "F"), r.fRight);
+    env->SetFloatField(rectf, env->GetFieldID(c, "bottom", "F"), r.fBottom);
+  }
+  return isr ? JNI_TRUE : JNI_FALSE;
+}
+// Path.Op enum matches SkPathOp 1:1 (DIFFERENCE/INTERSECT/UNION/XOR/REVERSE_DIFFERENCE = 0..4).
+jboolean Path_nOp(JNIEnv*, jclass, jlong p1, jlong p2, jint op, jlong result) {
+  auto* a = reinterpret_cast<SkPath*>(p1);
+  auto* b = reinterpret_cast<SkPath*>(p2);
+  auto* out = reinterpret_cast<SkPath*>(result);
+  return (a && b && out && Op(*a, *b, static_cast<SkPathOp>(op), out)) ? JNI_TRUE : JNI_FALSE;
+}
 // @CriticalNative — handle-only.
+jboolean Path_nIsEmpty(jlong p) { auto* s = reinterpret_cast<SkPath*>(p); return (s && s->isEmpty()) ? JNI_TRUE : JNI_FALSE; }
+jboolean Path_nIsConvex(jlong p) { auto* s = reinterpret_cast<SkPath*>(p); return (s && s->isConvex()) ? JNI_TRUE : JNI_FALSE; }
 void Path_nReset(jlong p) {
   if (auto* s = reinterpret_cast<SkPath*>(p)) s->reset();
 }
@@ -535,6 +688,10 @@ void Path_nRewind(jlong p) {
 // Path.FillType: WINDING=0, EVEN_ODD=1, INVERSE_WINDING=2, INVERSE_EVEN_ODD=3 (SkPathFillType matches).
 void Path_nSetFillType(jlong p, jint ft) {
   if (auto* s = reinterpret_cast<SkPath*>(p)) s->setFillType(static_cast<SkPathFillType>(ft));
+}
+jint Path_nGetFillType(jlong p) {
+  auto* s = reinterpret_cast<SkPath*>(p);
+  return s ? static_cast<jint>(s->getFillType()) : 0;  // Path.FillType.nativeInt == SkPathFillType
 }
 
 // ── Canvas transform/clip — all @CriticalNative (handle-only, no JNIEnv/jclass) ──
@@ -824,9 +981,18 @@ AclRenderNode* rnode(jlong h) { return reinterpret_cast<AclRenderNode*>(h); }
 // non-optimal paths (if any) get hit hot enough to warrant a real implementation.
 std::atomic<std::uint64_t> g_rn_nodes{0};
 
-jlong RenderNode_nCreate(JNIEnv*, jclass, jstring) {
+jlong RenderNode_nCreate(JNIEnv* env, jclass, jstring name) {
   g_rn_nodes.fetch_add(1, std::memory_order_relaxed);
-  return reinterpret_cast<jlong>(new AclRenderNode());
+  auto* n = new AclRenderNode();
+  // acl's top-level present node: its RecordingCanvas draws immediately onto the GPU SkCanvas.
+  if (name != nullptr) {
+    const char* s = env->GetStringUTFChars(name, nullptr);
+    if (s != nullptr) {
+      if (std::strcmp(s, "acl$present$root") == 0) n->is_present_root = true;
+      env->ReleaseStringUTFChars(name, s);
+    }
+  }
+  return reinterpret_cast<jlong>(n);
 }
 jlong RenderNode_nGetNativeFinalizer(JNIEnv*, jclass) {
   return reinterpret_cast<jlong>(&free_rendernode);
@@ -855,8 +1021,20 @@ void RenderNode_nForceEndAnimators(JNIEnv*, jclass, jlong) {}
   jboolean fn(jlong h) { auto* n = rnode(h); return (n && n->field) ? JNI_TRUE : JNI_FALSE; }
 #define RN_NOPB(fn) jboolean fn(jlong) { return JNI_TRUE; }
 
-void RenderNode_nDiscardDisplayList(jlong) {}
-jboolean RenderNode_nIsValid(jlong) { return JNI_TRUE; }
+// nDiscardDisplayList: framework frees the node's recorded content — drop the picture so the next
+// hasDisplayList()/nIsValid reports "empty" and View.updateDisplayListIfDirty() re-records.
+void RenderNode_nDiscardDisplayList(jlong node) {
+  if (auto* n = reinterpret_cast<AclRenderNode*>(node)) n->picture = nullptr;
+}
+// RenderNode.hasDisplayList() -> nIsValid. This MUST be false until the node has actually recorded
+// a display list (endRecording -> nFinishRecording sets picture): View.updateDisplayListIfDirty()
+// only records when hasDisplayList() is false, so a blanket TRUE makes Compose/Views never record
+// (drawRenderNode then replays an empty node -> blank). present-root is always "valid" (it draws
+// immediately onto the GPU canvas and is never recorded into a picture).
+jboolean RenderNode_nIsValid(jlong node) {
+  auto* n = reinterpret_cast<AclRenderNode*>(node);
+  return (n != nullptr && (n->is_present_root || n->picture != nullptr)) ? JNI_TRUE : JNI_FALSE;
+}
 void RenderNode_nGetTransformMatrix(jlong, jlong m) {
   if (auto* mat = reinterpret_cast<SkMatrix*>(m)) mat->reset();
 }
@@ -989,6 +1167,7 @@ jint Paint_nGetStrokeCap(jlong p) { ACLP(p); return ap ? static_cast<jint>(ap->p
 jint Paint_nGetStrokeJoin(jlong p) { ACLP(p); return ap ? static_cast<jint>(ap->paint.getStrokeJoin()) : 0; }
 void Paint_nSetStrokeJoin(jlong p, jint j) { ACLP(p); if (ap) ap->paint.setStrokeJoin(static_cast<SkPaint::Join>(j)); }
 jfloat Paint_nGetStrokeMiter(jlong p) { ACLP(p); return ap ? ap->paint.getStrokeMiter() : 0; }
+jfloat Paint_nGetStrokeWidth(jlong p) { ACLP(p); return ap ? ap->paint.getStrokeWidth() : 0; }
 void Paint_nSetStrokeMiter(jlong p, jfloat m) { ACLP(p); if (ap) ap->paint.setStrokeMiter(m); }
 void Paint_nSetAlpha(jlong p, jint a) { ACLP(p); if (ap) ap->paint.setAlpha(static_cast<U8CPU>(a)); }
 jfloat Paint_nGetTextScaleX(jlong p) { ACLP(p); return ap ? ap->font.getScaleX() : 1; }
@@ -2541,7 +2720,335 @@ const JNINativeMethod kBitmap[] = {
     {"nativeHasAlpha", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeHasAlpha)},
     {"nativeConfig", "(J)I", reinterpret_cast<void*>(Bitmap_nativeConfig)},
     {"nativeIsImmutable", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeIsImmutable)},
+    {"nativeIsBackedByAshmem", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeIsBackedByAshmem)},
+    {"nativePrepareToDraw", "(J)V", reinterpret_cast<void*>(Bitmap_nativePrepareToDraw)},
+    {"nativeGenerationId", "(J)I", reinterpret_cast<void*>(Bitmap_nativeGenerationId)},
+    {"nativeRowBytes", "(J)I", reinterpret_cast<void*>(Bitmap_nativeRowBytes)},
+    {"nativeSetImmutable", "(J)V", reinterpret_cast<void*>(Bitmap_nativeSetImmutable)},
+    {"nativeSetHasMipMap", "(JZ)V", reinterpret_cast<void*>(Bitmap_nativeSetHasMipMap)},
+    {"nativeSetPremultiplied", "(JZ)V", reinterpret_cast<void*>(Bitmap_nativeSetPremultiplied)},
+    {"nativeSetColorSpace", "(JJ)V", reinterpret_cast<void*>(Bitmap_nativeSetColorSpace)},
+    {"nativeRecycle", "(J)V", reinterpret_cast<void*>(Bitmap_nativeRecycle)},
+    {"nativeReconfigure", "(JIIIZ)V", reinterpret_cast<void*>(Bitmap_nativeReconfigure)},
 };
+// ── RenderNode record/replay (Compose) ───────────────────────────────────────────────────────
+// Compose records each layer's content into a RenderNode via RecordingCanvas (beginRecording ->
+// draw ops -> endRecording), then paints it with canvas.drawRenderNode(node). acl re-owns this on
+// Skia: a RenderNode's recording canvas is an SkPictureRecorder (its SkCanvas ptr is STABLE across
+// begin/reset on the same recorder, so the pool's nResetDisplayListCanvas works); endRecording
+// finalizes the SkPicture into the node; drawRenderNode replays it with the node's transform/alpha/
+// clip. acl's top-level (present-root) node is special: its RecordingCanvas draws IMMEDIATELY onto
+// the GPU SkCanvas (set via acl_graphics_set_present_canvas) so the whole tree renders GPU-native.
+jlong g_present_gpu_canvas = 0;
+std::mutex g_rec_mu;
+std::unordered_map<SkCanvas*, SkPictureRecorder*> g_recorders;  // recording canvas -> its recorder
+// DIAG counters (Compose record/replay): begins=non-root nCreate, finishes, replays=nDrawRenderNode.
+std::atomic<std::uint64_t> g_rn_begins{0}, g_rn_finishes{0}, g_rn_replays{0};
+extern "C" std::uint64_t acl_graphics_profile_recstats() {
+  return (g_rn_begins.load() << 40) | (g_rn_finishes.load() << 20) | g_rn_replays.load();
+}
+
+extern "C" void acl_graphics_set_present_canvas(jlong c) { g_present_gpu_canvas = c; }
+
+bool is_recording_canvas(void* p) {
+  std::lock_guard<std::mutex> lk(g_rec_mu);
+  return g_recorders.find(reinterpret_cast<SkCanvas*>(p)) != g_recorders.end();
+}
+
+// Replay a RenderNode's recorded picture onto `c`, applying the node's position + transform + clip
+// + alpha (the properties the View/Compose set via the RenderNode setters).
+void draw_rendernode(SkCanvas* c, AclRenderNode* n) {
+  if (c == nullptr || n == nullptr || n->picture == nullptr) return;
+  const float w = static_cast<float>(n->right - n->left);
+  const float h = static_cast<float>(n->bottom - n->top);
+  SkAutoCanvasRestore acr(c, true);
+  c->translate(static_cast<float>(n->left), static_cast<float>(n->top));
+  c->translate(n->translationX, n->translationY);
+  if (n->scaleX != 1.0f || n->scaleY != 1.0f || n->rotation != 0.0f) {
+    const float px = n->pivotExplicit ? n->pivotX : w * 0.5f;
+    const float py = n->pivotExplicit ? n->pivotY : h * 0.5f;
+    c->translate(px, py);
+    if (n->rotation != 0.0f) c->rotate(n->rotation);
+    c->scale(n->scaleX, n->scaleY);
+    c->translate(-px, -py);
+  }
+  if (n->clipToBounds && w > 0 && h > 0) c->clipRect(SkRect::MakeWH(w, h));
+  if (n->alpha < 1.0f) {
+    SkPaint lp;
+    lp.setAlphaf(n->alpha);
+    c->saveLayer(nullptr, &lp);
+  }
+  c->drawPicture(n->picture);
+}
+
+// NOTE: every RecordingCanvas native is @CriticalNative — the JVM calls it with the raw C ABI and
+// passes ONLY the declared Java args (NO JNIEnv*, NO jclass). These signatures must therefore start
+// at the first Java parameter, or the args land two registers off. (BaseRecordingCanvas natives are
+// @FastNative, which keeps the normal env/jclass convention — hence kBaseCanvas is reused for them.)
+
+// RecordingCanvas.nCreateDisplayListCanvas(node, w, h): the present-root node returns the GPU
+// SkCanvas (immediate); any other node gets a fresh SkPictureRecorder (records into a picture).
+jlong RecordingCanvas_nCreate(jlong node, jint w, jint h) {
+  auto* n = reinterpret_cast<AclRenderNode*>(node);
+  if (n != nullptr && n->is_present_root && g_present_gpu_canvas != 0) return g_present_gpu_canvas;
+  g_rn_begins.fetch_add(1, std::memory_order_relaxed);
+  auto* rec = new SkPictureRecorder();
+  SkCanvas* c = rec->beginRecording(SkRect::MakeIWH(w > 0 ? w : 1, h > 0 ? h : 1));
+  std::lock_guard<std::mutex> lk(g_rec_mu);
+  g_recorders[c] = rec;
+  return reinterpret_cast<jlong>(c);
+}
+// nResetDisplayListCanvas(canvas, node, w, h): re-begin recording on the SAME recorder (stable ptr).
+void RecordingCanvas_nReset(jlong canvas, jlong /*node*/, jint w, jint h) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  if (canvas == g_present_gpu_canvas) return;  // root draws immediate; nothing to reset
+  std::lock_guard<std::mutex> lk(g_rec_mu);
+  auto it = g_recorders.find(c);
+  if (it != g_recorders.end()) it->second->beginRecording(SkRect::MakeIWH(w > 0 ? w : 1, h > 0 ? h : 1));
+}
+// nFinishRecording(canvas, node): finalize the recorder's picture into the node.
+void RecordingCanvas_nFinish(jlong canvas, jlong node) {
+  g_rn_finishes.fetch_add(1, std::memory_order_relaxed);
+  auto* n = reinterpret_cast<AclRenderNode*>(node);
+  if (canvas == g_present_gpu_canvas) return;  // root: content already drawn immediate
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  std::lock_guard<std::mutex> lk(g_rec_mu);
+  auto it = g_recorders.find(c);
+  if (it != g_recorders.end() && n != nullptr) n->picture = it->second->finishRecordingAsPicture();
+}
+// nDrawRenderNode(canvas, node): replay the node's picture onto the canvas (which may be the GPU
+// root canvas -> immediate, or another recorder -> nested/flattened into the parent picture).
+void RecordingCanvas_nDrawRenderNode(jlong canvas, jlong node) {
+  g_rn_replays.fetch_add(1, std::memory_order_relaxed);
+  tick_draw();
+  draw_rendernode(reinterpret_cast<SkCanvas*>(canvas), reinterpret_cast<AclRenderNode*>(node));
+}
+void RecordingCanvas_nEnableZ(jlong, jboolean) {}
+void RecordingCanvas_nDrawTextureLayer(jlong, jlong) {}
+jint RecordingCanvas_nGetMaximumTextureWidth() { return 8192; }
+jint RecordingCanvas_nGetMaximumTextureHeight() { return 8192; }
+// RecordingCanvas' hardware-only draws take animatable CanvasProperty handles (ripple/reveal) or a
+// WebView functor — acl has no display-list animator, so these are no-op stubs (no crash; the
+// static content still renders through the BaseRecordingCanvas.nDraw* path). All @CriticalNative.
+void RecordingCanvas_nDrawCircleProp(jlong, jlong, jlong, jlong, jlong) {}
+void RecordingCanvas_nDrawRoundRectProp(jlong, jlong, jlong, jlong, jlong, jlong, jlong, jlong) {}
+void RecordingCanvas_nDrawRipple(jlong, jlong, jlong, jlong, jlong, jlong, jlong, jint, jlong) {}
+void RecordingCanvas_nDrawWebViewFunctor(jlong, jint) {}
+// nPunchHole (SurfaceView transparency) is @FastNative on BaseRecordingCanvas -> keep env/jclass.
+void BaseRecordingCanvas_nPunchHole(JNIEnv*, jclass, jlong, jfloat, jfloat, jfloat, jfloat, jfloat, jfloat) {}
+
+const JNINativeMethod kBaseRecordingExtra[] = {
+    {"nPunchHole", "(JFFFFFF)V", reinterpret_cast<void*>(BaseRecordingCanvas_nPunchHole)},
+};
+
+const JNINativeMethod kRecordingCanvas[] = {
+    {"nCreateDisplayListCanvas", "(JII)J", reinterpret_cast<void*>(RecordingCanvas_nCreate)},
+    {"nResetDisplayListCanvas", "(JJII)V", reinterpret_cast<void*>(RecordingCanvas_nReset)},
+    {"nFinishRecording", "(JJ)V", reinterpret_cast<void*>(RecordingCanvas_nFinish)},
+    {"nDrawRenderNode", "(JJ)V", reinterpret_cast<void*>(RecordingCanvas_nDrawRenderNode)},
+    {"nEnableZ", "(JZ)V", reinterpret_cast<void*>(RecordingCanvas_nEnableZ)},
+    {"nDrawTextureLayer", "(JJ)V", reinterpret_cast<void*>(RecordingCanvas_nDrawTextureLayer)},
+    {"nGetMaximumTextureWidth", "()I", reinterpret_cast<void*>(RecordingCanvas_nGetMaximumTextureWidth)},
+    {"nGetMaximumTextureHeight", "()I", reinterpret_cast<void*>(RecordingCanvas_nGetMaximumTextureHeight)},
+    {"nDrawCircle", "(JJJJJ)V", reinterpret_cast<void*>(RecordingCanvas_nDrawCircleProp)},
+    {"nDrawRoundRect", "(JJJJJJJJ)V", reinterpret_cast<void*>(RecordingCanvas_nDrawRoundRectProp)},
+    {"nDrawRipple", "(JJJJJJJIJ)V", reinterpret_cast<void*>(RecordingCanvas_nDrawRipple)},
+    {"nDrawWebViewFunctor", "(JI)V", reinterpret_cast<void*>(RecordingCanvas_nDrawWebViewFunctor)},
+};
+
+// ── Text measurement + line breaking (android.graphics.text.*) ────────────────────────────────
+// Compose's text stack drives layout through MeasuredText (per-char advances + font metrics) and
+// LineBreaker (greedy line breaking over those advances). acl backs both with Skia SkFont — the same
+// font/size each run's Paint carries — so text composes/measures/wraps. Advances are per-UTF-16 code
+// unit (measured individually); adequate for layout width without full cluster shaping. The nInit/
+// nAddStyleRun/nBuild/nComputeLineBreaks natives are normal JNI (env/jclass); the width/metric/
+// line getters + release funcs are @CriticalNative (handle-only) — see the ABI note on RecordingCanvas.
+struct AclMtRun { const AclPaint* paint; int start; int end; bool replacement; float replaceWidth; };
+struct AclMtBuilder { std::vector<AclMtRun> runs; };
+struct AclMeasuredText {
+  std::vector<float> adv;         // advance per UTF-16 code unit
+  float ascent = 0, descent = 0;  // Skia convention: ascent negative, descent positive
+};
+struct AclLineBreaker { int breakStrategy = 0; bool justified = false; };
+struct AclLbResult {
+  std::vector<int> offset;        // break offset (exclusive end index) per line
+  std::vector<float> width, ascent, descent;
+  std::vector<int> flag;
+};
+extern "C" void acl_free_measuredtext(void* p) { delete reinterpret_cast<AclMeasuredText*>(p); }
+extern "C" void acl_free_linebreaker(void* p) { delete reinterpret_cast<AclLineBreaker*>(p); }
+extern "C" void acl_free_lbresult(void* p) { delete reinterpret_cast<AclLbResult*>(p); }
+
+jlong MtBuilder_nInit(JNIEnv*, jclass) { return reinterpret_cast<jlong>(new AclMtBuilder()); }
+void MtBuilder_nAddStyleRun(JNIEnv*, jclass, jlong b, jlong paint, jint, jint, jint start, jint end, jboolean) {
+  if (auto* bd = reinterpret_cast<AclMtBuilder*>(b))
+    bd->runs.push_back({reinterpret_cast<AclPaint*>(paint), start, end, false, 0.f});
+}
+void MtBuilder_nAddReplacementRun(JNIEnv*, jclass, jlong b, jlong paint, jint start, jint end, jfloat w) {
+  if (auto* bd = reinterpret_cast<AclMtBuilder*>(b))
+    bd->runs.push_back({reinterpret_cast<AclPaint*>(paint), start, end, true, w});
+}
+jlong MtBuilder_nBuild(JNIEnv* env, jclass, jlong b, jlong /*hint*/, jcharArray text, jboolean, jboolean, jboolean) {
+  auto* bd = reinterpret_cast<AclMtBuilder*>(b);
+  auto* mt = new AclMeasuredText();
+  const jsize n = text ? env->GetArrayLength(text) : 0;
+  mt->adv.assign(n, 0.f);
+  jchar* chars = n ? env->GetCharArrayElements(text, nullptr) : nullptr;
+  if (bd != nullptr && chars != nullptr) {
+    for (const auto& r : bd->runs) {
+      const int s = std::max(0, r.start), e = std::min<int>(n, r.end);
+      if (r.replacement) { if (s < e) mt->adv[s] = r.replaceWidth; continue; }
+      const AclPaint* ap = r.paint;
+      if (ap == nullptr) continue;
+      SkFontMetrics fm;
+      ap->font.getMetrics(&fm);
+      mt->ascent = std::min(mt->ascent, fm.fAscent);
+      mt->descent = std::max(mt->descent, fm.fDescent);
+      for (int i = s; i < e; ++i) {
+        const jchar u = chars[i];
+        mt->adv[i] = ap->font.measureText(&u, sizeof(jchar), SkTextEncoding::kUTF16, nullptr, &ap->paint);
+      }
+    }
+  }
+  if (chars != nullptr) env->ReleaseCharArrayElements(text, chars, JNI_ABORT);
+  if (mt->ascent == 0 && mt->descent == 0) { mt->ascent = -12.f; mt->descent = 4.f; }  // fallback metrics
+  return reinterpret_cast<jlong>(mt);
+}
+void MtBuilder_nFree(JNIEnv*, jclass, jlong b) { delete reinterpret_cast<AclMtBuilder*>(b); }
+
+jfloat MeasuredText_nGetWidth(jlong p, jint start, jint end) {
+  auto* mt = reinterpret_cast<AclMeasuredText*>(p);
+  if (mt == nullptr) return 0.f;
+  const int n = static_cast<int>(mt->adv.size());
+  float w = 0.f;
+  for (int i = std::max(0, start); i < std::min(n, end); ++i) w += mt->adv[i];
+  return w;
+}
+jfloat MeasuredText_nGetCharWidthAt(jlong p, jint off) {
+  auto* mt = reinterpret_cast<AclMeasuredText*>(p);
+  return (mt != nullptr && off >= 0 && off < static_cast<int>(mt->adv.size())) ? mt->adv[off] : 0.f;
+}
+jint MeasuredText_nGetMemoryUsage(jlong p) {
+  auto* mt = reinterpret_cast<AclMeasuredText*>(p);
+  return mt ? static_cast<jint>(mt->adv.size() * sizeof(float)) : 0;
+}
+jlong MeasuredText_nGetReleaseFunc() { return reinterpret_cast<jlong>(&acl_free_measuredtext); }
+void MeasuredText_nGetBounds(JNIEnv* env, jclass, jlong p, jcharArray, jint start, jint end, jobject rect) {
+  if (rect == nullptr) return;
+  auto* mt = reinterpret_cast<AclMeasuredText*>(p);
+  jclass rc = env->GetObjectClass(rect);
+  const float w = MeasuredText_nGetWidth(p, start, end);
+  env->SetIntField(rect, env->GetFieldID(rc, "left", "I"), 0);
+  env->SetIntField(rect, env->GetFieldID(rc, "top", "I"), mt ? static_cast<jint>(std::floor(mt->ascent)) : 0);
+  env->SetIntField(rect, env->GetFieldID(rc, "right", "I"), static_cast<jint>(std::ceil(w)));
+  env->SetIntField(rect, env->GetFieldID(rc, "bottom", "I"), mt ? static_cast<jint>(std::ceil(mt->descent)) : 0);
+}
+
+jlong LineBreaker_nInit(JNIEnv*, jclass, jint breakStrategy, jint, jboolean justified, jintArray) {
+  auto* lb = new AclLineBreaker();
+  lb->breakStrategy = breakStrategy;
+  lb->justified = justified;
+  return reinterpret_cast<jlong>(lb);
+}
+jlong LineBreaker_nGetReleaseFunc() { return reinterpret_cast<jlong>(&acl_free_linebreaker); }
+jlong LineBreaker_nGetReleaseResultFunc() { return reinterpret_cast<jlong>(&acl_free_lbresult); }
+// Greedy line break over the MeasuredText advances: accumulate width, wrap at the last space that
+// fit (or hard-break on '\n'). firstWidth applies to the first firstWidthLineCount lines, restWidth
+// after. Good enough for Compose Text/paragraph layout; not Knuth-Plass optimal.
+jlong LineBreaker_nComputeLineBreaks(JNIEnv* env, jclass, jlong /*lb*/, jcharArray text, jlong mtPtr,
+                                     jint length, jfloat firstWidth, jint firstWidthLineCount,
+                                     jfloat restWidth, jfloatArray, jfloat, jint) {
+  auto* mt = reinterpret_cast<AclMeasuredText*>(mtPtr);
+  auto* res = new AclLbResult();
+  const float asc = mt ? mt->ascent : -12.f, desc = mt ? mt->descent : 4.f;
+  jchar* chars = (text != nullptr && length > 0) ? env->GetCharArrayElements(text, nullptr) : nullptr;
+  const auto advAt = [&](int i) -> float {
+    return (mt != nullptr && i >= 0 && i < static_cast<int>(mt->adv.size())) ? mt->adv[i] : 0.f;
+  };
+  const auto emit = [&](int end, float w) {
+    res->offset.push_back(end);
+    res->width.push_back(w);
+    res->ascent.push_back(asc);
+    res->descent.push_back(desc);
+    res->flag.push_back(0);
+  };
+  int lineStart = 0, lineNo = 0, lastBreak = -1;
+  float lineW = 0.f, breakW = 0.f;
+  for (int i = 0; i < length; ++i) {
+    const jchar u = chars ? chars[i] : 0;
+    if (u == '\n') {  // hard break
+      emit(i + 1, lineW);
+      lineStart = i + 1; ++lineNo; lineW = 0.f; lastBreak = -1; breakW = 0.f;
+      continue;
+    }
+    const float a = advAt(i);
+    const float limit = (lineNo < firstWidthLineCount) ? firstWidth : restWidth;
+    if (lineW + a > limit && lastBreak > lineStart) {  // wrap at last fitting space
+      emit(lastBreak, breakW);
+      lineStart = lastBreak; ++lineNo; lastBreak = -1; breakW = 0.f;
+      lineW = 0.f;
+      for (int k = lineStart; k <= i; ++k) lineW += advAt(k);
+    } else {
+      lineW += a;
+    }
+    if (u == ' ' || u == '\t') { lastBreak = i + 1; breakW = lineW; }
+  }
+  if (lineStart < length || res->offset.empty()) emit(length, lineW);  // trailing / empty line
+  if (chars != nullptr) env->ReleaseCharArrayElements(text, chars, JNI_ABORT);
+  return reinterpret_cast<jlong>(res);
+}
+jint LineBreaker_nGetLineCount(jlong p) {
+  auto* r = reinterpret_cast<AclLbResult*>(p);
+  return r ? static_cast<jint>(r->offset.size()) : 0;
+}
+jint LineBreaker_nGetLineBreakOffset(jlong p, jint i) {
+  auto* r = reinterpret_cast<AclLbResult*>(p);
+  return (r && i >= 0 && i < static_cast<int>(r->offset.size())) ? r->offset[i] : 0;
+}
+jfloat LineBreaker_nGetLineWidth(jlong p, jint i) {
+  auto* r = reinterpret_cast<AclLbResult*>(p);
+  return (r && i >= 0 && i < static_cast<int>(r->width.size())) ? r->width[i] : 0.f;
+}
+jfloat LineBreaker_nGetLineAscent(jlong p, jint i) {
+  auto* r = reinterpret_cast<AclLbResult*>(p);
+  return (r && i >= 0 && i < static_cast<int>(r->ascent.size())) ? r->ascent[i] : 0.f;
+}
+jfloat LineBreaker_nGetLineDescent(jlong p, jint i) {
+  auto* r = reinterpret_cast<AclLbResult*>(p);
+  return (r && i >= 0 && i < static_cast<int>(r->descent.size())) ? r->descent[i] : 0.f;
+}
+jint LineBreaker_nGetLineFlag(jlong p, jint i) {
+  auto* r = reinterpret_cast<AclLbResult*>(p);
+  return (r && i >= 0 && i < static_cast<int>(r->flag.size())) ? r->flag[i] : 0;
+}
+
+const JNINativeMethod kMeasuredTextBuilder[] = {
+    {"nInitBuilder", "()J", reinterpret_cast<void*>(MtBuilder_nInit)},
+    {"nAddStyleRun", "(JJIIIIZ)V", reinterpret_cast<void*>(MtBuilder_nAddStyleRun)},
+    {"nAddReplacementRun", "(JJIIF)V", reinterpret_cast<void*>(MtBuilder_nAddReplacementRun)},
+    {"nBuildMeasuredText", "(JJ[CZZZ)J", reinterpret_cast<void*>(MtBuilder_nBuild)},
+    {"nFreeBuilder", "(J)V", reinterpret_cast<void*>(MtBuilder_nFree)},
+};
+const JNINativeMethod kMeasuredText[] = {
+    {"nGetWidth", "(JII)F", reinterpret_cast<void*>(MeasuredText_nGetWidth)},
+    {"nGetCharWidthAt", "(JI)F", reinterpret_cast<void*>(MeasuredText_nGetCharWidthAt)},
+    {"nGetMemoryUsage", "(J)I", reinterpret_cast<void*>(MeasuredText_nGetMemoryUsage)},
+    {"nGetReleaseFunc", "()J", reinterpret_cast<void*>(MeasuredText_nGetReleaseFunc)},
+    {"nGetBounds", "(J[CIILandroid/graphics/Rect;)V", reinterpret_cast<void*>(MeasuredText_nGetBounds)},
+};
+const JNINativeMethod kLineBreaker[] = {
+    {"nInit", "(IIZ[I)J", reinterpret_cast<void*>(LineBreaker_nInit)},
+    {"nGetReleaseFunc", "()J", reinterpret_cast<void*>(LineBreaker_nGetReleaseFunc)},
+    {"nComputeLineBreaks", "(J[CJIFIF[FFI)J", reinterpret_cast<void*>(LineBreaker_nComputeLineBreaks)},
+    {"nGetLineCount", "(J)I", reinterpret_cast<void*>(LineBreaker_nGetLineCount)},
+    {"nGetLineBreakOffset", "(JI)I", reinterpret_cast<void*>(LineBreaker_nGetLineBreakOffset)},
+    {"nGetLineWidth", "(JI)F", reinterpret_cast<void*>(LineBreaker_nGetLineWidth)},
+    {"nGetLineAscent", "(JI)F", reinterpret_cast<void*>(LineBreaker_nGetLineAscent)},
+    {"nGetLineDescent", "(JI)F", reinterpret_cast<void*>(LineBreaker_nGetLineDescent)},
+    {"nGetLineFlag", "(JI)I", reinterpret_cast<void*>(LineBreaker_nGetLineFlag)},
+    {"nGetReleaseResultFunc", "()J", reinterpret_cast<void*>(LineBreaker_nGetReleaseResultFunc)},
+};
+
 const JNINativeMethod kCanvas[] = {
     {"nInitRaster", "(J)J", reinterpret_cast<void*>(Canvas_nInitRaster)},
     {"nGetNativeFinalizer", "()J", reinterpret_cast<void*>(Canvas_nGetNativeFinalizer)},
@@ -2637,11 +3144,33 @@ const JNINativeMethod kPath[] = {
     {"nAddOval", "(JFFFFI)V", reinterpret_cast<void*>(Path_nAddOval)},
     {"nAddCircle", "(JFFFI)V", reinterpret_cast<void*>(Path_nAddCircle)},
     {"nAddRoundRect", "(JFFFFFFI)V", reinterpret_cast<void*>(Path_nAddRoundRect)},
+    {"nAddRoundRect", "(JFFFF[FI)V", reinterpret_cast<void*>(Path_nAddRoundRect8)},
     {"nApproximate", "(JF)[F", reinterpret_cast<void*>(Path_nApproximate)},
+    {"nRMoveTo", "(JFF)V", reinterpret_cast<void*>(Path_nRMoveTo)},
+    {"nRLineTo", "(JFF)V", reinterpret_cast<void*>(Path_nRLineTo)},
+    {"nRQuadTo", "(JFFFF)V", reinterpret_cast<void*>(Path_nRQuadTo)},
+    {"nRCubicTo", "(JFFFFFF)V", reinterpret_cast<void*>(Path_nRCubicTo)},
+    {"nArcTo", "(JFFFFFFZ)V", reinterpret_cast<void*>(Path_nArcTo)},
+    {"nAddArc", "(JFFFFFF)V", reinterpret_cast<void*>(Path_nAddArc)},
+    {"nAddPath", "(JJ)V", reinterpret_cast<void*>(Path_nAddPath)},
+    {"nAddPath", "(JJFF)V", reinterpret_cast<void*>(Path_nAddPathOffset)},
+    {"nAddPath", "(JJJ)V", reinterpret_cast<void*>(Path_nAddPathMatrix)},
+    {"nOffset", "(JFF)V", reinterpret_cast<void*>(Path_nOffset)},
+    {"nSet", "(JJ)V", reinterpret_cast<void*>(Path_nSet)},
+    {"nTransform", "(JJ)V", reinterpret_cast<void*>(Path_nTransform)},
+    {"nTransform", "(JJJ)V", reinterpret_cast<void*>(Path_nTransformDst)},
+    {"nSetLastPoint", "(JFF)V", reinterpret_cast<void*>(Path_nSetLastPoint)},
+    {"nIncReserve", "(JI)V", reinterpret_cast<void*>(Path_nIncReserve)},
+    {"nComputeBounds", "(JLandroid/graphics/RectF;)V", reinterpret_cast<void*>(Path_nComputeBounds)},
+    {"nIsRect", "(JLandroid/graphics/RectF;)Z", reinterpret_cast<void*>(Path_nIsRect)},
+    {"nOp", "(JJIJ)Z", reinterpret_cast<void*>(Path_nOp)},
+    {"nIsEmpty", "(J)Z", reinterpret_cast<void*>(Path_nIsEmpty)},
+    {"nIsConvex", "(J)Z", reinterpret_cast<void*>(Path_nIsConvex)},
     // @CriticalNative (handle-only).
     {"nReset", "(J)V", reinterpret_cast<void*>(Path_nReset)},
     {"nRewind", "(J)V", reinterpret_cast<void*>(Path_nRewind)},
     {"nSetFillType", "(JI)V", reinterpret_cast<void*>(Path_nSetFillType)},
+    {"nGetFillType", "(J)I", reinterpret_cast<void*>(Path_nGetFillType)},
 };
 const JNINativeMethod kPaint[] = {
     {"nInit", "()J", reinterpret_cast<void*>(Paint_nInit)},
@@ -2653,6 +3182,7 @@ const JNINativeMethod kPaint[] = {
     {"nGetStrokeJoin", "(J)I", reinterpret_cast<void*>(Paint_nGetStrokeJoin)},
     {"nSetStrokeJoin", "(JI)V", reinterpret_cast<void*>(Paint_nSetStrokeJoin)},
     {"nGetStrokeMiter", "(J)F", reinterpret_cast<void*>(Paint_nGetStrokeMiter)},
+    {"nGetStrokeWidth", "(J)F", reinterpret_cast<void*>(Paint_nGetStrokeWidth)},
     {"nSetStrokeMiter", "(JF)V", reinterpret_cast<void*>(Paint_nSetStrokeMiter)},
     {"nSetAlpha", "(JI)V", reinterpret_cast<void*>(Paint_nSetAlpha)},
     {"nGetTextScaleX", "(J)F", reinterpret_cast<void*>(Paint_nGetTextScaleX)},
@@ -3166,6 +3696,18 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   bool ok = true;
   ok = reg(env, "android/graphics/Bitmap", kBitmap, n(kBitmap)) && ok;
   ok = reg(env, "android/graphics/Canvas", kCanvas, n(kCanvas)) && ok;
+  // RenderNode record/replay (Compose). Best-effort: absent -> Compose layers don't replay (blank);
+  // present -> Compose renders. Not gated on `ok` so a signature drift never kills the whole floor.
+  // A RecordingCanvas draws through BaseRecordingCanvas.nDraw* (its OWN natives, distinct from
+  // BaseCanvas) — those share BaseCanvas' signatures/impl, so reuse kBaseCanvas here.
+  reg(env, "android/graphics/BaseRecordingCanvas", kBaseCanvas, n(kBaseCanvas));
+  reg(env, "android/graphics/BaseRecordingCanvas", kBaseRecordingExtra, n(kBaseRecordingExtra));
+  reg(env, "android/graphics/RecordingCanvas", kRecordingCanvas, n(kRecordingCanvas));
+  // Text measurement + line breaking (Compose's text layout). Best-effort: without these,
+  // LineBreaker/MeasuredText fail to link and Compose text throws mid-measure (blank content).
+  reg(env, "android/graphics/text/MeasuredText$Builder", kMeasuredTextBuilder, n(kMeasuredTextBuilder));
+  reg(env, "android/graphics/text/MeasuredText", kMeasuredText, n(kMeasuredText));
+  reg(env, "android/graphics/text/LineBreaker", kLineBreaker, n(kLineBreaker));
   ok = reg(env, "android/graphics/BaseCanvas", kBaseCanvas, n(kBaseCanvas)) && ok;
   ok = reg(env, "android/graphics/Path", kPath, n(kPath)) && ok;
   ok = reg(env, "android/graphics/ImageDecoder", kImageDecoder, n(kImageDecoder)) && ok;

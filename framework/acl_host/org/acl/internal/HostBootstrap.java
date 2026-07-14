@@ -1053,6 +1053,42 @@ public final class HostBootstrap {
     // skipping setView's Binder-heavy relayout. dispatchAttachedToWindow fires onAttachedToWindow
     // across the tree — needed by e.g. Jetpack ComposeView (it can't locate its window recomposer
     // until attached).
+    // Drive an androidx ComponentActivity's Lifecycle to RESUMED. The framework normally advances it
+    // via Application.dispatchActivityResumed -> registered ActivityLifecycleCallbacks (ReportFragment
+    // / LifecycleCallbacks), a path acl's stub Application/Instrumentation doesn't complete. Compose
+    // content, LaunchedEffect, collectAsStateWithLifecycle and ViewModels gate on RESUMED, so force
+    // the LifecycleRegistry there directly. Reflection-only (no compile-time androidx dep). Best effort.
+    public static void ensureResumed(Object activity) {
+        if (activity == null) return;
+        try {
+            java.lang.reflect.Method getLifecycle = activity.getClass().getMethod("getLifecycle");
+            Object lifecycle = getLifecycle.invoke(activity);
+            if (lifecycle == null) return;
+            Object cur = null;
+            try {
+                cur = lifecycle.getClass().getMethod("getCurrentState").invoke(lifecycle);
+            } catch (Throwable ignored) {}
+            // LifecycleRegistry.handleLifecycleEvent(Lifecycle.Event) walks CREATED->STARTED->RESUMED,
+            // firing every observer in between (what the missing framework dispatch would have done).
+            Class<?> eventCls = Class.forName("androidx.lifecycle.Lifecycle$Event");
+            java.lang.reflect.Method handle = null;
+            for (java.lang.reflect.Method m : lifecycle.getClass().getMethods()) {
+                if (m.getName().equals("handleLifecycleEvent") && m.getParameterCount() == 1) { handle = m; break; }
+            }
+            if (handle != null) {
+                for (String ev : new String[]{"ON_CREATE", "ON_START", "ON_RESUME"}) {
+                    Object e = eventCls.getField(ev).get(null);
+                    try { handle.invoke(lifecycle, e); } catch (Throwable ignored) {}
+                }
+            }
+            Object now = null;
+            try { now = lifecycle.getClass().getMethod("getCurrentState").invoke(lifecycle); } catch (Throwable ignored) {}
+            System.out.println("acl HostBootstrap: lifecycle " + cur + " -> " + now);
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: ensureResumed skipped: " + t);
+        }
+    }
+
     public static void attachDecorToWindow(android.view.View decor) {
         if (decor == null) return;
         try {
@@ -1100,6 +1136,21 @@ public final class HostBootstrap {
                     android.content.Context.class);
             aiCtor.setAccessible(true);
             Object attachInfo = aiCtor.newInstance(session, window, display, vri, handler, callbacks, ctx);
+            // acl's present canvas is a hardware-accelerated RecordingCanvas over a GPU (Skia/Ganesh
+            // → dma-buf) surface, so the view tree must believe it is hardware-accelerated. This is
+            // what makes View.isHardwareAccelerated() true, so Jetpack Compose picks RenderNodeLayer
+            // (recorded display lists replayed via Canvas.drawRenderNode) instead of a software
+            // ViewLayer — acl re-owns that RenderNode record/replay path in graphics_jni.
+            try { setField(aiCls, attachInfo, "mHardwareAccelerated", Boolean.TRUE); } catch (Throwable ignored) {}
+            // View.canHaveDisplayList() gates the hardware display-list path on
+            // mAttachInfo.mThreadedRenderer != null. Without it, View.updateDisplayListIfDirty()
+            // never records a RenderNode (Compose layers + classic View children draw empty), so
+            // seed a hollow ThreadedRenderer purely to satisfy the non-null check — acl drives its
+            // own present loop and never calls into it (its record/replay is re-owned in graphics_jni).
+            try {
+                Object tr = allocateHollow(Class.forName("android.view.ThreadedRenderer"));
+                setField(aiCls, attachInfo, "mThreadedRenderer", tr);
+            } catch (Throwable ignored) {}
             // The DecorView's attach calls back into mViewRootImpl.setOnContentApplyWindowInsets
             // Listener etc., which read the ViewRootImpl's own mAttachInfo — link them.
             try {
