@@ -466,9 +466,25 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     }
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
   }
+  // DIAG (ACL_OVERLAY_DIAG): the draw ops + RenderNode replays a Dialog/PopupWindow overlay pass
+  // contributes this frame. Compose content rides in replays (not direct ops), so both are logged;
+  // 0/0 means the decor painted nothing (empty composition). Confirms overlay compositing lands.
+  static const bool ov_diag = std::getenv("ACL_OVERLAY_DIAG") != nullptr;
+  static auto recstats0 = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_recstats"));
+  const std::uint64_t ops_pre_overlay = ov_diag && drawops ? drawops() : 0;
+  const std::uint64_t rep_pre_overlay = ov_diag && recstats0 ? (recstats0() & 0xfffff) : 0;
   if (overlay_present != nullptr && s->canvas != nullptr)
     env->CallStaticVoidMethod(overlay_cls, overlay_present, s->canvas, s->w, s->h);
   if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
+  if (ov_diag) {
+    const std::uint64_t d = drawops ? drawops() - ops_pre_overlay : 0;
+    const std::uint64_t rep_d = recstats0 ? (recstats0() & 0xfffff) - rep_pre_overlay : 0;
+    static int shown = 0;
+    if ((d > 0 || rep_d > 0) && (shown < 8 || s->frames % 60 == 0)) {
+      log::i(kTag, "overlay pass: {} draw ops, {} replays (frame {})", d, rep_d, s->frames);
+      ++shown;
+    }
+  }
   static auto rnodes = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_rendernodes"));
   static auto recstats = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_recstats"));
   if (diag) {
