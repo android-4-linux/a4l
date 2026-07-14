@@ -15,6 +15,7 @@
 
 #include <cstdint>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -23,6 +24,7 @@
 #include <cstring>
 #include <ctime>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -32,6 +34,13 @@
 #include "SkColor.h"
 #include "SkColorSpace.h"
 #include "SkData.h"
+#include "SkSamplingOptions.h"
+#include "SkStream.h"
+#include "SkPngChunkReader.h"
+#include "codec/SkAndroidCodec.h"
+#include "codec/SkCodec.h"
+#include <androidfw/Asset.h>          // android::Asset (ImageDecoder resource decode)
+#include <androidfw/ResourceTypes.h>  // android::Res_png_9patch (nine-patch npTc chunk)
 #include "SkFontStyle.h"
 #include "SkFont.h"
 #include "SkFontMetrics.h"
@@ -199,6 +208,10 @@ void Bitmap_nativeErase(JNIEnv*, jclass, jlong ptr, jint color) {
 jboolean Bitmap_nativeIsPremultiplied(JNIEnv*, jclass, jlong ptr) {
   auto* w = reinterpret_cast<AclBitmap*>(ptr);
   return (w != nullptr && w->bitmap.alphaType() == kPremul_SkAlphaType) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean Bitmap_nativeHasAlpha(JNIEnv*, jclass, jlong ptr) {
+  auto* w = reinterpret_cast<AclBitmap*>(ptr);
+  return (w != nullptr && !w->bitmap.isOpaque()) ? JNI_TRUE : JNI_FALSE;
 }
 
 jint Bitmap_nativeConfig(JNIEnv*, jclass, jlong ptr) {
@@ -399,6 +412,11 @@ void Canvas_nDrawPath(JNIEnv*, jclass, jlong canvas, jlong path, jlong paint) {
 // Geometry mutators are the NORMAL JNI convention here (not @CriticalNative in this
 // framework version); nReset/nRewind/nSetFillType ARE @CriticalNative (handle-only).
 jlong Path_nInit(JNIEnv*, jclass) { return reinterpret_cast<jlong>(new SkPath()); }
+// Path(Path src) copy constructor: nInit(long nPath) clones the source SkPath (0 => empty).
+jlong Path_nInitCopy(JNIEnv*, jclass, jlong src) {
+  auto* s = reinterpret_cast<SkPath*>(src);
+  return reinterpret_cast<jlong>(s != nullptr ? new SkPath(*s) : new SkPath());
+}
 jlong Path_nGetFinalizer(JNIEnv*, jclass) { return reinterpret_cast<jlong>(&free_path); }
 void Path_nMoveTo(JNIEnv*, jclass, jlong p, jfloat x, jfloat y) {
   if (auto* s = reinterpret_cast<SkPath*>(p)) s->moveTo(x, y);
@@ -1959,7 +1977,20 @@ void HardwareRenderer_nSetRtAnimationsEnabled(JNIEnv*, jclass, jboolean) {}
 // Choreographer's FrameHandler, so it runs when the looper is pumped — the present loop).
 // Enough for Compose's frame clock / recomposer to initialize. Real vsync via
 // wp_presentation is a later refinement.
-struct AclVsyncReceiver { jobject weakRef; };  // global ref to the WeakReference<DisplayEventReceiver>
+struct AclVsyncReceiver {
+  jobject weakRef;      // global ref to the WeakReference<DisplayEventReceiver>
+  bool pending = false;  // a scheduleVsync request awaiting delivery (approach A)
+};
+// Registry of live receivers so acl_deliver_vsync (the Looper-driven present, approach A)
+// can fan a compositor-clocked vsync out to whichever DisplayEventReceiver(s) asked for one.
+// Access is on the app main thread in practice; the mutex guards rare cross-thread create.
+static std::vector<AclVsyncReceiver*> g_vsync_receivers;
+static std::mutex g_vsync_mutex;
+// Legacy default: scheduleVsync dispatches a MONOTONIC-stamped vsync inline (self-clocked —
+// what the poll-loop present path relies on). The PresentDriver flips this off so vsync is
+// instead *delivered* by acl_deliver_vsync at the compositor's wp_presentation cadence.
+static bool g_vsync_immediate = true;
+
 jobject make_vsync_event_data(JNIEnv* env) {
   jclass c = env->FindClass("android/view/DisplayEventReceiver$VsyncEventData");
   if (c == nullptr) { env->ExceptionClear(); return nullptr; }
@@ -1969,22 +2000,10 @@ jobject make_vsync_event_data(JNIEnv* env) {
   env->DeleteLocalRef(c);
   return o;
 }
-jlong DisplayEventReceiver_nativeInit(JNIEnv* env, jclass, jobject weakReceiver, jobject /*mq*/,
-                                      jint /*source*/, jint /*config*/) {
-  auto* r = new AclVsyncReceiver();
-  r->weakRef = env->NewGlobalRef(weakReceiver);
-  return reinterpret_cast<jlong>(r);
-}
-void DisplayEventReceiver_nativeDispose(JNIEnv* env, jclass, jlong ptr) {
-  auto* r = reinterpret_cast<AclVsyncReceiver*>(ptr);
-  if (r != nullptr) {
-    if (r->weakRef != nullptr) env->DeleteGlobalRef(r->weakRef);
-    delete r;
-  }
-}
-void DisplayEventReceiver_nativeScheduleVsync(JNIEnv* env, jclass, jlong ptr) {
-  auto* r = reinterpret_cast<AclVsyncReceiver*>(ptr);
-  if (r == nullptr) return;
+// Deliver one vsync (frameTimeNanos) into a receiver's DisplayEventReceiver.dispatchVsync,
+// which posts Choreographer.doFrame on the main Handler.
+static void dispatch_vsync_to(JNIEnv* env, AclVsyncReceiver* r, jlong frameTimeNanos) {
+  if (r == nullptr || r->weakRef == nullptr) return;
   static jmethodID wrGet = nullptr;
   if (wrGet == nullptr) {
     jclass wrc = env->FindClass("java/lang/ref/Reference");
@@ -1998,10 +2017,8 @@ void DisplayEventReceiver_nativeScheduleVsync(JNIEnv* env, jclass, jlong ptr) {
       derc, "dispatchVsync", "(JJILandroid/view/DisplayEventReceiver$VsyncEventData;)V");
   if (dispatch != nullptr) {
     jobject vsync = make_vsync_event_data(env);
-    struct timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    const jlong now = static_cast<jlong>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
-    env->CallVoidMethod(receiver, dispatch, now, static_cast<jlong>(0), static_cast<jint>(1), vsync);
+    env->CallVoidMethod(receiver, dispatch, frameTimeNanos, static_cast<jlong>(0),
+                        static_cast<jint>(1), vsync);
     if (env->ExceptionCheck()) env->ExceptionClear();
     if (vsync != nullptr) env->DeleteLocalRef(vsync);
   } else {
@@ -2010,9 +2027,65 @@ void DisplayEventReceiver_nativeScheduleVsync(JNIEnv* env, jclass, jlong ptr) {
   env->DeleteLocalRef(derc);
   env->DeleteLocalRef(receiver);
 }
+jlong DisplayEventReceiver_nativeInit(JNIEnv* env, jclass, jobject weakReceiver, jobject /*mq*/,
+                                      jint /*source*/, jint /*config*/) {
+  auto* r = new AclVsyncReceiver();
+  r->weakRef = env->NewGlobalRef(weakReceiver);
+  { std::lock_guard<std::mutex> lk(g_vsync_mutex); g_vsync_receivers.push_back(r); }
+  return reinterpret_cast<jlong>(r);
+}
+void DisplayEventReceiver_nativeDispose(JNIEnv* env, jclass, jlong ptr) {
+  auto* r = reinterpret_cast<AclVsyncReceiver*>(ptr);
+  if (r == nullptr) return;
+  {
+    std::lock_guard<std::mutex> lk(g_vsync_mutex);
+    g_vsync_receivers.erase(
+        std::remove(g_vsync_receivers.begin(), g_vsync_receivers.end(), r),
+        g_vsync_receivers.end());
+  }
+  if (r->weakRef != nullptr) env->DeleteGlobalRef(r->weakRef);
+  delete r;
+}
+void DisplayEventReceiver_nativeScheduleVsync(JNIEnv* env, jclass, jlong ptr) {
+  auto* r = reinterpret_cast<AclVsyncReceiver*>(ptr);
+  if (r == nullptr) return;
+  r->pending = true;
+  if (g_vsync_immediate) {  // legacy self-clocked path: dispatch a MONOTONIC vsync now
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    r->pending = false;
+    dispatch_vsync_to(env, r, static_cast<jlong>(ts.tv_sec) * 1000000000LL + ts.tv_nsec);
+  }
+}
 jobject DisplayEventReceiver_nativeGetLatestVsyncEventData(JNIEnv* env, jclass, jlong) {
   return make_vsync_event_data(env);
 }
+
+// ── approach A: compositor-clocked vsync delivery (see docs/looper-driven-present.md) ──
+// Deliver a vsync at time `frameTimeNanos` (the presentation clock) to every receiver with a
+// pending scheduleVsync request → Choreographer.doFrame. Called from the PresentDriver's
+// native tick on the app main thread (which owns `env`). Snapshots pending receivers under
+// the lock, then dispatches outside it (dispatchVsync re-enters Java).
+extern "C" void acl_deliver_vsync(JNIEnv* env, jlong frameTimeNanos) {
+  std::vector<AclVsyncReceiver*> pend;
+  {
+    std::lock_guard<std::mutex> lk(g_vsync_mutex);
+    for (auto* r : g_vsync_receivers)
+      if (r->pending) { r->pending = false; pend.push_back(r); }
+  }
+  for (auto* r : pend) dispatch_vsync_to(env, r, frameTimeNanos);
+}
+// Any receiver currently has a pending vsync request (the driver only clocks when someone —
+// Compose's frame clock or the traversal — actually asked for a frame).
+extern "C" int acl_vsync_pending() {
+  std::lock_guard<std::mutex> lk(g_vsync_mutex);
+  for (auto* r : g_vsync_receivers)
+    if (r->pending) return 1;
+  return 0;
+}
+// Switch vsync from legacy self-clocked (immediate) to delivered mode. The PresentDriver
+// calls acl_vsync_set_immediate(0) at startup so frames are paced by the compositor instead.
+extern "C" void acl_vsync_set_immediate(int on) { g_vsync_immediate = (on != 0); }
 
 // ── android.graphics.Interpolator (legacy keyframe interpolator) ─────────────────
 // Skia dropped SkInterpolator; acl keeps the first keyframe's values and returns them
@@ -2062,6 +2135,327 @@ void VirtualRefBasePtr_nDecStrong(JNIEnv*, jclass, jlong ptr) {
   if (auto* r = reinterpret_cast<VirtualLightRefBase*>(ptr)) r->decStrong(nullptr);
 }
 
+// ── android.graphics.ImageDecoder (Skia SkAndroidCodec) ──────────────────────────
+// The modern decode API (API 28+): a resource/asset/byte-source ImageView src goes through
+// ImageDecoder → nCreate (build a codec) → nDecodeBitmap (decode to a Bitmap). Backed by
+// Skia's SkAndroidCodec (libpng/libjpeg/libwebp linked). Enough for static images (drawables,
+// layout inflation); animation is a follow-on.
+// The PNG chunk reader that captures a .9.png's nine-patch data (the aapt-written "npTc"
+// chunk). Mirrors AOSP's NinePatchPeeker (Apache-2.0) minus the insets/scale helpers we don't
+// need: readChunk deserializes Res_png_9patch into a malloc'd copy the Bitmap chunk is built
+// from. Ref-counted (SkPngChunkReader is SkRefCnt) so SkCodec can hold it during decode.
+class AclNinePatchPeeker : public SkPngChunkReader {
+ public:
+  ~AclNinePatchPeeker() override { free(patch); }
+  bool readChunk(const char tag[], const void* data, size_t length) override {
+    if (std::strcmp("npTc", tag) == 0 && length >= sizeof(android::Res_png_9patch)) {
+      auto* p = static_cast<android::Res_png_9patch*>(const_cast<void*>(data));
+      const size_t sz = p->serializedSize();
+      if (length != sz) return true;  // malformed; ignore, keep decoding
+      auto* copy = static_cast<android::Res_png_9patch*>(std::malloc(sz));
+      if (copy == nullptr) return true;
+      std::memcpy(copy, p, sz);
+      android::Res_png_9patch::deserialize(copy);
+      copy->fileToDevice();
+      std::free(patch);
+      patch = copy;
+      patch_size = sz;
+    }
+    return true;  // keep decoding
+  }
+  android::Res_png_9patch* patch = nullptr;
+  size_t patch_size = 0;
+};
+
+struct AclImageDecoder {
+  std::unique_ptr<SkAndroidCodec> codec;
+  int width = 0, height = 0;
+  sk_sp<AclNinePatchPeeker> peeker;  // holds the npTc chunk when the source is a nine-patch
+};
+jclass g_imagedecoder_class = nullptr;
+jmethodID g_imagedecoder_ctor = nullptr;  // private ImageDecoder(long,int,int,boolean,boolean)
+
+// Build the Java ImageDecoder wrapping the encoded `data`; null if it can't be decoded. A
+// nine-patch peeker rides the decode so .9.png sources surface their stretch/padding data.
+jobject make_image_decoder(JNIEnv* env, sk_sp<SkData> data) {
+  if (data == nullptr || data->isEmpty()) return nullptr;
+  sk_sp<AclNinePatchPeeker> peeker(new AclNinePatchPeeker());
+  SkCodec::Result result = SkCodec::kInternalError;
+  std::unique_ptr<SkCodec> c =
+      SkCodec::MakeFromStream(SkMemoryStream::Make(data), &result, peeker.get());
+  if (c == nullptr) return nullptr;
+  std::unique_ptr<SkAndroidCodec> acodec = SkAndroidCodec::MakeFromCodec(std::move(c));
+  if (acodec == nullptr) return nullptr;
+  auto* d = new AclImageDecoder();
+  const SkImageInfo info = acodec->getInfo();
+  d->width = info.width();
+  d->height = info.height();
+  d->codec = std::move(acodec);
+  d->peeker = peeker;
+  const bool is_nine_patch = peeker->patch != nullptr;
+  if (g_imagedecoder_class == nullptr) {
+    jclass lc = env->FindClass("android/graphics/ImageDecoder");
+    if (lc != nullptr) {
+      g_imagedecoder_class = static_cast<jclass>(env->NewGlobalRef(lc));
+      g_imagedecoder_ctor = env->GetMethodID(g_imagedecoder_class, "<init>", "(JIIZZ)V");
+      env->DeleteLocalRef(lc);
+    }
+  }
+  if (g_imagedecoder_class == nullptr || g_imagedecoder_ctor == nullptr) { delete d; return nullptr; }
+  return env->NewObject(g_imagedecoder_class, g_imagedecoder_ctor, reinterpret_cast<jlong>(d),
+                        d->width, d->height, JNI_FALSE /*animated*/,
+                        is_nine_patch ? JNI_TRUE : JNI_FALSE);
+}
+
+// nCreate(long asset, boolean, Source): decode from an android::Asset (a resource/asset stream).
+jobject ImageDecoder_nCreateAsset(JNIEnv* env, jclass, jlong asset, jboolean, jobject) {
+  auto* a = reinterpret_cast<android::Asset*>(asset);
+  if (a == nullptr) return nullptr;
+  const void* buf = a->getBuffer(false);
+  const off64_t len = a->getLength();
+  if (buf == nullptr || len <= 0) return nullptr;
+  return make_image_decoder(env, SkData::MakeWithCopy(buf, static_cast<size_t>(len)));
+}
+// nCreate(byte[] data, int offset, int length, boolean, Source).
+jobject ImageDecoder_nCreateBytes(JNIEnv* env, jclass, jbyteArray data, jint offset, jint length,
+                                  jboolean, jobject) {
+  if (data == nullptr || length <= 0) return nullptr;
+  jbyte* p = env->GetByteArrayElements(data, nullptr);
+  if (p == nullptr) return nullptr;
+  sk_sp<SkData> d = SkData::MakeWithCopy(p + offset, static_cast<size_t>(length));
+  env->ReleaseByteArrayElements(data, p, JNI_ABORT);
+  return make_image_decoder(env, d);
+}
+
+// nCreate(InputStream is, byte[] storage, boolean, Source): drain the stream (storage is the
+// read buffer) and decode the accumulated bytes.
+jobject ImageDecoder_nCreateStream(JNIEnv* env, jclass, jobject is, jbyteArray storage, jboolean,
+                                   jobject) {
+  if (is == nullptr || storage == nullptr) return nullptr;
+  jclass isc = env->GetObjectClass(is);
+  jmethodID readM = env->GetMethodID(isc, "read", "([BII)I");
+  env->DeleteLocalRef(isc);
+  if (readM == nullptr) { env->ExceptionClear(); return nullptr; }
+  const jsize cap = env->GetArrayLength(storage);
+  std::vector<std::uint8_t> buf;
+  for (;;) {
+    const jint n = env->CallIntMethod(is, readM, storage, 0, cap);
+    if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionClear(); break; }
+    if (n <= 0) break;
+    jbyte* p = env->GetByteArrayElements(storage, nullptr);
+    if (p == nullptr) break;
+    buf.insert(buf.end(), reinterpret_cast<std::uint8_t*>(p),
+               reinterpret_cast<std::uint8_t*>(p) + n);
+    env->ReleaseByteArrayElements(storage, p, JNI_ABORT);
+  }
+  if (buf.empty()) return nullptr;
+  return make_image_decoder(env, SkData::MakeWithCopy(buf.data(), buf.size()));
+}
+// nCreate(ByteBuffer buffer, int position, int limit, boolean, Source): decode a direct buffer.
+jobject ImageDecoder_nCreateBuffer(JNIEnv* env, jclass, jobject buffer, jint position, jint limit,
+                                   jboolean, jobject) {
+  void* addr = env->GetDirectBufferAddress(buffer);
+  if (addr == nullptr || limit <= position) return nullptr;
+  return make_image_decoder(
+      env, SkData::MakeWithCopy(static_cast<std::uint8_t*>(addr) + position,
+                                static_cast<size_t>(limit - position)));
+}
+
+// nDecodeBitmap(nativePtr, decoder, doPostProcess, width, height, cropRect, mutable, allocator,
+//   unpremulRequired, conserveMemory, decodeAsAlphaMask, desiredColorSpace, extended) -> Bitmap.
+jobject ImageDecoder_nDecodeBitmap(JNIEnv* env, jclass, jlong nativePtr, jobject /*decoder*/,
+                                   jboolean /*doPostProcess*/, jint width, jint height,
+                                   jobject /*cropRect*/, jboolean isMutable, jint /*allocator*/,
+                                   jboolean /*unpremul*/, jboolean /*conserve*/,
+                                   jboolean /*alphaMask*/, jlong /*colorSpace*/, jboolean /*extended*/) {
+  auto* d = reinterpret_cast<AclImageDecoder*>(nativePtr);
+  if (d == nullptr || !d->codec) return nullptr;
+  const SkImageInfo nInfo =
+      d->codec->getInfo().makeColorType(kN32_SkColorType).makeAlphaType(kPremul_SkAlphaType);
+  SkBitmap native;
+  if (!native.tryAllocPixels(nInfo)) return nullptr;
+  const SkCodec::Result r =
+      d->codec->getAndroidPixels(nInfo, native.getPixels(), native.rowBytes());
+  if (r != SkCodec::kSuccess && r != SkCodec::kIncompleteInput) return nullptr;
+  auto* w = new AclBitmap();
+  if (width <= 0 || height <= 0 || (width == nInfo.width() && height == nInfo.height())) {
+    w->bitmap = native;
+  } else {  // ImageDecoder requested a resize
+    const SkImageInfo tInfo = nInfo.makeWH(width, height);
+    if (!w->bitmap.tryAllocPixels(tInfo)) { delete w; return nullptr; }
+    native.pixmap().scalePixels(w->bitmap.pixmap(), SkSamplingOptions(SkFilterMode::kLinear));
+  }
+  w->immutable = (isMutable == JNI_FALSE);
+  // A nine-patch source: hand the deserialized npTc chunk to the Bitmap so getNinePatchChunk()
+  // is non-null and the framework builds a NinePatchDrawable (backgrounds for EditText/Button/…).
+  jbyteArray np_chunk = nullptr;
+  if (d->peeker && d->peeker->patch != nullptr && d->peeker->patch_size > 0) {
+    np_chunk = env->NewByteArray(static_cast<jsize>(d->peeker->patch_size));
+    if (np_chunk != nullptr)
+      env->SetByteArrayRegion(np_chunk, 0, static_cast<jsize>(d->peeker->patch_size),
+                              reinterpret_cast<const jbyte*>(d->peeker->patch));
+  }
+  return env->NewObject(g_bitmap_class, g_bitmap_ctor, reinterpret_cast<jlong>(w),
+                        w->bitmap.width(), w->bitmap.height(), /*density=*/0,
+                        /*requestPremultiplied=*/JNI_TRUE, np_chunk,
+                        /*ninePatchInsets=*/static_cast<jobject>(nullptr));
+}
+
+// nGetPadding: the nine-patch content padding (from the npTc chunk), or (-1,-1,-1,-1) when the
+// source is not a nine-patch.
+void ImageDecoder_nGetPadding(JNIEnv* env, jclass, jlong nativePtr, jobject outRect) {
+  if (outRect == nullptr) return;
+  auto* d = reinterpret_cast<AclImageDecoder*>(nativePtr);
+  jint l = -1, t = -1, r = -1, b = -1;
+  if (d != nullptr && d->peeker && d->peeker->patch != nullptr) {
+    const android::Res_png_9patch* p = d->peeker->patch;
+    l = static_cast<jint>(p->paddingLeft);
+    t = static_cast<jint>(p->paddingTop);
+    r = static_cast<jint>(p->paddingRight);
+    b = static_cast<jint>(p->paddingBottom);
+  }
+  jclass rc = env->GetObjectClass(outRect);
+  jmethodID set = env->GetMethodID(rc, "set", "(IIII)V");
+  if (set != nullptr) env->CallVoidMethod(outRect, set, l, t, r, b);
+  env->DeleteLocalRef(rc);
+}
+void ImageDecoder_nClose(JNIEnv*, jclass, jlong nativePtr) {
+  delete reinterpret_cast<AclImageDecoder*>(nativePtr);
+}
+jobject ImageDecoder_nGetSampledSize(JNIEnv* env, jclass, jlong nativePtr, jint sampleSize) {
+  auto* d = reinterpret_cast<AclImageDecoder*>(nativePtr);
+  int w = d != nullptr ? d->width : 0, h = d != nullptr ? d->height : 0;
+  if (sampleSize > 1) { w = (w + sampleSize - 1) / sampleSize; h = (h + sampleSize - 1) / sampleSize; }
+  jclass sz = env->FindClass("android/util/Size");
+  if (sz == nullptr) return nullptr;
+  jmethodID ctor = env->GetMethodID(sz, "<init>", "(II)V");
+  jobject o = ctor != nullptr ? env->NewObject(sz, ctor, w, h) : nullptr;
+  env->DeleteLocalRef(sz);
+  return o;
+}
+
+// ── android.graphics.NinePatch (over the npTc chunk) ─────────────────────────────
+// The chunk is the (deserialized) Res_png_9patch a nine-patch Bitmap carries. validate
+// copies it to the native heap and hands back the pointer NinePatch/NinePatchDrawable holds.
+jboolean NinePatch_isNinePatchChunk(JNIEnv* env, jclass, jbyteArray obj) {
+  if (obj == nullptr || env->GetArrayLength(obj) < static_cast<jsize>(sizeof(android::Res_png_9patch)))
+    return JNI_FALSE;
+  jbyte* arr = env->GetByteArrayElements(obj, nullptr);
+  if (arr == nullptr) return JNI_FALSE;
+  const auto* chunk = reinterpret_cast<const android::Res_png_9patch*>(arr);
+  const int8_t was = chunk->wasDeserialized;
+  env->ReleaseByteArrayElements(obj, arr, JNI_ABORT);
+  return was != -1 ? JNI_TRUE : JNI_FALSE;  // deserialized ⇒ a valid chunk
+}
+jlong NinePatch_validateNinePatchChunk(JNIEnv* env, jclass, jbyteArray obj) {
+  const jsize sz = env->GetArrayLength(obj);
+  if (sz < static_cast<jsize>(sizeof(android::Res_png_9patch))) return 0;
+  auto* storage = new int8_t[sz];
+  env->GetByteArrayRegion(obj, 0, sz, reinterpret_cast<jbyte*>(storage));
+  return reinterpret_cast<jlong>(storage);  // Res_png_9patch* (getXDivs/getColors point within)
+}
+void NinePatch_nativeFinalize(JNIEnv*, jclass, jlong chunk) {
+  delete[] reinterpret_cast<int8_t*>(chunk);
+}
+
+// Canvas.nDrawNinePatch: draw the nine-patch bitmap into `dst` with Skia's lattice (the chunk's
+// stretch divs). Fixed-color/transparent regions aren't mapped (rare for widget backgrounds).
+void Canvas_nDrawNinePatch(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, jlong chunkHandle,
+                           jfloat left, jfloat top, jfloat right, jfloat bottom, jlong paintHandle,
+                           jint /*screenDensity*/, jint /*bitmapDensity*/) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* b = reinterpret_cast<AclBitmap*>(bitmapHandle);
+  const auto* chunk = reinterpret_cast<const android::Res_png_9patch*>(chunkHandle);
+  if (c == nullptr || b == nullptr || chunk == nullptr) return;
+  const int w = b->bitmap.width(), h = b->bitmap.height();
+  // NinePatchUtils::SetLatticeDivs (AOSP, Apache-2.0), inlined: the last div == size carries no
+  // extra info and Skia rejects it.
+  SkCanvas::Lattice lattice{};
+  lattice.fXCount = chunk->numXDivs;
+  lattice.fYCount = chunk->numYDivs;
+  lattice.fXDivs = chunk->getXDivs();
+  lattice.fYDivs = chunk->getYDivs();
+  if (lattice.fXCount > 0 && w == lattice.fXDivs[lattice.fXCount - 1]) lattice.fXCount--;
+  if (lattice.fYCount > 0 && h == lattice.fYDivs[lattice.fYCount - 1]) lattice.fYCount--;
+  lattice.fRectTypes = nullptr;
+  lattice.fColors = nullptr;
+  lattice.fBounds = nullptr;
+  auto* ap = reinterpret_cast<AclPaint*>(paintHandle);
+  if (sk_sp<SkImage> img = SkImage::MakeFromBitmap(b->bitmap)) {
+    const SkRect dst = SkRect::MakeLTRB(left, top, right, bottom);
+    c->drawImageLattice(img.get(), lattice, dst, SkFilterMode::kNearest,
+                        ap != nullptr ? &ap->paint : nullptr);
+  }
+}
+
+// android.graphics.drawable.AnimatedVectorDrawable: acl re-owns the render stack (ADR-4, hwui
+// dropped), and the RenderThread AnimatorSet backing this lives in hwui. Stub the animator seam
+// so an AVD inflates and draws its underlying (static) VectorDrawable — the animation itself is a
+// follow-on. Property-holder creators return a non-zero sentinel; control calls are no-ops.
+// The AnimatorSet ptr is wrapped in a VirtualRefBasePtr (inc/decStrong'd), so it must be a real
+// ref-counted object, not a sentinel. Property holders may be too — hand out real ones as well.
+const JNINativeMethod kAnimatedVectorDrawable[] = {
+    {"nCreateAnimatorSet", "()J", reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jlong {
+       return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
+    {"nSetVectorDrawableTarget", "(JJ)V",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jlong) {})},
+    {"nAddAnimator", "(JJJJJII)V",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jlong, jlong, jlong, jlong, jint, jint) {})},
+    {"nSetPropertyHolderData", "(J[FI)V",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jfloatArray, jint) {})},
+    {"nSetPropertyHolderData", "(J[II)V",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jintArray, jint) {})},
+    {"nStart",
+     "(JLandroid/graphics/drawable/AnimatedVectorDrawable$VectorDrawableAnimatorRT;I)V",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jobject, jint) {})},
+    {"nReverse",
+     "(JLandroid/graphics/drawable/AnimatedVectorDrawable$VectorDrawableAnimatorRT;I)V",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jobject, jint) {})},
+    {"nCreateGroupPropertyHolder", "(JIFF)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jint, jfloat, jfloat) -> jlong {
+       return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
+    {"nCreatePathDataPropertyHolder", "(JJJ)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jlong, jlong) -> jlong {
+       return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
+    {"nCreatePathColorPropertyHolder", "(JIII)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jint, jint, jint) -> jlong {
+       return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
+    {"nCreatePathPropertyHolder", "(JIFF)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jint, jfloat, jfloat) -> jlong {
+       return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
+    {"nCreateRootAlphaPropertyHolder", "(JFF)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jfloat, jfloat) -> jlong {
+       return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
+    {"nEnd", "(J)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) {})},
+    {"nReset", "(J)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) {})},
+};
+
+const JNINativeMethod kNinePatch[] = {
+    {"isNinePatchChunk", "([B)Z", reinterpret_cast<void*>(NinePatch_isNinePatchChunk)},
+    {"validateNinePatchChunk", "([B)J", reinterpret_cast<void*>(NinePatch_validateNinePatchChunk)},
+    {"nativeFinalize", "(J)V", reinterpret_cast<void*>(NinePatch_nativeFinalize)},
+};
+
+const JNINativeMethod kImageDecoder[] = {
+    {"nCreate", "(JZLandroid/graphics/ImageDecoder$Source;)Landroid/graphics/ImageDecoder;",
+     reinterpret_cast<void*>(ImageDecoder_nCreateAsset)},
+    {"nCreate", "([BIIZLandroid/graphics/ImageDecoder$Source;)Landroid/graphics/ImageDecoder;",
+     reinterpret_cast<void*>(ImageDecoder_nCreateBytes)},
+    {"nCreate",
+     "(Ljava/io/InputStream;[BZLandroid/graphics/ImageDecoder$Source;)Landroid/graphics/ImageDecoder;",
+     reinterpret_cast<void*>(ImageDecoder_nCreateStream)},
+    {"nCreate",
+     "(Ljava/nio/ByteBuffer;IIZLandroid/graphics/ImageDecoder$Source;)Landroid/graphics/ImageDecoder;",
+     reinterpret_cast<void*>(ImageDecoder_nCreateBuffer)},
+    {"nDecodeBitmap",
+     "(JLandroid/graphics/ImageDecoder;ZIILandroid/graphics/Rect;ZIZZZJZ)Landroid/graphics/Bitmap;",
+     reinterpret_cast<void*>(ImageDecoder_nDecodeBitmap)},
+    {"nGetSampledSize", "(JI)Landroid/util/Size;",
+     reinterpret_cast<void*>(ImageDecoder_nGetSampledSize)},
+    {"nGetPadding", "(JLandroid/graphics/Rect;)V", reinterpret_cast<void*>(ImageDecoder_nGetPadding)},
+    {"nClose", "(J)V", reinterpret_cast<void*>(ImageDecoder_nClose)},
+};
+
 const JNINativeMethod kBitmap[] = {
     {"nativeCreate", "([IIIIIIZJ)Landroid/graphics/Bitmap;",
      reinterpret_cast<void*>(Bitmap_nativeCreate)},
@@ -2072,6 +2466,7 @@ const JNINativeMethod kBitmap[] = {
     {"nativeSetHasAlpha", "(JZZ)V", reinterpret_cast<void*>(Bitmap_nativeSetHasAlpha)},
     {"nativeErase", "(JI)V", reinterpret_cast<void*>(Bitmap_nativeErase)},
     {"nativeIsPremultiplied", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeIsPremultiplied)},
+    {"nativeHasAlpha", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeHasAlpha)},
     {"nativeConfig", "(J)I", reinterpret_cast<void*>(Bitmap_nativeConfig)},
     {"nativeIsImmutable", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeIsImmutable)},
 };
@@ -2153,10 +2548,12 @@ const JNINativeMethod kBaseCanvas[] = {
     {"nDrawTextOnPath", "(JLjava/lang/String;JFFIJ)V", reinterpret_cast<void*>(Canvas_nDrawTextOnPathString)},
     {"nDrawBitmap", "(JJFFJIII)V", reinterpret_cast<void*>(Canvas_nDrawBitmap)},
     {"nDrawBitmap", "(JJFFFFFFFFJII)V", reinterpret_cast<void*>(Canvas_nDrawBitmapRect)},
+    {"nDrawNinePatch", "(JJJFFFFJII)V", reinterpret_cast<void*>(Canvas_nDrawNinePatch)},
     {"nDrawPath", "(JJJ)V", reinterpret_cast<void*>(Canvas_nDrawPath)},
 };
 const JNINativeMethod kPath[] = {
     {"nInit", "()J", reinterpret_cast<void*>(Path_nInit)},
+    {"nInit", "(J)J", reinterpret_cast<void*>(Path_nInitCopy)},  // Path(Path) copy ctor
     {"nGetFinalizer", "()J", reinterpret_cast<void*>(Path_nGetFinalizer)},
     {"nMoveTo", "(JFF)V", reinterpret_cast<void*>(Path_nMoveTo)},
     {"nLineTo", "(JFF)V", reinterpret_cast<void*>(Path_nLineTo)},
@@ -2587,6 +2984,10 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/Canvas", kCanvas, n(kCanvas)) && ok;
   ok = reg(env, "android/graphics/BaseCanvas", kBaseCanvas, n(kBaseCanvas)) && ok;
   ok = reg(env, "android/graphics/Path", kPath, n(kPath)) && ok;
+  ok = reg(env, "android/graphics/ImageDecoder", kImageDecoder, n(kImageDecoder)) && ok;
+  ok = reg(env, "android/graphics/NinePatch", kNinePatch, n(kNinePatch)) && ok;
+  ok = reg(env, "android/graphics/drawable/AnimatedVectorDrawable", kAnimatedVectorDrawable,
+           n(kAnimatedVectorDrawable)) && ok;
   ok = reg(env, "android/graphics/Matrix", kMatrix, n(kMatrix)) && ok;
   ok = reg(env, "android/graphics/RenderNode", kRenderNode, n(kRenderNode)) && ok;
   ok = reg(env, "android/graphics/Paint", kPaint, n(kPaint)) && ok;

@@ -9,6 +9,7 @@ cc_library_shared {
     name: "libacl_graphics_jni",
     host_supported: true,
     device_supported: false,
+    compile_multilib: "64",  // ART host runs 64-bit; libandroidfw host is 64-only
     srcs: [
         "graphics_jni.cpp",
         "gpu_dmabuf.cpp",
@@ -27,6 +28,9 @@ cc_library_shared {
         "libwebp-encode",
         "libsfntly",
         "libwuffs_mirror_release_c",
+        "libandroidfw",  // host: static-only (android::Asset / Res_png_9patch for ImageDecoder)
+        "libutils",      // transitive: String8/String16/utf8_to_utf16/SortedVector
+        "libziparchive", // transitive: libandroidfw zip access
     ],
     shared_libs: [
         "libpng",
@@ -51,6 +55,7 @@ cc_library_shared {
         "external/skia/include/gpu",
         "external/skia/include/private",
         "external/skia/include/android",
+        "external/skia/include/codec",
         "external/skia/include/encode",
     ],
     cflags: [
