@@ -51,6 +51,40 @@ with the search path wired. Two hard pieces remain (Phase 4 / R-6):
 
 The front of the chain (this change) is what every later step builds on.
 
+## What a real engine expects — Flutter, read from source (so we don't implement blind)
+
+Read from `flutter/engine/src/flutter/shell/platform/android/`. `libflutter.so` (x86_64 build,
+still bionic-linked) is a concrete, representative NDK client. What it needs:
+
+- **Direct-linked libs** (must resolve at `dlopen`): bionic `libc.so`/`libm.so`/`libdl.so` (the
+  bridge), `libandroid.so`, `libEGL.so`, `libGLESv2.so`, `liblog.so`, `libjnigraphics.so`.
+- **`libandroid.so` functions actually called** — direct: `ANativeWindow_fromSurface` /
+  `_acquire`/`_release`/`_getWidth`/`_getHeight`; `ALooper_prepare`/`_acquire`/`_addFd`/`_pollOnce`/
+  `_wake` (every engine thread runs on an ALooper over real fds); `AAssetManager_fromJava` +
+  `AAsset_open/close/getLength/getBuffer`; `__android_log_print`. Resolved lazily via `dlsym` and
+  *tolerant of absence*: `AChoreographer_*`, `AHardwareBuffer_*`, `ASurfaceControl/Transaction_*`,
+  `ATrace_isEnabled`.
+- **Rendering config — pick the easy one:** the engine defaults to Impeller (Vulkan-first on API
+  ≥29, needs the AHardwareBuffer/ASurfaceControl set). Forcing **`--enable-impeller=false`** (or
+  targeting API < 29) selects **Skia-GLES**, which needs only an **EGL window surface** on the
+  `ANativeWindow`: `EGL_OPENGL_ES2_BIT`, `EGL_WINDOW_BIT`, RGBA8888, depth=0/stencil=0, GLES2
+  context, `eglSwapBuffers`. That is the minimal render path.
+- **Surface flow:** Java `Surface` → `ANativeWindow_fromSurface` → `eglCreateWindowSurface` →
+  GLES2 render → `eglSwapBuffers`. So the one load-bearing shim is **`ANativeWindow` backed by an
+  acl Wayland/dma-buf surface** (`wm/`+`gfx/` already produce exactly this), with EGL/GLES routed
+  to host **Mesa**. **Vsync can be driven entirely from Java** (`FlutterJNI.nativeOnVsync`), so
+  `AChoreographer` is optional.
+- **Bring-up an embedder drives:** `FlutterLoader.startInitialization` → `loadLibrary` →
+  `nativeInit` (ICU is a blob inside `libflutter.so`, located via `--icu-native-lib-path`; AOT via
+  `--aot-shared-library-name=libapp.so`; JIT via `kernel_blob.bin`) → `attachToNative` →
+  `runBundleAndSnapshotFromLibrary` → `nativeSurfaceCreated(Surface)` → `nativeSetViewportMetrics`
+  → frames. The JNI surface is ~40 `FlutterJNI` natives (inventory in the research notes).
+
+**Upshot for acl:** the NDK trampolines map almost entirely onto machinery that already exists —
+`ANativeWindow` → `wm/`+`gfx/` dma-buf/Wayland surface, `ALooper` → the reactor, EGL/GLES → host
+Mesa, `liblog` → `log/`. The genuinely hard, missing piece is the **bionic libc/libm/libdl bridge**
+so the `.so` links at all; the trampolines are then a well-scoped surface, not a guess.
+
 ## Verify
 
 ```sh
