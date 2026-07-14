@@ -300,9 +300,15 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     if (diag) log::i(kTag, "PresentDriver.nTraverse: measured {}x{}", mw, mh);
   }
   if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); return; }
+  // DIAG (Compose draw-path): count draw ops issued during this frame's draw. ~0 => the view
+  // tree produced no paint (blank/white frame); high => content draws (issue is elsewhere).
+  static auto drawops = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_drawops"));
+  const std::uint64_t ops_before = drawops ? drawops() : 0;
   if (s->m_draw != nullptr && s->canvas != nullptr) env->CallVoidMethod(s->view, s->m_draw, s->canvas);
   if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); return; }
-  if (diag) log::i(kTag, "PresentDriver.nTraverse: drawn");
+  static auto rnodes = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_rendernodes"));
+  if (diag) log::i(kTag, "PresentDriver.nTraverse: drawn ({} draw ops this frame, {} RenderNodes created)",
+                   drawops ? drawops() - ops_before : 0, rnodes ? rnodes() : 0);
   const int bufidx = s->presenter->next_buffer();
   if (bufidx < 0) { if (diag) log::w(kTag, "PresentDriver.nTraverse: no free buffer"); return; }
   PresentDmabuf f{};

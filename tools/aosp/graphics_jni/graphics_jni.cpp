@@ -253,13 +253,21 @@ jlong Canvas_nGetNativeFinalizer(JNIEnv*, jclass) {
   return reinterpret_cast<jlong>(&free_canvas);
 }
 
+// DIAG (Compose draw-path investigation): count Canvas draw ops so we can tell whether a
+// frame's content actually reaches the Skia canvas (vs a blank/white frame). acl_graphics_
+// profile_drawops() reads it; jvm_vm logs the per-frame delta.
+std::atomic<std::uint64_t> g_draw_ops{0};
+inline void tick_draw() { g_draw_ops.fetch_add(1, std::memory_order_relaxed); }
+
 void Canvas_nDrawColor(JNIEnv*, jclass, jlong canvas, jint color, jint /*mode*/) {
+  tick_draw();
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
   if (c != nullptr) c->drawColor(static_cast<SkColor>(color), SkBlendMode::kSrcOver);
 }
 
 void Canvas_nDrawRect(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b,
                       jlong paint) {
+  tick_draw();
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
   SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
@@ -268,6 +276,7 @@ void Canvas_nDrawRect(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat 
 
 void Canvas_nDrawLine(JNIEnv*, jclass, jlong canvas, jfloat x0, jfloat y0, jfloat x1, jfloat y1,
                       jlong paint) {
+  tick_draw();
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
   SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
@@ -276,6 +285,7 @@ void Canvas_nDrawLine(JNIEnv*, jclass, jlong canvas, jfloat x0, jfloat y0, jfloa
 
 void Canvas_nDrawOval(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b,
                       jlong paint) {
+  tick_draw();
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
   SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
@@ -284,6 +294,7 @@ void Canvas_nDrawOval(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat 
 
 void Canvas_nDrawCircle(JNIEnv*, jclass, jlong canvas, jfloat cx, jfloat cy, jfloat radius,
                         jlong paint) {
+  tick_draw();
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
   SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
@@ -292,6 +303,7 @@ void Canvas_nDrawCircle(JNIEnv*, jclass, jlong canvas, jfloat cx, jfloat cy, jfl
 
 void Canvas_nDrawRoundRect(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b,
                            jfloat rx, jfloat ry, jlong paint) {
+  tick_draw();
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
   SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
@@ -317,6 +329,7 @@ void draw_utf16(SkCanvas* c, AclPaint* ap, const jchar* chars, int len, int off,
 // nDrawText(String, start, end)
 void Canvas_nDrawText(JNIEnv* env, jclass, jlong canvas, jstring text, jint start, jint end,
                       jfloat x, jfloat y, jint /*flags*/, jlong paint) {
+  tick_draw();
   if (text == nullptr) return;
   const jchar* chars = env->GetStringChars(text, nullptr);
   if (chars != nullptr) {
@@ -328,6 +341,7 @@ void Canvas_nDrawText(JNIEnv* env, jclass, jlong canvas, jstring text, jint star
 // nDrawText(char[], index, count)
 void Canvas_nDrawTextChars(JNIEnv* env, jclass, jlong canvas, jcharArray text, jint index,
                            jint count, jfloat x, jfloat y, jint /*flags*/, jlong paint) {
+  tick_draw();
   if (text == nullptr) return;
   jchar* chars = env->GetCharArrayElements(text, nullptr);
   if (chars != nullptr) {
@@ -339,6 +353,7 @@ void Canvas_nDrawTextChars(JNIEnv* env, jclass, jlong canvas, jcharArray text, j
 // nDrawTextRun(String, start, end, contextStart, contextEnd, x, y, isRtl, paint)
 void Canvas_nDrawTextRunString(JNIEnv* env, jclass, jlong canvas, jstring text, jint start, jint end,
                                jint, jint, jfloat x, jfloat y, jboolean, jlong paint) {
+  tick_draw();
   if (text == nullptr) return;
   const jchar* chars = env->GetStringChars(text, nullptr);
   if (chars != nullptr) {
@@ -351,6 +366,7 @@ void Canvas_nDrawTextRunString(JNIEnv* env, jclass, jlong canvas, jstring text, 
 void Canvas_nDrawTextRunChars(JNIEnv* env, jclass, jlong canvas, jcharArray text, jint start,
                               jint count, jint, jint, jfloat x, jfloat y, jboolean, jlong paint,
                               jlong) {
+  tick_draw();
   if (text == nullptr) return;
   jchar* chars = env->GetCharArrayElements(text, nullptr);
   if (chars != nullptr) {
@@ -364,6 +380,7 @@ void Canvas_nDrawTextRunChars(JNIEnv* env, jclass, jlong canvas, jcharArray text
 void Canvas_nDrawGlyphs(JNIEnv* env, jclass, jlong canvas, jintArray glyphIds, jfloatArray positions,
                         jint glyphIdStart, jint positionStart, jint glyphCount, jlong /*font*/,
                         jlong paint) {
+  tick_draw();
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
   if (c == nullptr || ap == nullptr || glyphIds == nullptr || positions == nullptr || glyphCount <= 0)
@@ -391,6 +408,7 @@ void Canvas_nDrawTextOnPathString(JNIEnv*, jclass, jlong, jstring, jlong, jfloat
 void Canvas_nDrawBitmap(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, jfloat left, jfloat top,
                         jlong paint, jint /*canvasDensity*/, jint /*screenDensity*/,
                         jint /*bitmapDensity*/) {
+  tick_draw();
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
   auto* b = reinterpret_cast<AclBitmap*>(bitmapHandle);
   if (c == nullptr || b == nullptr) return;
@@ -403,6 +421,7 @@ void Canvas_nDrawBitmap(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, jfloa
 void Canvas_nDrawBitmapRect(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, jfloat sl, jfloat st,
                             jfloat sr, jfloat sb, jfloat dl, jfloat dt, jfloat dr, jfloat db,
                             jlong paint, jint /*screenDensity*/, jint /*bitmapDensity*/) {
+  tick_draw();
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
   auto* b = reinterpret_cast<AclBitmap*>(bitmapHandle);
   if (c == nullptr || b == nullptr) return;
@@ -414,6 +433,7 @@ void Canvas_nDrawBitmapRect(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, j
 }
 
 void Canvas_nDrawPath(JNIEnv*, jclass, jlong canvas, jlong path, jlong paint) {
+  tick_draw();
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
   auto* sp = reinterpret_cast<SkPath*>(path);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
@@ -2406,6 +2426,7 @@ void NinePatch_nativeFinalize(JNIEnv*, jclass, jlong chunk) {
 void Canvas_nDrawNinePatch(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, jlong chunkHandle,
                            jfloat left, jfloat top, jfloat right, jfloat bottom, jlong paintHandle,
                            jint /*screenDensity*/, jint /*bitmapDensity*/) {
+  tick_draw();
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
   auto* b = reinterpret_cast<AclBitmap*>(bitmapHandle);
   const auto* chunk = reinterpret_cast<const android::Res_png_9patch*>(chunkHandle);
@@ -3119,6 +3140,12 @@ extern "C" bool acl_read_bitmap(long handle, std::uint32_t* dst, int w, int h) {
 // before the final optimal path. Today: RenderNode shim nodes created (ADR-4 hwui-drop).
 extern "C" std::uint64_t acl_graphics_profile_rendernodes() {
   return g_rn_nodes.load(std::memory_order_relaxed);
+}
+
+// DIAG: total Canvas draw ops issued so far (see g_draw_ops). jvm_vm logs the per-frame delta
+// to tell whether Compose content actually paints or the frame is blank.
+extern "C" std::uint64_t acl_graphics_profile_drawops() {
+  return g_draw_ops.load(std::memory_order_relaxed);
 }
 
 // acl calls this after dlopen. Returns JNI_OK when the minimal graphics floor is bound.
