@@ -117,9 +117,43 @@ existing Choreographer/`acl_deliver_vsync` machinery for free — matching ivi-h
 `frame_start = present_ns`, `frame_target = present_ns + refresh` timing. Vsync is **reuse, not new
 work**; only the timestamps/thread-affinity above must be honored.
 
+## The bionic bridge — validated foundation + the embedding mechanism
+
+**Stage 0 — PROVEN.** A bionic x86_64 exe, run via the bionic `linker64` with the vendored bionic
+runtime, `dlopen`'d a bionic `.so` and called it → `answer()=42` **on this glibc host**. So the
+runtime + linker are sound; bionic code runs here. Recipe: NDK clang `--target=x86_64-linux-android24`
+for the `.so`/exe; `m linker` → `…/apex/com.android.runtime/bin/linker64`; the real 64-bit bionic libs
+are `out/soong/.intermediates/bionic/{libc,libm,libdl}/…/**android_x86_64_shared**/*.so` +
+`linker/ld-android/android_x86_64_shared/ld-android.so` (**not** `android_x86_x86_64_shared`, which is
+32-bit); run `LD_LIBRARY_PATH=<bionic-libs> ./linker64 <ABSOLUTE-path-exe>` (the missing
+`/linkerconfig/ld.config.txt` warning is harmless).
+
+**Stage 0b — the in-process embedding (the hard, dedicated piece).** acl needs the app `.so` loaded
+*into* the glibc ART process (so its JNI reaches the JVM), not a child process. The mechanism is now
+pinned:
+- The bionic `linker64`/`ld-android.so` export a programmatic loader — `__loader_dlopen`,
+  `__loader_android_dlopen_ext`, `__loader_dlsym`, `__loader_android_create_namespace`, … (bionic
+  `dlfcn.cpp`).
+- But glibc **cannot** call them naively: glibc's own linker can't even map `ld-android.so` (a bionic
+  `.so` whose `NEEDED` don't resolve against glibc), and `__loader_dlopen` requires the linker's
+  `solist`/namespaces initialized plus a `caller_addr`.
+- So the bionic linker must be **bootstrapped in-process**: map `linker64` (PIE, self-relocating),
+  call `__linker_init(KernelArgumentBlock)` (bionic `linker_main.cpp:698`) with a **synthetic**
+  argument block (fake `argc/argv/envp/auxv`, no real main executable), set up TLS + a default
+  namespace, then `__loader_android_dlopen_ext` the app `.so` in that namespace with our trampoline
+  `.so` on its search path.
+- This is exactly what **libhybris** (Apache-2.0) implements (for the reverse direction — glibc apps
+  using bionic GL drivers). Options: **(a)** vendor/patch libhybris's linker-loading core, or **(b)** a
+  purpose-built bootstrap in `src/ndk/` (a controlled subset — acl loads a known `.so` set, not the
+  general case). Both are bionic-version-specific (target the vendored android-13 bionic) and are a
+  focused multi-step build, not a small shim. The two-libc coexistence (bionic libc for app `.so` +
+  glibc for acl, bridged at the NDK/JNI boundary) is the R-6 risk to manage here.
+
 ## Verify
 
 ```sh
+# Stage 0 (scratchpad /tmp/acl/scratchpad/bionic0/): bionic .so runs on host
+LD_LIBRARY_PATH=broot/lib64 broot/linker64 $PWD/broot/hello_exe   # -> answer()=42
 # host-.so fixture (scratchpad): proves the loadLibrary plumbing
 acl run ndkdemo.apk --main=com.acl.ndkdemo.NativeMain   # -> "loaded libacldemo; answer()=42"
 # a real arm-only app reports the mismatch:
