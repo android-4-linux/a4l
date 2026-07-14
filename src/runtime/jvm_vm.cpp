@@ -1386,10 +1386,53 @@ class JniVm : public Vm {
   // Print + clear a pending exception and return a RuntimeError describing `what`.
   Error fail_with_exception(const std::string& what) {
     if (env_->ExceptionCheck() == JNI_TRUE) {
-      env_->ExceptionDescribe();
+      jthrowable t = env_->ExceptionOccurred();
+      env_->ExceptionDescribe();  // stack to stderr (often empty for linker-thrown errors)
       env_->ExceptionClear();
+      log_throwable_chain(t);     // class + message + cause chain (names the missing class)
+      if (t != nullptr) env_->DeleteLocalRef(t);
     }
     return Error::of(Status::RuntimeError, "failed to " + what);
+  }
+
+  // Log a throwable's type, message, and cause chain. A NoClassDefFoundError thrown by the
+  // class linker often carries an empty stack but a message (or a ClassNotFoundException cause)
+  // that names the missing class — the only place the culprit surfaces.
+  void log_throwable_chain(jthrowable t) {
+    jclass thr_cls = env_->FindClass("java/lang/Throwable");
+    jclass cls_cls = env_->FindClass("java/lang/Class");
+    if (thr_cls == nullptr || cls_cls == nullptr) { clear_exception(); return; }
+    jmethodID m_getMessage = env_->GetMethodID(thr_cls, "getMessage", "()Ljava/lang/String;");
+    jmethodID m_getCause = env_->GetMethodID(thr_cls, "getCause", "()Ljava/lang/Throwable;");
+    jmethodID m_getName = env_->GetMethodID(cls_cls, "getName", "()Ljava/lang/String;");
+    jthrowable cur = t;   // depth 0 is the caller-owned ref; causes below are ours to free
+    bool owned = false;
+    for (int depth = 0; cur != nullptr && depth < 8; ++depth) {
+      jclass tc = env_->GetObjectClass(cur);
+      auto jname = static_cast<jstring>(env_->CallObjectMethod(tc, m_getName));
+      auto jmsg = static_cast<jstring>(env_->CallObjectMethod(cur, m_getMessage));
+      const char* cname = jname != nullptr ? env_->GetStringUTFChars(jname, nullptr) : nullptr;
+      const char* cmsg = jmsg != nullptr ? env_->GetStringUTFChars(jmsg, nullptr) : nullptr;
+      log::w(kTag, "  {}: {} -- {}", depth == 0 ? "exception" : "caused by",
+             cname != nullptr ? cname : "?", cmsg != nullptr ? cmsg : "(no message)");
+      if (cname != nullptr) env_->ReleaseStringUTFChars(jname, cname);
+      if (cmsg != nullptr) env_->ReleaseStringUTFChars(jmsg, cmsg);
+      if (jname != nullptr) env_->DeleteLocalRef(jname);
+      if (jmsg != nullptr) env_->DeleteLocalRef(jmsg);
+      env_->DeleteLocalRef(tc);
+      jthrowable cause = static_cast<jthrowable>(env_->CallObjectMethod(cur, m_getCause));
+      const bool stop = cause == nullptr || env_->IsSameObject(cause, cur) == JNI_TRUE;
+      if (owned) env_->DeleteLocalRef(cur);
+      if (stop) {
+        if (cause != nullptr) env_->DeleteLocalRef(cause);
+        break;
+      }
+      cur = cause;
+      owned = true;
+    }
+    clear_exception();
+    env_->DeleteLocalRef(thr_cls);
+    env_->DeleteLocalRef(cls_cls);
   }
 
   // Call onGetRoot(pkg, uid, null) and read BrowserRoot.getRootId(). `api` supplies
@@ -1917,6 +1960,19 @@ class ArtVm final : public JniVm {
       option_strings.push_back("-Xint");  // imageless: interpret; no runtime dex2oat
     }
     option_strings.push_back("-Djava.class.path=" + join(cp, ':'));
+    // Extra raw ART runtime options, space-separated (e.g. "-verbose:class -verbose:jni" to
+    // surface the missing class behind an app-swallowed NoClassDefFoundError). Debug/diagnostic.
+    if (const char* opts = std::getenv("ACL_ART_OPTS"); opts != nullptr && *opts != '\0') {
+      std::string cur;
+      for (const char* c = opts;; ++c) {
+        if (*c == ' ' || *c == '\0') {
+          if (!cur.empty()) { option_strings.push_back(cur); cur.clear(); }
+          if (*c == '\0') break;
+        } else {
+          cur.push_back(*c);
+        }
+      }
+    }
     for (const std::string& opt : config_.options) option_strings.push_back(opt);
 
     std::vector<JavaVMOption> options;

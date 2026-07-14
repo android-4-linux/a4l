@@ -1076,19 +1076,27 @@ public final class HostBootstrap {
         return java.lang.reflect.Proxy.newProxyInstance(
                 iface.getClassLoader(), new Class<?>[]{iface},
                 (p, method, a) -> {
-                    switch (method.getName()) {
-                        case "getStreamVolume":    return AudioBridge.getVolume((Integer) a[0]);
-                        case "getStreamMaxVolume": return AudioBridge.maxVolume((Integer) a[0]);
-                        case "getStreamMinVolume": return AudioBridge.minVolume((Integer) a[0]);
-                        case "isStreamMute":       return AudioBridge.isMuted((Integer) a[0]);
-                        case "setStreamVolume":    // (int stream, int index, int flags, String pkg)
-                            AudioBridge.setVolume((Integer) a[0], (Integer) a[1]);
-                            return null;
-                        case "adjustStreamVolume": // (int stream, int direction, int flags, String pkg)
-                            AudioBridge.adjust((Integer) a[0], (Integer) a[1]);
-                            return null;
-                        default:
-                            return defaultValue(method.getReturnType());
+                    try {
+                        switch (method.getName()) {
+                            case "getStreamVolume":    return AudioBridge.getVolume((Integer) a[0]);
+                            case "getStreamMaxVolume": return AudioBridge.maxVolume((Integer) a[0]);
+                            case "getStreamMinVolume": return AudioBridge.minVolume((Integer) a[0]);
+                            case "isStreamMute":       return AudioBridge.isMuted((Integer) a[0]);
+                            case "setStreamVolume":    // (int stream, int index, int flags, String pkg)
+                                AudioBridge.setVolume((Integer) a[0], (Integer) a[1]);
+                                return null;
+                            case "adjustStreamVolume": // (int stream, int direction, int flags, String pkg)
+                                AudioBridge.adjust((Integer) a[0], (Integer) a[1]);
+                                return null;
+                            default:
+                                return defaultValue(method.getReturnType());
+                        }
+                    } catch (Throwable t) {
+                        // An unresolvable return type or a bad arg must not propagate out of the
+                        // IAudioService proxy (the real framework only catches RemoteException).
+                        android.util.Log.w("acl.audio", "IAudioService." + method.getName()
+                                + " defaulted: " + t.getClass().getName());
+                        return defaultForReturn(method);
                     }
                 });
     }
@@ -1176,6 +1184,14 @@ public final class HostBootstrap {
         } catch (Throwable ignored) {
         }
         return new String[]{title, text};
+    }
+
+    // Safe default when a proxied method's return type can't even be resolved (getReturnType()
+    // may throw NoClassDefFoundError if the return class references a missing type). An
+    // unresolvable return type is always a reference type (primitives always load) → null.
+    private static Object defaultForReturn(java.lang.reflect.Method method) {
+        try { return defaultValue(method.getReturnType()); }
+        catch (Throwable t) { return null; }
     }
 
     private static Object defaultValue(Class<?> rt) {
