@@ -72,6 +72,13 @@ class Apk {
 
   const std::string& path() const noexcept { return path_; }
 
+  // This build's supported ABIs in Android's preference order (primary first), e.g.
+  // x86_64 -> {"x86_64","x86"}, arm64 -> {"arm64-v8a","armeabi-v7a","armeabi"}.
+  static std::vector<std::string> host_abi_candidates();
+  // The ABI to load for `apk_abis` on this host: the first host candidate present, else "".
+  // A non-empty result with no host match means the app's native code can't run here.
+  static std::string select_abi(const std::vector<std::string>& apk_abis);
+
  private:
   bool index_central_directory(ZipError& out_error);
   // Compute the file offset of an entry's compressed data by reading its local

@@ -242,6 +242,48 @@ int cmd_run(const std::vector<std::string>& args) {
   cfg.present = present;                 // show the rendered content view via wm/ (wcs)
   if (!present_frames.empty()) cfg.present_frames = std::strtoull(present_frames.c_str(), nullptr, 10);
 
+  // Native libraries (NDK): extract the app's lib/<abi>/*.so for this host's ABI to a per-app
+  // dir and point java.library.path at it, so System.loadLibrary(name) resolves lib<name>.so.
+  // An ABI mismatch (e.g. an arm-only app on an x86_64 host) is reported, not extracted. Real
+  // apps ship bionic-linked .so, which load only when host-arch-compatible AND through the
+  // bionic bridge (Phase 4 / ADR-5, R-6); this wires the front of that path. See docs/ndk-scope.md.
+  if (!abis.empty()) {
+    const std::string abi = acl::pkg::Apk::select_abi(abis);
+    if (abi.empty()) {
+      acl::log::w(kTag, "native libs present but no host-compatible ABI (see abis above); "
+                        "System.loadLibrary will fail (needs arch match + bionic bridge)");
+    } else {
+      std::string base;
+      if (const char* x = std::getenv("XDG_CACHE_HOME"); x != nullptr && *x != '\0') base = x;
+      else if (const char* h = std::getenv("HOME"); h != nullptr && *h != '\0')
+        base = std::string(h) + "/.cache";
+      else base = "/tmp";
+      const std::string libdir =
+          base + "/acl/" + (manifest.package.empty() ? "app" : manifest.package) + "/lib";
+      std::error_code ec;
+      std::filesystem::create_directories(libdir, ec);
+      const std::string want = "lib/" + abi + "/";
+      int nlibs = 0;
+      for (const acl::pkg::Apk::Entry& e : apk->entries()) {
+        if (e.name.size() <= want.size() || e.name.compare(0, want.size(), want) != 0) continue;
+        if (e.name.size() < 3 || e.name.compare(e.name.size() - 3, 3, ".so") != 0) continue;
+        if (e.name.find('/', want.size()) != std::string::npos) continue;  // flat, no nested dirs
+        acl::pkg::ZipError lerr;
+        std::vector<std::uint8_t> bytes;
+        if (!apk->read(e, bytes, lerr)) continue;
+        std::ofstream f(libdir + "/" + e.name.substr(want.size()),
+                        std::ios::binary | std::ios::trunc);
+        if (f) {
+          f.write(reinterpret_cast<const char*>(bytes.data()),
+                  static_cast<std::streamsize>(bytes.size()));
+          ++nlibs;
+        }
+      }
+      cfg.options.push_back("-Djava.library.path=" + libdir);
+      acl::log::i(kTag, "native libs: extracted {} lib(s) for abi '{}' -> {}", nlibs, abi, libdir);
+    }
+  }
+
   // Boot classpath = the android.* framework (ADR-0002). Precedence: --framework,
   // then $ACL_FRAMEWORK, then the staged default (framework/ -> build/framework/classes,
   // baked in at build time) so `acl run <apk>` resolves android.* out of the box.

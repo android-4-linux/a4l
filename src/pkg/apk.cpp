@@ -303,4 +303,27 @@ std::vector<std::string> Apk::native_abis() const {
   return {abis.begin(), abis.end()};
 }
 
+std::vector<std::string> Apk::host_abi_candidates() {
+#if defined(__x86_64__)
+  return {"x86_64", "x86"};
+#elif defined(__aarch64__)
+  return {"arm64-v8a", "armeabi-v7a", "armeabi"};
+#elif defined(__i386__)
+  return {"x86"};
+#elif defined(__arm__)
+  return {"armeabi-v7a", "armeabi"};
+#else
+  return {};
+#endif
+}
+
+std::string Apk::select_abi(const std::vector<std::string>& apk_abis) {
+  for (const std::string& cand : host_abi_candidates()) {
+    for (const std::string& a : apk_abis) {
+      if (a == cand) return cand;
+    }
+  }
+  return {};
+}
+
 }  // namespace acl::pkg
