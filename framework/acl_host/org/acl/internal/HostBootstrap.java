@@ -259,6 +259,11 @@ public final class HostBootstrap {
             return application != null ? application : this;
         }
         public int getDisplayId() { return 0; }
+        // A null-base ContextWrapper NPEs on getDisplay()/getDisplayNoVerify() (mBase == null);
+        // WindowManagerImpl.addView calls mContext.getDisplayNoVerify(), so a Dialog/PopupWindow on
+        // this context needs a real Display (Wayland output metrics).
+        @Override public android.view.Display getDisplay() { return buildDisplay(); }
+        public android.view.Display getDisplayNoVerify() { return buildDisplay(); }
         @Override public android.os.Looper getMainLooper() {
             return android.os.Looper.getMainLooper();
         }
@@ -419,6 +424,19 @@ public final class HostBootstrap {
                             .getDeclaredConstructor(android.content.Context.class);
                     c.setAccessible(true);
                     return c.newInstance(this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
+            if ("window".equals(name)) {
+                // Dialog/PopupWindow/Toast: Window.setWindowManager casts the result to the
+                // concrete (final) WindowManagerImpl and calls createLocalWindowManager, so we
+                // must return a real one. Seed WindowManagerGlobal's no-Binder session first so
+                // the subsequent addView -> ViewRootImpl.setView doesn't NPE on a null session.
+                try {
+                    seedWindowManagerGlobal();
+                    return Class.forName("android.view.WindowManagerImpl")
+                            .getConstructor(android.content.Context.class).newInstance(this);
                 } catch (Throwable t) {
                     return null;
                 }
@@ -895,6 +913,20 @@ public final class HostBootstrap {
             // Activity implements Window.Callback; real Activity.attach() wires it so the
             // window routes events to the Activity (AppCompat requires a non-null callback).
             ((android.view.Window) window).setCallback(a);
+            // Wire a real WindowManager onto the Activity's window (real Activity.attach() does
+            // mWindow.setWindowManager(...); mWindowManager = mWindow.getWindowManager()). Without
+            // it, Activity.getSystemService(WINDOW_SERVICE) returns null and any Dialog/PopupWindow/
+            // Toast NPEs in Window.setWindowManager. Seed WindowManagerGlobal's no-Binder session
+            // so the eventual addView -> ViewRootImpl.setView path has a session.
+            seedWindowManagerGlobal();
+            Object wmImpl = Class.forName("android.view.WindowManagerImpl")
+                    .getConstructor(android.content.Context.class).newInstance(ctx);
+            java.lang.reflect.Method setWm = android.view.Window.class.getMethod(
+                    "setWindowManager", android.view.WindowManager.class,
+                    android.os.IBinder.class, String.class);
+            setWm.invoke(window, wmImpl, null, a.getClass().getName());
+            setField(android.app.Activity.class, a, "mWindowManager",
+                    ((android.view.Window) window).getWindowManager());
         } catch (Throwable t) {
             Throwable cause = (t instanceof java.lang.reflect.InvocationTargetException
                     && t.getCause() != null) ? t.getCause() : t;
@@ -1120,6 +1152,51 @@ public final class HostBootstrap {
                     }
                     return defaultValue(method.getReturnType());
                 });
+    }
+
+    // Seed WindowManagerGlobal.sWindowSession with a no-Binder IWindowSession so the real
+    // WindowManagerGlobal.addView -> ViewRootImpl.setView path (Dialog/PopupWindow/Toast) does
+    // not NPE on getWindowManagerService().openSession() (our IWindowManager returns null).
+    private static boolean sWmgSeeded;
+    static synchronized void seedWindowManagerGlobal() {
+        if (sWmgSeeded) return;
+        sWmgSeeded = true;
+        try {
+            Class<?> wmg = Class.forName("android.view.WindowManagerGlobal");
+            Object session = noop(Class.forName("android.view.IWindowSession"));
+            setStaticField(wmg, "sWindowSession", session);
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: seedWindowManagerGlobal failed: " + t);
+        }
+    }
+
+    // A real android.view.Display carrying acl's Wayland output metrics (a DisplayManagerGlobal
+    // Display with the buildDisplayInfo() DisplayInfo). Needed by WindowManagerImpl.addView and
+    // any getDisplay()/getDisplayNoVerify() on the null-base app context.
+    static android.view.Display buildDisplay() {
+        try {
+            Class<?> dmgCls = Class.forName("android.hardware.display.DisplayManagerGlobal");
+            Object dmg = dmgCls.getMethod("getInstance").invoke(null);
+            try { setField(dmgCls, dmg, "mDisplayCache", null); } catch (Throwable ignored) {}
+            Class<?> diCls = Class.forName("android.view.DisplayInfo");
+            Object di = buildDisplayInfo();
+            Class<?> daCls = Class.forName("android.view.DisplayAdjustments");
+            Object da = daCls.getConstructor().newInstance();
+            return (android.view.Display) android.view.Display.class
+                    .getConstructor(dmgCls, int.class, diCls, daCls)
+                    .newInstance(dmg, 0, di, da);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static void setStaticField(Class<?> cls, String name, Object val) {
+        try {
+            java.lang.reflect.Field f = cls.getDeclaredField(name);
+            f.setAccessible(true);
+            f.set(null, val);
+        } catch (Throwable ignored) {
+        }
     }
 
     // A DisplayInfo carrying acl's output metrics (Wayland output; 60Hz mode). Used both to
