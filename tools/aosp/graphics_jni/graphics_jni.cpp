@@ -545,6 +545,22 @@ jboolean Canvas_nClipRect(jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b, 
               regionOp == 0 ? SkClipOp::kDifference : SkClipOp::kIntersect, /*doAA=*/false);
   return c->isClipEmpty() ? JNI_FALSE : JNI_TRUE;
 }
+// nGetClipBounds(canvas, Rect): the current clip's local-space integer bounds (false if empty).
+// Regular native (takes a Rect object), unlike the @CriticalNative clip ops above.
+jboolean Canvas_nGetClipBounds(JNIEnv* env, jclass, jlong canvas, jobject bounds) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  if (c == nullptr) return JNI_FALSE;
+  const SkRect local = c->getLocalClipBounds();
+  if (local.isEmpty()) return JNI_FALSE;
+  const SkIRect r = local.roundOut();
+  if (bounds != nullptr) {
+    jclass rc = env->GetObjectClass(bounds);
+    jmethodID set = env->GetMethodID(rc, "set", "(IIII)V");
+    if (set != nullptr) env->CallVoidMethod(bounds, set, r.left(), r.top(), r.right(), r.bottom());
+    env->DeleteLocalRef(rc);
+  }
+  return JNI_TRUE;
+}
 // @CriticalNative — concat the CTM with the Matrix.
 void Canvas_nConcat(jlong canvas, jlong matrix) {
   auto* c = reinterpret_cast<SkCanvas*>(canvas);
@@ -955,6 +971,21 @@ void Paint_nSetLetterSpacing(jlong p, jfloat s) { ACLP(p); if (ap) ap->letterSpa
 // Filters/effects acl doesn't model yet: color filter is applied (SkColorFilter*), the rest
 // are accepted and ignored. The (JJ)J setters return the incoming handle (Java stores it).
 jlong Paint_nSetColorFilter(jlong p, jlong cf) { ACLP(p); if (ap) ap->paint.setColorFilter(sk_ref_sp(reinterpret_cast<SkColorFilter*>(cf))); return cf; }
+
+// android.graphics.ColorFilter / BlendModeColorFilter: a tint (color + blend mode) applied to a
+// Paint — pervasive (drawable/icon tinting). native_CreateBlendModeFilter → SkColorFilters::Blend;
+// the ColorFilter finalizer unrefs the SkColorFilter (its NativeAllocationRegistry needs it).
+void free_colorfilter(void* p) { SkSafeUnref(reinterpret_cast<SkColorFilter*>(p)); }
+jlong ColorFilter_nativeGetFinalizer(JNIEnv*, jclass) {
+  return reinterpret_cast<jlong>(&free_colorfilter);
+}
+jlong BlendModeColorFilter_native_Create(JNIEnv*, jclass, jint color, jint blendmode) {
+  const SkBlendMode mode = (blendmode >= 0 && blendmode <= static_cast<jint>(SkBlendMode::kLastMode))
+                               ? static_cast<SkBlendMode>(blendmode)
+                               : SkBlendMode::kSrcOver;
+  sk_sp<SkColorFilter> cf = SkColorFilters::Blend(static_cast<SkColor>(color), mode);
+  return reinterpret_cast<jlong>(cf.release());  // may be null (no-op blend); Java tolerates it
+}
 jlong Paint_nSetPathEffect(jlong /*p*/, jlong e) { return e; }
 jlong Paint_nSetMaskFilter(jlong /*p*/, jlong f) { return f; }
 void Paint_nSetShadowLayer(jlong, jfloat, jfloat, jfloat, jlong, jlong) {}
@@ -2430,6 +2461,14 @@ const JNINativeMethod kAnimatedVectorDrawable[] = {
     {"nReset", "(J)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) {})},
 };
 
+const JNINativeMethod kColorFilter[] = {
+    {"nativeGetFinalizer", "()J", reinterpret_cast<void*>(ColorFilter_nativeGetFinalizer)},
+};
+const JNINativeMethod kBlendModeColorFilter[] = {
+    {"native_CreateBlendModeFilter", "(II)J",
+     reinterpret_cast<void*>(BlendModeColorFilter_native_Create)},
+};
+
 const JNINativeMethod kNinePatch[] = {
     {"isNinePatchChunk", "([B)Z", reinterpret_cast<void*>(NinePatch_isNinePatchChunk)},
     {"validateNinePatchChunk", "([B)J", reinterpret_cast<void*>(NinePatch_validateNinePatchChunk)},
@@ -2482,6 +2521,7 @@ const JNINativeMethod kCanvas[] = {
     {"nScale", "(JFF)V", reinterpret_cast<void*>(Canvas_nScale)},
     {"nRotate", "(JF)V", reinterpret_cast<void*>(Canvas_nRotate)},
     {"nClipRect", "(JFFFFI)Z", reinterpret_cast<void*>(Canvas_nClipRect)},
+    {"nGetClipBounds", "(JLandroid/graphics/Rect;)Z", reinterpret_cast<void*>(Canvas_nGetClipBounds)},
     {"nConcat", "(JJ)V", reinterpret_cast<void*>(Canvas_nConcat)},
     {"nSetMatrix", "(JJ)V", reinterpret_cast<void*>(Canvas_nSetMatrix)},
     {"nGetMatrix", "(JJ)V", reinterpret_cast<void*>(Canvas_nGetMatrix)},
@@ -2986,6 +3026,9 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/Path", kPath, n(kPath)) && ok;
   ok = reg(env, "android/graphics/ImageDecoder", kImageDecoder, n(kImageDecoder)) && ok;
   ok = reg(env, "android/graphics/NinePatch", kNinePatch, n(kNinePatch)) && ok;
+  ok = reg(env, "android/graphics/ColorFilter", kColorFilter, n(kColorFilter)) && ok;
+  ok = reg(env, "android/graphics/BlendModeColorFilter", kBlendModeColorFilter,
+           n(kBlendModeColorFilter)) && ok;
   ok = reg(env, "android/graphics/drawable/AnimatedVectorDrawable", kAnimatedVectorDrawable,
            n(kAnimatedVectorDrawable)) && ok;
   ok = reg(env, "android/graphics/Matrix", kMatrix, n(kMatrix)) && ok;
