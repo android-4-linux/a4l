@@ -311,6 +311,11 @@ class AxmlParser {
       if (const Attr* a = find(attrs, "name")) {
         current_.name = resolve_class_name(out_.package, a->string_value);
       }
+      // <activity-alias android:targetActivity> names the real Activity class the alias stands
+      // in for (the alias name itself is not a class). Resolved so launch_class() follows it.
+      if (const Attr* a = find(attrs, "targetActivity")) {
+        current_.target_activity = resolve_class_name(out_.package, a->string_value);
+      }
       // android:enabled=false (e.g. F-Droid's panic/disguise launcher aliases) —
       // a disabled component isn't launchable. Absent → default true.
       if (const Attr* a = find(attrs, "enabled")) {

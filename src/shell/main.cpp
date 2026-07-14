@@ -222,7 +222,9 @@ int cmd_run(const std::vector<std::string>& args) {
   // Resolve the launch class: explicit --main wins, else the manifest launcher.
   if (main_class.empty()) {
     if (const acl::pkg::Activity* launch = manifest.launcher()) {
-      main_class = launch->name;
+      // launch_class() follows an <activity-alias> to its real targetActivity (the alias name
+      // is not an instantiable class — e.g. Spotify's com.spotify.music.MainActivity alias).
+      main_class = launch->launch_class();
       acl::log::i(kTag, "launch activity: {}", main_class);
     }
   }

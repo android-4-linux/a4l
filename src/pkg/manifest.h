@@ -35,9 +35,16 @@ struct AxmlError {
 };
 
 struct Activity {
-  std::string name;        // fully-qualified class name (resolved against package)
+  std::string name;        // component name, FQ-resolved (for <activity-alias> this is the alias)
+  std::string target_activity;  // <activity-alias android:targetActivity>, FQ-resolved (else empty)
   bool launcher = false;   // has an intent-filter with MAIN + LAUNCHER
   bool enabled = true;     // android:enabled (default true); disabled ones aren't launchable
+
+  // The class to actually instantiate: an <activity-alias> names a target class that is the
+  // real Activity (the alias name is not a class), so follow it; a plain <activity> is itself.
+  const std::string& launch_class() const noexcept {
+    return target_activity.empty() ? name : target_activity;
+  }
 };
 
 struct Manifest {
