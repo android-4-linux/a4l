@@ -20,6 +20,7 @@
 
 #include <dlfcn.h>
 #include <jni.h>
+#include <jvmti.h>
 
 #include "acl_config.h"
 #if ACL_HAVE_SDBUS
@@ -50,6 +51,81 @@ namespace acl::runtime {
 namespace {
 
 constexpr std::string_view kTag = "acl.runtime.jvm";
+
+// ── JVMTI diagnostic (ACL_JVMTI_DIAG) ─────────────────────────────────────────────────────────
+// ART strips the class name/stack from boot-classloader NoClassDefFoundErrors, so an app-swallowed
+// one is opaque. This JVMTI Exception hook names the exact throwing Java method + bytecode location
+// (the site that referenced the missing class), which -verbose:class cannot. Opt-in; needs the
+// -Xplugin:libopenjdkjvmti[d].so option (added below when the env is set).
+void JNICALL acl_jvmti_exception(jvmtiEnv* jvmti, JNIEnv* jni, jthread, jmethodID method,
+                                 jlocation location, jobject exception, jmethodID, jlocation) {
+  if (exception == nullptr) return;
+  jclass exc_cls = jni->GetObjectClass(exception);
+  char* exc_sig = nullptr;
+  if (jvmti->GetClassSignature(exc_cls, &exc_sig, nullptr) != JVMTI_ERROR_NONE || exc_sig == nullptr) {
+    jni->DeleteLocalRef(exc_cls);
+    return;
+  }
+  // The throwing method's declaring class — logged, and also used to surface exceptions thrown
+  // from the window-add path (ViewRootImpl.setView's original RuntimeException is masked when
+  // WindowManagerGlobal.addView's catch rolls back and the rollback itself throws).
+  char *mname = nullptr, *dsig = nullptr;
+  jclass decl = nullptr;
+  jvmti->GetMethodName(method, &mname, nullptr, nullptr);
+  if (jvmti->GetMethodDeclaringClass(method, &decl) == JVMTI_ERROR_NONE && decl != nullptr)
+    jvmti->GetClassSignature(decl, &dsig, nullptr);
+  // Log the opaque class-loader errors AND anything thrown from the window-add machinery (so the
+  // masked original setView failure is named at throw time, before the rollback discards it).
+  // ACL_JVMTI_ALL=1 widens the net to every throw except the noisy benign ClassNotFoundException
+  // (LayoutInflater prefix probing) — used to catch a RuntimeException masked by a later rollback.
+  const bool log_all = [] { const char* v = std::getenv("ACL_JVMTI_ALL"); return v != nullptr && *v != '\0'; }();
+  const bool interesting = std::strstr(exc_sig, "NoClassDefFoundError") != nullptr ||
+                           std::strstr(exc_sig, "ExceptionInInitializerError") != nullptr ||
+                           (!log_all && std::strstr(exc_sig, "ClassNotFoundException") != nullptr) ||
+                           (log_all && std::strstr(exc_sig, "ClassNotFoundException") == nullptr) ||
+                           (dsig != nullptr && (std::strstr(dsig, "ViewRootImpl") != nullptr ||
+                                                std::strstr(dsig, "WindowManagerGlobal") != nullptr));
+  if (interesting) {
+    // Throwable.detailMessage names the class for ClassNotFoundException (and holds the stripped
+    // text for the boot NoClassDefFoundError). Read the field directly — GetObjectField is safe with
+    // an exception pending (it invokes no Java), unlike CallObjectMethod(getMessage).
+    std::string msg;
+    if (jclass thr = jni->FindClass("java/lang/Throwable")) {
+      if (jfieldID dm = jni->GetFieldID(thr, "detailMessage", "Ljava/lang/String;")) {
+        if (auto s = static_cast<jstring>(jni->GetObjectField(exception, dm))) {
+          if (const char* c = jni->GetStringUTFChars(s, nullptr)) { msg = c; jni->ReleaseStringUTFChars(s, c); }
+          jni->DeleteLocalRef(s);
+        }
+      }
+      jni->DeleteLocalRef(thr);
+    }
+    log::w(kTag, "JVMTI: {} msg='{}' at {}.{} loc={}", exc_sig, msg, dsig ? dsig : "?",
+           mname ? mname : "?", static_cast<long long>(location));
+  }
+  if (mname) jvmti->Deallocate(reinterpret_cast<unsigned char*>(mname));
+  if (dsig) jvmti->Deallocate(reinterpret_cast<unsigned char*>(dsig));
+  if (decl) jni->DeleteLocalRef(decl);
+  jvmti->Deallocate(reinterpret_cast<unsigned char*>(exc_sig));
+  jni->DeleteLocalRef(exc_cls);
+}
+
+// Attach a JVMTI env to the running VM and enable the Exception event. Best-effort; needs the
+// JVMTI plugin loaded (-Xplugin) — GetEnv(JVMTI_VERSION) returns JNI_EVERSION otherwise.
+void install_jvmti_diag(JavaVM* vm) {
+  jvmtiEnv* jvmti = nullptr;
+  if (vm->GetEnv(reinterpret_cast<void**>(&jvmti), JVMTI_VERSION_1_2) != JNI_OK || jvmti == nullptr) {
+    log::w(kTag, "JVMTI: plugin not loaded (GetEnv failed) — no exception naming");
+    return;
+  }
+  jvmtiCapabilities caps{};
+  caps.can_generate_exception_events = 1;
+  jvmti->AddCapabilities(&caps);
+  jvmtiEventCallbacks cbs{};
+  cbs.Exception = &acl_jvmti_exception;
+  jvmti->SetEventCallbacks(&cbs, sizeof(cbs));
+  jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_EXCEPTION, nullptr);
+  log::i(kTag, "JVMTI: exception naming enabled (ACL_JVMTI_DIAG)");
+}
 
 // acl graphics font seam: dlsym'd from libacl_graphics_jni (load_acl_graphics) — builds an
 // SkTypeface* handle from a font-file path for org.acl.internal.HostBootstrap.nTypefaceFromPath
@@ -2091,6 +2167,13 @@ class ArtVm final : public JniVm {
       }
     }
     for (const std::string& opt : config_.options) option_strings.push_back(opt);
+    // JVMTI exception-naming diagnostic (ACL_JVMTI_DIAG): load the JVMTI plugin so GetEnv() can
+    // attach an Exception hook that names boot-classloader NoClassDefFoundErrors.
+    const bool jvmti_diag = [] { const char* v = std::getenv("ACL_JVMTI_DIAG"); return v != nullptr && *v != '\0'; }();
+    if (jvmti_diag) {
+      option_strings.push_back("-Xplugin:libopenjdkjvmti.so");  // non-debug — must match libartbase.so
+      option_strings.push_back("-XjdwpProvider:none");
+    }
 
     std::vector<JavaVMOption> options;
     options.reserve(option_strings.size());
@@ -2111,6 +2194,7 @@ class ArtVm final : public JniVm {
                        "ART JNI_CreateJavaVM failed (rc=" + std::to_string(rc) +
                            "); ACL_ART_HOME=" + home);
     }
+    if (jvmti_diag) install_jvmti_diag(jvm_);
     return Error::ok();
   }
 
