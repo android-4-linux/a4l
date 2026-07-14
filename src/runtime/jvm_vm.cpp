@@ -51,6 +51,11 @@ namespace {
 
 constexpr std::string_view kTag = "acl.runtime.jvm";
 
+// acl graphics font seam: dlsym'd from libacl_graphics_jni (load_acl_graphics) — builds an
+// SkTypeface* handle from a font-file path for org.acl.internal.HostBootstrap.nTypefaceFromPath
+// (distinct system font families). Null until the graphics lib loads; the native returns 0 then.
+jlong (*g_acl_typeface_from_path)(const char*) = nullptr;
+
 // StrictMode thread policy slot (android.os.Binder.set/getThreadStrictModePolicy). Per-thread,
 // like the real Binder thread-local; no Binder, so it just round-trips in-process.
 thread_local jint g_strict_mode_policy = 0;
@@ -2236,6 +2241,31 @@ class ArtVm final : public JniVm {
     log::i(kTag,
            "acl graphics: android.graphics natives registered on Android host Skia "
            "(Bitmap/Canvas/Paint)");
+    // Font seam: bind org.acl.internal.HostBootstrap.nTypefaceFromPath to the graphics lib's
+    // acl_typeface_from_path (SkTypeface::MakeFromFile), so seedTypefaces can load distinct
+    // system families (sans/serif/monospace) from real font files without the framework's
+    // unavailable createFromFile / @CriticalNative Font$Builder path. See docs/font-scope.md.
+    g_acl_typeface_from_path =
+        reinterpret_cast<jlong (*)(const char*)>(::dlsym(h, "acl_typeface_from_path"));
+    if (g_acl_typeface_from_path != nullptr) {
+      if (jclass boot = env->FindClass("org/acl/internal/HostBootstrap"); boot != nullptr) {
+        JNINativeMethod m[] = {
+            {const_cast<char*>("nTypefaceFromPath"), const_cast<char*>("(Ljava/lang/String;)J"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv* e, jclass, jstring jp) -> jlong {
+                   if (g_acl_typeface_from_path == nullptr || jp == nullptr) return 0;
+                   const char* p = e->GetStringUTFChars(jp, nullptr);
+                   const jlong hnd = p != nullptr ? g_acl_typeface_from_path(p) : 0;
+                   if (p != nullptr) e->ReleaseStringUTFChars(jp, p);
+                   return hnd;
+                 })},
+        };
+        if (env->RegisterNatives(boot, m, 1) != JNI_OK) env->ExceptionClear();
+        env->DeleteLocalRef(boot);
+      } else {
+        env->ExceptionClear();
+      }
+    }
     graphics_ops_check(env);
     graphics_present_demo(env);
     graphics_view_demo(env);

@@ -40,7 +40,7 @@ helvetica, georgia, courier, monaco, …) and probes real serif/mono files, with
 `ACL_FONT_SERIF` / `ACL_FONT_MONO` env vars as an override hook. Today those distinct families
 **gracefully fall back to the sans default** — see the blocker below.
 
-## Blocker: distinct families need a native entry point
+## Why distinct families need a native entry point
 
 Loading a *second* font file into a `Typeface` from Java does not work on this host:
 
@@ -51,24 +51,25 @@ Loading a *second* font file into a `Typeface` from Java does not work on this h
   and `graphics_jni` compiles them with that ABI (see `docs/render-host-scope.md:285`), so a
   standard reflective JNI invocation crashes the process.
 
-So distinct serif/mono/fallback faces must be produced in **native** code.
+So distinct serif/mono/fallback faces are produced in **native** code.
 
-## The native fix (next step)
+## The native entry — DONE (option 1)
 
-Add to `graphics_jni` (`vendor/acl/graphics_jni/`, rebuilt with `m libacl_graphics_jni`) a clean
-**non-`@CriticalNative`** entry — either:
+`graphics_jni` (`vendor/acl/graphics_jni/`, rebuilt with `m libacl_graphics_jni`) exports a
+**non-`@CriticalNative`** C entry `acl_typeface_from_path(const char*) -> jlong` (a reffed
+`SkTypeface*` handle from `SkTypeface::MakeFromFile`). The runtime (`load_acl_graphics`) `dlsym`s
+it and binds it as `org.acl.internal.HostBootstrap.nTypefaceFromPath(String)`;
+`seedTypefaces().firstTypeface()` calls it and wraps the handle with `new Typeface(long)`
+(`free_typeface` unrefs it). Verified: serif (`NotoSerif`) and monospace (`AdwaitaMono`) now load
+as distinct faces, no segfault.
 
-1. `nAclTypefaceFromPath(String path) -> long` returning a reffed `SkTypeface*` handle that
-   `new Typeface(long)` wraps (minimal — `seedTypefaces.firstTypeface()` swaps `createFromFile`
-   for this one call), or
-2. **fonts.xml parsing**: `graphics_jni` builds a real `SkFontMgr_Custom` / font collection from a
-   vendored `fonts.xml` (`frameworks/base/data/fonts/fonts.xml`, Apache-2.0) + a probed/vendored
-   font set, giving proper **per-script fallback** (CJK, Arabic, …) and **emoji** coverage — which
-   the single-`SkTypeface` path cannot do (glyph fallback is minikin/SkShaper's job).
+## Remaining (option 2) — full fonts.xml fallback collection
 
-Option 2 is the complete answer (families + fallback chain + emoji); option 1 is the quick win for
-distinct sans/serif/mono. `seedTypefaces()` already has the family-map + probing seam wired, so the
-native call drops straight in.
+The single-`SkTypeface`-per-family model has no **per-script glyph fallback** (CJK, Arabic, …) or
+**emoji** — that is minikin/SkShaper's job. The complete answer is `graphics_jni` building a real
+`SkFontMgr_Custom` / font collection from a vendored `fonts.xml`
+(`frameworks/base/data/fonts/fonts.xml`, Apache-2.0) + a probed/vendored font set, so text with
+mixed scripts resolves glyph-by-glyph. Left as future work; the family-map + probing seam is wired.
 
 ## Verify
 

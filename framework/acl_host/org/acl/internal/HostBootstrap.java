@@ -94,10 +94,9 @@ public final class HostBootstrap {
             // styled text (e.g. <tt>, code views) don't all render as the sans default. Probe real
             // font files on the host / AOSP tree (no in-tree font vendoring — mirrors the native
             // default_typeface() candidate list); fall back to the sans default if none is found.
-            // NOTE: this drives the graphics Font/FontFamily/Typeface natives via reflection (the
-            // path route -> SkTypeface::MakeFromFile). A cleaner home is graphics_jni parsing a
-            // vendored fonts.xml into a real SkFontMgr fallback collection (families + per-script
-            // fallback + emoji); switch to that native path later. See docs/font-scope.md.
+            // Each is loaded via the graphics native nTypefaceFromPath (SkTypeface::MakeFromFile).
+            // Per-script glyph fallback (CJK, emoji) needs a fonts.xml -> SkFontMgr collection in
+            // graphics_jni; still future. See docs/font-scope.md.
             Object serif = firstTypeface(new String[]{
                     System.getenv("ACL_FONT_SERIF"),
                     "/usr/share/fonts/google-noto-vf/NotoSerif[wght].ttf",
@@ -147,20 +146,34 @@ public final class HostBootstrap {
     // Font/FontFamily/Typeface natives (path route -> SkTypeface::MakeFromFile), bypassing the
     // framework's Font.Builder(File) mmap/validation path (which fails silently on this host and
     // yields DEFAULT). Returns null if no candidate loads. See seedTypefaces()'s NOTE.
+    // acl graphics native: SkTypeface::MakeFromFile(path) -> Typeface native handle (an
+    // SkTypeface*). Bound by the runtime from libacl_graphics_jni (acl_typeface_from_path). This
+    // is the dedicated, non-@CriticalNative entry the framework's own font-loading path lacks on
+    // this host (Typeface.createFromFile returns DEFAULT; the Font$Builder natives segfault when
+    // driven reflectively). Returns 0 if unbound or the file can't be loaded. See docs/font-scope.md.
+    static native long nTypefaceFromPath(String path);
+
     private static Object firstTypeface(String[] candidates) {
-        Object dflt = null;
-        try { dflt = android.graphics.Typeface.DEFAULT; } catch (Throwable ignored) {}
+        Class<?> tfc;
+        java.lang.reflect.Constructor<?> ctor;
+        try {
+            tfc = Class.forName("android.graphics.Typeface");
+            ctor = tfc.getDeclaredConstructor(long.class);
+            ctor.setAccessible(true);
+        } catch (Throwable t) {
+            return null;
+        }
         for (String path : candidates) {
             if (path == null || path.isEmpty()) continue;
             if (!new java.io.File(path).exists()) continue;
             try {
-                // Typeface.createFromFile fails SAFELY (returns Typeface.DEFAULT) rather than
-                // crashing; the low-level Font/FontFamily builder natives are @CriticalNative and
-                // segfault when driven reflectively (they belong in a dedicated native entry).
-                Object tf = android.graphics.Typeface.createFromFile(path);
-                if (tf != null && tf != dflt) {
-                    System.err.println("acl HostBootstrap: loaded typeface " + path);
-                    return tf;
+                long handle = nTypefaceFromPath(path);
+                if (handle != 0) {
+                    Object tf = ctor.newInstance(handle);
+                    if (tf != null) {
+                        System.err.println("acl HostBootstrap: loaded typeface " + path);
+                        return tf;
+                    }
                 }
             } catch (Throwable t) {
                 // try the next candidate

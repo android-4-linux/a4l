@@ -126,6 +126,18 @@ sk_sp<SkTypeface> default_typeface() {
   return tf;
 }
 
+// Build an SkTypeface from a font file and hand back its raw handle (an SkTypeface*, +1 ref)
+// as android.graphics.Typeface's native pointer — Typeface(long) wraps it, free_typeface() unrefs
+// it. acl calls this to seed distinct system families (sans/serif/monospace) from real font files:
+// the framework's own path (Typeface.createFromFile / the @CriticalNative Font$Builder natives) is
+// unavailable on this host. A dedicated, non-@CriticalNative entry avoids that ABI hazard.
+extern "C" jlong acl_typeface_from_path(const char* path) {
+  if (path == nullptr || *path == '\0') return 0;
+  sk_sp<SkTypeface> tf = SkTypeface::MakeFromFile(path);
+  if (!tf) return 0;
+  return reinterpret_cast<jlong>(tf.release());
+}
+
 jclass g_bitmap_class = nullptr;    // global ref, for nativeCreate -> NewObject
 jmethodID g_bitmap_ctor = nullptr;
 
