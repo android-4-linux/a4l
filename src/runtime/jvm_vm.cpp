@@ -2084,6 +2084,7 @@ class ArtVm final : public JniVm {
     populate_system_properties(env);
     load_system_resources(env);
     register_no_binder(env);
+    register_systemproperties_override(env);  // neutralize the device-only fast-property abort
     bootstrap_host_env(env);
     load_acl_graphics(env);
     // Seed default typefaces now that the graphics Font/Typeface natives are registered
@@ -2141,6 +2142,24 @@ class ArtVm final : public JniVm {
   // BinderInternal.getContextObject() → null makes ServiceManager.getService() return
   // null, and framework callers (ViewConfiguration, WindowManagerGlobal, …) fall back to
   // their no-service defaults. The Java-visible Manager APIs are served by svc/, not Binder.
+  // android.os.SystemProperties.native_find (the fast-property-access path) LOG(FATAL)s on host
+  // ("fast property access supported only on device", android_os_SystemProperties.cpp:143). Override
+  // it to return 0 (prop not found) so callers (SystemProperties.find()) fall back to the slow
+  // native_get(name) path, which works on host. Must run after the libandroid_runtime native floor
+  // (which binds the aborting one). Hit by Flutter's FlutterLoader.startInitialization + ACRA.
+  void register_systemproperties_override(JNIEnv* env) {
+    if (jclass c = env->FindClass("android/os/SystemProperties")) {
+      JNINativeMethod m[] = {
+          {const_cast<char*>("native_find"), const_cast<char*>("(Ljava/lang/String;)J"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jstring) -> jlong { return 0; })},
+      };
+      if (env->RegisterNatives(c, m, 1) != JNI_OK) env->ExceptionClear();
+      env->DeleteLocalRef(c);
+    } else {
+      env->ExceptionClear();
+    }
+  }
+
   void register_no_binder(JNIEnv* env) {
     if (jclass c = env->FindClass("com/android/internal/os/BinderInternal")) {
       JNINativeMethod m[] = {
