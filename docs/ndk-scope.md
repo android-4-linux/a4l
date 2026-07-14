@@ -85,6 +85,38 @@ still bionic-linked) is a concrete, representative NDK client. What it needs:
 Mesa, `liblog` → `log/`. The genuinely hard, missing piece is the **bionic libc/libm/libdl bridge**
 so the `.so` links at all; the trampolines are then a well-scoped surface, not a guess.
 
+### Vsync — reuse acl's wp_presentation source (per ivi-homescreen)
+
+Reference: ivi-homescreen `shell/vsync/wayland_vsync_provider.cc` + `ivsync_provider.cc` (the
+canonical Flutter-on-Wayland embedder, Apache-2.0). Its model, and the mapping to acl:
+
+- **The contract**: Flutter hands out an opaque *baton* (embedder API) / *cookie* (Android
+  `FlutterJNI.asyncWaitForVsync(long)`); the embedder returns **exactly one** vsync per baton —
+  `FlutterEngineOnVsync(engine, baton, frame_start, frame_target)` / `FlutterJNI.onVsync(start,
+  target, cookie)` → `nativeOnVsync` — **on the platform task runner** (Flutter rejects vsync from
+  any other thread).
+- **The wp_presentation association**: mint a `wp_presentation_feedback` on the surface *before*
+  each `wl_surface.commit`/`eglSwapBuffers` (`RequestFeedback`); on the compositor's `presented`
+  event, take the scanout timestamp and the `refresh` period and deliver **`frame_start =
+  present_ns`, `frame_target = present_ns + refresh_ns`** (`PostOnVsync` → `OnVsync(engine, baton,
+  now_ns, now_ns + period_ns)`). Refresh defaults to 60 Hz (16.67 ms) until the first `presented`,
+  clamped to a 10 Hz floor.
+- **Park vs drain**: if a present is already in flight (feedback pending) → **park** the baton, the
+  `presented` event returns it; if the pipeline is idle → **drain inline** on the wall clock so
+  Flutter is not stalled. `discarded` still returns the baton (wall clock).
+- **Clock gate**: only usable when `wp_presentation.clock_id == CLOCK_MONOTONIC` (matches
+  `FlutterEngineGetCurrentTime`); otherwise leave vsync unset and let Flutter self-schedule.
+
+**acl already has this exact source.** The Looper-driven present (`PresentDriver` +
+`acl_deliver_vsync`, clocked by `wp_presentation` `OnPresented → present_ns + refresh`) is the same
+mechanism ivi-homescreen's provider implements. On the **Android** engine path, vsync rides Java
+`android.view.Choreographer` → `DisplayEventReceiver` — which acl **already drives** from that same
+wp_presentation source. So if the NDK trampoline **omits `AChoreographer_*`** (the research shows
+the engine then falls back to the Java `nativeOnVsync` path), Flutter's vsync flows through acl's
+existing Choreographer/`acl_deliver_vsync` machinery for free — matching ivi-homescreen's
+`frame_start = present_ns`, `frame_target = present_ns + refresh` timing. Vsync is **reuse, not new
+work**; only the timestamps/thread-affinity above must be honored.
+
 ## Verify
 
 ```sh
