@@ -25,6 +25,13 @@ public final class HostBootstrap {
 
     /** Set the app's manifest theme resId; applied when a Context resolves its theme. */
     public static void setAppTheme(int resId) { appThemeResId = resId; }
+    // The theme to apply to the app Context + Activity + window decor: the manifest's app theme,
+    // or a full framework default (DeviceDefault has the complete android:attr set) when the app
+    // declares none. Used consistently so the Activity, its window, and inflated views agree.
+    static int defaultAppTheme() {
+        return appThemeResId != 0 ? appThemeResId
+                                  : android.R.style.Theme_DeviceDefault_Light_DarkActionBar;
+    }
 
     // Drain the main Looper's currently-pending messages (non-blocking). The GPU present loop
     // is a native frame loop, not Looper.loop(), so Handler-posted work never runs on its own —
@@ -112,6 +119,38 @@ public final class HostBootstrap {
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: ServiceManager seed failed: " + t);
         }
+        seedSqliteDefaults();
+        seedContentService();
+    }
+
+    // ContentResolver.getContentService() reads ServiceManager.getService("content") → null (no
+    // Binder), so registerContentObserver/notifyChange NPE — and many views (ListView, TextView's
+    // font-scale observer, …) register observers during inflation. Seed a no-op IContentService.
+    private static void seedContentService() {
+        try {
+            Class<?> cr = Class.forName("android.content.ContentResolver");
+            Class<?> ics = Class.forName("android.content.IContentService");
+            java.lang.reflect.Field f = cr.getDeclaredField("sContentService");
+            f.setAccessible(true);
+            if (f.get(null) == null) f.set(null, noop(ics));
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: content service seed skipped: " + t);
+        }
+    }
+
+    // SQLiteGlobal.getDefaultPageSize() does `new StatFs("/data")` unconditionally the first time
+    // (before its debug.sqlite.pagesize SystemProperties fallback), which throws on the host (no
+    // /data sandbox) and takes down any Room/SQLite open. Pre-seed the cached sDefaultPageSize so
+    // that branch is skipped — the value then comes from the property fallback (default 4096).
+    private static void seedSqliteDefaults() {
+        try {
+            Class<?> g = Class.forName("android.database.sqlite.SQLiteGlobal");
+            java.lang.reflect.Field f = g.getDeclaredField("sDefaultPageSize");
+            f.setAccessible(true);
+            if (f.getInt(null) == 0) f.setInt(null, 4096);
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: SQLite default-page-size seed skipped: " + t);
+        }
     }
 
     /** A minimal Context sufficient to construct a View (getResources/getMainLooper/…). */
@@ -195,11 +234,11 @@ public final class HostBootstrap {
         @Override public Resources.Theme getTheme() {
             if (theme == null) {
                 theme = res.newTheme();
-                // Apply the app's manifest theme so decor/layout inflation resolves theme
-                // attributes (a bare newTheme() has no styles → InflateException).
-                if (appThemeResId != 0) {
-                    try { theme.applyStyle(appThemeResId, true); } catch (Throwable ignored) {}
-                }
+                // Apply the app's manifest theme (or a framework default when the app declares
+                // none) so decor/layout inflation resolves theme attributes. A bare newTheme()
+                // has no styles → InflateException. PhoneWindow.generateLayout inflates the window
+                // decor (screen_title/…) off THIS context theme, so it must be populated too.
+                try { theme.applyStyle(defaultAppTheme(), true); } catch (Throwable ignored) {}
             }
             return theme;
         }
@@ -328,31 +367,58 @@ public final class HostBootstrap {
             return null;
         }
 
-        // No broadcast infrastructure yet — accept registrations as no-ops. Return an EMPTY
-        // Intent (not null) so sticky-broadcast reads (receiver==null, e.g. WorkManager's
-        // battery/storage trackers reading ACTION_BATTERY_CHANGED) get defaults instead of an
-        // NPE. Broadcasts are an svc/ concern later.
+        // No general broadcast bus yet — accept registrations as no-ops, but return the current
+        // sticky Intent so sticky reads get real values (not an NPE). ACTION_BATTERY_CHANGED is
+        // served from the host UPower backend (svc/battery via BatteryBridge); other actions get
+        // an empty Intent. A receiver registered for the battery action is delivered the current
+        // state once (sticky semantics). General broadcasts remain an svc/ concern.
+        private android.content.Intent stickyFor(android.content.BroadcastReceiver r,
+                                                 android.content.IntentFilter f) {
+            android.content.Intent sticky = new android.content.Intent();
+            if (f != null && f.hasAction(android.content.Intent.ACTION_BATTERY_CHANGED)) {
+                try { sticky = BatteryBridge.batteryIntent(); } catch (Throwable ignored) {}
+                if (r != null) {
+                    try { r.onReceive(this, sticky); } catch (Throwable ignored) {}
+                }
+            }
+            return sticky;
+        }
         @Override public android.content.Intent registerReceiver(
                 android.content.BroadcastReceiver r, android.content.IntentFilter f) {
-            return new android.content.Intent();
+            return stickyFor(r, f);
         }
         @Override public android.content.Intent registerReceiver(
                 android.content.BroadcastReceiver r, android.content.IntentFilter f, int flags) {
-            return new android.content.Intent();
+            return stickyFor(r, f);
         }
         @Override public android.content.Intent registerReceiver(
                 android.content.BroadcastReceiver r, android.content.IntentFilter f,
                 String perm, android.os.Handler h) {
-            return new android.content.Intent();
+            return stickyFor(r, f);
         }
         @Override public android.content.Intent registerReceiver(
                 android.content.BroadcastReceiver r, android.content.IntentFilter f,
                 String perm, android.os.Handler h, int flags) {
-            return new android.content.Intent();
+            return stickyFor(r, f);
         }
         @Override public void unregisterReceiver(android.content.BroadcastReceiver r) {}
         @Override public void sendBroadcast(android.content.Intent i) {}
         @Override public void sendBroadcast(android.content.Intent i, String perm) {}
+
+        // Main-thread dispatch: ContextWrapper delegates these to the (null) base, so views that
+        // post to the main thread (ListView/RecyclerView.getMainExecutor, etc.) NPE. Back them
+        // with the real main Looper.
+        private android.os.Handler mainHandler;
+        private android.os.Handler mainHandler() {
+            if (mainHandler == null) mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+            return mainHandler;
+        }
+        @Override public java.util.concurrent.Executor getMainExecutor() {
+            final android.os.Handler h = mainHandler();
+            return new java.util.concurrent.Executor() {
+                @Override public void execute(Runnable r) { h.post(r); }
+            };
+        }
 
         // File-backed SharedPreferences (real android.app.SharedPreferencesImpl over a temp
         // dir) — apps read/write prefs in Application.onCreate. No app data dir yet, so a temp.
@@ -381,31 +447,76 @@ public final class HostBootstrap {
             }
             return sp;
         }
-        @Override public java.io.File getFilesDir() {
-            java.io.File d = new java.io.File(System.getProperty("java.io.tmpdir"),
-                                              "acl-files-" + pkg);
-            d.mkdirs();
-            return d;
+        // ── App storage, mapped onto the XDG Base Directory spec ─────────────────────────
+        // Android's per-app sandbox (/data/data/<pkg>/{files,databases,cache,app_*}) has no
+        // analogue on the host, so acl roots it under the freedesktop XDG dirs: persistent data
+        // at $XDG_DATA_HOME/acl/<pkg>, caches at $XDG_CACHE_HOME/acl/<pkg> (defaults per spec:
+        // ~/.local/share and ~/.cache). getDataDir() is that data root; the Android subdirs hang
+        // off it. This replaces the null base (super(null)) that made every Context.getDir/
+        // getFilesDir NPE, and keeps app data out of the (absent) /data sandbox.
+        private static java.io.File xdgHome(String var, String fallbackRel) {
+            String base = System.getenv(var);
+            if (base == null || base.isEmpty()) {
+                String home = System.getProperty("user.home");
+                if (home == null || home.isEmpty()) home = System.getenv("HOME");
+                if (home == null || home.isEmpty()) home = System.getProperty("java.io.tmpdir", "/tmp");
+                base = home + "/" + fallbackRel;
+            }
+            return new java.io.File(base);
         }
-        @Override public java.io.File getCacheDir() {
-            java.io.File d = new java.io.File(System.getProperty("java.io.tmpdir"),
-                                              "acl-cache-" + pkg);
-            d.mkdirs();
-            return d;
+        private java.io.File dataRoot() {
+            return new java.io.File(xdgHome("XDG_DATA_HOME", ".local/share"), "acl/" + pkg);
         }
-        @Override public java.io.File getNoBackupFilesDir() {
-            java.io.File d = new java.io.File(System.getProperty("java.io.tmpdir"),
-                                              "acl-nobackup-" + pkg);
-            d.mkdirs();
-            return d;
+        private java.io.File cacheRoot() {
+            return new java.io.File(xdgHome("XDG_CACHE_HOME", ".cache"), "acl/" + pkg);
         }
-        // Room/SQLite (androidx WorkManager's WorkDatabase) — back onto the host libsqlite
-        // in a temp databases dir. No app sandbox yet; a per-package dir suffices.
+        private static java.io.File ensure(java.io.File d) { d.mkdirs(); return d; }
+
+        @Override public java.io.File getDataDir() { return ensure(dataRoot()); }
+        @Override public java.io.File getFilesDir() { return ensure(new java.io.File(dataRoot(), "files")); }
+        @Override public java.io.File getCacheDir() { return ensure(cacheRoot()); }
+        @Override public java.io.File getCodeCacheDir() { return ensure(new java.io.File(cacheRoot(), "code_cache")); }
+        @Override public java.io.File getNoBackupFilesDir() { return ensure(new java.io.File(dataRoot(), "no_backup")); }
+        // Context.getDir(name, mode) -> /data/data/<pkg>/app_<name>; keep the app_ prefix.
+        @Override public java.io.File getDir(String name, int mode) {
+            return ensure(new java.io.File(dataRoot(), "app_" + name));
+        }
+        @Override public java.io.File getFileStreamPath(String name) {
+            return new java.io.File(getFilesDir(), name);
+        }
+        @Override public java.io.FileInputStream openFileInput(String name) throws java.io.FileNotFoundException {
+            return new java.io.FileInputStream(getFileStreamPath(name));
+        }
+        @Override public java.io.FileOutputStream openFileOutput(String name, int mode) throws java.io.FileNotFoundException {
+            return new java.io.FileOutputStream(getFileStreamPath(name), (mode & MODE_APPEND) != 0);
+        }
+        @Override public boolean deleteFile(String name) { return getFileStreamPath(name).delete(); }
+        @Override public String[] fileList() {
+            String[] l = getFilesDir().list();
+            return l != null ? l : new String[0];
+        }
+        // No real external storage; map it to a subtree of the data root so apps that download
+        // to getExternalFilesDir (e.g. F-Droid's APK cache) get a writable, persistent dir.
+        @Override public java.io.File getExternalFilesDir(String type) {
+            java.io.File d = new java.io.File(dataRoot(), "external/files");
+            if (type != null && !type.isEmpty()) d = new java.io.File(d, type);
+            return ensure(d);
+        }
+        @Override public java.io.File[] getExternalFilesDirs(String type) {
+            return new java.io.File[] { getExternalFilesDir(type) };
+        }
+        @Override public java.io.File getExternalCacheDir() {
+            return ensure(new java.io.File(dataRoot(), "external/cache"));
+        }
+        @Override public java.io.File[] getExternalCacheDirs() {
+            return new java.io.File[] { getExternalCacheDir() };
+        }
+        // Room/SQLite (androidx WorkManager's WorkDatabase) back onto the host libsqlite under
+        // the XDG data root's databases/ dir.
         @Override public java.io.File getDatabasePath(String name) {
-            java.io.File d = new java.io.File(System.getProperty("java.io.tmpdir"),
-                                              "acl-db-" + pkg);
-            d.mkdirs();
-            return new java.io.File(d, name);
+            // Absolute names (Room sometimes passes a full path) are used as-is.
+            if (name != null && name.startsWith("/")) return new java.io.File(name);
+            return new java.io.File(ensure(new java.io.File(dataRoot(), "databases")), name);
         }
         @Override public android.database.sqlite.SQLiteDatabase openOrCreateDatabase(
                 String name, int mode, android.database.sqlite.SQLiteDatabase.CursorFactory f) {
@@ -512,9 +623,18 @@ public final class HostBootstrap {
     public static android.app.Application createApplication(String appClass, String apkPath,
             String frameworkResPath, String pkg) throws Exception {
         android.content.Context base = newAppContext(apkPath, frameworkResPath, pkg);
-        android.app.Application app = (appClass != null && !appClass.isEmpty())
-                ? (android.app.Application) Class.forName(appClass).getConstructor().newInstance()
-                : new android.app.Application();
+        // Construct the app's Application, falling back to a bare Application if the declared
+        // class can't be instantiated — so getApplication() is ALWAYS a real object.
+        android.app.Application app = null;
+        if (appClass != null && !appClass.isEmpty()) {
+            try {
+                app = (android.app.Application) Class.forName(appClass).getConstructor().newInstance();
+            } catch (Throwable t) {
+                System.err.println("acl HostBootstrap: Application " + appClass
+                        + " construct failed (" + t + "); using a bare Application");
+            }
+        }
+        if (app == null) app = new android.app.Application();
         setField(ContextWrapper.class, app, "mBase", base);
         if (base instanceof AppContext) ((AppContext) base).setApplication(app);
         seedActivityThread(pkg);
@@ -525,8 +645,17 @@ public final class HostBootstrap {
             if (cur != null) setField(at, cur, "mInitialApplication", app);
         } catch (Throwable ignored) {
         }
-        app.onCreate();  // sets the app's own singleton; may throw on a not-yet-supported API
-        return app;
+        // Run the app's own init (sets its singleton). A failure here (unsupported API, missing
+        // native lib — e.g. React Native's SoLoader) must NOT discard the Application: the
+        // Activity still needs a non-null getApplication(). Log and continue with the object.
+        try {
+            app.onCreate();
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: Application.onCreate incomplete for "
+                    + (appClass == null || appClass.isEmpty() ? "(default)" : appClass)
+                    + " (" + t + "); continuing with the Application attached");
+        }
+        return app;  // never null → Activity.getApplication() works even if app init failed
     }
 
     // Allocate an instance without running its constructor (no side effects) — for seeding
@@ -556,6 +685,16 @@ public final class HostBootstrap {
             ai.processName = pkg;
             setField(abd, abdInst, "appInfo", ai);
             setField(at, atInst, "mBoundApplication", abdInst);
+            // Unsafe.allocateInstance skips field initializers, so ActivityThread's final locks/
+            // singletons are null. Seed the ones View/resource code reaches: mCoreSettingsLock
+            // (ViewConfiguration.getLongPressTimeout → AppGlobals.getIntCoreSetting synchronizes
+            // on it — a null lock is "synchronize on null" and takes down Spinner/ForwardingListener
+            // inflation) and mResourcesManager (the real singleton).
+            try { setField(at, atInst, "mCoreSettingsLock", new Object()); } catch (Throwable ignored) {}
+            try {
+                Class<?> rm = Class.forName("android.content.res.ResourcesManager");
+                setField(at, atInst, "mResourcesManager", rm.getMethod("getInstance").invoke(null));
+            } catch (Throwable ignored) {}
             java.lang.reflect.Field s = at.getDeclaredField("sCurrentActivityThread");
             s.setAccessible(true);
             s.set(null, atInst);
@@ -571,8 +710,35 @@ public final class HostBootstrap {
     // caller can drive onCreate then read getWindow().getDecorView() as the content view.
     public static void attachActivity(android.app.Activity a, android.content.Context ctx)
             throws Exception {
-        setField(android.app.Activity.class, a, "mActivityInfo",
-                 new android.content.pm.ActivityInfo());
+        // Real Activity.attach() applies the activity/app theme from ActivityInfo.getThemeResource()
+        // before onCreate; layout inflation (obtainStyledAttributes) then resolves framework + app
+        // attributes off it. Without it the Activity's ContextThemeWrapper theme is bare (Themes=[])
+        // → InflateException "Failed to resolve attribute". Apply the manifest app theme, or a
+        // framework default (DeviceDefault has a full attribute set) when the app declares none.
+        int themeRes = defaultAppTheme();
+        android.content.pm.ActivityInfo ai = new android.content.pm.ActivityInfo();
+        ai.theme = themeRes;
+        // A valid ApplicationInfo (ComponentInfo.getIconResource reads applicationInfo.icon; the
+        // ActionBar/task-description path NPEs on a null one). Reuse the app Context's.
+        try {
+            android.content.pm.ApplicationInfo appInfo = ctx.getApplicationInfo();
+            if (appInfo == null) { appInfo = new android.content.pm.ApplicationInfo(); appInfo.packageName = ctx.getPackageName(); }
+            ai.applicationInfo = appInfo;
+            ai.packageName = appInfo.packageName;
+        } catch (Throwable ignored) {}
+        setField(android.app.Activity.class, a, "mActivityInfo", ai);
+        // Set the theme on the Activity's ContextThemeWrapper (mBase is already attached), forcing
+        // a re-resolve, then log what actually landed on the theme stack.
+        try {
+            Class<?> ctw = Class.forName("android.view.ContextThemeWrapper");
+            setField(ctw, a, "mThemeResource", themeRes);
+            try { setField(ctw, a, "mTheme", null); } catch (Throwable ignored) {}
+            android.content.res.Resources.Theme t = a.getTheme();  // applies themeRes now
+            System.err.println("acl HostBootstrap: activity theme -> 0x"
+                    + Integer.toHexString(themeRes) + " => " + t);
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: activity theme apply failed: " + t);
+        }
         // The launch Intent — getIntent() is read in onCreate (a null mIntent NPEs).
         try {
             setField(android.app.Activity.class, a, "mIntent",
@@ -870,6 +1036,9 @@ public final class HostBootstrap {
         svc.put("input_method", "com.android.internal.view.IInputMethodManager");
         svc.put("accessibility", "android.view.accessibility.IAccessibilityManager");
         svc.put("clipboard", "android.content.IClipboard");
+        // InputManager.getInstance() resolves ServiceManager.getService("input") during the first
+        // traversal (input-device / ViewConfiguration queries); a no-Binder proxy suffices.
+        svc.put("input", "android.hardware.input.IInputManager");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},
