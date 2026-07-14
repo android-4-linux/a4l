@@ -385,6 +385,16 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("bluetooth".equals(name)) {
+                // acl's clean-room android.bluetooth.BluetoothManager (boot classpath, backed by
+                // svc/bluetooth → BlueZ). Reflective for the same reason as connectivity.
+                try {
+                    return Class.forName("android.bluetooth.BluetoothManager")
+                            .getConstructor(android.content.Context.class).newInstance(this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             return null;
         }
         // getSystemService(Class) → getSystemServiceName(Class) → getSystemService(String).
@@ -400,6 +410,7 @@ public final class HostBootstrap {
             if ("android.hardware.display.DisplayManager".equals(serviceClass.getName())) return "display";
             // ConnectivityManager compared by name (off this compile classpath, see above).
             if ("android.net.ConnectivityManager".equals(serviceClass.getName())) return "connectivity";
+            if ("android.bluetooth.BluetoothManager".equals(serviceClass.getName())) return "bluetooth";
             return null;
         }
 
@@ -455,6 +466,22 @@ public final class HostBootstrap {
                 @Override public void execute(Runnable r) { h.post(r); }
             };
         }
+
+        // App service start/stop: acl has no ActivityManager service dispatch yet (ADR-3), and
+        // ContextWrapper delegates to the null base (NPE). Acknowledge the start (return the
+        // component) so onCreate proceeds; actually hosting the Service is a follow-on.
+        @Override public android.content.ComponentName startService(android.content.Intent service) {
+            return service != null ? service.getComponent() : null;
+        }
+        @Override public android.content.ComponentName startForegroundService(android.content.Intent service) {
+            return service != null ? service.getComponent() : null;
+        }
+        @Override public boolean stopService(android.content.Intent service) { return true; }
+        @Override public boolean bindService(android.content.Intent service,
+                android.content.ServiceConnection conn, int flags) {
+            return false;
+        }
+        @Override public void unbindService(android.content.ServiceConnection conn) {}
 
         // File-backed SharedPreferences (real android.app.SharedPreferencesImpl over a temp
         // dir) — apps read/write prefs in Application.onCreate. No app data dir yet, so a temp.

@@ -24,6 +24,7 @@
 #include "acl_config.h"
 #if ACL_HAVE_SDBUS
 #include "svc/battery/battery_jni.h"
+#include "svc/bluetooth/bt_jni.h"
 #include "svc/net/connectivity_jni.h"
 #include "svc/notify/notify_jni.h"
 #endif
@@ -2038,6 +2039,9 @@ class ArtVm final : public JniVm {
     // Bind org.acl.internal.BatteryBridge (ACTION_BATTERY_CHANGED extras) to the svc/battery
     // host power backend (org.freedesktop.UPower).
     acl::battery::register_battery_natives(env);
+    // Bind org.acl.internal.BluetoothBridge (android.bluetooth.* shims) to the svc/bluetooth
+    // host BlueZ backend (org.bluez).
+    acl::bt::register_bt_natives(env);
 #endif
 #if ACL_HAVE_VULKAN && ACL_HAVE_WCS
     // Bind org.acl.internal.PresentDriver's native seam (the Looper-driven present, approach A).
