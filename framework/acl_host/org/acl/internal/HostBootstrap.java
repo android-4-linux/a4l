@@ -324,6 +324,10 @@ public final class HostBootstrap {
         }
         void setApplication(android.app.Application a) { this.application = a; }
         @Override public Resources getResources() { return res; }
+        // Null-base ContextWrapper -> getAssets() NPEs; return the app Resources' AssetManager
+        // (APK assets + framework-res). Apps read assets in Application.onCreate (e.g. pdfinspector
+        // InspectorApp.getAssets()), which otherwise leaves the app uninitialized -> blank window.
+        @Override public android.content.res.AssetManager getAssets() { return res.getAssets(); }
         @Override public String getPackageName() { return pkg; }
         @Override public String getOpPackageName() { return pkg; }  // ContentResolver.<init> reads it
         @Override public int getUserId() { return 0; }              // single-user (system user)
