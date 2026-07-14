@@ -324,6 +324,14 @@ public final class HostBootstrap {
         }
         void setApplication(android.app.Application a) { this.application = a; }
         @Override public Resources getResources() { return res; }
+        // A null-base ContextWrapper throws from register/unregisterComponentCallbacks. Compose's OWN
+        // obtainImageVectorCache DisposableEffect calls registerComponentCallbacks during the initial
+        // composition (via the activity's ContextThemeWrapper, which delegates here) — that throw
+        // aborted the whole composition, so no later effect ran (DisposableEffect/LaunchedEffect/
+        // rememberLauncherForActivityResult), the attach was interrupted, and the WindowRecomposer
+        // never activated. acl has no config-change/low-memory callback bus, so accept + drop them.
+        @Override public void registerComponentCallbacks(android.content.ComponentCallbacks callback) {}
+        @Override public void unregisterComponentCallbacks(android.content.ComponentCallbacks callback) {}
         // Null-base ContextWrapper -> getAssets() NPEs; return the app Resources' AssetManager
         // (APK assets + framework-res). Apps read assets in Application.onCreate (e.g. pdfinspector
         // InspectorApp.getAssets()), which otherwise leaves the app uninitialized -> blank window.
@@ -1131,6 +1139,30 @@ public final class HostBootstrap {
             try {
                 setField(vriCls, vri, "mChoreographer",
                         android.view.Choreographer.getInstance());
+            } catch (Throwable ignored) {}
+            // View.getWindowInsetsController() -> mViewRootImpl.getInsetsController() (mInsetsController);
+            // null on the hollow ViewRootImpl -> WindowInsetsControllerCompat.show() NPEs (apps drive
+            // edge-to-edge / IME visibility from a LaunchedEffect on startup). Seed a real
+            // InsetsController over a no-op InsetsController.Host so show/hide are safe no-ops (acl has
+            // no system bars/IME insets to animate).
+            try {
+                Class<?> hostCls = Class.forName("android.view.InsetsController$Host");
+                Object host = java.lang.reflect.Proxy.newProxyInstance(
+                        hostCls.getClassLoader(), new Class<?>[]{hostCls},
+                        (p, m, a) -> {
+                            switch (m.getName()) {
+                                case "getHandler": return new android.os.Handler(android.os.Looper.getMainLooper());
+                                case "hasAnimationCallbacks": return Boolean.FALSE;
+                                case "getSystemBarsAppearance":
+                                case "getSystemBarsBehavior": return 0;
+                                case "dipToPx": return (a != null && a.length > 0) ? a[0] : Integer.valueOf(0);
+                                case "getRootViewTitle": return "acl";
+                                default: return defaultValue(m.getReturnType());
+                            }
+                        });
+                Object ic = Class.forName("android.view.InsetsController")
+                        .getConstructor(hostCls).newInstance(host);
+                setField(vriCls, vri, "mInsetsController", ic);
             } catch (Throwable ignored) {}
             android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
             Class<?> aiCls = Class.forName("android.view.View$AttachInfo");
