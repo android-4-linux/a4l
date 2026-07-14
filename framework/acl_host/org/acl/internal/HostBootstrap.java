@@ -546,6 +546,22 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("input_method".equals(name)) {
+                // No IME and no Binder (ADR-3), but ViewRootImpl/ImeFocusController dereference the
+                // InputMethodManager on the Dialog/PopupWindow add + remove paths. Use the framework's
+                // OWN headless path: InputMethodManager.createStubInstance() (built for layoutlib) wires
+                // a Proxy-stubbed IInputMethodManager (all IPCs return false/0/null) into the real ctor,
+                // so getDelegate() is non-null and IME calls no-op. Reflective: createStubInstance is
+                // private static.
+                try {
+                    java.lang.reflect.Method m = android.view.inputmethod.InputMethodManager.class
+                            .getDeclaredMethod("createStubInstance", int.class, android.os.Looper.class);
+                    m.setAccessible(true);
+                    return m.invoke(null, 0 /* Display.DEFAULT_DISPLAY */, android.os.Looper.getMainLooper());
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("storage".equals(name)) {
                 // The real android.os.storage.StorageManager(Context, Looper); its ctor resolves
                 // ServiceManager.getServiceOrThrow("mount") — seeded above → getVolumeList works.
@@ -578,6 +594,9 @@ public final class HostBootstrap {
             // ViewRootImpl.<init> reads getSystemService(AudioManager.class) (navigation sound
             // effects); map it so the Dialog/PopupWindow add path gets a real AudioManager.
             if (serviceClass == android.media.AudioManager.class) return "audio";
+            // ImeFocusController.getImmDelegate() does getSystemService(InputMethodManager.class)
+            // .getDelegate(); a Dialog add/remove NPEs here if it returns null. Map it.
+            if (serviceClass == android.view.inputmethod.InputMethodManager.class) return "input_method";
             return null;
         }
 
@@ -1490,12 +1509,37 @@ public final class HostBootstrap {
                 (p, method, a) -> {
                     String n = method.getName();
                     if (n.startsWith("addToDisplay") || n.startsWith("relayout")) {
-                        if (a != null) for (Object arg : a)
+                        if (a != null) for (Object arg : a) {
                             if (arg instanceof float[] && ((float[]) arg).length > 0) ((float[]) arg)[0] = 1.0f;
+                            // ViewRootImpl.setView passes an empty InputChannel expecting WMS to fill it;
+                            // an unfilled one makes WindowInputEventReceiver's nativeInit throw
+                            // "InputChannel is not initialized." Give it a real host socketpair channel.
+                            if (arg instanceof android.view.InputChannel) initInputChannel((android.view.InputChannel) arg);
+                        }
                         return method.getReturnType() == void.class ? null : Integer.valueOf(0);
                     }
                     return defaultValue(method.getReturnType());
                 });
+    }
+
+    // Server ends of the host InputChannel socketpairs, kept alive so the client ends handed to
+    // ViewRootImpl stay open (acl never dispatches through them — the pair just satisfies the
+    // framework's "channel must be initialized" invariant on the no-WMS Dialog/PopupWindow path).
+    private static final java.util.List<android.view.InputChannel> sChannelServerEnds =
+            new java.util.ArrayList<>();
+
+    private static void initInputChannel(android.view.InputChannel out) {
+        try {
+            android.view.InputChannel[] pair = android.view.InputChannel.openInputChannelPair("acl-host-window");
+            synchronized (sChannelServerEnds) { sChannelServerEnds.add(pair[0]); }
+            android.os.Parcel parcel = android.os.Parcel.obtain();
+            pair[1].writeToParcel(parcel, 0);
+            parcel.setDataPosition(0);
+            out.readFromParcel(parcel);
+            parcel.recycle();
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: initInputChannel failed: " + t);
+        }
     }
 
     // Install a compat-change delegate so android.compat.Compatibility.isChangeEnabled(id) returns
