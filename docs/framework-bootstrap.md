@@ -37,6 +37,33 @@ independently of, app classes). The ART target (R-1) will instead build a real b
 these entries; the seam is the same. `--framework=<dir>` (and `$ACL_FRAMEWORK`) populate it;
 default is the vendored staging dir once it exists.
 
+#### A1.1 The boot-vs-app split (host-ART, `framework/acl_host/` shims)
+
+On the real host-ART backend the framework is not source-staged — it is the AOSP
+`framework-minus-apex` (+ `framework-graphics`, `ext`, …) DEX jars, loaded on the ART boot
+classpath (`-Xbootclasspath`, `$ACL_ART_BOOTCLASSPATH`). That framework is *minus apex*: it
+references apex/mainline-module classes (`android.net.ConnectivityManager`,
+`android.bluetooth.*`, `android.provider.MediaStore`, the `*FrameworkInitializer`s, …) that live
+in modules acl does not ship. acl instead vendors clean-room shims for them under
+`framework/acl_host/android/**`.
+
+**A boot-classpath class can only resolve other boot-classpath classes.** So those shims *must*
+be delivered on the boot classpath, not the app classpath — otherwise every framework→apex
+reference is an Unresolved Reference that turns into a bare, unnamed `NoClassDefFoundError` the
+moment it is called. (This silently killed every `Dialog.setView`: `ViewRootImpl` pulls in
+`AudioManager`, whose apex refs then failed at use.) The fix is to compile `framework/acl_host`
+once and split it into two DEX jars:
+
+- **boot jar** — `android/**` plus `org/acl/internal/BluetoothBridge` (the only bridge the shims
+  call; it references only framework classes) → appended to `$ACL_ART_BOOTCLASSPATH`.
+- **app jar** — the rest of `org/acl/internal/**` (`HostBootstrap`, `PresentDriver`, … which
+  reference app-bundled androidx/Compose and so cannot live on the boot classpath) →
+  `$ACL_ART_HOST_BOOTSTRAP`.
+
+`HostBootstrap` is still located by native `FindClass` because the system (app) classloader
+delegates to its boot parent. `tools/run-apk.sh` performs this split and is the canonical way to
+run an APK on host ART; the `run_*_art_test.py` harnesses follow the same rule.
+
 ### A2. Framework staging (source → .class, NOT dex-translate)
 The framework is vendored as **Java source** (ADR-0002), so it is compiled with `javac` to a
 `framework/classes/` boot dir — no DEX round-trip. (Only the *app* takes the DEX→JVM path; the

@@ -18,6 +18,12 @@ Repository tooling. Phase 0 placeholder for the items called out in `plan.md` §
   Automotive car-tag pairing still `TODO`.
 - **app-corpus fetch** — resolve the hash-pinned F-Droid corpus manifest into
   `tests/app-corpus/apks/` (gitignored).
+- **`run-apk.sh` — run an unmodified APK on the host-ART backend (dev harness).** The interactive
+  counterpart to the `tests/integration/run_*_art_test.py` tests: it assembles the framework boot
+  classpath, compiles `framework/acl_host` and performs the **boot-vs-app classpath split** that
+  the framework shims require (see `docs/framework-bootstrap.md` A1.1), then `acl run <apk>
+  --vm=art`. Needs a host ART build (`$ACL_ART_HOME`) and the AOSP host toolchain; exits 77 (skip)
+  when absent. Example: `ACL_ART_HOME=… tools/run-apk.sh app.apk --present`.
 
 These land as they are needed; nothing here is on the critical path for the Phase 0 skeleton
 build. Scripts added here follow the same SPDX + provenance + DCO rules as the rest of the tree.

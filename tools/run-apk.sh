@@ -1,0 +1,107 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Provenance: original run harness; plan.md §5 (Tier B), docs/framework-bootstrap.md (A1.1),
+# docs/art-host-spike.md (M3); AOSP host toolchain (d8, javac) + framework-minus-apex boot jars
+# (Apache-2.0). No GPL-3.0 sources.
+#
+# Run an unmodified APK on the real host-ART backend (--vm=art) with acl's vendored framework and
+# the org.acl.internal.HostBootstrap runtime environment. This is the developer counterpart to the
+# tests/integration/run_*_art_test.py harnesses; unlike them it is interactive (--present) and takes
+# an arbitrary APK.
+#
+# THE KEY MECHANISM (docs/framework-bootstrap.md A3) — the boot-vs-app classpath split:
+#   framework-minus-apex sits on the ART BOOT classpath (-Xbootclasspath). A boot-classpath class
+#   can only resolve other boot-classpath classes, so acl's clean-room android.* shims (which the
+#   framework references — android.net.ConnectivityManager, android.bluetooth.*, ...) MUST also be
+#   on the boot classpath, not the app classpath, or every such reference is an Unresolved Reference
+#   that becomes a bare NoClassDefFoundError when called (this silently broke Dialog.setView). So we
+#   compile framework/acl_host once and split it into TWO dex jars:
+#     - boot jar (aclshims):  android/**  +  org/acl/internal/BluetoothBridge  (framework-facing;
+#                             reference only framework classes + each other)  -> ACL_ART_BOOTCLASSPATH
+#     - app  jar (hostboot):  the rest of org/acl/internal/**  (HostBootstrap/PresentDriver, which
+#                             reference app-bundled androidx/Compose)          -> ACL_ART_HOST_BOOTSTRAP
+#   HostBootstrap is still found by native FindClass because the system classloader delegates to boot.
+#
+# Usage:   tools/run-apk.sh <app.apk> [extra acl args, e.g. --present --main=...]
+# Env:     ACL_ART_HOME   (required) host ART build out/host/linux-x86 (libart.so + apex/com.android.art)
+#          ACL_BIN        acl binary            (default: <repo>/build/src/shell/acl)
+#          ACL_RUN_TIMEOUT seconds              (default: 60; 0 disables the timeout)
+#          ACL_APK        APK path if $1 omitted
+# Exits 77 (meson "skip" convention) when the host-ART build or toolchain is absent.
+set -u
+# AOSP's environment sometimes shadows coreutils with shell functions; use the real binaries.
+unset -f grep egrep fgrep sed awk ls find 2>/dev/null || true
+
+SKIP=77
+die_skip() { printf 'SKIP: %s\n' "$1" >&2; exit "$SKIP"; }
+
+HOME_DIR="${ACL_ART_HOME:-}"
+[ -n "$HOME_DIR" ] && [ -d "$HOME_DIR" ] || die_skip "ACL_ART_HOME not set to a host ART build (out/host/linux-x86)"
+[ -f "$HOME_DIR/lib64/libart.so" ] || die_skip "no libart.so under ACL_ART_HOME ($HOME_DIR)"
+
+# The AOSP tree root is three levels above out/host/linux-x86.
+ROOT=$(cd "$HOME_DIR/../../.." && pwd)
+# The repo root is two levels above this script (tools/run-apk.sh).
+ACLROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ACL_BIN="${ACL_BIN:-$ACLROOT/build/src/shell/acl}"
+[ -x "$ACL_BIN" ] || die_skip "acl binary not built at $ACL_BIN (meson compile -C build acl)"
+
+APK="${1:-${ACL_APK:-}}"
+[ -n "$APK" ] && [ -f "$APK" ] || { printf 'usage: %s <app.apk> [acl args...]\n' "$0" >&2; exit 2; }
+shift 2>/dev/null || true
+
+first() { for p in "$@"; do [ -e "$p" ] && { printf '%s\n' "$p"; return; }; done; }
+
+D8="$HOME_DIR/bin/d8"
+JAVAC=$(first "$ROOT"/prebuilts/jdk/jdk11/linux-x86/bin/javac "$ROOT"/prebuilts/jdk/jdk17/linux-x86/bin/javac)
+[ -x "$D8" ] || die_skip "d8 not found at $D8"
+[ -x "${JAVAC:-}" ] || die_skip "javac not found under $ROOT/prebuilts/jdk"
+
+# Framework the acl_host shims compile against (real android.* to bind method signatures).
+FWCLASSES=$(first "$ROOT"/out/target/common/obj/JAVA_LIBRARIES/framework-minus-apex_intermediates/classes.jar)
+CORECLASSES=$(first "$ROOT"/out/host/common/obj/JAVA_LIBRARIES/core-libart-hostdex_intermediates/classes.jar)
+[ -n "${FWCLASSES:-}" ] || die_skip "framework-minus-apex classes.jar not built (m framework-minus-apex)"
+
+# Framework BOOT jars (PRODUCT_BOOT_JARS, system), in order; framework-minus-apex is the anchor.
+BOOT=""
+for m in framework-minus-apex framework-graphics ext telephony-common voip-common ims-common; do
+  j=$(first "$ROOT"/out/target/product/*/obj/JAVA_LIBRARIES/${m}_intermediates/javalib.jar)
+  [ -n "$j" ] && BOOT="${BOOT:+$BOOT:}$j"
+done
+[ -n "$BOOT" ] || die_skip "framework boot jars not built (m framework-minus-apex framework-graphics ...)"
+FRES=$(first "$ROOT"/out/target/product/*/system/framework/framework-res.apk)
+
+W=$(mktemp -d "${TMPDIR:-/tmp}/acl-run-apk-XXXXXX")
+trap 'rm -rf "$W"' EXIT
+mkdir -p "$W/hbcls" "$W/bootdex" "$W/appdex"
+
+# Compile all of framework/acl_host once (against the real framework + core), at --release 8 so the
+# host javac's newer class-file version is accepted by this ART's d8.
+"$JAVAC" -cp "$FWCLASSES${CORECLASSES:+:$CORECLASSES}" --release 8 -d "$W/hbcls" \
+  $(find "$ACLROOT/framework/acl_host" -name '*.java') 2>&1 | head
+
+# Split the compiled classes (see header): framework-facing -> boot jar, the rest -> app jar.
+BOOTCLS=$( { find "$W/hbcls/android" -name '*.class' 2>/dev/null
+             find "$W/hbcls/org/acl/internal" -name 'BluetoothBridge*.class' 2>/dev/null; } )
+APPCLS=$(find "$W/hbcls/org" -name '*.class' 2>/dev/null | grep -v '/BluetoothBridge')
+
+$D8 --min-api 24 --output "$W/bootdex" $BOOTCLS 2>&1 | tail -1
+$D8 --min-api 24 --output "$W/appdex"  $APPCLS  2>&1 | tail -1
+( cd "$W/bootdex" && zip -X -0 -q "$W/aclshims.jar" classes*.dex )
+( cd "$W/appdex"  && zip -X -0 -q "$W/hostboot.jar" classes*.dex )
+
+# aclshims.jar joins the BOOT classpath so framework-minus-apex resolves the android.* shims.
+BOOT="$BOOT:$W/aclshims.jar"
+
+TIMEOUT="${ACL_RUN_TIMEOUT:-60}"
+RUNNER=(env
+  ACL_ART_BOOTCLASSPATH="$BOOT"
+  ACL_ART_NATIVE=1
+  ACL_ART_HOST_BOOTSTRAP="$W/hostboot.jar")
+[ -n "${FRES:-}" ] && RUNNER+=(ACL_ART_FRAMEWORK_RES="$FRES")
+RGFONT=$(first "$ROOT"/external/roboto-fonts/Roboto-Regular.ttf)
+[ -n "${RGFONT:-}" ] && RUNNER+=(ACL_GRAPHICS_FONT="$RGFONT")
+[ -f "$HOME_DIR/lib64/libacl_graphics_jni.so" ] && RUNNER+=(ACL_ART_GRAPHICS_LIB="$HOME_DIR/lib64/libacl_graphics_jni.so")
+[ "$TIMEOUT" != "0" ] && RUNNER+=(timeout "$TIMEOUT")
+
+"${RUNNER[@]}" "$ACL_BIN" run "$APK" --vm=art "$@" 2>&1
