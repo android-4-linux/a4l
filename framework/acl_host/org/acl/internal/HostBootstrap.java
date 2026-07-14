@@ -278,7 +278,7 @@ public final class HostBootstrap {
      */
     public static android.content.Context newAppContext(String apkPath, String frameworkResPath,
                                                         String packageName) {
-        AppContext c = new AppContext(appResources(apkPath, frameworkResPath), packageName);
+        AppContext c = new AppContext(appResources(apkPath, frameworkResPath), packageName, apkPath);
         sAppContext = c;  // the current app context, for acl-sourced broadcasts (battery/bluetooth)
         return c;
     }
@@ -316,9 +316,12 @@ public final class HostBootstrap {
     static final class AppContext extends ContextWrapper {
         private final Resources res;
         private final String pkg;
+        private final String apkPath;   // the app's APK (ApplicationInfo.sourceDir); may be null
         private Resources.Theme theme;
         private android.app.Application application;  // set once createApplication wraps this base
-        AppContext(Resources res, String pkg) { super(null); this.res = res; this.pkg = pkg; }
+        AppContext(Resources res, String pkg, String apkPath) {
+            super(null); this.res = res; this.pkg = pkg; this.apkPath = apkPath;
+        }
         void setApplication(android.app.Application a) { this.application = a; }
         @Override public Resources getResources() { return res; }
         @Override public String getPackageName() { return pkg; }
@@ -351,6 +354,14 @@ public final class HostBootstrap {
             android.content.pm.ApplicationInfo ai = new android.content.pm.ApplicationInfo();
             ai.packageName = pkg;
             ai.processName = pkg;   // single-process; WorkManager compares against this
+            // Native-lib loaders (Flutter/ReLinker, System.loadLibrary internals) read these:
+            // sourceDir = the APK to scan for lib/<abi>/*.so; nativeLibraryDir = where acl
+            // extracted them (matches the run-time java.library.path). Absent -> new File(null) NPE.
+            ai.sourceDir = apkPath;
+            ai.publicSourceDir = apkPath;
+            ai.dataDir = ensure(dataRoot()).getAbsolutePath();
+            ai.nativeLibraryDir = new java.io.File(cacheRoot(), "lib").getAbsolutePath();
+            ai.flags = android.content.pm.ApplicationInfo.FLAG_HAS_CODE;
             return ai;
         }
         // AppContext has a null base (super(null)), so Context methods not overridden here
