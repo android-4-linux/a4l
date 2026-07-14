@@ -90,20 +90,83 @@ public final class HostBootstrap {
             java.lang.reflect.Field sDefaults = tfc.getDeclaredField("sDefaults");
             sDefaults.setAccessible(true);
             sDefaults.set(null, arr);
+            // Distinct serif + monospace families so Typeface.create("serif"/"monospace") and
+            // styled text (e.g. <tt>, code views) don't all render as the sans default. Probe real
+            // font files on the host / AOSP tree (no in-tree font vendoring — mirrors the native
+            // default_typeface() candidate list); fall back to the sans default if none is found.
+            // NOTE: this drives the graphics Font/FontFamily/Typeface natives via reflection (the
+            // path route -> SkTypeface::MakeFromFile). A cleaner home is graphics_jni parsing a
+            // vendored fonts.xml into a real SkFontMgr fallback collection (families + per-script
+            // fallback + emoji); switch to that native path later. See docs/font-scope.md.
+            Object serif = firstTypeface(new String[]{
+                    System.getenv("ACL_FONT_SERIF"),
+                    "/usr/share/fonts/google-noto-vf/NotoSerif[wght].ttf",
+                    "/usr/share/fonts/liberation-serif/LiberationSerif-Regular.ttf",
+                    "/usr/share/fonts/liberation-serif-fonts/LiberationSerif-Regular.ttf",
+                    "/usr/share/fonts/dejavu-serif-fonts/DejaVuSerif.ttf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+            });
+            if (serif == null) serif = tf;
+            Object mono = firstTypeface(new String[]{
+                    System.getenv("ACL_FONT_MONO"),
+                    "/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-Regular.ttf",
+                    "/usr/share/fonts/google-noto-vf/NotoSansMono[wght].ttf",
+                    "/usr/share/fonts/liberation-mono-fonts/LiberationMono-Regular.ttf",
+                    "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            });
+            if (mono == null) mono = tf;
+
             java.lang.reflect.Field smf = tfc.getDeclaredField("sSystemFontMap");
             smf.setAccessible(true);
             Object mapObj = smf.get(null);
             if (mapObj instanceof java.util.Map) {
                 @SuppressWarnings("unchecked")
                 java.util.Map<String, Object> m = (java.util.Map<String, Object>) mapObj;
-                for (String n : new String[]{"sans-serif", "serif", "monospace", "default",
+                // sans-serif and its weight/name aliases (fonts.xml sans family).
+                for (String n : new String[]{"sans-serif", "default", "arial", "helvetica",
                         "sans-serif-medium", "sans-serif-light", "sans-serif-condensed",
+                        "sans-serif-condensed-light", "sans-serif-condensed-medium",
                         "sans-serif-black", "sans-serif-thin", "cursive", "casual"})
                     m.put(n, tf);
+                // serif family + serif-like aliases.
+                for (String n : new String[]{"serif", "georgia", "baskerville", "palatino",
+                        "goudy", "fantasy", "times", "times new roman"})
+                    m.put(n, serif);
+                // monospace family + mono aliases.
+                for (String n : new String[]{"monospace", "sans-serif-monospace", "serif-monospace",
+                        "courier", "courier new", "monaco"})
+                    m.put(n, mono);
             }
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: seedTypefaces failed: " + t);
         }
+    }
+
+    // Build a Typeface from the first existing font file in `candidates`, via the graphics
+    // Font/FontFamily/Typeface natives (path route -> SkTypeface::MakeFromFile), bypassing the
+    // framework's Font.Builder(File) mmap/validation path (which fails silently on this host and
+    // yields DEFAULT). Returns null if no candidate loads. See seedTypefaces()'s NOTE.
+    private static Object firstTypeface(String[] candidates) {
+        Object dflt = null;
+        try { dflt = android.graphics.Typeface.DEFAULT; } catch (Throwable ignored) {}
+        for (String path : candidates) {
+            if (path == null || path.isEmpty()) continue;
+            if (!new java.io.File(path).exists()) continue;
+            try {
+                // Typeface.createFromFile fails SAFELY (returns Typeface.DEFAULT) rather than
+                // crashing; the low-level Font/FontFamily builder natives are @CriticalNative and
+                // segfault when driven reflectively (they belong in a dedicated native entry).
+                Object tf = android.graphics.Typeface.createFromFile(path);
+                if (tf != null && tf != dflt) {
+                    System.err.println("acl HostBootstrap: loaded typeface " + path);
+                    return tf;
+                }
+            } catch (Throwable t) {
+                // try the next candidate
+            }
+        }
+        return null;
     }
 
     /** Idempotent: prepare the main Looper and seed a no-Binder ServiceManager. */
