@@ -34,6 +34,8 @@ class NullBackend : public IBtBackend {
   bool set_powered(bool) override { return false; }
   bool start_discovery() override { return false; }
   bool stop_discovery() override { return false; }
+  bool connect_device(const std::string&) override { return false; }
+  bool disconnect_device(const std::string&) override { return false; }
   void set_sink(std::function<void(const AndroidBtState&)>) override {}
 };
 
@@ -57,6 +59,19 @@ std::uint32_t get_u32(const PropMap& p, const char* k) {
   auto it = p.find(k);
   if (it == p.end()) return 0;
   try { return it->second.get<std::uint32_t>(); } catch (...) { return 0; }
+}
+// True if the device's UUIDs advertise an A2DP profile (sink 0000110b / source 0000110a).
+bool has_a2dp(const PropMap& p) {
+  auto it = p.find("UUIDs");
+  if (it == p.end()) return false;
+  try {
+    for (const std::string& u : it->second.get<std::vector<std::string>>()) {
+      if (u.size() >= 8 && (u.compare(0, 8, "0000110b") == 0 || u.compare(0, 8, "0000110a") == 0))
+        return true;
+    }
+  } catch (...) {
+  }
+  return false;
 }
 
 bool name_has_owner(sdbus::IConnection& conn, const char* bus_name) {
@@ -118,6 +133,17 @@ class BlueZBackend : public IBtBackend {
     });
   }
 
+  bool connect_device(const std::string& address) override {
+    return with_device(address, [](sdbus::IProxy& d) {
+      d.callMethod("Connect").onInterface(sdbus::InterfaceName{"org.bluez.Device1"});
+    });
+  }
+  bool disconnect_device(const std::string& address) override {
+    return with_device(address, [](sdbus::IProxy& d) {
+      d.callMethod("Disconnect").onInterface(sdbus::InterfaceName{"org.bluez.Device1"});
+    });
+  }
+
   void set_sink(std::function<void(const AndroidBtState&)> on_change) override {
     std::lock_guard<std::mutex> lk(mu_);
     sink_ = std::move(on_change);
@@ -135,6 +161,24 @@ class BlueZBackend : public IBtBackend {
       return true;
     } catch (const sdbus::Error& e) {
       log::w(kTag, "adapter op failed ({})", e.getMessage());
+      return false;
+    }
+  }
+  template <class F>
+  bool with_device(const std::string& address, F&& fn) {
+    std::string path;
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      for (const BtDevice& d : state_.devices)
+        if (d.address == address) { path = d.path; break; }
+    }
+    if (path.empty()) return false;
+    try {
+      auto d = sdbus::createProxy(*conn_, sdbus::ServiceName{"org.bluez"}, sdbus::ObjectPath{path});
+      fn(*d);
+      return true;
+    } catch (const sdbus::Error& e) {
+      log::w(kTag, "device op failed ({})", e.getMessage());
       return false;
     }
   }
@@ -165,9 +209,11 @@ class BlueZBackend : public IBtBackend {
           d.address = get_str(p, "Address");
           d.name = get_str(p, "Alias");
           if (d.name.empty()) d.name = get_str(p, "Name");
+          d.path = path;
           d.cls = static_cast<int>(get_u32(p, "Class"));
           d.bond_state = get_bool(p, "Paired") ? kBondBonded : kBondNone;
           d.connected = get_bool(p, "Connected");
+          d.a2dp = has_a2dp(p);
           st.devices.push_back(std::move(d));  // all devices; JNI filters bonded
         }
       }

@@ -24,6 +24,10 @@ public final class BluetoothBridge {
     static native int nDeviceClass(String address);
     static native int nDeviceBondState(String address);  // BluetoothDevice.BOND_* (10/11/12)
     static native String[] nAllDevices();       // paired + discovered (for ACTION_FOUND diffing)
+    static native boolean nDeviceConnected(String address);
+    static native String[] nA2dpConnected();    // connected devices advertising A2DP
+    static native boolean nConnectDevice(String address);
+    static native boolean nDisconnectDevice(String address);
     static native boolean nSetPowered(boolean on);
     static native boolean nStartDiscovery();
     static native boolean nStopDiscovery();
@@ -66,6 +70,19 @@ public final class BluetoothBridge {
     public static String[] allDevices() {
         try { String[] a = nAllDevices(); return a != null ? a : new String[0]; }
         catch (Throwable t) { return new String[0]; }
+    }
+    public static boolean deviceConnected(String address) {
+        try { return nDeviceConnected(address); } catch (Throwable t) { return false; }
+    }
+    public static String[] a2dpConnected() {
+        try { String[] a = nA2dpConnected(); return a != null ? a : new String[0]; }
+        catch (Throwable t) { return new String[0]; }
+    }
+    public static boolean connectDevice(String address) {
+        try { return nConnectDevice(address); } catch (Throwable t) { return false; }
+    }
+    public static boolean disconnectDevice(String address) {
+        try { return nDisconnectDevice(address); } catch (Throwable t) { return false; }
     }
 
     // ── P2 broadcasts ────────────────────────────────────────────────────────────────────

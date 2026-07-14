@@ -30,9 +30,11 @@ enum : int { kBondNone = 10, kBondBonding = 11, kBondBonded = 12 };
 struct BtDevice {
   std::string address;   // AA:BB:CC:DD:EE:FF (BluetoothDevice.getAddress)
   std::string name;      // Alias/Name (getName)
+  std::string path;      // BlueZ object path (for Connect/Disconnect)
   int cls = 0;           // Class (u) → BluetoothClass
   int bond_state = kBondNone;  // Paired → BOND_BONDED
-  bool connected = false;
+  bool connected = false;      // Device1.Connected
+  bool a2dp = false;           // advertises an A2DP UUID (sink/source) → a BluetoothA2dp device
 };
 
 // The Android-visible adapter truth, independent of the host daemon.
@@ -58,6 +60,11 @@ class IBtBackend {
   virtual bool set_powered(bool on) = 0;
   virtual bool start_discovery() = 0;
   virtual bool stop_discovery() = 0;
+
+  // Connect/disconnect a device by address (BlueZ Device1.Connect/Disconnect) — the A2DP
+  // profile's connect(device)/disconnect(device).
+  virtual bool connect_device(const std::string& address) = 0;
+  virtual bool disconnect_device(const std::string& address) = 0;
 
   virtual void set_sink(std::function<void(const AndroidBtState&)> on_change) = 0;
 };

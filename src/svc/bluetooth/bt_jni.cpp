@@ -112,6 +112,34 @@ jint JNICALL n_device_bond_state(JNIEnv* env, jclass, jstring addr) {
   const BtDevice* d = find_device(s, env, addr);
   return d != nullptr ? d->bond_state : kBondNone;
 }
+jboolean JNICALL n_device_connected(JNIEnv* env, jclass, jstring addr) {
+  const IBtBackend* b = backend().get();
+  const AndroidBtState s = b != nullptr ? b->snapshot() : AndroidBtState{};
+  const BtDevice* d = find_device(s, env, addr);
+  return (d != nullptr && d->connected) ? JNI_TRUE : JNI_FALSE;
+}
+// BluetoothA2dp.getConnectedDevices(): connected devices advertising an A2DP profile.
+jobjectArray JNICALL n_a2dp_connected(JNIEnv* env, jclass) {
+  const IBtBackend* b = backend().get();
+  const AndroidBtState s = b != nullptr ? b->snapshot() : AndroidBtState{};
+  return addresses(env, s, [](const BtDevice& d) { return d.connected && d.a2dp; });
+}
+jboolean JNICALL n_connect_device(JNIEnv* env, jclass, jstring addr) {
+  IBtBackend* b = backend().get();
+  if (b == nullptr || addr == nullptr) return JNI_FALSE;
+  const char* c = env->GetStringUTFChars(addr, nullptr);
+  const bool ok = c != nullptr && b->connect_device(c);
+  if (c != nullptr) env->ReleaseStringUTFChars(addr, c);
+  return ok ? JNI_TRUE : JNI_FALSE;
+}
+jboolean JNICALL n_disconnect_device(JNIEnv* env, jclass, jstring addr) {
+  IBtBackend* b = backend().get();
+  if (b == nullptr || addr == nullptr) return JNI_FALSE;
+  const char* c = env->GetStringUTFChars(addr, nullptr);
+  const bool ok = c != nullptr && b->disconnect_device(c);
+  if (c != nullptr) env->ReleaseStringUTFChars(addr, c);
+  return ok ? JNI_TRUE : JNI_FALSE;
+}
 jboolean JNICALL n_set_powered(JNIEnv*, jclass, jboolean on) {
   IBtBackend* b = backend().get();
   return (b != nullptr && b->set_powered(on == JNI_TRUE)) ? JNI_TRUE : JNI_FALSE;
@@ -156,6 +184,14 @@ void register_bt_natives(JNIEnv* env) {
        reinterpret_cast<void*>(&n_device_class)},
       {const_cast<char*>("nDeviceBondState"), const_cast<char*>("(Ljava/lang/String;)I"),
        reinterpret_cast<void*>(&n_device_bond_state)},
+      {const_cast<char*>("nDeviceConnected"), const_cast<char*>("(Ljava/lang/String;)Z"),
+       reinterpret_cast<void*>(&n_device_connected)},
+      {const_cast<char*>("nA2dpConnected"), const_cast<char*>("()[Ljava/lang/String;"),
+       reinterpret_cast<void*>(&n_a2dp_connected)},
+      {const_cast<char*>("nConnectDevice"), const_cast<char*>("(Ljava/lang/String;)Z"),
+       reinterpret_cast<void*>(&n_connect_device)},
+      {const_cast<char*>("nDisconnectDevice"), const_cast<char*>("(Ljava/lang/String;)Z"),
+       reinterpret_cast<void*>(&n_disconnect_device)},
       {const_cast<char*>("nSetPowered"), const_cast<char*>("(Z)Z"),
        reinterpret_cast<void*>(&n_set_powered)},
       {const_cast<char*>("nStartDiscovery"), const_cast<char*>("()Z"),

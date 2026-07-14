@@ -94,10 +94,23 @@ public final class BluetoothAdapter {
 
     public int getProfileConnectionState(int profile) { return STATE_DISCONNECTED; }
 
-    // Profile proxies (A2DP/HEADSET/...) are P3; report unavailable so the app doesn't wait.
+    // Hand out the profile proxy backed by svc/bluetooth → BlueZ. A2DP is implemented; other
+    // profiles report unavailable. The ServiceListener is notified on the main thread.
     public boolean getProfileProxy(android.content.Context context,
-                                   BluetoothProfile.ServiceListener listener, int profile) {
-        return false;
+                                   final BluetoothProfile.ServiceListener listener, final int profile) {
+        final BluetoothProfile proxy;
+        if (profile == BluetoothProfile.A2DP) {
+            proxy = new BluetoothA2dp();
+        } else {
+            return false;
+        }
+        android.util.Log.i("acl.bt", "getProfileProxy A2DP -> BluetoothA2dp (BlueZ-backed)");
+        if (listener != null) {
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
+                @Override public void run() { listener.onServiceConnected(profile, proxy); }
+            });
+        }
+        return true;
     }
     public void closeProfileProxy(int profile, BluetoothProfile proxy) {}
 
