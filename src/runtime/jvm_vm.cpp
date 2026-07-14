@@ -23,6 +23,7 @@
 
 #include "acl_config.h"
 #if ACL_HAVE_SDBUS
+#include "svc/battery/battery_jni.h"
 #include "svc/net/connectivity_jni.h"
 #include "svc/notify/notify_jni.h"
 #endif
@@ -44,6 +45,322 @@ namespace acl::runtime {
 namespace {
 
 constexpr std::string_view kTag = "acl.runtime.jvm";
+
+// StrictMode thread policy slot (android.os.Binder.set/getThreadStrictModePolicy). Per-thread,
+// like the real Binder thread-local; no Binder, so it just round-trips in-process.
+thread_local jint g_strict_mode_policy = 0;
+
+#if ACL_HAVE_VULKAN && ACL_HAVE_WCS
+// ── Looper-driven present (approach A): native seam for org.acl.internal.PresentDriver ──
+// The Java driver owns Looper.loop() and the Choreographer; these natives expose the wm
+// presenter primitives, the GPU begin/end-frame, and the vsync-delivery hooks so a real
+// Android frame loop drives dma-buf submission. See docs/looper-driven-present.md.
+
+// Mirror of libacl_graphics_jni's AclDmabuf (the GPU end-frame output descriptor).
+struct PresentDmabuf {
+  int fd;
+  std::uint32_t width, height, plane_count;
+  std::uint32_t offsets[4], strides[4];
+  std::uint64_t modifier;
+  std::uint32_t drm_format;
+};
+
+// Map a Linux evdev scancode to an Android KeyEvent keycode (a small practical subset;
+// unmapped keys become KEYCODE_UNKNOWN=0). Mirrors Android's Generic.kl.
+jint acl_evdev_to_android_keycode(std::uint32_t evdev) {
+  switch (evdev) {
+    case 30: return 29;  case 48: return 30;  case 46: return 31;  case 32: return 32;  // A B C D
+    case 18: return 33;  case 33: return 34;  case 34: return 35;  case 35: return 36;  // E F G H
+    case 23: return 37;  case 36: return 38;  case 37: return 39;  case 38: return 40;  // I J K L
+    case 50: return 41;  case 49: return 42;  case 24: return 43;  case 25: return 44;  // M N O P
+    case 16: return 45;  case 19: return 46;  case 31: return 47;  case 20: return 48;  // Q R S T
+    case 22: return 49;  case 47: return 50;  case 17: return 51;  case 45: return 52;  // U V W X
+    case 21: return 53;  case 44: return 54;                                            // Y Z
+    case 2: return 8;   case 3: return 9;   case 4: return 10;  case 5: return 11;       // 1 2 3 4
+    case 6: return 12;  case 7: return 13;  case 8: return 14;  case 9: return 15;       // 5 6 7 8
+    case 10: return 16; case 11: return 7;                                               // 9 0
+    case 28: return 66;  case 57: return 62;  case 1: return 111;  case 14: return 67;   // ENT SPC ESC DEL
+    case 15: return 61;  case 105: return 21; case 106: return 22;                       // TAB LEFT RIGHT
+    case 103: return 19; case 108: return 20;                                            // UP DOWN
+    default: return 0;
+  }
+}
+
+// A monotonic timestamp (ns) for MotionEvent/KeyEvent times.
+std::uint64_t present_now_ns() {
+  timespec ts{};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(ts.tv_nsec);
+}
+
+// Per-window native state for PresentDriver; its address is the jlong `s` handed to Java.
+struct PresentSession {
+  std::unique_ptr<wm::IPresenter> presenter;
+  JavaVM* vm = nullptr;
+  jobject view = nullptr;    // global ref to the decor View
+  jobject canvas = nullptr;  // global ref to the android.graphics.Canvas over the GPU SkCanvas
+  int w = 0, h = 0;
+  jint wspec = 0, hspec = 0;  // MeasureSpec.EXACTLY(w/h)
+  long (*gpu_begin)(int, int) = nullptr;
+  bool (*gpu_end)(int, PresentDmabuf*) = nullptr;
+  void (*deliver_vsync)(JNIEnv*, jlong) = nullptr;
+  int (*vsync_pending)() = nullptr;
+  void (*vsync_set_immediate)(int) = nullptr;
+  jmethodID m_measure = nullptr, m_gmw = nullptr, m_gmh = nullptr, m_layout = nullptr, m_draw = nullptr;
+  jclass motionevent_cls = nullptr, keyevent_cls = nullptr;  // global refs
+  jmethodID me_obtain = nullptr, me_recycle = nullptr, ke_obtain = nullptr;
+  jmethodID dispatch_touch = nullptr, dispatch_key = nullptr;
+  std::uint64_t down_time = 0;
+  std::uint64_t frames = 0;  // presented-frame count (progress evidence)
+};
+
+// The current thread's JNIEnv (input callbacks run on the main thread during nDispatch, but
+// were created in nOpen — re-fetch rather than capture a possibly-stale env).
+JNIEnv* present_env(PresentSession* s) {
+  JNIEnv* e = nullptr;
+  if (s != nullptr && s->vm != nullptr) s->vm->GetEnv(reinterpret_cast<void**>(&e), JNI_VERSION_1_6);
+  return e;
+}
+
+// Deliver a compositor pointer/key event to the decor View (native side of MotionEvent/
+// KeyEvent). Runs synchronously inside presenter->dispatch() on the main thread.
+void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
+  JNIEnv* env = present_env(s);
+  if (env == nullptr) return;
+  if (const auto* p = std::get_if<wm::PointerInput>(&ev)) {
+    if (s->motionevent_cls == nullptr || s->me_obtain == nullptr || s->dispatch_touch == nullptr) return;
+    const jint action = p->action == wm::PointerInput::Action::Down ? 0
+                      : p->action == wm::PointerInput::Action::Up   ? 1 : 2;
+    if (action == 0) s->down_time = present_now_ns();
+    jobject me = env->CallStaticObjectMethod(
+        s->motionevent_cls, s->me_obtain, static_cast<jlong>(s->down_time),
+        static_cast<jlong>(present_now_ns()), action, static_cast<jfloat>(p->x),
+        static_cast<jfloat>(p->y), 0);
+    if (me != nullptr) {
+      env->CallBooleanMethod(s->view, s->dispatch_touch, me);
+      if (s->me_recycle != nullptr) env->CallVoidMethod(me, s->me_recycle);
+      env->DeleteLocalRef(me);
+    }
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  } else if (const auto* k = std::get_if<wm::KeyInput>(&ev)) {
+    if (s->keyevent_cls == nullptr || s->ke_obtain == nullptr || s->dispatch_key == nullptr) return;
+    const jint action = k->action == wm::KeyInput::Action::Down ? 0 : 1;
+    jobject ke = env->CallStaticObjectMethod(s->keyevent_cls, s->ke_obtain, action,
+                                             acl_evdev_to_android_keycode(k->keycode));
+    if (ke != nullptr) {
+      env->CallBooleanMethod(s->view, s->dispatch_key, ke);
+      env->DeleteLocalRef(ke);
+    }
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  }
+}
+
+jlong JNICALL PresentDriver_nOpen(JNIEnv* env, jclass, jobject view, jint w, jint h,
+                                  jstring title, jstring appId) {
+  if (!wm::wayland_available()) {
+    log::i(kTag, "PresentDriver.nOpen: no Wayland compositor reachable");
+    return 0;
+  }
+  auto begin = reinterpret_cast<long (*)(int, int)>(
+      ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_begin_frame"));
+  auto finish = reinterpret_cast<bool (*)(int, PresentDmabuf*)>(
+      ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_end_frame"));
+  if (begin == nullptr || finish == nullptr) {
+    log::w(kTag, "PresentDriver.nOpen: GPU begin/end frame missing (libacl_graphics_jni?)");
+    return 0;
+  }
+  auto* s = new PresentSession();
+  env->GetJavaVM(&s->vm);
+  s->w = w;
+  s->h = h;
+  const jint ms_exactly = 1 << 30;  // MeasureSpec.EXACTLY
+  const jint ms_mask = 0x3 << 30;
+  s->wspec = (w & ~ms_mask) | ms_exactly;
+  s->hspec = (h & ~ms_mask) | ms_exactly;
+  s->gpu_begin = begin;
+  s->gpu_end = finish;
+  s->deliver_vsync = reinterpret_cast<void (*)(JNIEnv*, jlong)>(::dlsym(RTLD_DEFAULT, "acl_deliver_vsync"));
+  s->vsync_pending = reinterpret_cast<int (*)()>(::dlsym(RTLD_DEFAULT, "acl_vsync_pending"));
+  s->vsync_set_immediate = reinterpret_cast<void (*)(int)>(::dlsym(RTLD_DEFAULT, "acl_vsync_set_immediate"));
+  s->view = env->NewGlobalRef(view);
+
+  // Resolve the View traversal methods + input dispatch entry points.
+  if (jclass vc = env->GetObjectClass(view)) {
+    s->m_measure = env->GetMethodID(vc, "measure", "(II)V");
+    s->m_gmw = env->GetMethodID(vc, "getMeasuredWidth", "()I");
+    s->m_gmh = env->GetMethodID(vc, "getMeasuredHeight", "()I");
+    s->m_layout = env->GetMethodID(vc, "layout", "(IIII)V");
+    s->m_draw = env->GetMethodID(vc, "draw", "(Landroid/graphics/Canvas;)V");
+    s->dispatch_touch = env->GetMethodID(vc, "dispatchTouchEvent", "(Landroid/view/MotionEvent;)Z");
+    s->dispatch_key = env->GetMethodID(vc, "dispatchKeyEvent", "(Landroid/view/KeyEvent;)Z");
+    env->DeleteLocalRef(vc);
+  }
+  if (jclass mecls = env->FindClass("android/view/MotionEvent")) {
+    s->me_obtain = env->GetStaticMethodID(mecls, "obtain", "(JJIFFI)Landroid/view/MotionEvent;");
+    s->me_recycle = env->GetMethodID(mecls, "recycle", "()V");
+    s->motionevent_cls = static_cast<jclass>(env->NewGlobalRef(mecls));
+    env->DeleteLocalRef(mecls);
+  } else { env->ExceptionClear(); }
+  if (jclass kecls = env->FindClass("android/view/KeyEvent")) {
+    s->ke_obtain = env->GetStaticMethodID(kecls, "obtain", "(II)Landroid/view/KeyEvent;");
+    s->keyevent_cls = static_cast<jclass>(env->NewGlobalRef(kecls));
+    env->DeleteLocalRef(kecls);
+  } else { env->ExceptionClear(); }
+  if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+
+  auto to_utf8 = [&](jstring js) -> std::string {
+    if (js == nullptr) return {};
+    const char* c = env->GetStringUTFChars(js, nullptr);
+    std::string out(c != nullptr ? c : "");
+    if (c != nullptr) env->ReleaseStringUTFChars(js, c);
+    return out;
+  };
+  const std::string t = to_utf8(title);
+  const std::string a = to_utf8(appId);
+
+  const wm::InputCallback input = [s](const wm::InputEvent& ev) { present_deliver_input(s, ev); };
+  s->presenter = wm::presenter_open(w, h, t.empty() ? "acl" : t, a.empty() ? "org.acl.app" : a,
+                                    input, /*want_ime=*/false);
+  if (!s->presenter) {
+    log::w(kTag, "PresentDriver.nOpen: presenter_open failed");
+    if (s->view != nullptr) env->DeleteGlobalRef(s->view);
+    if (s->motionevent_cls != nullptr) env->DeleteGlobalRef(s->motionevent_cls);
+    if (s->keyevent_cls != nullptr) env->DeleteGlobalRef(s->keyevent_cls);
+    delete s;
+    return 0;
+  }
+  // Wrap the persistent GPU SkCanvas once (begin_frame clears it each tick, same handle).
+  const jlong ch = s->gpu_begin(w, h);
+  if (ch != 0) {
+    if (jclass canvasC = env->FindClass("android/graphics/Canvas")) {
+      if (jmethodID cctor = env->GetMethodID(canvasC, "<init>", "(J)V")) {
+        jobject c = env->NewObject(canvasC, cctor, ch);
+        if (c != nullptr) { s->canvas = env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+      }
+      env->DeleteLocalRef(canvasC);
+    }
+  }
+  if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  log::i(kTag, "PresentDriver.nOpen: {}x{} presenter ready (looper-driven)", w, h);
+  return reinterpret_cast<jlong>(s);
+}
+
+jint JNICALL PresentDriver_nFd(JNIEnv*, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  return (s != nullptr && s->presenter) ? s->presenter->fd() : -1;
+}
+jint JNICALL PresentDriver_nRepeatFd(JNIEnv*, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  return (s != nullptr && s->presenter) ? s->presenter->repeat_fd() : -1;
+}
+jboolean JNICALL PresentDriver_nDispatch(JNIEnv*, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s == nullptr || !s->presenter) return JNI_FALSE;
+  return s->presenter->dispatch() ? JNI_TRUE : JNI_FALSE;  // runs input callbacks
+}
+void JNICALL PresentDriver_nDispatchRepeat(JNIEnv*, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s != nullptr && s->presenter) s->presenter->dispatch_repeat();
+}
+void JNICALL PresentDriver_nSetVsyncDelivered(JNIEnv*, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s != nullptr && s->vsync_set_immediate != nullptr) s->vsync_set_immediate(0);
+}
+void JNICALL PresentDriver_nMaybeDeliverVsync(JNIEnv* env, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s == nullptr || !s->presenter || s->deliver_vsync == nullptr) return;
+  const bool rdy = s->presenter->ready();
+  const bool pend = (s->vsync_pending == nullptr || s->vsync_pending() != 0);
+  static int diag = 0;
+  if (diag < 8) { log::i(kTag, "PresentDriver.vsync: ready={} pending={}", rdy, pend); ++diag; }
+  if (rdy && pend) s->deliver_vsync(env, static_cast<jlong>(s->presenter->frame_time_ns()));
+}
+void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s == nullptr || !s->presenter) return;
+  static int tdiag = 0;
+  if (tdiag < 4) { log::i(kTag, "PresentDriver.nTraverse: entered (frame {})", s->frames); ++tdiag; }
+  if (s->gpu_begin(s->w, s->h) == 0) { log::w(kTag, "PresentDriver.nTraverse: gpu_begin=0"); return; }  // clear + re-arm
+  const bool diag = tdiag <= 4;
+  if (s->m_measure != nullptr && s->m_layout != nullptr) {
+    env->CallVoidMethod(s->view, s->m_measure, s->wspec, s->hspec);
+    const jint mw = env->CallIntMethod(s->view, s->m_gmw);
+    const jint mh = env->CallIntMethod(s->view, s->m_gmh);
+    env->CallVoidMethod(s->view, s->m_layout, 0, 0, mw, mh);
+    if (diag) log::i(kTag, "PresentDriver.nTraverse: measured {}x{}", mw, mh);
+  }
+  if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); return; }
+  if (s->m_draw != nullptr && s->canvas != nullptr) env->CallVoidMethod(s->view, s->m_draw, s->canvas);
+  if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); return; }
+  if (diag) log::i(kTag, "PresentDriver.nTraverse: drawn");
+  const int bufidx = s->presenter->next_buffer();
+  if (bufidx < 0) { if (diag) log::w(kTag, "PresentDriver.nTraverse: no free buffer"); return; }
+  PresentDmabuf f{};
+  if (!s->gpu_end(bufidx, &f) || f.fd < 0) { if (diag) log::w(kTag, "PresentDriver.nTraverse: gpu_end failed"); return; }
+  gfx::DmabufFrame fr{};
+  fr.fd = f.fd;
+  fr.width = f.width;
+  fr.height = f.height;
+  fr.plane_count = f.plane_count;
+  for (std::uint32_t i = 0; i < f.plane_count && i < 4; ++i) {
+    fr.planes[i].offset = f.offsets[i];
+    fr.planes[i].stride = f.strides[i];
+  }
+  fr.modifier = f.modifier;
+  fr.drm_format = f.drm_format;
+  fr.modifier_tiled = f.modifier != 0;
+  if (s->presenter->submit(fr)) {
+    if (s->frames == 0 || s->frames % 60 == 0)
+      log::i(kTag, "PresentDriver: frame {} presented ({}x{}) — looper-driven, Compose composed",
+             s->frames, f.width, f.height);
+    ++s->frames;
+  }
+}
+void JNICALL PresentDriver_nClose(JNIEnv* env, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s == nullptr) return;
+  s->presenter.reset();  // tears down the surface + disconnects
+  if (s->view != nullptr) env->DeleteGlobalRef(s->view);
+  if (s->canvas != nullptr) env->DeleteGlobalRef(s->canvas);
+  if (s->motionevent_cls != nullptr) env->DeleteGlobalRef(s->motionevent_cls);
+  if (s->keyevent_cls != nullptr) env->DeleteGlobalRef(s->keyevent_cls);
+  delete s;
+}
+
+// Bind org.acl.internal.PresentDriver's native seam. RegisterNatives is atomic per class, so
+// every signature must match; a miss leaves PresentDriver.run to fail fast via nOpen=0.
+void register_present_driver_natives(JNIEnv* env) {
+  jclass c = env->FindClass("org/acl/internal/PresentDriver");
+  if (c == nullptr) { env->ExceptionClear(); return; }
+  const JNINativeMethod m[] = {
+      {const_cast<char*>("nOpen"),
+       const_cast<char*>("(Landroid/view/View;IILjava/lang/String;Ljava/lang/String;)J"),
+       reinterpret_cast<void*>(PresentDriver_nOpen)},
+      {const_cast<char*>("nFd"), const_cast<char*>("(J)I"), reinterpret_cast<void*>(PresentDriver_nFd)},
+      {const_cast<char*>("nRepeatFd"), const_cast<char*>("(J)I"),
+       reinterpret_cast<void*>(PresentDriver_nRepeatFd)},
+      {const_cast<char*>("nDispatch"), const_cast<char*>("(J)Z"),
+       reinterpret_cast<void*>(PresentDriver_nDispatch)},
+      {const_cast<char*>("nDispatchRepeat"), const_cast<char*>("(J)V"),
+       reinterpret_cast<void*>(PresentDriver_nDispatchRepeat)},
+      {const_cast<char*>("nSetVsyncDelivered"), const_cast<char*>("(J)V"),
+       reinterpret_cast<void*>(PresentDriver_nSetVsyncDelivered)},
+      {const_cast<char*>("nMaybeDeliverVsync"), const_cast<char*>("(J)V"),
+       reinterpret_cast<void*>(PresentDriver_nMaybeDeliverVsync)},
+      {const_cast<char*>("nTraverse"), const_cast<char*>("(J)V"),
+       reinterpret_cast<void*>(PresentDriver_nTraverse)},
+      {const_cast<char*>("nClose"), const_cast<char*>("(J)V"),
+       reinterpret_cast<void*>(PresentDriver_nClose)},
+  };
+  if (env->RegisterNatives(c, m, sizeof(m) / sizeof(m[0])) != JNI_OK) {
+    log::w(kTag, "PresentDriver: RegisterNatives failed");
+    env->ExceptionClear();
+  } else {
+    log::i(kTag, "PresentDriver native seam registered (looper-driven present)");
+  }
+  env->DeleteLocalRef(c);
+}
+#endif  // ACL_HAVE_VULKAN && ACL_HAVE_WCS
 
 #if ACL_PROFILE_AUTOMOTIVE
 // The composition-root audio route for the media bridge: renders the now-playing
@@ -591,7 +908,11 @@ class JniVm : public Vm {
     // once the loop's doFrame pumps it (chicken-and-egg).
     if (config_.present) {
       if (const char* gpu = std::getenv("ACL_PRESENT_GPU"); gpu != nullptr && *gpu != '\0') {
-        present_content_loop_gpu(view, w, h);
+        // Default: the Looper-driven present (approach A). ACL_PRESENT_LEGACY selects the old
+        // native poll loop (kept for comparison; it starves the Android Looper so Compose hangs).
+        const char* legacy = std::getenv("ACL_PRESENT_LEGACY");
+        if (legacy != nullptr && *legacy != '\0') present_content_loop_gpu(view, w, h);
+        else present_content_looper(view, w, h);
         env_->DeleteLocalRef(view);
         return;
       }
@@ -815,6 +1136,40 @@ class JniVm : public Vm {
   // wl_seat wiring); IME on this path is a follow-up. Gated by ACL_PRESENT_GPU so the
   // mature interactive shm loop stays the default.
  protected:  // ArtVm's view-host demo drives this directly
+  // Looper-driven present (approach A, default): hand the decor View to Java's PresentDriver,
+  // which runs Looper.loop() so the Android main thread owns Wayland dispatch and the real
+  // Choreographer drives frames — unblocking Handler-posted async work (Jetpack Compose).
+  void present_content_looper(jobject view, int w, int h) {
+#if ACL_HAVE_VULKAN && ACL_HAVE_WCS
+    jclass pd = env_->FindClass("org/acl/internal/PresentDriver");
+    if (pd == nullptr) {
+      clear_exception();
+      log::w(kTag, "--present(gpu): PresentDriver not on the boot classpath; falling back to loop");
+      present_content_loop_gpu(view, w, h);
+      return;
+    }
+    jmethodID run = env_->GetStaticMethodID(
+        pd, "run", "(Landroid/view/View;IILjava/lang/String;Ljava/lang/String;)V");
+    if (run == nullptr) {
+      clear_exception();
+      env_->DeleteLocalRef(pd);
+      present_content_loop_gpu(view, w, h);
+      return;
+    }
+    const std::string& pkg = config_.package_name;
+    jstring title = env_->NewStringUTF(pkg.empty() ? "acl" : pkg.c_str());
+    jstring appId = env_->NewStringUTF(pkg.empty() ? "org.acl.app" : pkg.c_str());
+    log::i(kTag, "--present(gpu): handing off to PresentDriver (looper owns dispatch)");
+    env_->CallStaticVoidMethod(pd, run, view, w, h, title, appId);
+    if (env_->ExceptionCheck() == JNI_TRUE) fail_with_exception("PresentDriver.run");
+    if (title != nullptr) env_->DeleteLocalRef(title);
+    if (appId != nullptr) env_->DeleteLocalRef(appId);
+    env_->DeleteLocalRef(pd);
+#else
+    (void)view; (void)w; (void)h;
+#endif
+  }
+
   void present_content_loop_gpu(jobject view, int w, int h) {
 #if ACL_HAVE_VULKAN && ACL_HAVE_WCS
     log::i(kTag, "--present(gpu): entered {}x{}, checking compositor…", w, h);
@@ -1680,6 +2035,13 @@ class ArtVm final : public JniVm {
     // Bind org.acl.internal.NotifyBridge (INotificationManager translation) to the
     // svc/notify host backend (org.freedesktop.Notifications).
     acl::notify::register_notify_natives(env);
+    // Bind org.acl.internal.BatteryBridge (ACTION_BATTERY_CHANGED extras) to the svc/battery
+    // host power backend (org.freedesktop.UPower).
+    acl::battery::register_battery_natives(env);
+#endif
+#if ACL_HAVE_VULKAN && ACL_HAVE_WCS
+    // Bind org.acl.internal.PresentDriver's native seam (the Looper-driven present, approach A).
+    register_present_driver_natives(env);
 #endif
   }
 
@@ -1743,8 +2105,14 @@ class ArtVm final : public JniVm {
           // Called from MessageQueue.next on background looper threads (no Binder to flush).
           {const_cast<char*>("flushPendingCommands"), const_cast<char*>("()V"),
            reinterpret_cast<void*>(+[](JNIEnv*, jclass) {})},
+          // StrictMode thread policy rides in the Binder thread-local (device-side it maps to
+          // the driver). No Binder → keep it in a process-local slot so set/get round-trips.
+          {const_cast<char*>("setThreadStrictModePolicy"), const_cast<char*>("(I)V"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jint policy) { g_strict_mode_policy = policy; })},
+          {const_cast<char*>("getThreadStrictModePolicy"), const_cast<char*>("()I"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jint { return g_strict_mode_policy; })},
       };
-      if (env->RegisterNatives(c, m, 7) != JNI_OK) env->ExceptionClear();
+      if (env->RegisterNatives(c, m, sizeof(m) / sizeof(m[0])) != JNI_OK) env->ExceptionClear();
       env->DeleteLocalRef(c);
     } else {
       env->ExceptionClear();
