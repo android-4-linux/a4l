@@ -88,7 +88,37 @@ if have_wcs
       command : [wcs_scanner, '--mode=client-header', '--std=c++23',
                  '@INPUT@', '@OUTPUT@'],
     )
-    wm_sources += [files('dmabuf_presenter.cpp'), linux_dmabuf_client_hpp]
+    # Multi-shell (ACL_WL_SHELL): besides xdg-shell (desktop), the dmabuf presenter can
+    # establish the surface role via AGL's agl_shell (set_background/panel + ready — the
+    # ivi-homescreen automotive pattern), the ivi-shell ivi_application (numeric surface
+    # id + configure), or zwp_fullscreen_shell_v1 (the "simple" present-a-surface path).
+    # These three have no wcs framework wrapper, so --emit-interface-tables makes each
+    # generated header self-contained (like presentation-time / text-input). The protocol
+    # XMLs are vendored (MIT) under third_party/wayland-protocols/.
+    agl_shell_client_hpp = custom_target(
+      'wm-agl-shell-client-header',
+      input : files('../../third_party/wayland-protocols/agl-shell.xml'),
+      output : 'agl_shell_client.hpp',
+      command : [wcs_scanner, '--mode=client-header', '--std=c++23',
+                 '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
+    )
+    ivi_application_client_hpp = custom_target(
+      'wm-ivi-application-client-header',
+      input : files('../../third_party/wayland-protocols/ivi-application.xml'),
+      output : 'ivi_application_client.hpp',
+      command : [wcs_scanner, '--mode=client-header', '--std=c++23',
+                 '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
+    )
+    fullscreen_shell_client_hpp = custom_target(
+      'wm-fullscreen-shell-client-header',
+      input : files('../../third_party/wayland-protocols/fullscreen-shell-unstable-v1.xml'),
+      output : 'fullscreen_shell_client.hpp',
+      command : [wcs_scanner, '--mode=client-header', '--std=c++23',
+                 '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
+    )
+    wm_sources += [files('dmabuf_presenter.cpp'), linux_dmabuf_client_hpp,
+                   agl_shell_client_hpp, ivi_application_client_hpp,
+                   fullscreen_shell_client_hpp]
   endif
 else
   wm_sources += files('present_stub.cpp')

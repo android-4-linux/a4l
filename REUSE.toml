@@ -47,6 +47,21 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "The acl Authors"
 SPDX-License-Identifier = "Apache-2.0"
 
+# Vendored Wayland shell protocol definitions (unmodified upstream XML, MIT). Consumed by
+# the wcs scanner to generate the agl/ivi/fullscreen client bindings for ACL_WL_SHELL. Each
+# carries its own upstream copyright in-file; declared here for REUSE. Origins in METADATA.
+[[annotations]]
+path = ["third_party/wayland-protocols/*.xml"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = [
+  "Copyright © 2019, 2022 Collabora, Ltd.",
+  "Copyright (C) 2013 DENSO CORPORATION",
+  "Copyright (c) 2013 BMW Car IT GmbH",
+  "Copyright © 2016 Yong Bakos",
+  "Copyright © 2015 Jason Ekstrand",
+]
+SPDX-License-Identifier = "MIT"
+
 # Vendored AOSP frameworks/base sources (ADR-0002 content layer). Unmodified upstream
 # files whose api-33 headers may predate machine-readable SPDX tags; the license is
 # declared here (idiomatic REUSE for third-party code) and audited per file in

@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -152,6 +153,58 @@ bool present_dmabuf_loop(int width, int height, std::string_view title,
                          std::string_view app_id, const DmabufFrameFn& render,
                          const InputCallback& input, bool want_ime = false,
                          std::uint64_t max_frames = 0) noexcept;
+
+// ── Looper-driven present (approach A) ──────────────────────────────────────────────
+// The self-contained present_dmabuf_loop above owns its own poll() loop, so it can only
+// service Wayland — it never runs the Android main Looper, and Handler-posted async work
+// (Jetpack Compose's recomposer, coroutines, animations) starves. IPresenter breaks the
+// loop into primitives so the *Android Looper* can own dispatch instead: the caller
+// registers fd()/repeat_fd() with the MessageQueue, drives frames from the real
+// Choreographer (vsync clocked by wp_presentation via frame_time_ns()), and runs the
+// traversal + submit() as a CALLBACK_TRAVERSAL — ordered after Compose recomposition,
+// exactly like ViewRootImpl.performTraversals. See docs/looper-driven-present.md.
+//
+// All methods run on the thread that called presenter_open (the app main thread); the
+// object is not thread-safe. Double-buffered (ping-pong dma-buf) like the loop path.
+class IPresenter {
+ public:
+  virtual ~IPresenter() = default;
+
+  // The Wayland connection fd — register with the MessageQueue; call dispatch() when readable.
+  virtual int fd() noexcept = 0;
+  // The wl_keyboard repeat timerfd (-1 if no keyboard) — register too; dispatch_repeat() on tick.
+  virtual int repeat_fd() noexcept = 0;
+  // Drain queued Wayland events (input, xdg configure, wl_surface.frame, wl_buffer.release,
+  // wp_presentation feedback) without blocking, then flush. Returns false once the toplevel closes.
+  virtual bool dispatch() noexcept = 0;
+  // Service one key-repeat tick (call when repeat_fd() is readable).
+  virtual void dispatch_repeat() noexcept = 0;
+
+  // True when the compositor is ready for the next frame: configured, a wl_surface.frame tick is
+  // pending, and a ping-pong buffer is free. The driver gates vsync delivery on this.
+  virtual bool ready() const noexcept = 0;
+  // The free ping-pong buffer index to render into this frame (-1 if none) — pass to the GPU
+  // end_frame so the produced dma-buf lands in the buffer the compositor has released.
+  virtual int next_buffer() const noexcept = 0;
+  // The vsync-aligned frame time (ns; Choreographer.frameTimeNanos) for the next frame.
+  virtual std::uint64_t frame_time_ns() const noexcept = 0;
+  // The compositor's advertised XRGB8888 DRM modifiers (for the GPU begin_frame tiled path).
+  virtual const std::vector<std::uint64_t>& modifiers() const noexcept = 0;
+
+  // Present the produced dma-buf `frame` (rendered into next_buffer()'s image): build its
+  // wl_buffer once, arm the next wl_surface.frame callback, attach + damage + commit + flush.
+  virtual bool submit(const gfx::DmabufFrame& frame) noexcept = 0;
+
+  // True once the compositor/user has closed the toplevel.
+  virtual bool closed() const noexcept = 0;
+};
+
+// Connect to the compositor and create a titled xdg_toplevel, returning a presenter ready for
+// its first frame (configured, one buffer free). `input` (may be empty) receives pointer/key/IME.
+// Returns nullptr when no backend/compositor is available. Destroy to tear down + disconnect.
+std::unique_ptr<IPresenter> presenter_open(int width, int height, std::string_view title,
+                                           std::string_view app_id, InputCallback input,
+                                           bool want_ime = false) noexcept;
 #endif  // ACL_HAVE_VULKAN && ACL_HAVE_WCS
 
 const char* module_name() noexcept;

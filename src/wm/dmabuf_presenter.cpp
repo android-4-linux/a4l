@@ -19,7 +19,9 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>  // getenv/strtoul (ACL_WL_SHELL shell selection)
 #include <ctime>
+#include <string_view>
 #include <vector>
 
 #include <poll.h>
@@ -31,6 +33,9 @@
 #include "wayland_client.hpp"
 #include "xdg_shell_client.hpp"
 #include "linux_dmabuf_client.hpp"
+#include "agl_shell_client.hpp"          // ACL_WL_SHELL=agl (AGL agl_shell)
+#include "ivi_application_client.hpp"    // ACL_WL_SHELL=ivi (ivi-shell)
+#include "fullscreen_shell_client.hpp"   // ACL_WL_SHELL=simple (zwp_fullscreen_shell_v1)
 #include "presentation_time_client.hpp"
 #include "text_input_v3_client.hpp"  // WL_IME_BACKEND_TEXT_INPUT_V3 (IME)
 
@@ -92,6 +97,79 @@ class FrameH : public CWlCallback<FrameH> {
 class BufferParamsH
     : public dmabuf::CZwpLinuxBufferParamsV1<BufferParamsH> {};
 
+namespace agl = agl_shell::client;
+namespace ivi = ivi_application::client;
+namespace fsh = fullscreen_shell_unstable_v1::client;
+
+// ── Wayland shell selection (ACL_WL_SHELL) ───────────────────────────────────────────
+// The compositor role the surface takes. `Xdg` (default) is the desktop stable shell;
+// `Agl` targets AGL's agl_shell (acl acts as the shell client — background/panel, the
+// ivi-homescreen automotive pattern); `Ivi` targets ivi-shell's ivi_application (numeric
+// surface id); `Simple` uses zwp_fullscreen_shell_v1 (present a surface, no wm).
+enum class ShellKind { Xdg, Agl, Ivi, Simple };
+// The agl_shell surface role (ACL_AGL_WINDOW_TYPE); Background is the default homescreen role.
+enum class AglRole { Background, PanelTop, PanelBottom, PanelLeft, PanelRight, Normal };
+
+ShellKind shell_from_env() noexcept {
+  const char* s = std::getenv("ACL_WL_SHELL");
+  if (s == nullptr || *s == '\0') return ShellKind::Xdg;  // default: xdg (desktop)
+  const std::string_view v(s);
+  if (v == "agl") return ShellKind::Agl;
+  if (v == "ivi") return ShellKind::Ivi;
+  if (v == "simple" || v == "fullscreen") return ShellKind::Simple;
+  return ShellKind::Xdg;  // "xdg" or anything unrecognized
+}
+AglRole agl_role_from_env() noexcept {
+  const char* s = std::getenv("ACL_AGL_WINDOW_TYPE");
+  if (s == nullptr || *s == '\0') return AglRole::Background;
+  const std::string_view v(s);
+  if (v == "panel-top") return AglRole::PanelTop;
+  if (v == "panel-bottom") return AglRole::PanelBottom;
+  if (v == "panel-left") return AglRole::PanelLeft;
+  if (v == "panel-right") return AglRole::PanelRight;
+  if (v == "normal") return AglRole::Normal;
+  return AglRole::Background;
+}
+std::uint32_t ivi_id_from_env() noexcept {
+  const char* s = std::getenv("ACL_IVI_SURFACE_ID");
+  if (s == nullptr || *s == '\0') return 0;
+  return static_cast<std::uint32_t>(std::strtoul(s, nullptr, 0));
+}
+
+// agl_shell: bound_ok/bound_fail report whether the compositor granted us the shell role
+// (only one client may hold it); app_state/app_on_output drive app activation (unused —
+// acl presents its own surface, it is not the app launcher).
+class AglShellH : public agl::CAglShell<AglShellH> {
+ public:
+  bool bound_ok = false;
+  bool bound_done = false;
+  void OnBoundOk() override { bound_ok = true; bound_done = true; }
+  void OnBoundFail() override { bound_ok = false; bound_done = true; }
+  void OnAppState(const char*, std::uint32_t) override {}
+  void OnAppOnOutput(const char*, const char*) override {}
+};
+// ivi_application has no events; a bare proxy is enough to call surface_create.
+class IviAppH : public ivi::CIviApplication<IviAppH> {};
+// ivi_surface.configure(width,height): the compositor's size for this ivi id. Sets the
+// presenter's configured_ flag (pointed at like FrameH::need) so the first frame can go.
+class IviSurfaceH : public ivi::CIviSurface<IviSurfaceH> {
+ public:
+  bool* configured = nullptr;
+  bool* need = nullptr;
+  std::int32_t w = 0, h = 0;
+  void OnConfigure(std::int32_t width, std::int32_t height) override {
+    w = width;
+    h = height;
+    if (configured != nullptr) *configured = true;
+    if (need != nullptr) *need = true;
+  }
+};
+// zwp_fullscreen_shell_v1: capability advertises the supported present methods (unused).
+class FullscreenShellH : public fsh::CZwpFullscreenShellV1<FullscreenShellH> {
+ public:
+  void OnCapability(std::uint32_t) override {}
+};
+
 class Presenter;
 
 // wl_seat: on the capabilities event, create the wl_pointer / wl_keyboard and point their
@@ -121,9 +199,9 @@ class SeatH : public CWlSeat<SeatH> {
 // The presenter is the DmabufFeedback "App": it receives OnDmabufFeedback (v4 tranches)
 // and OnDmabufLegacyFormat (v1–v3 fallback) via the wcs binding, and drives xdg-shell. It
 // is also the pointer/keyboard/IME listener (input parity with the shm presenter).
-class Presenter : public wl::ime::TextInputListener {
+class Presenter : public IPresenter, public wl::ime::TextInputListener {
  public:
-  ~Presenter() { presentation_.Release(); ti_.Release(); }  // idempotent; static path too
+  ~Presenter() override { presentation_.Release(); ti_.Release(); }  // idempotent; static path too
 
   // Static present: render once, re-attach the same frame each tick.
   bool run(const DmabufRenderFn& render, std::string_view title,
@@ -162,12 +240,85 @@ class Presenter : public wl::ime::TextInputListener {
     return present_loop_dynamic();
   }
 
+  // ── IPresenter (approach A): the Android Looper drives; we expose primitives ──────────
+  // Connect + create the titled toplevel, leaving the presenter ready for its first frame.
+  // Owns `input` (the heap presenter outlives the caller, unlike run_loop's borrowed ref).
+  bool open(int width, int height, std::string_view title, std::string_view app_id,
+            InputCallback input, bool want_ime) noexcept {
+    w_ = width;
+    h_ = height;
+    owned_input_ = std::move(input);
+    input_ = &owned_input_;
+    want_ime_ = want_ime;
+    max_frames_ = 0;
+    if (!setup(title, app_id)) return false;
+    if (ime_bound_) {
+      ti_.SetContentType(wl::ime::ContentHint::kNone, wl::ime::ContentPurpose::kNormal);
+      ti_.Activate();
+    }
+    return true;
+  }
+
+  int fd() noexcept override { return wl_display_get_fd(display_.Get()); }
+  int repeat_fd() noexcept override {
+    return keyboard_.IsNull() ? -1 : keyboard_.Get()->GetRepeatFd();
+  }
+  void dispatch_repeat() noexcept override {
+    if (!keyboard_.IsNull()) keyboard_.Get()->DispatchRepeat();
+  }
+  // Called when the wl fd is readable: read + dispatch queued events, reap timing feedback,
+  // flush replies. Returns false once the toplevel closes.
+  bool dispatch() noexcept override {
+    if (wl_display_dispatch(display_.Get()) < 0) { closed_ = true; return false; }
+    presentation_.Reap();
+    while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
+    return !closed_;
+  }
+  bool ready() const noexcept override {
+    return configured_ && need_frame_ && free_slot() >= 0;
+  }
+  int next_buffer() const noexcept override { return free_slot(); }
+  const std::vector<std::uint64_t>& modifiers() const noexcept override { return mods_; }
+
+  // Present the produced dma-buf into its free ping-pong slot: build the wl_buffer once, arm
+  // the next wl_surface.frame tick, attach + damage + commit + flush. Mirrors one iteration of
+  // present_loop_dynamic, minus the poll (the Looper owns the wait).
+  bool submit(const gfx::DmabufFrame& frame) noexcept override {
+    if (frame.fd < 0) return false;
+    const int s = free_slot();
+    if (s < 0) return false;
+    if (!slots_[s].built && !build_slot(s, frame)) return false;
+    if (frame_index_ == 0)
+      log::i(kTag, "dmabuf present(A): {}x{} {} modifier=0x{:x} {} plane(s), {} buffers",
+             frame.width, frame.height, frame.modifier_tiled ? "tiled" : "linear",
+             frame.modifier, frame.plane_count, kSlots);
+    if (wl_proxy* raw = wl::construct<wl_callback_traits, wl_surface_traits::Op::Frame>(
+            *surface_.Get()))
+      frame_._SetProxy(raw);
+    slots_[s].busy = true;
+    need_frame_ = false;
+    presentation_.Arm(surface_.Get()->GetProxy(),
+                      static_cast<std::uint32_t>(frame_index_));  // before commit
+    surface_.Get()->Attach(slots_[s].handler.GetProxy(), 0, 0);
+    surface_.Get()->Damage(0, 0, w_, h_);
+    surface_.Get()->Commit();
+    ++frame_index_;
+    while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
+    return true;
+  }
+  bool closed() const noexcept override { return closed_; }
+
   // Connect, bind (wl_compositor / xdg_wm_base / zwp_linux_dmabuf_v1), learn the advertised
   // modifiers, create the surface + xdg_toplevel, and commit-for-configure. Shared by the
   // static and animated present paths.
   bool setup(std::string_view title, std::string_view app_id) noexcept {
     title_ = std::string(title);
     app_id_ = std::string(app_id);
+    shell_kind_ = shell_from_env();
+    agl_role_ = agl_role_from_env();
+    ivi_id_ = ivi_id_from_env();
+    if (shell_kind_ != ShellKind::Xdg)
+      log::i(kTag, "dmabuf present: ACL_WL_SHELL selects {} shell", shell_global_name());
     if (!display_.Connect(nullptr)) {
       log::w(kTag, "dmabuf present: no Wayland display (WAYLAND_DISPLAY)");
       return false;
@@ -189,22 +340,54 @@ class Presenter : public wl::ime::TextInputListener {
       } else if (iface ==
                  text_input_unstable_v3::client::zwp_text_input_manager_v3_traits::interface_name) {
         ti_name_ = name; ti_ver_ = ver;
+      } else if (iface == agl::agl_shell_traits::interface_name) {
+        agl_name_ = name; agl_ver_ = ver;
+      } else if (iface == ivi::ivi_application_traits::interface_name) {
+        ivi_name_ = name; ivi_ver_ = ver;
+      } else if (iface == fsh::zwp_fullscreen_shell_v1_traits::interface_name) {
+        fsh_name_ = name; fsh_ver_ = ver;
+      } else if (iface == wl_output_traits::interface_name) {
+        if (output_name_ == 0) { output_name_ = name; output_ver_ = ver; }
       }
     });
     if (!wl::RoundtripWithTimeout(display_.Get())) {
       log::w(kTag, "dmabuf present: registry roundtrip failed");
       return false;
     }
-    if (comp_name_ == 0 || xdg_name_ == 0) {
-      log::w(kTag, "dmabuf present: compositor/xdg_wm_base not advertised");
+    if (comp_name_ == 0) {
+      log::w(kTag, "dmabuf present: wl_compositor not advertised");
+      return false;
+    }
+    if (!shell_global_present()) {
+      log::w(kTag, "dmabuf present: {} not advertised by the compositor",
+             shell_global_name());
       return false;
     }
     if (wl_proxy* raw = registry_.Bind<wl_compositor_traits>(
             comp_name_, std::min(comp_ver_, wl_compositor_traits::version)))
       comp_.Attach(raw);
     else return false;
-    if (!wl::BindHandler<xdg_wm_base_traits>(registry_, xdg_wm_base_, xdg_name_, xdg_ver_))
+    // Bind xdg_wm_base whenever present: the Xdg shell needs it, and Agl falls back to it.
+    if (xdg_name_ != 0 &&
+        !wl::BindHandler<xdg_wm_base_traits>(registry_, xdg_wm_base_, xdg_name_, xdg_ver_))
       return false;
+    // Bind the first wl_output (agl set_background / fullscreen present_surface target it).
+    if (output_name_ != 0)
+      output_ = registry_.Bind<wl_output_traits>(
+          output_name_, std::min(output_ver_, wl_output_traits::version));
+    // Bind the selected non-xdg shell global.
+    if (shell_kind_ == ShellKind::Agl && agl_name_ != 0) {
+      if (wl::BindHandler<agl::agl_shell_traits>(registry_, agl_, agl_name_, agl_ver_))
+        need_agl_bound_ = true;  // wait for bound_ok/bound_fail before set_background
+    } else if (shell_kind_ == ShellKind::Ivi && ivi_name_ != 0) {
+      // ivi_application is version 1, event-less: attach a bare proxy for surface_create.
+      if (wl_proxy* raw = registry_.Bind<ivi::ivi_application_traits>(
+              ivi_name_, std::min(ivi_ver_, ivi::ivi_application_traits::version)))
+        ivi_app_.Attach(raw);
+    } else if (shell_kind_ == ShellKind::Simple && fsh_name_ != 0) {
+      (void)wl::BindHandler<fsh::zwp_fullscreen_shell_v1_traits>(registry_, fsh_, fsh_name_,
+                                                                fsh_ver_);
+    }
     if (!feedback_.Bind(registry_, this)) {
       log::w(kTag, "dmabuf present: zwp_linux_dmabuf_v1 bind failed");
       return false;
@@ -230,9 +413,49 @@ class Presenter : public wl::ime::TextInputListener {
     log::i(kTag, "dmabuf present: compositor advertises {} modifier(s) for XRGB8888",
            mods_.size());
 
+    // The wl_surface is shared by every shell; its role is established below per ShellKind.
     if (!wl::SetupHandler(surface_, wl::construct<wl_surface_traits,
                           wl_compositor_traits::Op::CreateSurface>(*comp_.Get())))
       return false;
+    frame_.need = &need_frame_;
+    frame_.count = &frame_callbacks_;
+
+    if (!create_shell_role()) return false;
+
+    // Commit (no buffer) to elicit the initial configure, then present.
+    surface_.Get()->Commit();
+    (void)wl::RoundtripWithTimeout(display_.Get());
+    // Shells without a size-bearing configure handshake (agl background and fullscreen do
+    // not send one; ivi may) are ready for the first frame immediately — the buffer is the
+    // requested/output size and the compositor lays it out.
+    if (!configured_ && shell_kind_ != ShellKind::Xdg) { configured_ = true; need_frame_ = true; }
+    return true;
+  }
+
+  // ── Shell role creation (ACL_WL_SHELL dispatch) ──────────────────────────────────────
+  bool create_shell_role() noexcept {
+    switch (shell_kind_) {
+      case ShellKind::Xdg:
+        return create_xdg_role();
+      case ShellKind::Agl:
+        if (create_agl_role()) return true;
+        log::w(kTag, "dmabuf present: agl_shell unavailable/refused; falling back to xdg");
+        shell_kind_ = ShellKind::Xdg;
+        return create_xdg_role();
+      case ShellKind::Ivi:
+        return create_ivi_role();
+      case ShellKind::Simple:
+        return create_simple_role();
+    }
+    return false;
+  }
+
+  // xdg-shell (desktop): xdg_surface + xdg_toplevel, titled; size/close via configure.
+  bool create_xdg_role() noexcept {
+    if (xdg_wm_base_.IsNull()) {
+      log::w(kTag, "dmabuf present: xdg_wm_base not bound");
+      return false;
+    }
     if (!wl::SetupHandler(xdg_surface_, wl::construct<xdg_surface_traits,
                           xdg_wm_base_traits::Op::GetXdgSurface>(
                               *xdg_wm_base_.Get(), surface_.Get()->GetProxy())))
@@ -244,14 +467,93 @@ class Presenter : public wl::ime::TextInputListener {
     xdg_toplevel_.Get()->app_ = this;
     xdg_toplevel_.Get()->SetTitle(title_.c_str());
     xdg_toplevel_.Get()->SetAppId(app_id_.c_str());
-
-    frame_.need = &need_frame_;
-    frame_.count = &frame_callbacks_;
-
-    // Commit (no buffer) to elicit the initial configure, then present.
-    surface_.Get()->Commit();
-    (void)wl::RoundtripWithTimeout(display_.Get());
     return true;
+  }
+
+  // AGL agl_shell: acl is the shell client. Wait for the bound handshake, then assign the
+  // surface the background (default) or a panel edge, and signal ready. `Normal` presents a
+  // regular xdg surface and asks the compositor to activate it (app_id-keyed).
+  bool create_agl_role() noexcept {
+    if (agl_.IsNull()) return false;
+    if (need_agl_bound_) {  // pump until bound_ok/bound_fail (agl_shell v2+)
+      int ret = 0;
+      while (ret >= 0 && !agl_.Get()->bound_done)
+        ret = wl_display_dispatch(display_.Get());
+      if (!agl_.Get()->bound_ok) {
+        log::w(kTag, "dmabuf present: agl_shell bound_fail (extension already in use)");
+        return false;
+      }
+    }
+    if (agl_role_ == AglRole::Normal) {
+      if (!create_xdg_role()) return false;
+      if (output_ != nullptr) agl_.Get()->ActivateApp(app_id_.c_str(), output_);
+      return true;
+    }
+    if (output_ == nullptr) {
+      log::w(kTag, "dmabuf present: agl_shell background/panel needs a wl_output");
+      return false;
+    }
+    wl_proxy* surf = surface_.Get()->GetProxy();
+    if (agl_role_ == AglRole::Background) {
+      agl_.Get()->SetBackground(surf, output_);
+    } else {
+      const std::uint32_t edge =
+          agl_role_ == AglRole::PanelTop    ? static_cast<std::uint32_t>(agl::AglShellEdge::Top)
+        : agl_role_ == AglRole::PanelBottom ? static_cast<std::uint32_t>(agl::AglShellEdge::Bottom)
+        : agl_role_ == AglRole::PanelLeft   ? static_cast<std::uint32_t>(agl::AglShellEdge::Left)
+                                            : static_cast<std::uint32_t>(agl::AglShellEdge::Right);
+      agl_.Get()->SetPanel(surf, output_, edge);
+    }
+    agl_.Get()->Ready();
+    return true;
+  }
+
+  // ivi-shell: create the ivi_surface for the configured numeric id; the compositor's
+  // ivi-controller maps the id to a layer/screen. configure(w,h) arrives asynchronously.
+  bool create_ivi_role() noexcept {
+    if (ivi_app_.IsNull()) return false;
+    if (ivi_id_ == 0) {
+      log::w(kTag, "dmabuf present: ivi-shell needs ACL_IVI_SURFACE_ID (nonzero)");
+      return false;
+    }
+    if (!wl::SetupHandler(ivi_surface_, wl::construct<ivi::ivi_surface_traits,
+                          ivi::ivi_application_traits::Op::SurfaceCreate>(
+                              *ivi_app_.Get(), ivi_id_, surface_.Get()->GetProxy())))
+      return false;
+    ivi_surface_.Get()->configured = &configured_;
+    ivi_surface_.Get()->need = &need_frame_;
+    log::i(kTag, "dmabuf present: ivi_surface id={}", ivi_id_);
+    return true;
+  }
+
+  // zwp_fullscreen_shell_v1 ("simple"): present the surface fullscreen, no window
+  // management. Default present method lets the compositor choose scaling/centering.
+  bool create_simple_role() noexcept {
+    if (fsh_.IsNull()) return false;
+    fsh_.Get()->PresentSurface(
+        surface_.Get()->GetProxy(),
+        static_cast<std::uint32_t>(fsh::ZwpFullscreenShellV1PresentMethod::Default), output_);
+    return true;
+  }
+
+  // Which shell global must the compositor advertise for the selected ShellKind.
+  bool shell_global_present() const noexcept {
+    switch (shell_kind_) {
+      case ShellKind::Xdg:    return xdg_name_ != 0;
+      case ShellKind::Agl:    return agl_name_ != 0 || xdg_name_ != 0;  // agl falls back to xdg
+      case ShellKind::Ivi:    return ivi_name_ != 0;
+      case ShellKind::Simple: return fsh_name_ != 0;
+    }
+    return false;
+  }
+  const char* shell_global_name() const noexcept {
+    switch (shell_kind_) {
+      case ShellKind::Xdg:    return "xdg_wm_base";
+      case ShellKind::Agl:    return "agl_shell";
+      case ShellKind::Ivi:    return "ivi_application";
+      case ShellKind::Simple: return "zwp_fullscreen_shell_v1";
+    }
+    return "?";
   }
 
   // wl::DmabufFeedback<Presenter> callbacks.
@@ -464,7 +766,7 @@ class Presenter : public wl::ime::TextInputListener {
   // The vsync-aligned time for the frame about to be drawn (Choreographer.frameTimeNanos):
   // the last wp_presentation time plus one refresh interval, or the raw presentation clock
   // before any feedback has arrived (or CLOCK_MONOTONIC if wp_presentation is absent).
-  std::uint64_t frame_time_ns() const noexcept {
+  std::uint64_t frame_time_ns() const noexcept override {
     if (last_present_ns_ != 0 && refresh_ns_ != 0) return last_present_ns_ + refresh_ns_;
     const clockid_t clk = presentation_.Bound() ? presentation_.clock() : CLOCK_MONOTONIC;
     timespec ts{};
@@ -486,6 +788,13 @@ class Presenter : public wl::ime::TextInputListener {
   wl::WlPtr<SurfaceH> surface_;
   wl::WlPtr<wl::XdgSurfaceHandler<Presenter>> xdg_surface_;
   wl::WlPtr<wl::XdgToplevelHandler<Presenter>> xdg_toplevel_;
+  // Alternate shells (ACL_WL_SHELL): only the selected one is bound. wl_output targets the
+  // agl background/panel and the fullscreen present.
+  wl::WlPtr<AglShellH> agl_;
+  wl::WlPtr<IviAppH> ivi_app_;
+  wl::WlPtr<IviSurfaceH> ivi_surface_;
+  wl::WlPtr<FullscreenShellH> fsh_;
+  wl_proxy* output_ = nullptr;  // first wl_output (event-less bare proxy)
   wl::WlPtr<BufferParamsH> params_;
   BufferH buffer_;  // direct member: stable address for the dispatcher (static path)
   FrameH frame_;    // direct member: stable address for the dispatcher
@@ -503,9 +812,16 @@ class Presenter : public wl::ime::TextInputListener {
   std::string title_, app_id_;
   std::vector<std::uint64_t> mods_;           // compositor's advertised XRGB8888 modifiers
   const DmabufFrameFn* frame_fn_ = nullptr;   // per-tick producer (animated loop)
-  const InputCallback* input_ = nullptr;      // pointer/key/IME sink (animated loop)
+  const InputCallback* input_ = nullptr;      // pointer/key/IME sink (loop borrows; A owns below)
+  InputCallback owned_input_;                 // owned input sink for the Looper-driven path (A)
   std::uint32_t comp_name_ = 0, comp_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
   std::uint32_t seat_name_ = 0, seat_ver_ = 0, ti_name_ = 0, ti_ver_ = 0;
+  std::uint32_t agl_name_ = 0, agl_ver_ = 0, ivi_name_ = 0, ivi_ver_ = 0;
+  std::uint32_t fsh_name_ = 0, fsh_ver_ = 0, output_name_ = 0, output_ver_ = 0;
+  ShellKind shell_kind_ = ShellKind::Xdg;   // ACL_WL_SHELL (default xdg)
+  AglRole agl_role_ = AglRole::Background;   // ACL_AGL_WINDOW_TYPE
+  std::uint32_t ivi_id_ = 0;                 // ACL_IVI_SURFACE_ID
+  bool need_agl_bound_ = false;              // await agl_shell bound_ok before set_background
   double px_ = 0.0, py_ = 0.0;
   bool pointer_down_ = false;
   bool want_ime_ = false, ime_bound_ = false;
@@ -530,6 +846,14 @@ bool present_dmabuf_loop(int /*width*/, int /*height*/, std::string_view title,
                          std::uint64_t max_frames) noexcept {
   Presenter p;
   return p.run_loop(render, input, want_ime, title, app_id, max_frames);
+}
+
+std::unique_ptr<IPresenter> presenter_open(int width, int height, std::string_view title,
+                                           std::string_view app_id, InputCallback input,
+                                           bool want_ime) noexcept {
+  auto p = std::make_unique<Presenter>();
+  if (!p->open(width, height, title, app_id, std::move(input), want_ime)) return nullptr;
+  return p;
 }
 
 }  // namespace acl::wm

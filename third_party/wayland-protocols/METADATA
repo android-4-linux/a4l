@@ -1,0 +1,44 @@
+# Vendored Wayland shell protocol definitions (interface XML only).
+#
+# Consumed by the wayland-cxx-scanner (wcs) at build time to generate the client bindings
+# for the non-standard shells acl targets via ACL_WL_SHELL (agl / ivi / simple). The stable
+# desktop shells (xdg-shell, presentation-time, viewporter, fractional-scale, linux-dmabuf,
+# text-input-v3) come from the system `wayland-protocols` package and are NOT vendored here;
+# only protocols absent from that package are vendored.
+#
+# These are unmodified upstream interface definitions. No implementation code is vendored.
+# All three are MIT-licensed (permitted; see PROVENANCE.md). No GPL-3.0 sources.
+
+name: "wayland-protocols (vendored shell subset)"
+description: "agl_shell, ivi_application, and zwp_fullscreen_shell_v1 protocol XML for wcs codegen."
+
+third_party {
+  identifier {
+    type: "File"
+    value: "agl-shell.xml"
+    # Origin: AGL agl-compositor (Collabora). Installed copy:
+    #   /usr/share/agl-compositor/protocols/agl-shell.xml
+    # Upstream: https://gerrit.automotivelinux.org/gerrit/src/agl-compositor  protocol/agl-shell.xml
+    license: "MIT"
+    sha256: "9b9b9a011a37f32472e2398cb5df86fc6f9675c47a6b8b60afa34aeb5402a866"
+    version: "agl_shell interface version 11"
+  }
+  identifier {
+    type: "File"
+    value: "ivi-application.xml"
+    # Origin: Weston (DENSO / BMW Car IT), protocol/ivi-application.xml
+    # Upstream: https://gitlab.freedesktop.org/wayland/weston  protocol/ivi-application.xml
+    license: "MIT"
+    sha256: "452b1080dded455bfd0f36a24f5a65787db64220e75268a3df1490289804c5cc"
+    version: "ivi_application/ivi_surface interface version 1"
+  }
+  identifier {
+    type: "File"
+    value: "fullscreen-shell-unstable-v1.xml"
+    # Origin: wayland-protocols, unstable/fullscreen-shell/fullscreen-shell-unstable-v1.xml
+    # Upstream: https://gitlab.freedesktop.org/wayland/wayland-protocols
+    license: "MIT"
+    sha256: "fcc50bf0b48610d55bbe096a53da433e8557ea36a31feba2d77bf0cb9181bb52"
+    version: "zwp_fullscreen_shell_v1 interface version 1"
+  }
+}
