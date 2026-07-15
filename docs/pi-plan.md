@@ -125,9 +125,24 @@ isolation matters *more* against a distro OpenSSL). `tools/run-apk.sh` already d
     `-Ximage` ISA-subdir handling (docs/art-host-spike.md notes the x86_64 case).
   - ART JIT on A72/A76: confirm the arm64 quick-compiler/JIT is enabled in the host build (host ART
     historically favored the interpreter).
-  - **Recommended next spike:** attempt a `linux_bionic-arm64` build of just `libartbase`/`libdexfile`
-    (small, no framework) to confirm the arm64 host ART *toolchain path* even compiles in this tree,
-    before deciding B1 vs B2.
+
+**Toolchain spike done (2026-07-15) — the arm64 host-ART build path WORKS.** With
+`HOST_CROSS_OS=linux_bionic HOST_CROSS_ARCH=arm64` (which lands in `soong.variables` as
+`CrossHost=linux_bionic`/`CrossHostArch=arm64`), Soong instantiates the full bionic-arm64 host-cross
+graph (~1M rules) and building the specific target
+`out/soong/.intermediates/art/libdexfile/libdexfile/linux_bionic_arm64_shared/libdexfile.so` links
+**`libartbase.so` + `libdexfile.so` for `linux_bionic`** — the artifact is a real `ELF 64-bit ...
+AArch64` shared object. So the core ART libraries compile+link for arm64 host out of the box, no
+source patches. (Note: a plain `m libdexfile` builds the Android *target* variant, not the host_cross —
+you must request the `linux_bionic_arm64_shared` output explicitly.) **B1 is build-viable at the
+toolchain level.** The remaining P-B risk is therefore NOT the toolchain but the bionic-vs-glibc
+in-process coexistence (integration/architecture), plus scaling the build up to the full stack
+(`libart`, `dex2oat`, `libandroid_runtime`, boot jars) and the boot image (P-D).
+- **Next steps:** (1) build the full ART host stack for `linux_bionic_arm64` (libart/dex2oat/
+  libandroid_runtime + boot jars) — bigger but the toolchain is proven; (2) decide B1 vs B2 on the
+  libc-coexistence question (can a bionic ART cohabit a glibc process, or must the underside go bionic
+  / ART move to its own process); (3) only then wire `ACL_ART_HOME` at the arm64 tree and boot it under
+  acl's embedding seam.
 
 ### P-C. GPU / Vulkan dma-buf bring-up
 acl re-owns `android.graphics` on Skia + a Vulkan dma-buf present loop (ADR-0004). On a Pi that is
