@@ -1228,7 +1228,11 @@ public final class HostBootstrap {
 
     private static int measureSpec(int lpDim, int avail, int match, int wrap) {
         if (lpDim == match) return android.view.View.MeasureSpec.makeMeasureSpec(avail, android.view.View.MeasureSpec.EXACTLY);
-        if (lpDim == wrap) return android.view.View.MeasureSpec.makeMeasureSpec(avail, android.view.View.MeasureSpec.AT_MOST);
+        // WRAP_CONTENT, or an unsized window (<= 0): on device the WindowManagerService relayout
+        // sizes the window; acl's no-Binder session returns a 0 frame, so a Dialog's LayoutParams
+        // stay 0x0. Measure the decor against the screen (AT_MOST) so the Compose/View content
+        // reports its natural size instead of collapsing to EXACTLY(0).
+        if (lpDim == wrap || lpDim <= 0) return android.view.View.MeasureSpec.makeMeasureSpec(avail, android.view.View.MeasureSpec.AT_MOST);
         return android.view.View.MeasureSpec.makeMeasureSpec(lpDim, android.view.View.MeasureSpec.EXACTLY);
     }
 

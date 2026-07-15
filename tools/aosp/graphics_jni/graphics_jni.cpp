@@ -3693,6 +3693,9 @@ void SC_nSetColorTransform(JNIEnv*, jclass, jlong, jlong, jfloatArray, jfloatArr
 void SC_nSetColorSpaceAgnostic(JNIEnv*, jclass, jlong, jlong, jboolean) {}
 void SC_nSetFrameRateSelectionPriority(JNIEnv*, jclass, jlong, jlong, jint) {}
 void SC_nSetDropInputMode(JNIEnv*, jclass, jlong, jlong, jint) {}
+// A secondary window's real ViewRootImpl.relayoutWindow() calls SurfaceControl.setTransformHint
+// during performTraversals (Dialog/PopupWindow); acl composites such windows itself, so no-op it.
+void SC_nSetTransformHint(JNIEnv*, jclass, jlong, jint) {}
 
 // android.view.SurfaceSession (ViewRootImpl creates one) — no-op create/destroy.
 jlong SS_nCreate(JNIEnv*, jclass) { return sc_handle(); }
@@ -3741,6 +3744,7 @@ const JNINativeMethod kSurfaceControl[] = {
     {"nativeSetColorSpaceAgnostic", "(JJZ)V", reinterpret_cast<void*>(SC_nSetColorSpaceAgnostic)},
     {"nativeSetFrameRateSelectionPriority", "(JJI)V", reinterpret_cast<void*>(SC_nSetFrameRateSelectionPriority)},
     {"nativeSetDropInputMode", "(JJI)V", reinterpret_cast<void*>(SC_nSetDropInputMode)},
+    {"nativeSetTransformHint", "(JI)V", reinterpret_cast<void*>(SC_nSetTransformHint)},
 };
 
 bool reg(JNIEnv* env, const char* cls, const JNINativeMethod* m, jint n) {
