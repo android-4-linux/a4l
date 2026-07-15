@@ -65,17 +65,34 @@ above), not a design problem:
 **Result: the toolchain works.** Soong finds `linux_musl_arm64` and instantiates musl-arm64 variants
 of `external/musl` (`libc_musl_crtbegin_*`, `libc_musl_crtend`, …).
 
-**The one remaining external dependency — the true B2 boundary:** those musl crt modules depend on
-compiler-rt's `clang_rt.crtbegin`/`clang_rt.crtend`, and **the clang prebuilt ships no aarch64
-*Linux host* compiler-rt** — only `x86_64/i686-linux-musl` host objects and `aarch64-android`
-(bionic) / baremetal builtins exist. There is no `aarch64-linux-musl` crtbegin/crtend/builtins,
-because AOSP's only stock arm64 host is bionic (which uses its own crt), so nobody needed it.
+**The remaining external dependency — the true B2 boundary (fully characterized 2026-07-15):** those
+musl crt modules pull `clang_rt.crtbegin`/`crtend`, and more generally **the clang prebuilt ships the
+entire LLVM runtime set only for the shipped host triples.** Per-target file counts under
+`clang-r450784d/.../lib/linux/<triple>/`:
 
-**Next step to finish B2:** provide aarch64-linux-musl host compiler-rt. Either (a) build compiler-rt
-from `toolchain/llvm-project` for the `aarch64-linux-musl` target (not synced in this tree — needs a
-sync or a standalone compiler-rt build), or (b) pragmatically retarget the musl-arm64 toolchain at the
-existing `libclang_rt.builtins-aarch64-android.a` (builtins are libc-agnostic soft-float/overflow
-helpers) and generate the two tiny crtbegin/crtend objects. After that, ART's own libs
+| host triple | runtime files |
+|---|---|
+| `x86_64-linux-musl` | **90** (crtbegin/crtend, builtins, libc++, libc++abi, libunwind) |
+| `aarch64-linux-musl` | **0 — absent** |
+| `aarch64-linux-gnu`  | **0 — absent** (so glibc-arm64 host has the same gap) |
+
+`toolchain/llvm-project` is **not synced**, so the source to build them isn't in the tree either. The
+`aarch64/libunwind.a` that does exist is the *android/generic* aarch64 build, not the
+`aarch64-linux-musl` host triple Soong resolves against. So this is **not** "generate two crt objects"
+— it is **build the whole LLVM runtime set for the `aarch64-linux-musl` host**. No in-tree shortcut.
+
+**Next step to finish B2:** sync `toolchain/llvm-project` and build the LLVM runtimes for
+`aarch64-linux-musl` (the same way AOSP's toolchain team produces the `x86_64-linux-musl` set — a
+compiler-rt + libcxx/libcxxabi/libunwind runtimes build), then drop them under the
+`clang-r450784d/.../aarch64-linux-musl/` path the toolchain resolves. After that, ART's own libs
 (`libart.so`, `libandroid_runtime.so`) build on the toolchain, and `tools/assemble-arm64-art.sh`
 (swap the `linux_bionic_arm64` glob for `linux_musl_arm64`) yields a single-libc `ACL_ART_HOME` that
 `acl run --vm=art` can `dlopen` on the Pi without the two-libc SIGTRAP.
+
+**Strategic fork this exposes:** B2's remaining cost is an **LLVM-runtime port** (llvm sync + a
+runtimes cross-build for a host triple no one has shipped). Meanwhile the **bionic** arm64 ART
+*already builds and runs natively on the Pi* (P-B / M2). So the honest comparison is now: finish the
+B2 toolchain (clean single-process end-state, but pay the LLVM-runtime port) **vs.** a
+**split-process design** — run the already-working bionic ART in its own all-bionic process and IPC
+to the glibc render/audio process (no toolchain port; pay an IPC/architecture layer instead). Pick
+per how much the single-process model is worth against the LLVM-runtime-port cost.

@@ -132,16 +132,27 @@ ClangTriple `aarch64-linux-musl`, which the prebuilt clang accepts); (3) list it
 (5) accept `HOST_CROSS_OS=linux_musl` (`envsetup.mk`). With these,
 `HOST_CROSS_OS=linux_musl HOST_CROSS_ARCH=arm64 m --skip-soong-tests nothing` drives Soong all the way
 to **instantiating musl-arm64 variants of `external/musl`** (`libc_musl_crtbegin_*`, `libc_musl_crtend`)
-— the toolchain works. **The single remaining boundary:** those crt modules need compiler-rt's
-`clang_rt.crtbegin`/`crtend`, and the clang prebuilt ships **no aarch64 *Linux-host* compiler-rt**
-(only `x86_64/i686-linux-musl` host + `aarch64-android`/baremetal builtins — nobody needed
-aarch64-linux-musl because stock arm64-host is bionic). **Next step:** provide aarch64-linux-musl host
-compiler-rt — build compiler-rt from `toolchain/llvm-project` for that target, or retarget at the
-existing `libclang_rt.builtins-aarch64-android.a` (builtins are libc-agnostic) + generate the two
-tiny crt objects. Then ART builds on the toolchain and `assemble-arm64-art.sh` (swap the
-`linux_bionic_arm64` glob → `linux_musl_arm64`) yields a single-libc `ACL_ART_HOME`. The AOSP tree was
-reverted after the spike (the bp2build map change fails golden tests on a normal `m`); the patch
-preserves the work.
+— the toolchain works. **The remaining boundary (fully characterized):** those crt modules pull
+compiler-rt's `clang_rt.crtbegin`/`crtend`, and the clang prebuilt ships the whole LLVM runtime set
+**only for the host triples it was built for** — `x86_64-linux-musl` has **90** runtime files
+(crt + builtins + libc++ + libunwind), `aarch64-linux-musl` has **0** (as does `aarch64-linux-gnu`),
+and `toolchain/llvm-project` is not synced. So finishing B2 is **not** "generate two crt objects" — it
+is **building the whole LLVM runtime set for the `aarch64-linux-musl` host** (sync `llvm-project`; run
+its compiler-rt + libcxx/libcxxabi/libunwind runtimes build for that triple, the way AOSP produces the
+x86_64-linux-musl set). No in-tree shortcut. Then ART builds on the toolchain and
+`assemble-arm64-art.sh` (swap the `linux_bionic_arm64` glob → `linux_musl_arm64`) yields a single-libc
+`ACL_ART_HOME`. The AOSP tree was reverted after the spike (the bp2build map change fails golden tests
+on a normal `m`); `tools/aosp/b2-musl-arm64/` preserves the work.
+
+**Decision point (B2 LLVM-runtime port vs. split-process).** The spike reframes P-B as a fork, because
+the **bionic** arm64 ART *already builds and runs natively on the Pi* (M2):
+- **Finish B2** — pay the LLVM-runtime port (llvm sync + a runtimes cross-build for a host triple no one
+  ships) once; get the clean single-process end-state (`acl` + ART share one libc, like x86 today).
+- **Split-process** — run the working bionic ART in its own all-bionic process and IPC to the glibc
+  render/audio process; no toolchain port, but a persistent IPC/architecture layer (and it re-introduces
+  a process boundary the no-Binder single-process design avoided).
+Both are viable; the choice is how much the single-process model is worth against a one-time
+LLVM-runtime port. Recorded for a human call — not yet decided.
 
 Once a target exists, the module set is the same either way: `libart`, `libartbase`, `libdexfile`,
 `libprofile`, `dex2oat`, `libandroid_runtime`, `libnativehelper`; core boot jars (`core-oj`,
