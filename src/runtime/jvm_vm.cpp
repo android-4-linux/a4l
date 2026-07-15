@@ -197,6 +197,8 @@ struct PresentSession {
   jclass motionevent_cls = nullptr, keyevent_cls = nullptr;  // global refs
   jmethodID me_obtain = nullptr, me_recycle = nullptr, ke_obtain = nullptr;
   jmethodID dispatch_touch = nullptr, dispatch_key = nullptr;
+  jclass hostbootstrap_cls = nullptr;                 // global ref
+  jmethodID route_overlay_touch = nullptr;            // HostBootstrap.routeOverlayTouch(MotionEvent)Z
   std::uint64_t down_time = 0;
   std::uint64_t frames = 0;  // presented-frame count (progress evidence)
 };
@@ -224,11 +226,21 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
         static_cast<jlong>(present_now_ns()), action, static_cast<jfloat>(p->x),
         static_cast<jfloat>(p->y), 0);
     if (me != nullptr) {
-      const jboolean handled = env->CallBooleanMethod(s->view, s->dispatch_touch, me);
+      // A Dialog/PopupWindow overlay, when present, takes input first (it is drawn on top and,
+      // if modal, blocks the Activity behind). HostBootstrap.routeOverlayTouch translates the
+      // event into the overlay's local space and dispatches it; if it consumes the event, the
+      // Activity view is skipped. Absent an overlay it returns false and the Activity gets it.
+      jboolean consumed = JNI_FALSE;
+      if (s->route_overlay_touch != nullptr && s->hostbootstrap_cls != nullptr)
+        consumed = env->CallStaticBooleanMethod(s->hostbootstrap_cls, s->route_overlay_touch, me);
+      if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionClear(); consumed = JNI_FALSE; }
+      jboolean handled = consumed;
+      if (consumed == JNI_FALSE)
+        handled = env->CallBooleanMethod(s->view, s->dispatch_touch, me);
       static int idiag = 0;
       if (idiag < 24) {
-        log::i(kTag, "input: pointer action={} ({},{}) -> dispatchTouchEvent handled={}",
-               action, p->x, p->y, handled == JNI_TRUE);
+        log::i(kTag, "input: pointer action={} ({},{}) -> {} handled={}",
+               action, p->x, p->y, consumed == JNI_TRUE ? "overlay" : "activity", handled == JNI_TRUE);
         ++idiag;
       }
       if (s->me_recycle != nullptr) env->CallVoidMethod(me, s->me_recycle);
@@ -288,6 +300,14 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env, jclass, jobject view, jint w, jin
     s->dispatch_key = env->GetMethodID(vc, "dispatchKeyEvent", "(Landroid/view/KeyEvent;)Z");
     env->DeleteLocalRef(vc);
   }
+  // Overlay input routing (Dialog/PopupWindow gets input first). Best-effort — absent it, input
+  // falls through to the Activity as before.
+  if (jclass hb = env->FindClass("org/acl/internal/HostBootstrap")) {
+    s->hostbootstrap_cls = static_cast<jclass>(env->NewGlobalRef(hb));
+    s->route_overlay_touch = env->GetStaticMethodID(hb, "routeOverlayTouch", "(Landroid/view/MotionEvent;)Z");
+    env->DeleteLocalRef(hb);
+  }
+  if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
   if (jclass mecls = env->FindClass("android/view/MotionEvent")) {
     s->me_obtain = env->GetStaticMethodID(mecls, "obtain", "(JJIFFI)Landroid/view/MotionEvent;");
     s->me_recycle = env->GetMethodID(mecls, "recycle", "()V");

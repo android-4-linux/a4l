@@ -1179,6 +1179,7 @@ public final class HostBootstrap {
             java.util.List<?> views = new java.util.ArrayList<>((java.util.List<?>) getField(wmgCls, wmg, "mViews"));
             java.util.List<?> params = new java.util.ArrayList<>((java.util.List<?>) getField(wmgCls, wmg, "mParams"));
             java.util.List<?> roots = new java.util.ArrayList<>((java.util.List<?>) getField(wmgCls, wmg, "mRoots"));
+            android.view.View top = null; android.graphics.Rect topRect = null; boolean topModal = false;
             for (int i = 0; i < views.size() && i < params.size(); i++) {
                 android.view.View v = (android.view.View) views.get(i);
                 android.view.WindowManager.LayoutParams lp =
@@ -1193,11 +1194,40 @@ public final class HostBootstrap {
                     int a = (int) (Math.max(0f, Math.min(1f, lp.dimAmount)) * 255f);
                     canvas.drawColor(a << 24);  // black scrim behind the dialog
                 }
-                drawOverlayView(canvas, v, lp, w, h);
+                android.graphics.Rect r = drawOverlayView(canvas, v, lp, w, h);
+                if (r != null) {  // the last drawn overlay is topmost — it receives input
+                    top = v; topRect = r; topModal = (lp.flags & 0x20 /*FLAG_NOT_TOUCH_MODAL*/) == 0;
+                }
             }
+            sTopOverlay = top; sTopOverlayRect = topRect; sTopOverlayModal = topModal;
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: presentOverlays: " + t);
         }
+    }
+
+    // The topmost drawn overlay + where acl placed it on screen, for input routing. Written by
+    // presentOverlays and read by routeOverlayTouch — both run on the present/main thread.
+    private static volatile android.view.View sTopOverlay;
+    private static volatile android.graphics.Rect sTopOverlayRect;
+    private static volatile boolean sTopOverlayModal;
+
+    // Route a pointer event to the topmost Dialog/PopupWindow overlay. acl gravity-places the decor
+    // at sTopOverlayRect, so translate the event into the decor's local space before dispatch.
+    // Returns true if the overlay consumed it (so the caller must NOT also deliver it to the Activity):
+    // inside the overlay -> dispatched to the overlay; outside a modal overlay -> swallowed (the
+    // dialog blocks the window behind, as on device); outside a non-modal one -> falls through.
+    public static boolean routeOverlayTouch(android.view.MotionEvent me) {
+        android.view.View top = sTopOverlay;
+        android.graphics.Rect r = sTopOverlayRect;
+        if (top == null || r == null) return false;
+        if (r.contains((int) me.getX(), (int) me.getY())) {
+            me.offsetLocation(-r.left, -r.top);
+            try { top.dispatchTouchEvent(me); } catch (Throwable t) {
+                System.err.println("acl HostBootstrap: routeOverlayTouch: " + t);
+            }
+            return true;
+        }
+        return sTopOverlayModal;
     }
 
     // Stop a Dialog's real ViewRootImpl from ever scheduling its own traversal (acl drives render).
@@ -1208,14 +1238,16 @@ public final class HostBootstrap {
     }
 
     // Measure/layout the overlay decor per its LayoutParams (MATCH/WRAP/exact + gravity) and draw it.
-    private static void drawOverlayView(android.graphics.Canvas canvas, android.view.View v,
+    // Measure/lay out/draw the overlay decor; returns the screen Rect it was placed at (for input
+    // routing), or null if it had nothing to draw.
+    private static android.graphics.Rect drawOverlayView(android.graphics.Canvas canvas, android.view.View v,
             android.view.WindowManager.LayoutParams lp, int w, int h) {
         final int MATCH = -1, WRAP = -2;
         int wspec = measureSpec(lp.width, w, MATCH, WRAP);
         int hspec = measureSpec(lp.height, h, MATCH, WRAP);
         v.measure(wspec, hspec);
         int mw = v.getMeasuredWidth(), mh = v.getMeasuredHeight();
-        if (mw <= 0 || mh <= 0) return;
+        if (mw <= 0 || mh <= 0) return null;
         v.layout(0, 0, mw, mh);
         int gravity = lp.gravity == 0 ? android.view.Gravity.CENTER : lp.gravity;
         android.graphics.Rect out = new android.graphics.Rect();
@@ -1224,6 +1256,7 @@ public final class HostBootstrap {
         canvas.translate(out.left, out.top);
         v.draw(canvas);
         canvas.restoreToCount(save);
+        return out;
     }
 
     private static int measureSpec(int lpDim, int avail, int match, int wrap) {
