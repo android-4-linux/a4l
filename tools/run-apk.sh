@@ -98,6 +98,13 @@ RUNNER=(env
   ACL_ART_BOOTCLASSPATH="$BOOT"
   ACL_ART_NATIVE=1
   ACL_ART_HOST_BOOTSTRAP="$W/hostboot.jar")
+# Where System.loadLibrary finds acl's supplemental native libs (libsoundpool.so etc.). ART's
+# boot-classloader loader resolves via both java.library.path (ACL_ART_LIBPATH) and the dynamic
+# linker path, so set both.
+if [ -f "$ACLROOT/build/src/audio/libsoundpool.so" ]; then
+  RUNNER+=(ACL_ART_LIBPATH="$ACLROOT/build/src/audio"
+           LD_LIBRARY_PATH="$ACLROOT/build/src/audio:${LD_LIBRARY_PATH:-}")
+fi
 [ -n "${FRES:-}" ] && RUNNER+=(ACL_ART_FRAMEWORK_RES="$FRES")
 RGFONT=$(first "$ROOT"/external/roboto-fonts/Roboto-Regular.ttf)
 [ -n "${RGFONT:-}" ] && RUNNER+=(ACL_GRAPHICS_FONT="$RGFONT")

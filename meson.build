@@ -58,6 +58,25 @@ endif
 pw_dep = dependency('libpipewire-0.3', required : false)
 have_pipewire = pw_dep.found()
 
+# FFmpeg (LGPL, dynamic link — permitted per plan.md license policy): decodes SoundPool
+# samples (OGG/WAV/MP3/…) to PCM. Built only when all four libs are present. We take only the
+# HEADERS (compile args), not the link: SoundPool dlopen()s the libs with RTLD_LOCAL at runtime so
+# FFmpeg's transitive system OpenSSL never enters the global symbol scope (it would otherwise
+# interpose on AOSP conscrypt's BoringSSL and crash NativeCrypto.<clinit>).
+ff_full = [
+  dependency('libavcodec', required : false),
+  dependency('libavformat', required : false),
+  dependency('libavutil', required : false),
+  dependency('libswresample', required : false),
+]
+have_ffmpeg = ff_full[0].found() and ff_full[1].found() and ff_full[2].found() and ff_full[3].found()
+ff_dep = []
+if have_ffmpeg
+  foreach d : ff_full
+    ff_dep += d.partial_dependency(compile_args : true, includes : true)
+  endforeach
+endif
+
 # wm/ windowing backend: wayland-cxx-scanner (wcs) CRTP bindings over wayland-client
 # (plan.md Addendum A02). wcs is consumed as a prebuilt artifact: its scanner tool
 # generates C++ protocol headers and its header-only wl/ framework provides the CRTP
@@ -185,6 +204,7 @@ conf.set('ACL_VERSION', '"' + meson.project_version() + '"')
 conf.set10('ACL_PROFILE_AUTOMOTIVE', profile_automotive)
 conf.set10('ACL_HAVE_JNI', have_jni)
 conf.set10('ACL_HAVE_PIPEWIRE', have_pipewire)
+conf.set10('ACL_HAVE_FFMPEG', have_ffmpeg)
 conf.set10('ACL_HAVE_WCS', have_wcs)
 conf.set10('ACL_HAVE_SKIA', have_skia)
 conf.set10('ACL_HAVE_VULKAN', have_vulkan)

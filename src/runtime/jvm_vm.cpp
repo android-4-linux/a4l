@@ -2193,6 +2193,11 @@ class ArtVm final : public JniVm {
       option_strings.push_back("-Xint");  // imageless: interpret; no runtime dex2oat
     }
     option_strings.push_back("-Djava.class.path=" + join(cp, ':'));
+    // Where System.loadLibrary resolves boot-classpath native libs (acl's libsoundpool.so — the
+    // android.media.SoundPool <clinit> loadLibrary("soundpool") — and any future supplemental .so).
+    if (const char* libpath = std::getenv("ACL_ART_LIBPATH"); libpath != nullptr && *libpath != '\0') {
+      option_strings.push_back(std::string("-Djava.library.path=") + libpath);
+    }
     // Extra raw ART runtime options, space-separated (e.g. "-verbose:class -verbose:jni" to
     // surface the missing class behind an app-swallowed NoClassDefFoundError). Debug/diagnostic.
     if (const char* opts = std::getenv("ACL_ART_OPTS"); opts != nullptr && *opts != '\0') {

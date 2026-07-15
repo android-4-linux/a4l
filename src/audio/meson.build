@@ -13,6 +13,7 @@ if have_pipewire
   audio_deps += [pw_dep, jni_dep]  # jni_dep = jni.h only (calls go through the passed JNIEnv*)
 endif
 
+
 audio_lib = static_library(
   'acl_audio',
   audio_sources,
@@ -20,6 +21,27 @@ audio_lib = static_library(
   dependencies : audio_deps,
 )
 module_libs += audio_lib
+
+# libsoundpool.so — acl's replacement for the host-absent libsoundpool.so. android.media.SoundPool
+# .<clinit> does System.loadLibrary("soundpool"); ART loads THIS and calls JNI_OnLoad, which binds
+# acl's SoundPool natives (FFmpeg decode + polyphonic mix through the audio Sink). FFmpeg is
+# dlopen()'d at runtime (RTLD_LOCAL) — see soundpool.cpp — so its transitive OpenSSL never enters
+# the global scope where it would clash with AOSP conscrypt's BoringSSL.
+if have_ffmpeg
+  sp_deps = [fmt_dep, jni_dep] + ff_dep
+  if have_pipewire
+    sp_deps += pw_dep
+  endif
+  shared_library(
+    'soundpool',
+    files('soundpool.cpp'),
+    include_directories : [config_inc, core_inc],
+    link_with : [audio_lib, acl_log],
+    dependencies : sp_deps,
+    name_prefix : 'lib',
+    install : false,
+  )
+endif
 
 # Dev tool: print / set the host PipeWire master-output volume (the default sink), to verify the
 # svc/audio → AudioManager mapping. Built only when PipeWire is present.
