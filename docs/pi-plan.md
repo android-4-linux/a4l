@@ -119,7 +119,29 @@ the Pi's **glibc** Wayland / Vulkan / PipeWire libraries, and you cannot cleanly
   `linux_glibc`/`linux_musl` × `arm64` `ToolchainFactory` (mirroring `x86_64_linux_host.go`), wire the
   aarch64 cross toolchain, and build ART for it. This yields an arm64 ART that coexists with the Pi's
   glibc libs exactly as the x86 host does today. Real Soong work, but it preserves the single-process
-  architecture — **recommended** if pursued.
+  architecture — **recommended, and now spiked (see the B2 spike below).**
+
+**B2 SPIKE (2026-07-15) — musl-arm64 toolchain authored, Soong integration proven, one boundary
+left.** musl beats glibc here: AOSP builds `external/musl` **from source** with a complete aarch64
+port, so **no prebuilt arm64 sysroot is needed** (glibc-arm64's blocker). The toolchain and its Soong
+wiring are captured as a five-site carried patch in **`tools/aosp/b2-musl-arm64/`** (`soong-musl-arm64.patch`
++ README): (1) add `Arm64` to the `LinuxMusl` OsType (`arch.go`); (2) a new `LinuxMusl × Arm64`
+factory composing `toolchainArm64 + toolchainMusl` with the bionic-ness overridden (`arm64_musl_host.go`,
+ClangTriple `aarch64-linux-musl`, which the prebuilt clang accepts); (3) list it in the soong-cc-config
+`srcs` (explicit, not a glob); (4) register `linux_musl_arm64` in bp2build `configurability.go`;
+(5) accept `HOST_CROSS_OS=linux_musl` (`envsetup.mk`). With these,
+`HOST_CROSS_OS=linux_musl HOST_CROSS_ARCH=arm64 m --skip-soong-tests nothing` drives Soong all the way
+to **instantiating musl-arm64 variants of `external/musl`** (`libc_musl_crtbegin_*`, `libc_musl_crtend`)
+— the toolchain works. **The single remaining boundary:** those crt modules need compiler-rt's
+`clang_rt.crtbegin`/`crtend`, and the clang prebuilt ships **no aarch64 *Linux-host* compiler-rt**
+(only `x86_64/i686-linux-musl` host + `aarch64-android`/baremetal builtins — nobody needed
+aarch64-linux-musl because stock arm64-host is bionic). **Next step:** provide aarch64-linux-musl host
+compiler-rt — build compiler-rt from `toolchain/llvm-project` for that target, or retarget at the
+existing `libclang_rt.builtins-aarch64-android.a` (builtins are libc-agnostic) + generate the two
+tiny crt objects. Then ART builds on the toolchain and `assemble-arm64-art.sh` (swap the
+`linux_bionic_arm64` glob → `linux_musl_arm64`) yields a single-libc `ACL_ART_HOME`. The AOSP tree was
+reverted after the spike (the bp2build map change fails golden tests on a normal `m`); the patch
+preserves the work.
 
 Once a target exists, the module set is the same either way: `libart`, `libartbase`, `libdexfile`,
 `libprofile`, `dex2oat`, `libandroid_runtime`, `libnativehelper`; core boot jars (`core-oj`,

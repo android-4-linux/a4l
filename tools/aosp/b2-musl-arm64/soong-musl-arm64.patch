@@ -1,0 +1,199 @@
+# acl B2: musl-arm64 host toolchain for Soong (Android 13 / T AOSP, clang-r450784d)
+# Apply from the AOSP tree root. build/soong and build/make are separate git repos.
+#
+# FIVE sites (all validated: 'm nothing' reaches musl-arm64 variant instantiation of
+# external/musl; see ./README.md and docs/pi-plan.md P-B for the terminus + next step):
+#   1. build/soong/android/arch.go            - add Arm64 to the LinuxMusl OsType
+#   2. build/soong/cc/config/arm64_musl_host.go (NEW) - the LinuxMusl x Arm64 toolchain
+#   3. build/soong/cc/config/Android.bp        - add the new file to the soong-cc-config srcs
+#   4. build/soong/bazel/configurability.go    - register linux_musl_arm64 in the bp2build maps
+#   5. build/make/core/envsetup.mk             - accept HOST_CROSS_OS=linux_musl
+# Build with:  HOST_CROSS_OS=linux_musl HOST_CROSS_ARCH=arm64 m --skip-soong-tests <target>
+# ============================================================================
+### 1+3+4. build/soong (tracked files) ###
+diff --git a/android/arch.go b/android/arch.go
+index 3587b469f..f589f95c6 100644
+--- a/android/arch.go
++++ b/android/arch.go
+@@ -307,7 +307,9 @@ var (
+ 	// Linux is the OS for the Linux kernel plus the glibc runtime.
+ 	Linux = newOsType("linux_glibc", Host, false, X86, X86_64)
+ 	// LinuxMusl is the OS for the Linux kernel plus the musl runtime.
+-	LinuxMusl = newOsType("linux_musl", Host, false, X86, X86_64)
++	// Arm64 added for acl B2: a single-libc arm64 host ART (musl) that can be dlopen'd into a
++	// glibc process, unlike stock linux_bionic-arm64 (bionic libc cannot cold-load under glibc).
++	LinuxMusl = newOsType("linux_musl", Host, false, Arm64, X86, X86_64)
+ 	// Darwin is the OS for MacOS/Darwin host machines.
+ 	Darwin = newOsType("darwin", Host, false, Arm64, X86_64)
+ 	// LinuxBionic is the OS for the Linux kernel plus the Bionic libc runtime, but without the
+diff --git a/bazel/configurability.go b/bazel/configurability.go
+index 7355ac7d3..acf011dac 100644
+--- a/bazel/configurability.go
++++ b/bazel/configurability.go
+@@ -43,6 +43,7 @@ const (
+ 	osArchDarwinX86_64      = "darwin_x86_64"
+ 	osArchLinuxX86          = "linux_glibc_x86"
+ 	osArchLinuxX86_64       = "linux_glibc_x86_64"
++	osArchLinuxMuslArm64    = "linux_musl_arm64" // acl B2: musl arm64 host
+ 	osArchLinuxMuslX86      = "linux_musl_x86"
+ 	osArchLinuxMuslX86_64   = "linux_musl_x86_64"
+ 	osArchLinuxBionicArm64  = "linux_bionic_arm64"
+@@ -101,6 +102,7 @@ var (
+ 		osArchDarwinX86_64:         "//build/bazel/platforms/os_arch:darwin_x86_64",
+ 		osArchLinuxX86:             "//build/bazel/platforms/os_arch:linux_glibc_x86",
+ 		osArchLinuxX86_64:          "//build/bazel/platforms/os_arch:linux_glibc_x86_64",
++		osArchLinuxMuslArm64:       "//build/bazel/platforms/os_arch:linux_musl_arm64",
+ 		osArchLinuxMuslX86:         "//build/bazel/platforms/os_arch:linux_musl_x86",
+ 		osArchLinuxMuslX86_64:      "//build/bazel/platforms/os_arch:linux_musl_x86_64",
+ 		osArchLinuxBionicArm64:     "//build/bazel/platforms/os_arch:linux_bionic_arm64",
+@@ -118,7 +120,7 @@ var (
+ 	osToArchMap = map[string][]string{
+ 		osAndroid:     {archArm, archArm64, archX86, archX86_64},
+ 		osLinux:       {archX86, archX86_64},
+-		osLinuxMusl:   {archX86, archX86_64},
++		osLinuxMusl:   {archArm64, archX86, archX86_64}, // acl B2: + archArm64
+ 		osDarwin:      {archArm64, archX86_64},
+ 		osLinuxBionic: {archArm64, archX86_64},
+ 		// TODO(cparsons): According to arch.go, this should contain archArm, archArm64, as well.
+diff --git a/cc/config/Android.bp b/cc/config/Android.bp
+index 1a21c1361..7621aebfa 100644
+--- a/cc/config/Android.bp
++++ b/cc/config/Android.bp
+@@ -30,6 +30,7 @@ bootstrap_go_package {
+         "x86_windows_host.go",
+ 
+         "arm64_linux_host.go",
++        "arm64_musl_host.go",
+     ],
+     testSrcs: [
+         "tidy_test.go",
+### 2. build/soong: NEW FILE cc/config/arm64_musl_host.go ###
+diff --git a/cc/config/arm64_musl_host.go b/cc/config/arm64_musl_host.go
+new file mode 100644
+index 000000000..dfdae55d1
+--- /dev/null
++++ b/cc/config/arm64_musl_host.go
+@@ -0,0 +1,105 @@
++// Copyright 2026 The acl Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// acl carried patch (B2): register a LinuxMusl x Arm64 host toolchain so ART can be built as a
++// single-libc arm64 host runtime. Stock AOSP has only a bionic arm64 host (linux_bionic-arm64),
++// and a glibc acl process cannot dlopen a bionic libart.so (bionic libc cannot cold-load under a
++// foreign loader -> SIGTRAP; proven on a Pi 4, docs/pi-plan.md P-B). A musl arm64 host ART links
++// only musl, coexisting with the Pi's glibc Wayland/Vulkan/PipeWire exactly as today's x86 host.
++//
++// Composes the device arm64 arch flags (toolchainArm64) with the arch-agnostic musl libc
++// specialization (toolchainMusl), the same shape as toolchainLinuxMuslX8664 on x86 -- except the
++// only arm64 toolchain base (toolchainArm64) embeds toolchainBionic, so the bionic-ness it inherits
++// (Bionic(), the bionic crt objects, the bionic default shared libs) is overridden with musl below.
++
++package config
++
++import (
++	"strings"
++
++	"android/soong/android"
++)
++
++type toolchainLinuxMuslArm64 struct {
++	toolchainArm64
++	toolchainMusl
++}
++
++// Override the bionic-ness inherited via toolchainArm64 -> toolchainBionic.
++func (toolchainLinuxMuslArm64) Bionic() bool { return false }
++
++func (t *toolchainLinuxMuslArm64) ClangTriple() string {
++	// No "-android" suffix (no __ANDROID__); no "-gnu" (musl, not glibc).
++	return "aarch64-linux-musl"
++}
++
++func (t *toolchainLinuxMuslArm64) Cflags() string {
++	return t.toolchainArm64.Cflags() + " " + t.toolchainMusl.Cflags()
++}
++
++func (t *toolchainLinuxMuslArm64) Ldflags() string {
++	return t.toolchainArm64.Ldflags() + " " + t.toolchainMusl.Ldflags()
++}
++
++func (t *toolchainLinuxMuslArm64) Lldflags() string {
++	return t.toolchainArm64.Lldflags() + " " + t.toolchainMusl.Lldflags()
++}
++
++// toolchainArm64 (via toolchainBionic) and toolchainMusl both define these; resolve the ambiguity
++// in favor of musl so binaries link the musl crt objects and libc_musl.
++func (t *toolchainLinuxMuslArm64) DefaultSharedLibraries() []string {
++	return t.toolchainMusl.DefaultSharedLibraries()
++}
++func (t *toolchainLinuxMuslArm64) CrtBeginStaticBinary() []string {
++	return t.toolchainMusl.CrtBeginStaticBinary()
++}
++func (t *toolchainLinuxMuslArm64) CrtBeginSharedBinary() []string {
++	return t.toolchainMusl.CrtBeginSharedBinary()
++}
++func (t *toolchainLinuxMuslArm64) CrtBeginSharedLibrary() []string {
++	return t.toolchainMusl.CrtBeginSharedLibrary()
++}
++func (t *toolchainLinuxMuslArm64) CrtEndStaticBinary() []string {
++	return t.toolchainMusl.CrtEndStaticBinary()
++}
++func (t *toolchainLinuxMuslArm64) CrtEndSharedBinary() []string {
++	return t.toolchainMusl.CrtEndSharedBinary()
++}
++func (t *toolchainLinuxMuslArm64) CrtEndSharedLibrary() []string {
++	return t.toolchainMusl.CrtEndSharedLibrary()
++}
++
++func linuxMuslArm64ToolchainFactory(arch android.Arch) Toolchain {
++	archVariant := "armv8-a" // for host, default to armv8-a (matches linuxArm64ToolchainFactory)
++	toolchainCflags := []string{arm64ArchVariantCflagsVar[archVariant]}
++
++	// Conservatively assume the host CPU needs the erratum fix (same as the bionic arm64 host).
++	extraLdflags := "-Wl,--fix-cortex-a53-843419"
++
++	ret := toolchainLinuxMuslArm64{}
++	ret.toolchainArm64.ldflags = strings.Join([]string{
++		"${config.Arm64Ldflags}",
++		extraLdflags,
++	}, " ")
++	ret.toolchainArm64.lldflags = strings.Join([]string{
++		"${config.Arm64Lldflags}",
++		extraLdflags,
++	}, " ")
++	ret.toolchainArm64.toolchainCflags = strings.Join(toolchainCflags, " ")
++	return &ret
++}
++
++func init() {
++	registerToolchainFactory(android.LinuxMusl, android.Arm64, linuxMuslArm64ToolchainFactory)
++}
+### 5. build/make: core/envsetup.mk ###
+diff --git a/core/envsetup.mk b/core/envsetup.mk
+index c32d380b0..6d4f595c9 100644
+--- a/core/envsetup.mk
++++ b/core/envsetup.mk
+@@ -164,6 +164,12 @@ ifeq ($(HOST_OS),linux)
+     ifeq (,$(HOST_CROSS_ARCH))
+       $(error HOST_CROSS_ARCH missing.)
+     endif
++  else ifeq ($(HOST_CROSS_OS),linux_musl)
++    # acl B2: musl arm64 host-cross (single-libc arm64 host ART). See build/soong/cc/config/
++    # arm64_musl_host.go and docs/pi-plan.md P-B.
++    ifeq (,$(HOST_CROSS_ARCH))
++      $(error HOST_CROSS_ARCH missing.)
++    endif
+   else
+     $(error Unsupported HOST_CROSS_OS $(HOST_CROSS_OS))
+   endif
