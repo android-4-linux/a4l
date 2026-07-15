@@ -138,11 +138,22 @@ you must request the `linux_bionic_arm64_shared` output explicitly.) **B1 is bui
 toolchain level.** The remaining P-B risk is therefore NOT the toolchain but the bionic-vs-glibc
 in-process coexistence (integration/architecture), plus scaling the build up to the full stack
 (`libart`, `dex2oat`, `libandroid_runtime`, boot jars) and the boot image (P-D).
-- **Next steps:** (1) build the full ART host stack for `linux_bionic_arm64` (libart/dex2oat/
-  libandroid_runtime + boot jars) — bigger but the toolchain is proven; (2) decide B1 vs B2 on the
-  libc-coexistence question (can a bionic ART cohabit a glibc process, or must the underside go bionic
-  / ART move to its own process); (3) only then wire `ACL_ART_HOME` at the arm64 tree and boot it under
-  acl's embedding seam.
+**Full native stack spike done (2026-07-15) — the whole ART host runtime builds for arm64.**
+Building the `linux_bionic_arm64_shared` outputs of `libandroid_runtime` (+ `libart`,
+`libnativehelper`, `libprofile`) links successfully: **`libart.so` (AArch64, ~104M unstripped) and
+`libandroid_runtime.so` (AArch64, ~112M)** — exactly the two `.so`s acl `dlopen`s from
+`$ACL_ART_HOME/lib64/` — plus everything `libandroid_runtime` transitively pulls (libart-compiler,
+libsigchain, libbase, libc++, libsqlite, …), all as `linux_bionic` AArch64, **no source patches**.
+So P-B is **build-complete at the native level**: the entire embedding surface acl depends on
+compiles+links for an arm64 host. (Unstripped because the `linux_bionic` bp block disables strip for
+crash symbols; stripped is far smaller.)
+- **Sole remaining P-B risk = integration, not build:** bionic ART in-process with the Pi's glibc
+  Wayland/Vulkan/PipeWire (B1 vs B2, above).
+- **Still to build for P-D (boot image), not yet done here:** `dex2oat`/`dex2oat64` for
+  `linux_bionic_arm64` + the boot jars (the jars are DEX/Java = arch-independent), then the arm64
+  boot image.
+- **Then:** wire `ACL_ART_HOME` at the arm64 tree and boot it under acl's embedding seam — where the
+  libc-coexistence question gets its empirical answer.
 
 ### P-C. GPU / Vulkan dma-buf bring-up
 acl re-owns `android.graphics` on Skia + a Vulkan dma-buf present loop (ADR-0004). On a Pi that is
