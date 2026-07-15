@@ -1069,6 +1069,18 @@ public final class HostBootstrap {
             setWm.invoke(window, wmImpl, null, a.getClass().getName());
             setField(android.app.Activity.class, a, "mWindowManager",
                     ((android.view.Window) window).getWindowManager());
+            // Real Activity.attach() (Activity.java:8242) sets the Activity as the Window inflater's
+            // private factory. LayoutInflater then routes a <fragment> tag (and other tags the
+            // Activity claims via onCreateView) to Activity.onCreateView -> mFragments.onCreateView.
+            // Without it, inflating a layout XML containing <fragment> falls through to
+            // createView("fragment","android.view.") -> ClassNotFoundException: android.view.fragment.
+            // (androidx FragmentActivity overrides onCreateView to use its own FragmentController.)
+            try {
+                ((android.view.Window) window).getLayoutInflater()
+                        .setPrivateFactory((android.view.LayoutInflater.Factory2) a);
+            } catch (Throwable t) {
+                System.err.println("acl HostBootstrap: setPrivateFactory deferred: " + t);
+            }
         } catch (Throwable t) {
             Throwable cause = (t instanceof java.lang.reflect.InvocationTargetException
                     && t.getCause() != null) ? t.getCause() : t;
