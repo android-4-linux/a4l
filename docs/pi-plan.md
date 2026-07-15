@@ -209,11 +209,12 @@ that can be pre-built off-Pi already is (P-A/P-B done); the Pi work is native bu
 coexistence test.
 
 **M1 — acl on the Pi via OpenJDK (`--vm=jvm`), low risk.** Proves the *desktop-side* stack on real
-hardware without any bionic ART. On the Pi (Bookworm): `apt install` the P-A dev deps +
-`default-jdk-headless`; `pip3 install --break-system-packages 'meson>=1.3'` (stock Bookworm meson is
-1.0.1 < 1.3); `meson setup build && meson compile`; run a simple APK with `acl run app.apk --vm=jvm
---present`. Validates Wayland (labwc/Wayfire) + Mesa V3DV + PipeWire + input end-to-end on the Pi.
-Gaps surface here are P-C (V3DV dma-buf modifiers) and perf, not ART.
+hardware without any bionic ART. **The reference Pi runs Debian/RPi-OS trixie — the exact toolchain
+(g++ 14.2, meson ≥ 1.3) the off-Pi container build was validated against**, so no pip-meson
+workaround and no compiler caveat (those were only for stock Bookworm). Run `tools/pi-build.sh`
+(apt deps + `meson setup build && meson compile`), then `acl run app.apk --vm=jvm --present`.
+Validates Wayland (labwc/Wayfire) + Mesa V3DV + PipeWire + input end-to-end on the Pi. Gaps that
+surface here are P-C (V3DV dma-buf modifiers) and perf, not ART.
 
 **M2 — stand up the arm64 host ART, boot it natively.** Off-Pi: `tools/assemble-arm64-art.sh`
 produces a `linux_bionic-arm64` `ACL_ART_HOME` tree (37 libs + `dex2oats` + boot jars, ~37 MB
