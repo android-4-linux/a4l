@@ -82,26 +82,52 @@ Original task (now satisfied by the above): confirm the acl C++ core compiles cl
   (none expected — the code is portable C++23).
 
 ### P-B. Host ART for arm64-Linux (the critical path)
-Produce an AOSP host runtime that runs *on the Pi* (arm64), mirroring today's `out/host/linux-x86`.
-- Build ART + deps for a **`linux_musl_arm64`** host target (AOSP's musl host cross target; the
-  glibc `linux-x86` host has no arm64 variant). Candidate Soong targets, arm64 host:
-  `libart`, `libartbase`, `libdexfile`, `libprofile`, `dex2oat`, `libandroid_runtime`, `libnativehelper`,
-  the core boot jars (`core-oj`, `core-libart`, `okhttp`, `bouncycastle`, `apache-xml`, `core-icu4j`,
-  `conscrypt`) and `framework-minus-apex` / `framework-graphics` / `ext` / `telephony-common`.
-- Rebuild acl's own supplemental natives for that target: `libacl_graphics_jni.so` (Skia+Vulkan)
-  and `libsoundpool.so` (already dlopen-isolated from FFmpeg's OpenSSL — that isolation matters
-  more on a distro with a system OpenSSL).
-- Point `ACL_ART_HOME` at the arm64 tree; the run harness (`tools/run-apk.sh`) is already
-  parameterized by `ACL_ART_HOME` and derives everything from it — no x86 assumptions in the harness
-  logic, only in what tree you hand it.
+Produce an AOSP host runtime that runs *on the Pi* (arm64), mirroring today's glibc
+`out/host/linux-x86`. **Feasibility spike (2026-07-15) — the shape is harder than first assumed:**
+
+AOSP registers host toolchains for these OS/arch pairs only
+(`build/soong/cc/config/*.go`, `registerToolchainFactory`):
+
+| host libc | x86 / x86_64 | arm64 |
+|---|---|---|
+| glibc (`android.Linux`) | yes (acl uses this today) | **NO** |
+| musl (`android.LinuxMusl`) | yes | **NO** |
+| bionic (`android.LinuxBionic`) | yes | **yes — the only arm64 host** (`arm64_linux_host.go`) |
+
+So the earlier `linux_musl_arm64` premise was wrong (musl host is x86-only), and there is **no stock
+glibc arm64 host** either. The single arm64 Linux host is **`linux_bionic-arm64`** — Android's bionic
+libc with a host-bionic linker. That collides with acl's core model: acl runs ART **in-process** with
+the Pi's **glibc** Wayland / Vulkan / PipeWire libraries, and you cannot cleanly host two libcs
+(bionic + glibc) in one process (loader, TLS, malloc, symbol namespaces). So P-B forks:
+
+- **Path B1 — `linux_bionic-arm64` (stock, but fights the model).** Build ART bionic-arm64; then
+  either (a) make the graphics/audio underside *also* bionic (build acl + Skia + Wayland/Vulkan/
+  PipeWire clients against bionic — large, and the Pi's system libs are glibc), or (b) split ART into
+  its own process and IPC to a glibc render/audio process (a big architectural change to the
+  single-process design). Host Bionic is also a niche/fragile AOSP path.
+- **Path B2 — add a glibc (or musl) arm64 host toolchain to Soong (clean end-state).** Register a
+  `linux_glibc`/`linux_musl` × `arm64` `ToolchainFactory` (mirroring `x86_64_linux_host.go`), wire the
+  aarch64 cross toolchain, and build ART for it. This yields an arm64 ART that coexists with the Pi's
+  glibc libs exactly as the x86 host does today. Real Soong work, but it preserves the single-process
+  architecture — **recommended** if pursued.
+
+Once a target exists, the module set is the same either way: `libart`, `libartbase`, `libdexfile`,
+`libprofile`, `dex2oat`, `libandroid_runtime`, `libnativehelper`; core boot jars (`core-oj`,
+`core-libart`, `okhttp`, `bouncycastle`, `apache-xml`, `core-icu4j`, `conscrypt`);
+`framework-minus-apex`/`framework-graphics`/`ext`/`telephony-common`; and acl's own
+`libacl_graphics_jni.so` + `libsoundpool.so` rebuilt for it (the SoundPool FFmpeg-vs-OpenSSL dlopen
+isolation matters *more* against a distro OpenSSL). `tools/run-apk.sh` already derives everything from
+`ACL_ART_HOME`, so no harness change — only which tree you point it at.
 - **Gaps:**
-  - Musl vs glibc: the Pi runs glibc; a `linux_musl_arm64` ART is statically-ish musl-linked. Confirm
-    it loads cleanly next to the Pi's glibc Wayland/PipeWire/Vulkan libs (acl loads those in-process).
-    Alternative: a `linux_bionic` arm64 host — heavier, brings bionic in.
+  - **libc coexistence (the crux):** bionic ART + glibc graphics/audio in one process — B1 or B2 above.
+  - No stock glibc/musl arm64 host toolchain → B2 requires adding one to Soong first.
   - `dex2oat64` naming/ISA: the boot image path bakes `/x86_64/`; arm64 inserts `/arm64/` — verify
     `-Ximage` ISA-subdir handling (docs/art-host-spike.md notes the x86_64 case).
-  - ART JIT on A72/A76: fine; but confirm the arm64 quick-compiler/JIT is enabled in the host build
-    (host ART historically favored the interpreter).
+  - ART JIT on A72/A76: confirm the arm64 quick-compiler/JIT is enabled in the host build (host ART
+    historically favored the interpreter).
+  - **Recommended next spike:** attempt a `linux_bionic-arm64` build of just `libartbase`/`libdexfile`
+    (small, no framework) to confirm the arm64 host ART *toolchain path* even compiles in this tree,
+    before deciding B1 vs B2.
 
 ### P-C. GPU / Vulkan dma-buf bring-up
 acl re-owns `android.graphics` on Skia + a Vulkan dma-buf present loop (ADR-0004). On a Pi that is
