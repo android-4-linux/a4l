@@ -55,6 +55,12 @@ arm64-clean.** Skia + wcs gate OFF (not in the container), so gfx/wm build reduc
 graphics path is P-C. Reproduce: `podman run --platform linux/arm64 debian:trixie`, install the
 P-A deps + `default-jdk-headless`, `meson setup b /src -Dtests=false && meson compile -C b`.
 
+**Correctness (not just compilation):** `meson test` on arm64 → **17 Ok, 1 skipped, 1 Fail** — the
+Tier A unit tests (DEX→JVM translator, pkg/manifest) and the integration tests all pass; the single
+failure (`run-apk-default-framework`) is environmental — it wants a host-built `build/framework/classes`
+absent in the fresh container (fails identically on x86 without that step), not an arm64 bug. So the
+arm64 build is verified correct, not merely compilable.
+
 **Pi-4 target compiler — characterized (Bookworm, arm64 container):** a full arm64 `acl` also
 **builds and runs with stock Bookworm's g++ 12.2 and fmt 9.1** (rc=0) — so acl's C++23 usage does
 NOT need g++13+. The ONE stock-Bookworm blocker is **meson 1.0.1 < the required 1.3.0**: install a
