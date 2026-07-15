@@ -202,6 +202,36 @@ painfully slow to start.
   matrix (plan.md §5). The `run_*_art_test.py` harnesses already SKIP without `ACL_ART_HOME`, so
   they run unchanged once P-B lands.
 
+## 2a. Pi bring-up runbook (hardware in hand)
+
+Ordered so each milestone is independently demonstrable and risk rises last. Everything a Pi needs
+that can be pre-built off-Pi already is (P-A/P-B done); the Pi work is native build + assembly + the
+coexistence test.
+
+**M1 — acl on the Pi via OpenJDK (`--vm=jvm`), low risk.** Proves the *desktop-side* stack on real
+hardware without any bionic ART. On the Pi (Bookworm): `apt install` the P-A dev deps +
+`default-jdk-headless`; `pip3 install --break-system-packages 'meson>=1.3'` (stock Bookworm meson is
+1.0.1 < 1.3); `meson setup build && meson compile`; run a simple APK with `acl run app.apk --vm=jvm
+--present`. Validates Wayland (labwc/Wayfire) + Mesa V3DV + PipeWire + input end-to-end on the Pi.
+Gaps surface here are P-C (V3DV dma-buf modifiers) and perf, not ART.
+
+**M2 — stand up the arm64 host ART, boot it natively.** Off-Pi: `tools/assemble-arm64-art.sh`
+produces a `linux_bionic-arm64` `ACL_ART_HOME` tree (37 libs + `dex2oats` + boot jars, ~37 MB
+stripped) — scp it to the Pi. On the Pi: `export ACL_ART_HOME=<tree>` and confirm the bionic-arm64
+ART boots natively (no qemu) — e.g. a static-`main` DEX under `acl run --vm=art` imageless (acl
+defaults to `-Xint` with no `ACL_ART_BOOT_IMAGE`, so no boot image needed first). This retires
+"does the arm64 ART run on real silicon" (we only proved it under emulation off-Pi).
+
+**M3 — `--vm=art` full path: the bionic-vs-glibc coexistence crux.** Build `libacl_graphics_jni.so`
+for `linux_bionic_arm64` (Soong, in the AOSP tree — watch for Skia-arm64 availability) + build acl
+itself on the Pi (glibc). Run `acl run app.apk --vm=art --present`. This is the moment a **glibc**
+acl process `dlopen`s the **bionic** `libart.so` and then a **glibc** Vulkan/Wayland/PipeWire lib —
+the make-or-break test. Likely-OK because host-bionic libs carry their own bionic runtime (libart's
+NEEDED set is all bionic `libc/libc++/...`), so the two libcs don't share symbols; the risk is the
+JNI boundary (memory allocated on one side freed on the other) and TLS. If it holds → B1 is the
+answer. If it fights → B2 (add a glibc/musl arm64 Soong toolchain so the whole process is one libc)
+or split ART into its own process + IPC. **This is the one question no off-Pi spike can answer.**
+
 ## 3. What already works in acl's favor
 - **arm64 is first-class**: cross files exist; the automotive targets (RK3588, SA8155P) are arm64.
 - **Harness is host-agnostic**: `tools/run-apk.sh` + `ArtVm` derive everything from `ACL_ART_HOME`;
