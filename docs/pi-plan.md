@@ -149,9 +149,15 @@ compiles+links for an arm64 host. (Unstripped because the `linux_bionic` bp bloc
 crash symbols; stripped is far smaller.)
 - **Sole remaining P-B risk = integration, not build:** bionic ART in-process with the Pi's glibc
   Wayland/Vulkan/PipeWire (B1 vs B2, above).
-- **Still to build for P-D (boot image), not yet done here:** `dex2oat`/`dex2oat64` for
-  `linux_bionic_arm64` + the boot jars (the jars are DEX/Java = arch-independent), then the arm64
-  boot image.
+- **`dex2oats` (the boot-image compiler) also builds for arm64 (2026-07-15):** target
+  `out/soong/.intermediates/art/dex2oat/dex2oats/linux_bionic_arm64/dex2oats` links as an AArch64 ELF
+  (~198M unstripped). (Module name is `dex2oats`, not `dex2oat`, for the host-cross variant.) So ALL
+  the core arm64 host-ART native binaries — `libart.so`, `libandroid_runtime.so`, `libnativehelper.so`,
+  `libprofile.so`, `dex2oats` — build clean, no source patches. **The native side of a
+  `linux_bionic-arm64` `ACL_ART_HOME` is build-complete.**
+- **Still to do for P-D (boot image):** the boot jars are DEX/Java = arch-independent (reuse the x86
+  ones); produce an arm64 `boot.art` (either the arm64 `dex2oats` under emulation, or the x86 `dex2oat`
+  cross-targeting arm64), then assemble the tree.
 - **Then:** wire `ACL_ART_HOME` at the arm64 tree and boot it under acl's embedding seam — where the
   libc-coexistence question gets its empirical answer.
 
