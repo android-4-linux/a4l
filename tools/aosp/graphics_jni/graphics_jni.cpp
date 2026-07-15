@@ -3822,6 +3822,11 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/ColorFilter", kColorFilter, n(kColorFilter)) && ok;
   ok = reg(env, "android/graphics/BlendModeColorFilter", kBlendModeColorFilter,
            n(kBlendModeColorFilter)) && ok;
+  // PorterDuffColorFilter is the older tint API; its native_CreateBlendModeFilter(color, mode) has
+  // the same signature + semantics as BlendModeColorFilter's, so share the impl. Pervasive: Material
+  // drawable/icon tinting (e.g. opendrummer's toolbar + vector drawables) goes through it.
+  ok = reg(env, "android/graphics/PorterDuffColorFilter", kBlendModeColorFilter,
+           n(kBlendModeColorFilter)) && ok;
   ok = reg(env, "android/graphics/drawable/AnimatedVectorDrawable", kAnimatedVectorDrawable,
            n(kAnimatedVectorDrawable)) && ok;
   ok = reg(env, "android/graphics/Matrix", kMatrix, n(kMatrix)) && ok;

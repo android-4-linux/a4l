@@ -1324,6 +1324,39 @@ public final class HostBootstrap {
                 setField(vriCls, vri, "mChoreographer",
                         android.view.Choreographer.getInstance());
             } catch (Throwable ignored) {}
+            // A classic (XML-inflated / fragment) View hierarchy drives the real ViewRootImpl during
+            // attach + traversal, unlike Compose (which draws through its own layers). These fields are
+            // field-initialized in the ViewRootImpl ctor acl skips, so a null one NPEs the traversal:
+            // mHandler (ViewRootHandler.removeMessages), mInvalidateOnAnimationRunnable (.addView), and
+            // the three ViewRootRectTracker fields (updateRectsForView). Seed them.
+            // ViewRootImpl.getConfiguration() (reached from getWindowInsets → View.getRootWindowInsets,
+            // e.g. androidx DrawerLayout.onLayout) dereferences mContext.getResources(); seed it.
+            try { setField(vriCls, vri, "mContext", ctx); } catch (Throwable ignored) {}
+            // getWindowInsets() reads mWindowAttributes.type; seed a default LayoutParams.
+            try {
+                android.view.WindowManager.LayoutParams wa = new android.view.WindowManager.LayoutParams();
+                wa.type = android.view.WindowManager.LayoutParams.TYPE_APPLICATION;
+                setField(vriCls, vri, "mWindowAttributes", wa);
+            } catch (Throwable ignored) {}
+            try {
+                setField(vriCls, vri, "mHandler",
+                        innerInstance("android.view.ViewRootImpl$ViewRootHandler", vriCls, vri));
+            } catch (Throwable ignored) {}
+            try {
+                setField(vriCls, vri, "mInvalidateOnAnimationRunnable",
+                        innerInstance("android.view.ViewRootImpl$InvalidateOnAnimationRunnable", vriCls, vri));
+            } catch (Throwable ignored) {}
+            try {
+                Class<?> rtCls = Class.forName("android.view.ViewRootRectTracker");
+                java.lang.reflect.Constructor<?> rtCtor =
+                        rtCls.getDeclaredConstructor(java.util.function.Function.class);
+                rtCtor.setAccessible(true);
+                java.util.function.Function<Object, Object> emptyRects = v -> new java.util.ArrayList<>();
+                for (String f : new String[]{"mGestureExclusionTracker", "mKeepClearRectsTracker",
+                                             "mUnrestrictedKeepClearRectsTracker"}) {
+                    try { setField(vriCls, vri, f, rtCtor.newInstance(emptyRects)); } catch (Throwable ignored) {}
+                }
+            } catch (Throwable ignored) {}
             // View.getWindowInsetsController() -> mViewRootImpl.getInsetsController() (mInsetsController);
             // null on the hollow ViewRootImpl -> WindowInsetsControllerCompat.show() NPEs (apps drive
             // edge-to-edge / IME visibility from a LaunchedEffect on startup). Seed a real
@@ -1403,6 +1436,13 @@ public final class HostBootstrap {
         java.lang.reflect.Field f = c.getDeclaredField(name);
         f.setAccessible(true);
         f.set(obj, val);
+    }
+
+    // Instantiate a non-static inner class (its synthetic constructor takes the enclosing instance).
+    private static Object innerInstance(String innerName, Class<?> outerCls, Object outer) throws Exception {
+        java.lang.reflect.Constructor<?> c = Class.forName(innerName).getDeclaredConstructor(outerCls);
+        c.setAccessible(true);
+        return c.newInstance(outer);
     }
 
     static final class ViewContext extends ContextWrapper {
