@@ -2842,6 +2842,17 @@ const JNINativeMethod kBaseRecordingExtra[] = {
     {"nPunchHole", "(JFFFFFF)V", reinterpret_cast<void*>(BaseRecordingCanvas_nPunchHole)},
 };
 
+// android.graphics.CanvasProperty — an animatable float/paint holder for RecordingCanvas' ripple/
+// reveal draws (RippleDrawable). acl has no display-list animator (nDrawCircleProp is a no-op), so
+// the value is never read; the handle only has to be a real VirtualLightRefBase because
+// CanvasProperty wraps it in a VirtualRefBasePtr that inc/decStrongs it on finalize.
+const JNINativeMethod kCanvasProperty[] = {
+    {"nCreateFloat", "(F)J", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jfloat) -> jlong {
+       return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
+    {"nCreatePaint", "(J)J", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) -> jlong {
+       return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
+};
+
 const JNINativeMethod kRecordingCanvas[] = {
     {"nCreateDisplayListCanvas", "(JII)J", reinterpret_cast<void*>(RecordingCanvas_nCreate)},
     {"nResetDisplayListCanvas", "(JJII)V", reinterpret_cast<void*>(RecordingCanvas_nReset)},
@@ -3808,6 +3819,7 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   reg(env, "android/graphics/BaseRecordingCanvas", kBaseCanvas, n(kBaseCanvas));
   reg(env, "android/graphics/BaseRecordingCanvas", kBaseRecordingExtra, n(kBaseRecordingExtra));
   reg(env, "android/graphics/RecordingCanvas", kRecordingCanvas, n(kRecordingCanvas));
+  reg(env, "android/graphics/CanvasProperty", kCanvasProperty, n(kCanvasProperty));
   // Text measurement + line breaking (Compose's text layout). Best-effort: without these,
   // LineBreaker/MeasuredText fail to link and Compose text throws mid-measure (blank content).
   reg(env, "android/graphics/text/MeasuredText$Builder", kMeasuredTextBuilder, n(kMeasuredTextBuilder));
