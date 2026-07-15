@@ -155,9 +155,18 @@ crash symbols; stripped is far smaller.)
   the core arm64 host-ART native binaries — `libart.so`, `libandroid_runtime.so`, `libnativehelper.so`,
   `libprofile.so`, `dex2oats` — build clean, no source patches. **The native side of a
   `linux_bionic-arm64` `ACL_ART_HOME` is build-complete.**
-- **Still to do for P-D (boot image):** the boot jars are DEX/Java = arch-independent (reuse the x86
-  ones); produce an arm64 `boot.art` (either the arm64 `dex2oats` under emulation, or the x86 `dex2oat`
-  cross-targeting arm64), then assemble the tree.
+- **RUNTIME spike done (2026-07-15) — the arm64 ART executes.** The arm64 `dex2oats`
+  (statically linked — host-bionic embeds the linker) runs under `qemu-aarch64-static`: it
+  initialized the ART runtime and parsed its command line (printed usage from `dex2oat.cc:220`,
+  exit 0). So the `linux_bionic-arm64` ART binaries are not just build-complete but **runnable**
+  (at least under emulation — a Pi runs them natively). This is a strong signal the ART side works;
+  it does NOT yet test the bionic-vs-glibc coexistence (dex2oats is all-bionic).
+- **P-D boot image — finding:** AOSP does NOT auto-generate an arm64 *host* boot image (no
+  `linux_bionic-arm64 boot.art` target in the Soong graph; host boot images are built only for the
+  build host's x86_64). Options: run the arm64 `dex2oats` (under emulation) or the x86 `dex2oat`
+  (cross-targeting arm64) over the boot classpath jars to emit `boot.art` manually — OR skip it: acl
+  already defaults to imageless `-Xint` when `ACL_ART_BOOT_IMAGE` is unset, so a *first* arm64 boot
+  needs no boot image (just slower). The boot jars are DEX/Java = arch-independent (reuse the x86 ones).
 - **Then:** wire `ACL_ART_HOME` at the arm64 tree and boot it under acl's embedding seam — where the
   libc-coexistence question gets its empirical answer.
 
