@@ -321,6 +321,9 @@ class AxmlParser {
       if (const Attr* a = find(attrs, "enabled")) {
         current_.enabled = a->as_int().value_or(1) != 0;
       }
+      // Per-activity android:theme overrides the application theme (e.g. a NoActionBar theme so
+      // the activity can setSupportActionBar its own Toolbar). Resource ref: typed data = style resId.
+      if (const Attr* a = find(attrs, "theme")) current_.theme = a->data;
     } else if (elem == "intent-filter") {
       in_intent_filter_ = true;
       if_main_ = false;

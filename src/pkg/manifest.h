@@ -39,6 +39,7 @@ struct Activity {
   std::string target_activity;  // <activity-alias android:targetActivity>, FQ-resolved (else empty)
   bool launcher = false;   // has an intent-filter with MAIN + LAUNCHER
   bool enabled = true;     // android:enabled (default true); disabled ones aren't launchable
+  std::uint32_t theme = 0; // android:theme style resId (0 if none); overrides the application theme
 
   // The class to actually instantiate: an <activity-alias> names a target class that is the
   // real Activity (the alias name is not a class), so follow it; a plain <activity> is itself.

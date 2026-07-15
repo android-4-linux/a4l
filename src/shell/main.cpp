@@ -239,6 +239,14 @@ int cmd_run(const std::vector<std::string>& args) {
   cfg.package_name = manifest.package;  // injected into the entry point's Context
   cfg.application_name = manifest.application_name;  // app Application, created before the Activity
   cfg.application_theme = manifest.application_theme;  // applied to the app Context's theme
+  // A per-activity android:theme overrides the application theme for the launched activity — many
+  // apps declare a NoActionBar activity theme so they can setSupportActionBar their own Toolbar
+  // (the application theme keeps the DarkActionBar). Prefer the launcher activity's theme when set.
+  if (const acl::pkg::Activity* launch = manifest.launcher();
+      launch != nullptr && launch->theme != 0) {
+    cfg.application_theme = launch->theme;
+    acl::log::i(kTag, "using launcher activity theme resId=0x{:x}", launch->theme);
+  }
   cfg.present = present;                 // show the rendered content view via wm/ (wcs)
   if (!present_frames.empty()) cfg.present_frames = std::strtoull(present_frames.c_str(), nullptr, 10);
 
