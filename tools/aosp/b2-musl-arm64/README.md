@@ -81,13 +81,31 @@ entire LLVM runtime set only for the shipped host triples.** Per-target file cou
 `aarch64-linux-musl` host triple Soong resolves against. So this is **not** "generate two crt objects"
 — it is **build the whole LLVM runtime set for the `aarch64-linux-musl` host**. No in-tree shortcut.
 
-**Next step to finish B2:** sync `toolchain/llvm-project` and build the LLVM runtimes for
-`aarch64-linux-musl` (the same way AOSP's toolchain team produces the `x86_64-linux-musl` set — a
-compiler-rt + libcxx/libcxxabi/libunwind runtimes build), then drop them under the
-`clang-r450784d/.../aarch64-linux-musl/` path the toolchain resolves. After that, ART's own libs
-(`libart.so`, `libandroid_runtime.so`) build on the toolchain, and `tools/assemble-arm64-art.sh`
-(swap the `linux_bionic_arm64` glob for `linux_musl_arm64`) yields a single-libc `ACL_ART_HOME` that
-`acl run --vm=art` can `dlopen` on the Pi without the two-libc SIGTRAP.
+**Step 2 — build the LLVM runtimes for `aarch64-linux-musl` (in progress; `build-aarch64-musl-runtimes.sh`).**
+The recipe (validated against LLVM 14.0.6 = the prebuilt's revision, using the prebuilt clang as the
+compiler):
+- Clone `llvm-project` at `llvmorg-14.0.6` (matches `clang-r450784d`).
+- **musl-arm64 sysroot** — `external/musl` keeps upstream's `configure`/`Makefile`; build it with the
+  prebuilt clang (`--target=aarch64-linux-musl`). `make install-headers` gives the header tree incl. the
+  arch-generated `bits/alltypes.h` (the static libc.so link needs extra target setup, but the runtimes
+  only need headers + libc.a).
+- **compiler-rt (crt + builtins) — DONE.** `clang_rt.crtbegin/crtend-aarch64.o` + a 251-object
+  `libclang_rt.builtins-aarch64.a` (verified: `__clear_cache` present — ART's JIT needs it). Two cmake
+  wrinkles handled in the script: cmake 4.x needs `CMAKE_POLICY_VERSION_MINIMUM=3.5`; the prebuilt
+  clang's `LLVMExports.cmake` references absent LLVM libs, so it's stubbed for the build and restored
+  after (compiler-rt/libcxx don't need it). Freestanding compile via `-nostdlibinc -isystem <musl>/include`.
+- **libunwind + libc++abi + libc++ (static) — DONE.** `libunwind.a` (128K), `libc++abi.a` (796K),
+  `libc++.a` (2.3M, 861 defined text symbols), built via the `runtimes` entry point against the musl
+  sysroot. libc++ needs Linux kernel UAPI headers (`atomic.cpp` → `linux/futex.h`); supplied from
+  AOSP's **sanitized** headers (Apache-2.0/BSD): the `bionic/libc/kernel/uapi` tree + the
+  `android/uapi` overlay (which carries `linux/compiler.h`) — not the GPL-2.0 originals.
+
+**The whole `aarch64-linux-musl` host LLVM runtime set is built (3.6 MB total).** Remaining B2 work is
+now purely *consumption*: drop this set under the `clang-r450784d/.../lib/linux/aarch64-linux-musl/`
+path the toolchain resolves (mirroring the `x86_64-linux-musl` layout), apply `soong-musl-arm64.patch`,
+and build ART for `linux_musl_arm64`. Then `tools/assemble-arm64-art.sh` (swap the `linux_bionic_arm64`
+glob for `linux_musl_arm64`) yields a single-libc `ACL_ART_HOME` that `acl run --vm=art` can `dlopen`
+on the Pi without the two-libc SIGTRAP.
 
 **Strategic fork this exposes:** B2's remaining cost is an **LLVM-runtime port** (llvm sync + a
 runtimes cross-build for a host triple no one has shipped). Meanwhile the **bionic** arm64 ART

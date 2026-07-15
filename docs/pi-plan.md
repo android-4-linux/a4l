@@ -137,12 +137,22 @@ compiler-rt's `clang_rt.crtbegin`/`crtend`, and the clang prebuilt ships the who
 **only for the host triples it was built for** — `x86_64-linux-musl` has **90** runtime files
 (crt + builtins + libc++ + libunwind), `aarch64-linux-musl` has **0** (as does `aarch64-linux-gnu`),
 and `toolchain/llvm-project` is not synced. So finishing B2 is **not** "generate two crt objects" — it
-is **building the whole LLVM runtime set for the `aarch64-linux-musl` host** (sync `llvm-project`; run
-its compiler-rt + libcxx/libcxxabi/libunwind runtimes build for that triple, the way AOSP produces the
-x86_64-linux-musl set). No in-tree shortcut. Then ART builds on the toolchain and
-`assemble-arm64-art.sh` (swap the `linux_bionic_arm64` glob → `linux_musl_arm64`) yields a single-libc
-`ACL_ART_HOME`. The AOSP tree was reverted after the spike (the bp2build map change fails golden tests
-on a normal `m`); `tools/aosp/b2-musl-arm64/` preserves the work.
+is **building the whole LLVM runtime set for the `aarch64-linux-musl` host** (compiler-rt +
+libcxx/libcxxabi/libunwind for that triple, the way AOSP produces the x86_64-linux-musl set).
+
+**LLVM-RUNTIME PORT DONE (2026-07-15).** Built the complete `aarch64-linux-musl` host runtime set with
+the prebuilt clang (14.0.6) against a musl-arm64 sysroot, all captured in
+`tools/aosp/b2-musl-arm64/build-aarch64-musl-runtimes.sh`: **compiler-rt** `clang_rt.crtbegin/crtend`
++ a 251-object `libclang_rt.builtins-aarch64.a` (verified `__clear_cache` present — ART JIT needs it),
+plus **`libunwind.a` + `libc++abi.a` + `libc++.a`** (2.3 MB, 861 symbols) — 3.6 MB total. Sysroot from
+`external/musl` (`configure`/`make install-headers`, arch-generated `bits/alltypes.h`) + AOSP's
+**sanitized** kernel UAPI headers (Apache-2.0/BSD, not the GPL-2.0 originals). cmake wrinkles handled:
+`CMAKE_POLICY_VERSION_MINIMUM=3.5` for cmake-4-vs-LLVM-14, and the prebuilt clang's incomplete
+`LLVMExports.cmake` stubbed-then-restored. **Remaining B2 work is now pure consumption:** drop the set
+under the clang prebuilt's `.../aarch64-linux-musl/` path, apply `soong-musl-arm64.patch`, build ART for
+`linux_musl_arm64`, then `assemble-arm64-art.sh` (swap the `linux_bionic_arm64` glob → `linux_musl_arm64`)
+yields a single-libc `ACL_ART_HOME`. The AOSP tree was reverted after the Soong spike (the bp2build map
+change fails golden tests on a normal `m`); `tools/aosp/b2-musl-arm64/` preserves everything.
 
 **Decision point (B2 LLVM-runtime port vs. split-process).** The spike reframes P-B as a fork, because
 the **bionic** arm64 ART *already builds and runs natively on the Pi* (M2):
