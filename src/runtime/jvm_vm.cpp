@@ -1133,6 +1133,10 @@ class JniVm : public Vm {
         env_->CallStaticVoidMethod(boot, att, view);
       if (env_->ExceptionCheck() == JNI_TRUE) env_->ExceptionClear();
       env_->DeleteLocalRef(boot);
+    } else if (env_->ExceptionCheck() == JNI_TRUE) {
+      // HostBootstrap is absent on the JVM backend (only the host-ART path provides it); the failed
+      // FindClass left a pending NoClassDefFoundError that would otherwise poison the traversal.
+      env_->ExceptionClear();
     }
 
     // GPU present: drive the Choreographer-pumped present loop directly — its per-frame
