@@ -21,6 +21,13 @@ plus acl's `libacl_graphics_jni.so` / `libsoundpool.so` and the framework jars �
 **arm64 Linux host** target. Everything else (Skia, Vulkan/dma-buf, Wayland, PipeWire, the OAT
 cache) is available or tractable on a Pi; the ART lift is the critical path.
 
+**RESULT (2026-07-15, on a real Pi 4 / trixie, all artifacts host-built, nothing compiled on the
+device):** the arm64 ART *builds* and *runs natively* — but the only stock arm64 host ART is
+**bionic**, and **a glibc `acl` cannot `dlopen` a bionic `libart.so`** (SIGTRAP at load — two libcs
+can't coexist when bionic's can't be cold-loaded by glibc's loader). So the end state requires a
+**single-libc arm64 host ART (B2: a glibc/musl arm64 Soong toolchain)** or a split ART process.
+The **`--vm=jvm` OpenJDK-arm64 fallback works end-to-end on the Pi today** (M1). Details in §P-B / §2a.
+
 A `--vm=jvm` (ADR-0001 fallback, stock OpenJDK-arm64) path gets *something* running with no ART
 build, at reduced fidelity — useful for early bring-up, not the end state (§4).
 
@@ -81,9 +88,12 @@ Original task (now satisfied by the above): confirm the acl C++ core compiles cl
 - **Gap:** verify no x86-only intrinsics/`-m` flags leaked into any module's `meson.build`
   (none expected — the code is portable C++23).
 
-### P-B. Host ART for arm64-Linux (the critical path)
+### P-B. Host ART for arm64-Linux (the critical path) — ⚠️ ANSWERED: B1 ruled out, B2 required
 Produce an AOSP host runtime that runs *on the Pi* (arm64), mirroring today's glibc
-`out/host/linux-x86`. **Feasibility spike (2026-07-15) — the shape is harder than first assumed:**
+`out/host/linux-x86`. **Feasibility spike (2026-07-15) — the shape is harder than first assumed,
+and the coexistence question is now settled on hardware (see the two 2026-07-15 findings at the end
+of this section): the stock `linux_bionic-arm64` ART builds and runs, but a glibc `acl` cannot load
+it in-process — B2 (single-libc arm64 host ART) is the required end-state.**
 
 AOSP registers host toolchains for these OS/arch pairs only
 (`build/soong/cc/config/*.go`, `registerToolchainFactory`):
@@ -167,8 +177,29 @@ crash symbols; stripped is far smaller.)
   (cross-targeting arm64) over the boot classpath jars to emit `boot.art` manually — OR skip it: acl
   already defaults to imageless `-Xint` when `ACL_ART_BOOT_IMAGE` is unset, so a *first* arm64 boot
   needs no boot image (just slower). The boot jars are DEX/Java = arch-independent (reuse the x86 ones).
-- **Then:** wire `ACL_ART_HOME` at the arm64 tree and boot it under acl's embedding seam — where the
-  libc-coexistence question gets its empirical answer.
+- **NATIVE-on-Pi spike done (2026-07-15) — arm64 ART runs on real silicon.** The assembled
+  `ACL_ART_HOME` tree was scp'd to a Debian trixie Pi 4 and the arm64 `dex2oats` ran **natively (no
+  qemu)** — same ART-runtime init + usage as under emulation, exit 0. The emulation-only caveat is
+  retired: the `linux_bionic-arm64` ART executes on real Pi hardware.
+- **COEXISTENCE ANSWERED (2026-07-15) — B1 fails at load; the arm64 host ART must be single-libc
+  (B2).** A host-built arm64 `acl` (Debian trixie arm64 container, glibc — the same build that runs
+  on the Pi) was run on the Pi as `acl run hello.apk --vm=art`. It parsed the APK/manifest, then
+  **SIGTRAP (exit 133)** the instant `ArtVm::create_java_vm` called `dlopen(libart.so)`
+  (`jvm_vm.cpp:2128`). gdb backtrace: **glibc's** `ld-linux-aarch64.so.1` cold-loads the bionic
+  `libart.so`+`libc.so`; when bionic libc's initializer runs it calls the bionic linker stub
+  `ld-android.so` and traps — the bionic C runtime cannot self-initialize under a foreign (glibc)
+  loader (no bionic TLS/linker rendezvous). `info sharedlibrary` shows the root cause directly:
+  **two libcs mapped in one process** — glibc `libc.so.6` (acl/Wayland/PipeWire) *and* bionic
+  `libc.so` (ART). This is the crux the whole Pi exercise targeted, now settled on real hardware:
+  **you cannot `dlopen` the bionic host ART into a glibc `acl` process.** So:
+  - **B1 (stock `linux_bionic-arm64` in-process) is ruled out** for the single-process model. It could
+    only work split-process (ART in its own all-bionic process, IPC to a glibc render/audio process)
+    — a large architectural change.
+  - **B2 (add a glibc or musl arm64 host `ToolchainFactory` to Soong) is the recommended end-state** —
+    a single-libc arm64 ART that coexists with the Pi's glibc libs exactly as today's x86 host does.
+    musl-arm64 is likely the lighter lift than glibc-arm64; both require adding the arm64 variant that
+    AOSP currently ships only for x86 (see the toolchain matrix above).
+  - **`--vm=jvm` (OpenJDK arm64) remains the working fallback today** (ADR-1) — validated below.
 
 ### P-C. GPU / Vulkan dma-buf bring-up
 acl re-owns `android.graphics` on Skia + a Vulkan dma-buf present loop (ADR-0004). On a Pi that is
@@ -204,34 +235,37 @@ painfully slow to start.
 
 ## 2a. Pi bring-up runbook (hardware in hand)
 
-Ordered so each milestone is independently demonstrable and risk rises last. Everything a Pi needs
-that can be pre-built off-Pi already is (P-A/P-B done); the Pi work is native build + assembly + the
-coexistence test.
+**Build discipline: everything is built *host-side*; the Pi only runs pre-built artifacts** (no
+compiler is invoked on the device). The arm64 `acl` binary is produced in a Debian trixie arm64
+container on the x86 host (emulated) — trixie-in-container == trixie-on-Pi, so the binary links
+against the same glibc lib versions the Pi carries; scp it over and run. The three milestones below
+are all **DONE (2026-07-15)** on a real Pi 4 (trixie), executed exactly this way.
 
-**M1 — acl on the Pi via OpenJDK (`--vm=jvm`), low risk.** Proves the *desktop-side* stack on real
-hardware without any bionic ART. **The reference Pi runs Debian/RPi-OS trixie — the exact toolchain
-(g++ 14.2, meson ≥ 1.3) the off-Pi container build was validated against**, so no pip-meson
-workaround and no compiler caveat (those were only for stock Bookworm). Run `tools/pi-build.sh`
-(apt deps + `meson setup build && meson compile`), then `acl run app.apk --vm=jvm --present`.
-Validates Wayland (labwc/Wayfire) + Mesa V3DV + PipeWire + input end-to-end on the Pi. Gaps that
-surface here are P-C (V3DV dma-buf modifiers) and perf, not ART.
+**M1 — acl on the Pi via OpenJDK (`--vm=jvm`) — ✅ DONE.** Host-built arm64 `acl` (11 MB, trixie
+container) scp'd to the Pi; `acl run hello.apk --vm=jvm --main=Hello` ran end-to-end: DEX→JVM
+translation (2 methods, 0 stubbed), OpenJDK-21 arm64 booted, static `main()` executed, exit 0. The
+binary's `NEEDED` set (`libfmt.so.10`, `libjvm.so`, `libpipewire-0.3`, `libsdbus-c++`, …) all resolve
+on the Pi (point `LD_LIBRARY_PATH` at the JDK's `lib/server` for the `libjvm.so` `NEEDED`). Proves the
+host-build→copy→run model and the ADR-1 fallback on real silicon. (A full `--present` Wayland/V3DV/
+PipeWire pass is P-C; needs a compositor session on the Pi's display.)
 
-**M2 — stand up the arm64 host ART, boot it natively.** Off-Pi: `tools/assemble-arm64-art.sh`
-produces a `linux_bionic-arm64` `ACL_ART_HOME` tree (37 libs + `dex2oats` + boot jars, ~37 MB
-stripped) — scp it to the Pi. On the Pi: `export ACL_ART_HOME=<tree>` and confirm the bionic-arm64
-ART boots natively (no qemu) — e.g. a static-`main` DEX under `acl run --vm=art` imageless (acl
-defaults to `-Xint` with no `ACL_ART_BOOT_IMAGE`, so no boot image needed first). This retires
-"does the arm64 ART run on real silicon" (we only proved it under emulation off-Pi).
+**M2 — arm64 host ART boots natively — ✅ DONE.** `tools/assemble-arm64-art.sh` produced the
+`linux_bionic-arm64` `ACL_ART_HOME` tree (37 libs + `dex2oats` + boot jars, ~37 MB stripped) off-Pi;
+scp'd over. On the Pi, `dex2oats` ran **natively (no qemu)** — initialized ART's runtime + parsed its
+command line, exit 0. Retires "does the arm64 ART run on real silicon" — it does.
 
-**M3 — `--vm=art` full path: the bionic-vs-glibc coexistence crux.** Build `libacl_graphics_jni.so`
-for `linux_bionic_arm64` (Soong, in the AOSP tree — watch for Skia-arm64 availability) + build acl
-itself on the Pi (glibc). Run `acl run app.apk --vm=art --present`. This is the moment a **glibc**
-acl process `dlopen`s the **bionic** `libart.so` and then a **glibc** Vulkan/Wayland/PipeWire lib —
-the make-or-break test. Likely-OK because host-bionic libs carry their own bionic runtime (libart's
-NEEDED set is all bionic `libc/libc++/...`), so the two libcs don't share symbols; the risk is the
-JNI boundary (memory allocated on one side freed on the other) and TLS. If it holds → B1 is the
-answer. If it fights → B2 (add a glibc/musl arm64 Soong toolchain so the whole process is one libc)
-or split ART into its own process + IPC. **This is the one question no off-Pi spike can answer.**
+**M3 — `--vm=art` coexistence crux — ✅ ANSWERED: B1 fails.** `acl run hello.apk --vm=art` on the Pi
+parsed the APK then **SIGTRAP (exit 133)** at `dlopen(libart.so)` (`create_java_vm`, `jvm_vm.cpp:2128`).
+gdb: **glibc's** `ld-linux-aarch64.so.1` cold-loads bionic `libart.so`+`libc.so`; bionic libc's
+initializer calls the bionic linker stub `ld-android.so` and traps — the bionic C runtime cannot
+self-initialize under glibc's loader. `info sharedlibrary` confirms **two libcs in one process**
+(glibc `libc.so.6` + bionic `libc.so`). The earlier "likely-OK because the two libcs don't share
+symbols" guess was **wrong**: the problem isn't symbol collision, it's that bionic libc *can't be
+cold-loaded by a foreign loader at all* (TLS/linker-rendezvous). **B1 (stock `linux_bionic-arm64`
+in-process) is ruled out.** Forward path: **B2** — a single-libc arm64 host ART (add a glibc/musl
+arm64 Soong `ToolchainFactory`; musl likely lighter) — or split ART into its own all-bionic process
+with IPC to the glibc render/audio process. `--vm=jvm` (M1) is the working interim. **This was the one
+question no off-Pi spike could answer; it is now answered on hardware.**
 
 ## 3. What already works in acl's favor
 - **arm64 is first-class**: cross files exist; the automotive targets (RK3588, SA8155P) are arm64.
