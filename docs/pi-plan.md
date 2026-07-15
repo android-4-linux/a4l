@@ -45,8 +45,24 @@ app. General View/Compose apps will run but be slow on Pi 4.
 
 Each phase is independently landable; later ones depend on earlier ones only where noted.
 
-### P-A. Core cross-build (low risk, do first)
-Confirm the acl C++ core compiles clean for arm64 — independent of ART.
+### P-A. Core cross-build (low risk, do first) — ✅ DONE (2026-07-15)
+**Result:** a full arm64 `acl` **compiles, links, and runs** (under qemu-aarch64 emulation) in a
+Debian **trixie** (g++ 14.2, full C++23) container with the stock arm64 dev packages — PipeWire,
+FFmpeg/SoundPool, Wayland, xkbcommon, sdbus-c++/net, fmt, zlib all found; the JVM backend also
+enabled (OpenJDK 21 arm64). Only non-code fix needed: install a JDK for `jni.h` (meson's `java
+found: NO` otherwise; the 27 non-JNI objects compiled clean regardless). **The C++ core is
+arm64-clean.** Skia + wcs gate OFF (not in the container), so gfx/wm build reduced — the real
+graphics path is P-C. Reproduce: `podman run --platform linux/arm64 debian:trixie`, install the
+P-A deps + `default-jdk-headless`, `meson setup b /src -Dtests=false && meson compile -C b`.
+
+**Pi-4 target compiler — characterized (Bookworm, arm64 container):** a full arm64 `acl` also
+**builds and runs with stock Bookworm's g++ 12.2 and fmt 9.1** (rc=0) — so acl's C++23 usage does
+NOT need g++13+. The ONE stock-Bookworm blocker is **meson 1.0.1 < the required 1.3.0**: install a
+newer meson (`pip3 install --break-system-packages 'meson>=1.3'`, or bookworm-backports) and the
+stock g++12 toolchain compiles acl cleanly. Net: **Pi 4 (Bookworm) can build acl from stock apt
+packages + a pip meson** — no compiler upgrade required.
+
+Original task (now satisfied by the above): confirm the acl C++ core compiles clean for arm64.
 - Add `cross/pi4.ini` (copy `rk3588.ini`; `cpu = 'cortex-a72'`, point `sysroot` at a Pi OS
   Bookworm sysroot). A Pi 5 build reuses it with `cpu = 'cortex-a76'`.
 - `meson setup build-pi4 --cross-file cross/pi4.ini` then `meson compile -C build-pi4`. The host-ART
