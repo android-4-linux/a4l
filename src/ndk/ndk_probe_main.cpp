@@ -157,6 +157,18 @@ static bool run_realvm(acl::ndk::BionicRuntime& rt, const char* so_path) {
 }
 #endif  // ACL_HAVE_JNI
 
+// Mappings currently owned by the process. An attached thread that never gave its TCB back leaves
+// two behind, so this is how the churn loop below sees a leak.
+static std::size_t count_mappings() {
+  std::FILE* f = std::fopen("/proc/self/maps", "r");
+  if (f == nullptr) return 0;
+  std::size_t lines = 0;
+  for (int c; (c = std::fgetc(f)) != EOF;)
+    if (c == '\n') ++lines;
+  std::fclose(f);
+  return lines;
+}
+
 // Thread mode: attach a SECOND thread to bionic and run bionic code as that thread.
 //
 // This is the whole point of attach_current_thread: bionic created no TCB for this thread (glibc
@@ -207,7 +219,34 @@ static bool run_thread_selftest(acl::ndk::BionicRuntime& rt, void* h) {
     ok = answer == 42 && tid == kernel_tid && self_ok;
   });
   worker.join();
-  return ok;
+  if (!ok) return false;
+
+  // Churn: attach and exit more threads than the fs-pair table has slots, and more than once, so
+  // both halves of the release path are exercised — the table slot must be reused (an append-only
+  // table aborts partway through) and the thread's TLS block + thread struct must be unmapped (a
+  // leak shows up as two mappings per thread, i.e. hundreds). This is the whole reason attach
+  // registers a glibc key destructor: bionic never runs a thread-exit path for a thread it did
+  // not create.
+  const std::size_t maps_before = count_mappings();
+  constexpr int kChurn = 300;  // > kMaxAttached (256) in bionic_runtime.cpp
+  bool churn_ok = true;
+  for (int i = 0; i < kChurn && churn_ok; ++i) {
+    std::thread t([&] {
+      std::string why;
+      if (rt.attach_current_thread(&why) == 0) { churn_ok = false; return; }
+      acl::ndk::BionicRuntime::RunScope scope(rt);
+      if (reinterpret_cast<int (*)(void*, void*)>(native_answer)(nullptr, nullptr) != 42)
+        churn_ok = false;
+    });
+    t.join();
+  }
+  const std::size_t maps_after = count_mappings();
+  // Each leaked thread would add its TLS block + thread struct; glibc's own stack caching moves
+  // this by a few either way, so allow slack while still catching a real leak (~600).
+  const bool no_leak = maps_after <= maps_before + 32;
+  std::printf("acl-ndk-probe: churned %d attach/exit cycles; mappings %zu -> %zu %s\n",
+              kChurn, maps_before, maps_after, (churn_ok && no_leak) ? "(PASS)" : "(FAIL)");
+  return churn_ok && no_leak;
 }
 
 int main(int argc, char** argv) {

@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <cstdarg>
+#include <mutex>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -148,14 +149,39 @@ FsPair g_fs_pairs[kMaxAttached];
 std::atomic<int> g_fs_pair_count{0};
 
 void register_fs_pair(std::uintptr_t bionic_fs, std::uintptr_t glibc_fs) {
+  // Reuse a slot a detached thread left behind before growing: threads come and go, and an
+  // append-only table would run out under any thread churn. Only the owning thread clears its own
+  // entry, so a reader that matched `bionic_fs` cannot have it freed underneath — it is that
+  // thread doing the reading.
+  const int n = g_fs_pair_count.load(std::memory_order_acquire);
+  for (int i = 0; i < n && i < kMaxAttached; ++i) {
+    std::uintptr_t expected = 0;
+    if (g_fs_pairs[i].bionic_fs.load(std::memory_order_relaxed) != 0) continue;
+    g_fs_pairs[i].glibc_fs = glibc_fs;  // must be visible before the entry is published
+    if (g_fs_pairs[i].bionic_fs.compare_exchange_strong(expected, bionic_fs,
+                                                        std::memory_order_release,
+                                                        std::memory_order_relaxed))
+      return;
+  }
   const int i = g_fs_pair_count.fetch_add(1, std::memory_order_relaxed);
   if (i >= kMaxAttached) {
-    log::e(kTag, "more than {} threads attached to bionic; cannot track this one's glibc %fs",
+    log::e(kTag, "more than {} threads attached to bionic at once; cannot track this one's glibc %fs",
            kMaxAttached);
     std::abort();  // an untracked thread would up-call onto another thread's TLS
   }
   g_fs_pairs[i].glibc_fs = glibc_fs;
   g_fs_pairs[i].bionic_fs.store(bionic_fs, std::memory_order_release);  // publishes the entry
+}
+
+// Called from the exiting thread's own destructor, before its TCB is unmapped — so the address
+// cannot be recycled by a later mmap while a stale entry still names it.
+void unregister_fs_pair(std::uintptr_t bionic_fs) {
+  const int n = g_fs_pair_count.load(std::memory_order_acquire);
+  for (int i = 0; i < n && i < kMaxAttached; ++i)
+    if (g_fs_pairs[i].bionic_fs.load(std::memory_order_acquire) == bionic_fs) {
+      g_fs_pairs[i].bionic_fs.store(0, std::memory_order_release);  // frees the slot for reuse
+      return;
+    }
 }
 
 std::uintptr_t glibc_fs_for(std::uintptr_t bionic_fs) {
@@ -170,6 +196,39 @@ std::uintptr_t glibc_fs_for(std::uintptr_t bionic_fs) {
 // Entered under bionic %fs (from the bionic .so); restore glibc for the real call, then bionic.
 // Sets the *constant* glibc/bionic %fs (not a save/restore), which composes correctly under JNI
 // re-entrancy with the down-call RunScope (up-calls always originate in bionic, down-calls in glibc).
+// ── Releasing an attached thread ─────────────────────────────────────────────────────────────
+// An attached thread must give its TCB back when it exits, or a process with any thread churn
+// (ART's pools) grows without bound. Bionic cannot tell us: this thread was never one of its own,
+// so it will not run bionic's thread-exit path, and __libc_register_thread_exit_callback only
+// fires for threads bionic created. glibc can: a pthread key destructor runs ON the exiting
+// thread, which is exactly where its bionic TCB has to be dismantled.
+//
+// What this CANNOT free — bionic's own per-thread dynamic-TLS blocks. If the thread's native code
+// touched a dlopen'ed module's __thread variable, bionic's allocator has blocks hanging off the
+// DTV, and __free_dynamic_tls (the only thing that knows how to release them) is __LIBC_HIDDEN__.
+// See docs/ndk-scope.md.
+struct AttachedThread {
+  void* tls_block = nullptr;
+  std::size_t tls_bytes = 0;
+  void* thread_struct = nullptr;
+  std::size_t thread_bytes = 0;
+  std::uintptr_t bionic_fs = 0;
+};
+
+void release_attached_thread(void* p) {
+  auto* a = static_cast<AttachedThread*>(p);
+  // Order matters: drop the pairing first, so no up-call can be routed to a TCB that is about to
+  // be unmapped — and so a later mmap reusing the address cannot collide with a stale entry.
+  unregister_fs_pair(a->bionic_fs);
+  t_bionic_fs = 0;  // a native reaching this thread again would now attach afresh, not use freed memory
+  if (a->tls_block != nullptr) ::munmap(a->tls_block, a->tls_bytes);
+  if (a->thread_struct != nullptr) ::munmap(a->thread_struct, a->thread_bytes);
+  delete a;
+}
+
+pthread_key_t g_attached_key;
+std::once_flag g_attached_key_once;
+
 // The DTV every attached thread starts with: all-zero, so its generation is kTlsGenerationNone.
 // That makes the first dynamic-TLS access build the thread's real DTV, and stops
 // __free_dynamic_tls's chain-walk here rather than passing acl's memory to bionic's allocator.
@@ -582,6 +641,20 @@ std::uintptr_t BionicRuntime::attach_current_thread(std::string* error) {
   // The up-call thunks run under bionic %fs, where this thread's glibc TLS is unreachable, so the
   // pairing has to be looked up by bionic %fs — register it before any native can up-call.
   register_fs_pair(t_bionic_fs, ndk_get_fs());
+
+  // Hand everything this thread owns to a glibc key destructor, which runs on this thread when it
+  // exits (see release_attached_thread). Failing to arm that is a leak, not a correctness problem,
+  // so it is reported rather than fatal.
+  std::call_once(g_attached_key_once, [] {
+    if (::pthread_key_create(&g_attached_key, &release_attached_thread) != 0)
+      log::w(kTag, "pthread_key_create failed; attached threads will leak their TCB at exit");
+  });
+  auto* owned = new AttachedThread{block, page_up(tls_size), thread,
+                                   page_up(ACL_BIONIC_SIZEOF_PTHREAD_INTERNAL), t_bionic_fs};
+  if (::pthread_setspecific(g_attached_key, owned) != 0) {
+    log::w(kTag, "pthread_setspecific failed; this thread will leak its bionic TCB at exit");
+    delete owned;
+  }
   log::i(kTag, "attached thread {} to bionic (tcb={:#x})", ::syscall(SYS_gettid), t_bionic_fs);
   return t_bionic_fs;
 #endif
