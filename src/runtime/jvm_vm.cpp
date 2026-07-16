@@ -2433,13 +2433,42 @@ class ArtVm final : public JniVm {
   // no-Binder ServiceManager. Runs on EVERY host-ART boot, before app code, so the normal
   // launcher-Activity flow (not just the view-host demo) gets the environment.
   void bootstrap_host_env(JNIEnv* env) {
-    jclass boot = env->FindClass("org/acl/internal/HostBootstrap");
-    if (boot == nullptr) { env->ExceptionClear(); return; }
-    if (jmethodID init = env->GetStaticMethodID(boot, "init", "()V"))
-      env->CallStaticVoidMethod(boot, init);
-    if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
-    env->DeleteLocalRef(boot);
-    log::i(kTag, "host bootstrap: main Looper + no-Binder ServiceManager ready");
+    if (jclass boot = find_class_optional(env, "org/acl/internal/HostBootstrap"); boot != nullptr) {
+      if (jmethodID init = env->GetStaticMethodID(boot, "init", "()V"))
+        env->CallStaticVoidMethod(boot, init);
+      if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
+      env->DeleteLocalRef(boot);
+      log::i(kTag, "host bootstrap: main Looper + no-Binder ServiceManager ready");
+      return;
+    }
+    // No acl helper on the classpath means the REAL framework boot classpath (P2.2/ADR-0008),
+    // where org.acl.internal.* legitimately does not exist. The main Looper still has to be
+    // prepared — an Activity constructs Handlers, and without it the app dies on "Can't create
+    // handler inside thread ... that has not called Looper.prepare()" before reaching onCreate.
+    // The framework prepares it itself on device (ActivityThread.main); here acl is the one
+    // standing in for ActivityThread, so call the framework's own entry point.
+    jclass looper = find_class_optional(env, "android/os/Looper");
+    if (looper == nullptr) return;  // a shim classpath without Looper: nothing to prepare
+    jmethodID get_main = env->GetStaticMethodID(looper, "getMainLooper", "()Landroid/os/Looper;");
+    jmethodID prepare_main = env->GetStaticMethodID(looper, "prepareMainLooper", "()V");
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+    if (get_main != nullptr && prepare_main != nullptr) {
+      // prepareMainLooper throws if one already exists, so ask first rather than lean on the throw.
+      jobject existing = env->CallStaticObjectMethod(looper, get_main);
+      if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+      if (existing == nullptr) {
+        env->CallStaticVoidMethod(looper, prepare_main);
+        if (env->ExceptionCheck() == JNI_TRUE) {
+          env->ExceptionDescribe();
+          env->ExceptionClear();
+        } else {
+          log::i(kTag, "host bootstrap: main Looper prepared (real framework classpath)");
+        }
+      } else {
+        env->DeleteLocalRef(existing);
+      }
+    }
+    env->DeleteLocalRef(looper);
   }
 
   // acl has no Binder (ADR-3): stub the ServiceManager entry point so the framework's
