@@ -35,19 +35,23 @@ import tempfile
 
 SKIP = 77  # meson interprets exit 77 as "skipped"
 
-# --worker mode: the fixture also calls the native from a NON-main thread. Only the thread that
-# bootstrapped the bionic linker has a bionic TCB, so acl must refuse — loudly and at the call.
-# Left to its own test because the refusal aborts by design. What this pins down: the refusal must
-# name the reason, and it must happen INSTEAD OF the corruption it prevents. Without the guard the
-# native returns fine and ART dies later in the GC ("Check failed: self == thread") because the
-# thread came back with the main thread's glibc %fs — i.e. reading another thread's TLS.
+# --worker mode: the fixture also calls the native from a NON-main thread — an ART thread bionic
+# never created and knows nothing about. The trampoline attaches it on first use (a hand-built
+# bionic TCB), so the native must simply WORK there, and the process must survive.
+#
+# What this really pins is the absence of the corruption this path used to cause. Before the
+# per-thread work, the worker's native returned 42 quite happily and ART then died inside the GC —
+# "Check failed: self == thread" — because the thread came back with the MAIN thread's glibc %fs,
+# so Thread::Current() (a TLS read) named the wrong thread. So: the value must be right, the
+# process must exit cleanly, and that GC check must never appear.
 WORKER_CHECKS = [
-    "WORKER: calling nativeAnswer() off the main thread",  # got as far as the call
-    "no bionic TCB",  # refused, by name (attach_current_thread exists but is not wired in yet)
+    "attached thread",                 # the trampoline attached it lazily, on first use
+    "WORKER: calling nativeAnswer() off the main thread",
+    "WORKER: nativeAnswer()=42",       # the native ran correctly on its own TCB
 ]
 WORKER_MUST_NOT = [
-    "Check failed: self == thread",   # the ART corruption the guard exists to prevent
-    "WORKER: nativeAnswer()=",        # the call must not have returned a value
+    "Check failed: self == thread",  # the ART corruption a shared/borrowed TCB used to cause
+    "no bionic TCB",                 # nothing should be refused now
 ]
 
 CHECKS = [
@@ -181,9 +185,8 @@ def main() -> int:
 
     ok = True
     if worker:
-        # The guard aborts on purpose, so a clean exit would mean it never fired.
-        if p.returncode == 0:
-            sys.stderr.write("FAIL: expected the off-main-thread native call to be refused\n")
+        if p.returncode != 0:
+            sys.stderr.write(f"FAIL: off-main-thread native call: acl exit {p.returncode}\n")
             ok = False
         for c in WORKER_CHECKS:
             if c not in out:
@@ -191,7 +194,7 @@ def main() -> int:
                 ok = False
         for c in WORKER_MUST_NOT:
             if c in out:
-                sys.stderr.write(f"FAIL: '{c}' present — the guard did not fire in time\n")
+                sys.stderr.write(f"FAIL: '{c}' present\n")
                 ok = False
     else:
         if p.returncode != 0:
@@ -205,8 +208,8 @@ def main() -> int:
         sys.stderr.write("--- captured output ---\n" + out + "\n")
         return 1
     if worker:
-        sys.stdout.write("OK: a bionic native called off the main thread is refused by name, "
-                         "instead of corrupting the caller's TLS\n")
+        sys.stdout.write("OK: an ART thread attached itself to bionic on first native call; "
+                         "nativeAnswer()=42 off the main thread, no TLS corruption\n")
     else:
         sys.stdout.write("OK: app's bionic lib/x86_64/*.so loaded in-process on host ART; "
                          "JNI round-trip answer()=4250 (RegisterNatives, and NOT the exported 9999 "
