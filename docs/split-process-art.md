@@ -118,9 +118,23 @@ art-host; `present_dmabuf_loop` + input stay in acl.
   (`libicu_jni`/`libjavacore`/`libopenjdk`/`libandroidio` + closure, `linux_bionic_arm64`) are not in
   `libart`'s NEEDED set — added to `lib64`; and the i18n/conscrypt boot jars must sit under
   `apex/<name>/javalib/` (both fixes folded into `tools/assemble-arm64-art.sh`).
-- **S2 — one frame across the boundary.** art-host renders a solid-color (then a real View) dma-buf and
-  sends `PresentFrame`; acl's `present_dmabuf_loop` puts it on screen via Wayland. First pixels on the
-  Pi from a real app under host ART.
+- **S2 — one frame across the boundary. (in progress)** art-host renders a solid-color (then a real
+  View) dma-buf and sends `PresentFrame` (fd via `SCM_RIGHTS`); acl imports it and puts it on screen.
+  First pixels on the Pi from a real app under host ART. **Present seam wired** (`wm/present_sink.h`):
+  `SplitVm` routes each IPC `PresentFrame` to a `PresentSink` as an `ExternalFrame`
+  (fd + w/h/fourcc/modifier/stride/damage). Two display backends slot behind it (Null today, for
+  plumbing bring-up):
+  - **drm-cxx KMS scanout** — the **appliance / automotive** path (ADR-0004; plan.md drm-cxx allocator
+    lineage). `drm::fmt::ScanoutBuffer::import_dmabuf(fd, {w,h,fourcc,modifier,{stride,offset}})` wraps
+    the art-host dma-buf as a KMS framebuffer, and `drm::present::ScanoutBackend::present()` does one
+    atomic commit **straight to the display — no compositor**. This is the natural fit for an in-car /
+    embedded panel where acl is the sole client, and it is exactly what drm-cxx (MIT, `app/drm-cxx`) is
+    built for. Vendored as an optional meson subproject (`drm_cxx_dep`; deps libdrm/gbm/libinput/
+    libudev/xkbcommon); the sink compiles out to Null when absent so acl always links.
+  - **Wayland** (`zwp_linux_dmabuf_v1`) — the **desktop** path, reusing `wm/dmabuf_presenter`'s import
+    to attach the external fd as a `wl_buffer` (works alongside a running compositor, e.g. the Pi's
+    labwc). The render side may allocate via drm-cxx's GBM producer or Vulkan export (`gfx_vk`).
+  Backend chosen by `ACL_PRESENT_SINK` (`null`|`wayland`|`drm-scanout`).
 - **S3 — input roundtrip.** Wayland pointer/key in acl → `Input` → injected into the View in art-host;
   a tappable UI responds.
 - **S4 — audio.** SoundPool/AudioTrack PCM → shm ring → PipeWire sink in acl.

@@ -19,6 +19,7 @@
 
 #include "ipc/ipc.h"
 #include "log/log.h"
+#include "wm/present_sink.h"
 
 extern char** environ;
 
@@ -121,7 +122,11 @@ class SplitVm final : public Vm {
     if (rc != 0)
       return Error::of(Status::RuntimeError, "split: posix_spawn failed: " + std::string(std::strerror(rc)));
 
-    // Drive the IPC: stream Log output to our stdout until the child says Bye.
+    // The present sink consumes the dma-buf frames art-host renders (S2). Null until a display
+    // backend (Wayland / drm-cxx scanout) is wired; selected via ACL_PRESENT_SINK.
+    auto sink = wm::make_present_sink(wm::default_present_backend());
+
+    // Drive the IPC: stream Log output to our stdout, route PresentFrames to the sink, until Bye.
     int child_code = -1;
     ipc::Received r;
     while (acl_end.recv(r)) {
@@ -133,6 +138,15 @@ class SplitVm final : public Vm {
           std::fwrite(r.extra.data(), 1, r.extra.size(), stdout);
           std::fflush(stdout);
           break;
+        case ipc::MsgType::PresentFrame: {
+          const auto& p = r.msg.present;
+          wm::ExternalFrame f{r.fd0,       p.w,        p.h,        p.drm_format, p.modifier,
+                              p.stride,    p.offset,   p.damage_x, p.damage_y,   p.damage_w,
+                              p.damage_h,  r.fd1};
+          sink->present(f);  // takes the fds (closes them)
+          r.fd0 = r.fd1 = -1;
+          break;
+        }
         case ipc::MsgType::Bye:
           child_code = static_cast<int>(r.msg.u32);
           break;
