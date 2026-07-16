@@ -12,9 +12,15 @@
 
 #include <elf.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+// Generated from the private headers of the bionic acl stages (tools/gen-bionic-offsets.sh) —
+// attach_current_thread lays out a bionic TCB with these. Defines ACL_BIONIC_OFFSETS_AVAILABLE 0
+// when no AOSP was present at build time, and attach then compiles out.
+#include "bionic_offsets.h"
 
 #include <cstdarg>
 #include <cstdlib>
@@ -37,7 +43,22 @@
 namespace acl::ndk {
 namespace {
 constexpr std::string_view kTag = "acl.ndk";
+
+// Reached when bionic code is about to run on a thread that has no bionic TCB — from the down-call
+// trampoline (which checks the slot before swapping, so it is still on the caller's glibc %fs, and
+// plain host calls are safe here) or from RunScope. It must not return. Continuing would run bionic
+// code on another thread's TCB and, worse, return with THAT thread's glibc %fs installed, detaching
+// the caller from its own TLS. Not a theoretical worry: ART's Thread::Current() is a TLS read, so
+// the process dies later inside the GC ("Check failed: self == thread") with nothing pointing back
+// here. Fail at the call instead.
+[[noreturn]] void acl_ndk_unattached() {
+  log::e(kTag,
+         "bionic code reached on a thread with no bionic TCB. Threads must be attached first "
+         "(BionicRuntime::attach_current_thread; see docs/ndk-scope.md). Aborting rather than "
+         "corrupting this thread's TLS.");
+  std::abort();
 }
+}  // namespace
 
 bool is_bionic_elf(const char* path) {
   // Bionic libs DT_NEEDED "libc.so"; glibc libs DT_NEEDED "libc.so.6". That soname is the reliable
@@ -99,6 +120,27 @@ namespace {
 constexpr std::size_t kPage = 4096;
 std::uintptr_t page_down(std::uintptr_t v) { return v & ~(std::uintptr_t{kPage} - 1); }
 std::uintptr_t page_up(std::uintptr_t v) { return page_down(v + kPage - 1); }
+
+// ── Per-thread bionic thread pointer ─────────────────────────────────────────────────────────
+// A bionic TCB belongs to ONE thread (it holds errno, pthread_self, pthread TLS, the DTV), so a
+// thread running bionic code needs its own — see BionicRuntime::attach_current_thread. This slot
+// holds the calling thread's bionic TCB, or 0 when the thread has never been attached. The
+// down-call trampoline reads it *before* swapping (i.e. still on the caller's glibc %fs) via a
+// constant %fs-relative displacement — hence initial-exec, which guarantees the slot lives in the
+// static TLS block at a fixed offset from the thread pointer for EVERY thread. (Local-exec would
+// do as well here; initial-exec states the requirement explicitly and survives this TU moving
+// into a shared library.)
+__thread __attribute__((tls_model("initial-exec"))) std::uintptr_t t_bionic_fs = 0;
+std::int64_t g_tls_disp = 0;  // &t_bionic_fs - glibc %fs base; constant across threads
+
+// The DTV every attached thread starts with: all-zero, so its generation is kTlsGenerationNone.
+// That makes the first dynamic-TLS access build the thread's real DTV, and stops
+// __free_dynamic_tls's chain-walk here rather than passing acl's memory to bionic's allocator.
+// One process-wide instance, exactly as bionic's own `static const TlsDtv zero_dtv`. Bytes, not a
+// struct: the layout belongs to bionic, and its size is measured, not assumed.
+#if ACL_BIONIC_OFFSETS_AVAILABLE
+alignas(16) char g_zero_dtv[ACL_BIONIC_SIZEOF_TLSDTV] = {};
+#endif
 
 std::uintptr_t get_fs() {
   std::uintptr_t v = 0;
@@ -232,7 +274,7 @@ constexpr int kBionicSignals[] = {SIGABRT, SIGBUS, SIGFPE,  SIGILL, SIGSEGV,
 // Bootstrap the linker; on success fill the loader fn ptrs and bionic %fs. Returns true/false.
 // (%fs — and the host's signal state, see below — are restored to glibc/host before returning.)
 bool bootstrap_x86_64(const BionicConfig& cfg, std::uintptr_t* out_bionic_fs, void** out_dlopen,
-                      void** out_dlsym, void** out_dlerror) {
+                      void** out_dlsym, void** out_dlerror, void** out_shared_globals) {
   Mapped lk;
   if (!map_pie(cfg.linker.c_str(), lk)) return false;
   const std::uintptr_t init_addr = find_sym(cfg.linker.c_str(), lk.base, "__dl___linker_init");
@@ -277,6 +319,10 @@ bool bootstrap_x86_64(const BionicConfig& cfg, std::uintptr_t* out_bionic_fs, vo
   *out_dlopen = dlopen_a;
   *out_dlsym = dlsym_a;
   *out_dlerror = dlerror_a;
+  // The linker's view of libc's shared globals — the static TLS layout + module table that
+  // attach_current_thread needs. libc itself imports this symbol from the linker.
+  *out_shared_globals = reinterpret_cast<void*>(
+      find_sym(cfg.linker.c_str(), lk.base, "__loader_shared_globals"));
   return true;
 }
 
@@ -288,15 +334,15 @@ void ndk_set_fs(std::uintptr_t v) { set_fs(v); }
 std::uintptr_t ndk_get_fs() { return get_fs(); }
 
 bool BionicRuntime_bootstrap(const BionicConfig& cfg, std::uintptr_t* fs, void** dlo, void** dls,
-                             void** dle) {
-  return bootstrap_x86_64(cfg, fs, dlo, dls, dle);
+                             void** dle, void** sg) {
+  return bootstrap_x86_64(cfg, fs, dlo, dls, dle, sg);
 }
 
 #else  // non-x86_64: bootstrap not yet ported (arm64 swaps TPIDR_EL0 / auxv / relocs)
 
 void ndk_set_fs(std::uintptr_t) {}
 std::uintptr_t ndk_get_fs() { return 0; }
-bool BionicRuntime_bootstrap(const BionicConfig&, std::uintptr_t*, void**, void**, void**) {
+bool BionicRuntime_bootstrap(const BionicConfig&, std::uintptr_t*, void**, void**, void**, void**) {
   return false;
 }
 
@@ -321,8 +367,8 @@ BionicRuntime* BionicRuntime::instance(const BionicConfig& cfg, std::string* err
   static BionicRuntime rt;
   rt.glibc_fs_ = ndk_get_fs();  // this (main) thread's glibc thread pointer, before bootstrap
   std::uintptr_t fs = 0;
-  void *dlo = nullptr, *dls = nullptr, *dle = nullptr;
-  if (!BionicRuntime_bootstrap(cfg, &fs, &dlo, &dls, &dle)) {
+  void *dlo = nullptr, *dls = nullptr, *dle = nullptr, *sg = nullptr;
+  if (!BionicRuntime_bootstrap(cfg, &fs, &dlo, &dls, &dle, &sg)) {
     if (error) *error = "bionic loader: linker bootstrap failed (see log)";
     return nullptr;
   }
@@ -330,15 +376,175 @@ BionicRuntime* BionicRuntime::instance(const BionicConfig& cfg, std::string* err
   rt.dlopen_fn_ = dlo;
   rt.dlsym_fn_ = dls;
   rt.dlerror_fn_ = dle;
+  rt.shared_globals_fn_ = sg;
   g_rt = &rt;
+#if defined(__x86_64__)
+  // The bootstrapping thread is attached by construction: __linker_init built it a real bionic TCB
+  // and migrated it to a permanent mapping. Record that as this thread's, and measure the slot's
+  // fixed displacement from the thread pointer for the trampolines — done here, on this thread,
+  // under its glibc %fs (ndk_get_fs() is its glibc base, == rt.glibc_fs_).
+  t_bionic_fs = fs;
+  g_tls_disp = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(&t_bionic_fs)) -
+               static_cast<std::int64_t>(rt.glibc_fs_);
+  if (g_tls_disp < INT32_MIN || g_tls_disp > INT32_MAX) {
+    if (error) *error = "bionic loader: TLS slot displacement does not fit a disp32";
+    g_rt = nullptr;
+    return nullptr;  // the trampoline encodes it as a disp32; refuse rather than emit a wrong one
+  }
+#endif
   log::i(kTag, "bionic linker bootstrapped in-process (fs={:#x})", fs);
   return g_rt;
 }
 
-BionicRuntime::RunScope::RunScope(BionicRuntime& rt) : saved_(ndk_get_fs()) {
-  ndk_set_fs(rt.bionic_fs_);
+void* BionicRuntime::bootstrap_thread_struct() const noexcept {
+#if defined(__x86_64__) && ACL_BIONIC_OFFSETS_AVAILABLE
+  if (bionic_fs_ == 0) return nullptr;
+  return reinterpret_cast<void**>(bionic_fs_)[ACL_BIONIC_TLS_SLOT_THREAD_ID_];
+#else
+  return nullptr;
+#endif
+}
+
+std::uintptr_t BionicRuntime::current_thread_fs() noexcept {
+#if defined(__x86_64__)
+  return t_bionic_fs;
+#else
+  return 0;
+#endif
+}
+
+// Run bionic code as THIS thread — never as the bootstrapping thread. Using rt.bionic_fs_ here
+// would hand a second thread the main thread's TCB, which is the whole hazard attach exists to
+// remove (shared errno / pthread_self / TLS keys / DTV). Attaching is explicit
+// (attach_current_thread), so an unattached thread here is a bug in acl, not something to paper
+// over by borrowing another thread's TCB.
+BionicRuntime::RunScope::RunScope(BionicRuntime&) : saved_(ndk_get_fs()) {
+  const std::uintptr_t fs = BionicRuntime::current_thread_fs();
+  if (fs == 0) acl_ndk_unattached();  // [[noreturn]]
+  ndk_set_fs(fs);
 }
 BionicRuntime::RunScope::~RunScope() { ndk_set_fs(saved_); }
+
+// ── attach-as-bionic ─────────────────────────────────────────────────────────────────────────
+// Build this thread a bionic TCB the way bionic's own __allocate_thread does, using the layout
+// measured from the staged bionic (bionic_offsets.h — never hand-copied structs; see
+// tools/gen-bionic-offsets.sh). Deliberately NOT a copy of the bootstrapping thread's block: that
+// block holds bionic_tls (pthread key_data, locale, the cleanup stack), which must not be
+// inherited, and its module TLS holds that thread's current values where a new thread needs the
+// pristine init images. So: zero, then re-init.
+std::uintptr_t BionicRuntime::attach_current_thread(std::string* error) {
+#if !defined(__x86_64__)
+  if (error) *error = "attach: only x86_64 is supported so far (arm64 TLS port pending)";
+  return 0;
+#elif !ACL_BIONIC_OFFSETS_AVAILABLE
+  if (error) *error =
+      "attach: built without bionic offsets (no AOSP at build time; see tools/gen-bionic-offsets.sh)";
+  return 0;
+#else
+  if (t_bionic_fs != 0) return t_bionic_fs;  // idempotent
+  auto fail = [&](const char* why) -> std::uintptr_t {
+    if (error) *error = why;
+    return 0;
+  };
+  if (shared_globals_fn_ == nullptr) return fail("attach: linker exposed no __loader_shared_globals");
+
+  // 1. The linker owns the authoritative layout of a static TLS block; libc reads it through the
+  //    same pointer. Reading it needs no bionic %fs — it is plain memory.
+  const auto* sg = static_cast<const char*>(
+      reinterpret_cast<void* (*)()>(shared_globals_fn_)());
+  if (sg == nullptr) return fail("attach: __loader_shared_globals returned null");
+  auto sz_at = [](const char* p, std::size_t off) { return *reinterpret_cast<const std::size_t*>(p + off); };
+  const char* layout = sg + ACL_BIONIC_OFF_SG_STATIC_TLS_LAYOUT;
+  const std::size_t tls_size = sz_at(layout, ACL_BIONIC_OFF_LAYOUT_SIZE);
+  const std::size_t tls_align = sz_at(layout, ACL_BIONIC_OFF_LAYOUT_ALIGNMENT);
+  const std::size_t off_tcb = sz_at(layout, ACL_BIONIC_OFF_LAYOUT_BIONIC_TCB);
+  const std::size_t off_tls = sz_at(layout, ACL_BIONIC_OFF_LAYOUT_BIONIC_TLS);
+  // If the offsets we were built with do not describe the bionic we loaded, these are garbage.
+  // Refuse: a bad TCB corrupts memory somewhere else rather than failing here.
+  if (tls_size == 0 || tls_size > (1u << 24) || off_tcb >= tls_size || off_tls >= tls_size ||
+      tls_align == 0 || tls_align > kPage)
+    return fail("attach: implausible static TLS layout — the staged bionic does not match the "
+                "offsets acl was built with (rebuild with the same $AOSP)");
+
+  // 2. A fresh, zeroed block (mmap is zero-filled), page-aligned, which covers any bionic
+  //    alignment up to a page.
+  void* block = ::mmap(nullptr, page_up(tls_size), PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (block == MAP_FAILED) return fail("attach: mmap of the static TLS block failed");
+  auto* blk = static_cast<char*>(block);
+
+  // 3. Seed each static module's TLS from its init image (bionic's __init_static_tls). The module
+  //    table is read without bionic's rwlock: taking it would mean calling bionic code, and this
+  //    thread has no TCB yet — that is the chicken-and-egg attach exists to break. Safe in
+  //    practice because the static modules are fixed after startup; a dlopen racing an attach
+  //    could still move the table, which is a known narrow race (docs/ndk-scope.md).
+  const char* mods = sg + ACL_BIONIC_OFF_SG_TLS_MODULES;
+  const std::size_t module_count = sz_at(mods, ACL_BIONIC_OFF_TLSMODULES_MODULE_COUNT);
+  const char* table = *reinterpret_cast<const char* const*>(mods + ACL_BIONIC_OFF_TLSMODULES_MODULE_TABLE);
+  for (std::size_t i = 0; table != nullptr && i < module_count; ++i) {
+    const char* m = table + i * ACL_BIONIC_SIZEOF_TLSMODULE;
+    const std::size_t static_offset = sz_at(m, ACL_BIONIC_OFF_TLSMODULE_STATIC_OFFSET);
+    if (static_offset == SIZE_MAX) break;  // all static modules precede the dynamic ones
+    const std::size_t init_size = sz_at(m, ACL_BIONIC_OFF_TLSMODULE_SEG_INIT_SIZE);
+    const void* init_ptr = *reinterpret_cast<const void* const*>(m + ACL_BIONIC_OFF_TLSMODULE_SEG_INIT_PTR);
+    if (init_size == 0 || init_ptr == nullptr) continue;  // .tbss: stays zero
+    if (static_offset + init_size > tls_size) {
+      ::munmap(block, page_up(tls_size));
+      return fail("attach: a TLS module's init image does not fit the block (layout mismatch)");
+    }
+    std::memcpy(blk + static_offset, init_ptr, init_size);
+  }
+
+  // 4. The thread struct. Bionic carves this out of the stack it allocates; acl did not allocate
+  //    this thread's stack, so give it its own mapping (zeroed, and never freed — see the
+  //    thread-exit gap in docs/ndk-scope.md).
+  void* thread = ::mmap(nullptr, page_up(ACL_BIONIC_SIZEOF_PTHREAD_INTERNAL), PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (thread == MAP_FAILED) {
+    ::munmap(block, page_up(tls_size));
+    return fail("attach: mmap of pthread_internal_t failed");
+  }
+  auto* thr = static_cast<char*>(thread);
+  *reinterpret_cast<pid_t*>(thr + ACL_BIONIC_OFF_PTHREAD_TID) =
+      static_cast<pid_t>(::syscall(SYS_gettid));
+  *reinterpret_cast<void**>(thr + ACL_BIONIC_OFF_PTHREAD_BIONIC_TLS) = blk + off_tls;
+  // Describe the stack this code is REALLY on — the glibc thread's — so bionic's unwinder and
+  // pthread_getattr_np see the truth rather than a stack acl never allocated.
+  void* stack_base = nullptr;
+  std::size_t stack_size = 0;
+  pthread_attr_t gattr;
+  if (::pthread_getattr_np(::pthread_self(), &gattr) == 0) {
+    ::pthread_attr_getstack(&gattr, &stack_base, &stack_size);
+    ::pthread_attr_destroy(&gattr);
+  }
+  if (stack_base != nullptr) {
+    *reinterpret_cast<void**>(thr + ACL_BIONIC_OFF_PTHREAD_ATTR + ACL_BIONIC_OFF_ATTR_STACK_BASE) = stack_base;
+    *reinterpret_cast<std::size_t*>(thr + ACL_BIONIC_OFF_PTHREAD_ATTR + ACL_BIONIC_OFF_ATTR_STACK_SIZE) = stack_size;
+    *reinterpret_cast<std::uintptr_t*>(thr + ACL_BIONIC_OFF_PTHREAD_STACK_TOP) =
+        reinterpret_cast<std::uintptr_t>(stack_base) + stack_size;
+  }
+
+  // 5. The TCB slots. On x86_64 the thread pointer IS the TCB (MIN_TLS_SLOT == 0, asserted by the
+  //    bionic-offsets test); an arm64 port must use StaticTlsLayout::offset_thread_pointer().
+  auto** tcb = reinterpret_cast<void**>(blk + off_tcb);
+  tcb[ACL_BIONIC_TLS_SLOT_SELF_] = tcb;        // x86_64 reads TLS vars through %fs:0
+  tcb[ACL_BIONIC_TLS_SLOT_THREAD_ID_] = thread;
+  tcb[ACL_BIONIC_TLS_SLOT_BIONIC_TLS_] = blk + off_tls;
+  // The stack canary is process-wide; take it from the bootstrapping thread's TCB rather than
+  // dlsym'ing __stack_chk_guard. A wrong value here would fail every bionic function's epilogue.
+  tcb[ACL_BIONIC_TLS_SLOT_STACK_GUARD_] =
+      reinterpret_cast<void**>(bionic_fs_)[ACL_BIONIC_TLS_SLOT_STACK_GUARD_];
+  // An all-zero DTV: generation 0 is kTlsGenerationNone, so the first dynamic-TLS access lazily
+  // builds this thread's real DTV, and __free_dynamic_tls's chain-walk stops here instead of
+  // handing our memory to bionic's allocator. One process-wide instance is what bionic itself
+  // does (static const TlsDtv zero_dtv). The slot points at the *generation field*, not the base.
+  tcb[ACL_BIONIC_TLS_SLOT_DTV_] = g_zero_dtv + ACL_BIONIC_OFF_TLSDTV_GENERATION;
+
+  t_bionic_fs = reinterpret_cast<std::uintptr_t>(tcb);
+  log::i(kTag, "attached thread {} to bionic (tcb={:#x})", ::syscall(SYS_gettid), t_bionic_fs);
+  return t_bionic_fs;
+#endif
+}
 
 void* BionicRuntime::load(const char* abs_path, std::string* error) {
   if (!abs_path || abs_path[0] != '/') {
@@ -416,31 +622,6 @@ WrapEnv g_wrap_env;
 WrapVM g_wrap_vm;
 std::uintptr_t g_jni_glibc_fs = 0, g_jni_bionic_fs = 0;
 
-// ── Per-thread bionic thread pointer ─────────────────────────────────────────────────────────
-// A bionic TCB belongs to ONE thread (it holds errno, pthread_self, pthread TLS, the DTV), so a
-// thread running bionic code needs its own. This slot holds the calling thread's bionic TCB, or 0
-// when the thread has never been attached. The down-call trampoline reads it *before* swapping
-// (i.e. still on the caller's glibc %fs) via a constant %fs-relative displacement — hence
-// initial-exec, which guarantees the slot lives in the static TLS block at a fixed offset from the
-// thread pointer for EVERY thread. (Local-exec would do as well here; initial-exec states the
-// requirement explicitly and survives this TU moving into a shared library.)
-__thread __attribute__((tls_model("initial-exec"))) std::uintptr_t t_bionic_fs = 0;
-std::int64_t g_tls_disp = 0;  // &t_bionic_fs - glibc %fs base; constant across threads
-
-// Called by the trampoline when a native is invoked on a thread with no bionic TCB. Runs on the
-// caller's own (glibc) %fs — nothing has been swapped yet — so plain host calls are safe here.
-// It must not return: continuing would run bionic code on another thread's TCB and, worse, return
-// with that thread's glibc %fs installed, which detaches the caller from its own TLS. That is not
-// a theoretical worry: ART's Thread::Current() is a TLS read, so the process dies later inside the
-// GC ("Check failed: self == thread") with nothing pointing back at here. Fail here instead.
-[[noreturn]] void acl_ndk_unattached() {
-  log::e(kTag,
-         "bionic native called from a thread with no bionic TCB. Per-thread attach-as-bionic is "
-         "not implemented yet (docs/ndk-scope.md): only the thread that bootstrapped the loader "
-         "(the main thread) may run app native code. Aborting rather than corrupting this "
-         "thread's TLS.");
-  std::abort();
-}
 
 // Entered under bionic %fs (from the bionic .so); restore glibc for the real call, then bionic.
 // Sets the *constant* glibc/bionic %fs (not a save/restore), which composes correctly under JNI
@@ -669,16 +850,6 @@ JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
   g_jni_glibc_fs = glibc_fs_;
   g_jni_bionic_fs = bionic_fs_;
 
-  // Attach the bootstrapping thread: give it the bionic TCB __linker_init built, and record the
-  // slot's fixed displacement from the thread pointer for the trampolines. Called on that thread,
-  // under its glibc %fs (ART's nativeLoad -> load_library), so ndk_get_fs() is its glibc base.
-  t_bionic_fs = bionic_fs_;
-  g_tls_disp = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(&t_bionic_fs)) -
-               static_cast<std::int64_t>(ndk_get_fs());
-  if (g_tls_disp < INT32_MIN || g_tls_disp > INT32_MAX) {
-    log::e(kTag, "bionic loader: TLS slot displacement {} does not fit a disp32", g_tls_disp);
-    return nullptr;  // the trampoline encodes it as a disp32; refuse rather than emit a wrong one
-  }
   g_env_tbl = *real_env->functions;  // start from the real table, then thunk every slot below
 
 #define S(N) g_env_tbl.N = w_##N

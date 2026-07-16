@@ -66,6 +66,30 @@ class BionicRuntime {
   // dlsym in a loaded handle. Runs with the thread pointer as bionic.
   void* symbol(void* handle, const char* name);
 
+  // Give the CALLING thread its own bionic TCB, so it may run bionic code. Returns the thread's
+  // bionic thread pointer (idempotent — returns the existing one if already attached), or 0 +
+  // sets `error`.
+  //
+  // A bionic TCB belongs to one thread: it holds errno, pthread_self, the pthread TLS keys and the
+  // DTV. Bionic creates one per thread it clones, but ART's threads are created by glibc, and
+  // bionic exports nothing that adopts a running thread (pthread_create always clones a new one,
+  // and its TCB builders are hidden), so acl builds the TCB the way bionic does — see
+  // docs/ndk-scope.md, and src/ndk/bionic_runtime.cpp for the steps. The internal layout comes
+  // from the generated bionic_offsets.h; when that is unavailable this fails rather than guessing.
+  //
+  // Must be called ON the thread being attached (it reads that thread's tid and stack).
+  std::uintptr_t attach_current_thread(std::string* error);
+
+  // This thread's bionic thread pointer, or 0 if it was never attached. What the down-call
+  // trampolines read to find the right TCB.
+  static std::uintptr_t current_thread_fs() noexcept;
+
+  // The bootstrapping thread's bionic thread pointer (the TCB __linker_init built) and its
+  // pthread_internal_t. Exposed so a test can assert an attached thread got its OWN of each:
+  // sharing either is the bug attach exists to prevent.
+  std::uintptr_t bootstrap_fs() const noexcept { return bionic_fs_; }
+  void* bootstrap_thread_struct() const noexcept;
+
   // Bidirectional-boundary self-test (docs/ndk-scope.md Rung 4). Calls a loaded bionic function
   // `int f(int(*cb)(int), int)` under bionic %fs, passing an internal up-call trampoline that
   // restores glibc %fs around `cb` — proving a bionic .so can call back into glibc (JNI) and
@@ -129,6 +153,9 @@ class BionicRuntime {
   void* dlopen_fn_ = nullptr;
   void* dlsym_fn_ = nullptr;
   void* dlerror_fn_ = nullptr;
+  // The linker's __loader_shared_globals: libc's static TLS layout + module table, which
+  // attach_current_thread reads to lay out a new thread's block. Null if the linker lacks it.
+  void* shared_globals_fn_ = nullptr;
 };
 
 }  // namespace acl::ndk

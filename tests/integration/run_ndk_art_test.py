@@ -42,8 +42,8 @@ SKIP = 77  # meson interprets exit 77 as "skipped"
 # native returns fine and ART dies later in the GC ("Check failed: self == thread") because the
 # thread came back with the main thread's glibc %fs — i.e. reading another thread's TLS.
 WORKER_CHECKS = [
-    "WORKER: calling nativeAnswer() off the main thread",   # got as far as the call
-    "bionic native called from a thread with no bionic TCB",  # refused, by name
+    "WORKER: calling nativeAnswer() off the main thread",  # got as far as the call
+    "no bionic TCB",  # refused, by name (attach_current_thread exists but is not wired in yet)
 ]
 WORKER_MUST_NOT = [
     "Check failed: self == thread",   # the ART corruption the guard exists to prevent

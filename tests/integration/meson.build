@@ -30,6 +30,17 @@ if py3.found()
     timeout : 300,
   )
 
+  # Per-thread attach-as-bionic: a glibc-created thread, handed a hand-built bionic TCB, runs real
+  # bionic code as itself (own TCB + pthread_internal_t + tid). Needs a staged bionic + the offsets
+  # header; SKIPs (exit 77) when absent. See docs/ndk-scope.md.
+  test(
+    'ndk-attach',
+    py3,
+    args : [files('run_ndk_attach_test.py'), ndk_probe_exe, meson.project_source_root()],
+    depends : [ndk_probe_exe],
+    timeout : 300,
+  )
+
   # `acl tone` manual audio-check command: run silent (ACL_AUDIO=null) so it is
   # deterministic and device-independent; asserts generation + frame accounting and
   # that it never hangs. Needs only the binary.

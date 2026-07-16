@@ -8,9 +8,13 @@
 // int(JNIEnv*,jclass) (the tools/ndk-loader-spike repro's nativeAnswer ignores both args).
 // Prints the returned int; exit 0 iff it returns 42 (the repro's value).
 
+#include <sys/syscall.h>
+#include <unistd.h>
+
 #include <cerrno>
 #include <cstdio>
 #include <string>
+#include <thread>
 
 #include "ndk/bionic_runtime.h"
 
@@ -153,9 +157,63 @@ static bool run_realvm(acl::ndk::BionicRuntime& rt, const char* so_path) {
 }
 #endif  // ACL_HAVE_JNI
 
+// Thread mode: attach a SECOND thread to bionic and run bionic code as that thread.
+//
+// This is the whole point of attach_current_thread: bionic created no TCB for this thread (glibc
+// did), so acl builds one. What it proves, on the worker thread and against real bionic libc:
+//   - the synthesized TCB survives real bionic code — nativeAnswer() calls __android_log_print,
+//     which goes through liblog into bionic libc and touches its TLS. A wrong TCB (or a bad stack
+//     canary, which lives in a TCB slot) crashes here rather than returning 42.
+//   - pthread_self() returns THIS thread's pthread_internal_t (slot TLS_SLOT_THREAD_ID), not the
+//     bootstrapping thread's — the field that backs mutex ownership, so sharing it would break
+//     mutual exclusion.
+//   - bionic's gettid() agrees with the kernel's for this thread.
+static bool run_thread_selftest(acl::ndk::BionicRuntime& rt, void* h) {
+  auto* native_answer = rt.symbol(h, "Java_com_acl_ndktest_Main_nativeAnswer");
+  auto* bionic_pthread_self = rt.symbol(h, "pthread_self");  // resolves through the .so to libc
+  auto* bionic_gettid = rt.symbol(h, "gettid");
+  if (!native_answer || !bionic_pthread_self || !bionic_gettid) {
+    std::fprintf(stderr, "thread selftest: missing symbol(s) in the target/libc\n");
+    return false;
+  }
+
+  bool ok = false;
+  std::thread worker([&] {
+    std::string why;
+    const std::uintptr_t fs = rt.attach_current_thread(&why);
+    if (fs == 0) {
+      std::fprintf(stderr, "attach failed: %s\n", why.c_str());
+      return;
+    }
+    if (fs == rt.bootstrap_fs()) {
+      std::fprintf(stderr, "attach handed back the bootstrapping thread's TCB\n");
+      return;
+    }
+    const auto kernel_tid = static_cast<long>(::syscall(SYS_gettid));
+    int answer = -1;
+    long tid = -1;
+    void* self = nullptr;
+    {
+      acl::ndk::BionicRuntime::RunScope scope(rt);  // this thread's bionic %fs
+      answer = reinterpret_cast<int (*)(void*, void*)>(native_answer)(nullptr, nullptr);
+      self = reinterpret_cast<void* (*)()>(bionic_pthread_self)();
+      tid = reinterpret_cast<long (*)()>(bionic_gettid)();
+    }
+    const bool self_ok = self != nullptr && self != rt.bootstrap_thread_struct();
+    std::printf("acl-ndk-probe: worker attached (tcb=%#lx) nativeAnswer=%d bionic gettid=%ld "
+                "(kernel %ld) pthread_self=%p %s\n",
+                static_cast<unsigned long>(fs), answer, tid, kernel_tid, self,
+                (answer == 42 && tid == kernel_tid && self_ok) ? "(PASS)" : "(FAIL)");
+    ok = answer == 42 && tid == kernel_tid && self_ok;
+  });
+  worker.join();
+  return ok;
+}
+
 int main(int argc, char** argv) {
   if (argc != 3) {
-    std::fprintf(stderr, "usage: %s <abs-path-to.so> <symbol>|--boundary\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <abs-path-to.so> <symbol>|--boundary|--jni|--realvm|--thread\n",
+                 argv[0]);
     return 2;
   }
   acl::ndk::BionicConfig cfg = acl::ndk::BionicConfig::from_env();
@@ -169,6 +227,11 @@ int main(int argc, char** argv) {
   if (!h) {
     std::fprintf(stderr, "load failed: %s\n", err.c_str());
     return 1;
+  }
+
+  // Thread mode: attach a second thread and run bionic code as that thread.
+  if (std::string(argv[2]) == "--thread") {
+    return run_thread_selftest(*rt, h) ? 0 : 1;
   }
 
   // Boundary mode: prove a bionic .so can call back into glibc and return with TLS intact.
