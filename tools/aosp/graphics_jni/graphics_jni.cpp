@@ -735,6 +735,21 @@ jboolean Canvas_nClipRect(jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b, 
               regionOp == 0 ? SkClipOp::kDifference : SkClipOp::kIntersect, /*doAA=*/false);
   return c->isClipEmpty() ? JNI_FALSE : JNI_TRUE;
 }
+// @CriticalNative — clip to a Path. Same Region.Op mapping as nClipRect above. Antialiased,
+// unlike the rect clip: a path clip is usually a curve (a rounded-corner background, a shaped
+// container), and AOSP's SkiaCanvas::clipPath passes doAA=true for exactly that reason — without
+// it every such edge is visibly stair-stepped.
+//
+// Real apps reach this early: SVS.pdfinspector's view tree hit it inside
+// DecorView.draw -> ViewGroup.dispatchDraw -> View.draw, and an unimplemented native there does
+// not just skip a clip — it throws UnsatisfiedLinkError out of the middle of the draw.
+jboolean Canvas_nClipPath(jlong canvas, jlong path, jint regionOp) {
+  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* p = reinterpret_cast<SkPath*>(path);
+  if (c == nullptr || p == nullptr) return JNI_FALSE;
+  c->clipPath(*p, regionOp == 0 ? SkClipOp::kDifference : SkClipOp::kIntersect, /*doAA=*/true);
+  return c->isClipEmpty() ? JNI_FALSE : JNI_TRUE;
+}
 // nGetClipBounds(canvas, Rect): the current clip's local-space integer bounds (false if empty).
 // Regular native (takes a Rect object), unlike the @CriticalNative clip ops above.
 jboolean Canvas_nGetClipBounds(JNIEnv* env, jclass, jlong canvas, jobject bounds) {
@@ -3173,6 +3188,7 @@ const JNINativeMethod kCanvas[] = {
     {"nScale", "(JFF)V", reinterpret_cast<void*>(Canvas_nScale)},
     {"nRotate", "(JF)V", reinterpret_cast<void*>(Canvas_nRotate)},
     {"nClipRect", "(JFFFFI)Z", reinterpret_cast<void*>(Canvas_nClipRect)},
+    {"nClipPath", "(JJI)Z", reinterpret_cast<void*>(Canvas_nClipPath)},
     {"nGetClipBounds", "(JLandroid/graphics/Rect;)Z", reinterpret_cast<void*>(Canvas_nGetClipBounds)},
     {"nConcat", "(JJ)V", reinterpret_cast<void*>(Canvas_nConcat)},
     {"nSetMatrix", "(JJ)V", reinterpret_cast<void*>(Canvas_nSetMatrix)},
