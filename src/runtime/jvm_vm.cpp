@@ -78,7 +78,13 @@ jobject create_bitmap(JNIEnv* env, jclass bitmap_cls, jint w, jint h) {
       jobject bmp = env->CallStaticObjectMethod(bitmap_cls, create, w, h, argb);
       env->DeleteLocalRef(config_cls);
       if (argb != nullptr) env->DeleteLocalRef(argb);
-      if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionClear(); return nullptr; }
+      if (env->ExceptionCheck() == JNI_TRUE) {
+        log::w(kTag, "Bitmap.createBitmap({}x{}, ARGB_8888) threw", w, h);
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        return nullptr;
+      }
+      if (bmp == nullptr) log::w(kTag, "Bitmap.createBitmap({}x{}) returned null", w, h);
       return bmp;
     }
     env->DeleteLocalRef(config_cls);
@@ -91,7 +97,12 @@ jobject create_bitmap(JNIEnv* env, jclass bitmap_cls, jint w, jint h) {
     return nullptr;
   }
   jobject bmp = env->CallStaticObjectMethod(bitmap_cls, create2, w, h);
-  if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionClear(); return nullptr; }
+  if (env->ExceptionCheck() == JNI_TRUE) {
+    log::w(kTag, "Bitmap.createBitmap({}x{}) [acl shim 2-arg] threw", w, h);
+    env->ExceptionDescribe();
+    env->ExceptionClear();
+    return nullptr;
+  }
   return bmp;
 }
 
@@ -1280,6 +1291,12 @@ class JniVm : public Vm {
       if (cctor != nullptr) {
         bmp = create_bitmap(env_, bmp_cls, w, h);
         jobject canvas = bmp != nullptr ? env_->NewObject(canvas_cls, cctor, bmp) : nullptr;
+        if (canvas == nullptr) {
+          // Without a Canvas there is no draw and no present. Saying so beats a silent no-op run
+          // that looks like success.
+          if (env_->ExceptionCheck() == JNI_TRUE) env_->ExceptionClear();
+          log::w(kTag, "content view not rendered: no Bitmap/Canvas ({}x{})", w, h);
+        }
         if (canvas != nullptr) {
           env_->CallVoidMethod(view, draw, canvas);
           // The app's view tree just ran arbitrary framework code, which can throw — an unbound
