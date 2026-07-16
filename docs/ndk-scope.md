@@ -342,15 +342,50 @@ attached thread; per-thread attach must revisit that too.
 
 **Per-thread attach-as-bionic is therefore the next rung**, and bionic offers no API for it: it
 exports `pthread_create`, `__libc_get_static_tls_bounds`, `__libc_register_thread_exit_callback`,
-`__tls_get_addr` — nothing that adopts an already-running (glibc-created) thread. `pthread_create`
-is no use: the native must run on ART's own thread, which holds ART's `Thread::Current()` and JNIEnv.
-So acl must synthesize the TCB. The plausible design: `__libc_get_static_tls_bounds` gives the main
-thread's static TLS block, which bionic laid out correctly; copy it per thread and fix the
-self-referential fields (`TLS_SLOT_SELF`, `TLS_SLOT_THREAD_ID` → a fresh `pthread_internal_t` with
-this thread's `tid`, and the DTV entries, which point INTO the block and must be rebased), then
-store the result in `t_bionic_fs`. That couples us to bionic's internal `pthread_internal_t`/TLS
-layout — acceptable only because acl pins the bionic it stages, and the reason the trampoline reads
-the TCB from a slot rather than assuming one.
+`__tls_get_addr` — nothing that adopts an already-running (glibc-created) thread, and the
+`__init_static_tls` / `__init_tcb*` / `__init_thread` helpers that build a TCB are `__LIBC_HIDDEN__`,
+not exported. `pthread_create` is no use either, with or without a caller-supplied stack
+(`pthread_attr_setstack` does make bionic map TLS-only): it always `clone()`s a *new* OS thread, and
+the native must run on ART's own thread — the one holding `Thread::Current()` and the JNIEnv. A
+donor thread's TCB can't be re-pointed at another thread either: `pthread_internal_t::tid` backs
+recursive/errorcheck mutex ownership, so two threads sharing a tid break mutual exclusion. So acl
+must synthesize the TCB. Read for it: `bionic/libc/bionic/pthread_create.cpp` (`__allocate_thread`),
+`__libc_init_main_thread.cpp`, `bionic_elf_tls.cpp`, `private/bionic_elf_tls.h`.
+
+**Do NOT copy the main thread's static TLS block** (an earlier draft of this doc said to; it is
+wrong). The block contains `bionic_tls` — pthread `key_data`, locale, the cleanup stack — so a copy
+would silently inherit the main thread's pthread TLS and cleanup state; and the module TLS in it
+holds the main thread's *current* values, where a new thread must get the pristine init images.
+Build it the way bionic does instead — the pieces are all reachable:
+
+1. **Shared globals.** The linker exports `__loader_shared_globals` (libc imports it), so the
+   bootstrap can `__loader_dlsym` it for `libc_shared_globals*` → `static_tls_layout` (sizes +
+   `offset_bionic_tcb`/`offset_bionic_tls`) and `tls_modules` (the module table).
+2. **A fresh, zeroed static TLS block** of `layout.size()` (mmap is already zero-filled), then the
+   `__init_static_tls` equivalent: for each module with `static_offset != SIZE_MAX`, memcpy its init
+   image to `static_tls + static_offset`.
+3. **The TCB slots** at `static_tls + layout.offset_bionic_tcb()` (x86_64 slot numbers in
+   `platform/bionic/tls_defines.h`): `TLS_SLOT_SELF` = the TCB itself, `TLS_SLOT_THREAD_ID` = the
+   new `pthread_internal_t`, `TLS_SLOT_STACK_GUARD` = `__stack_chk_guard` (exported), 
+   `TLS_SLOT_BIONIC_TLS` = `static_tls + layout.offset_bionic_tls()`, `TLS_SLOT_DTV` = a zero DTV.
+4. **The zero DTV is safe to provide ourselves** — this is the subtle one. `update_tls_dtv` chains
+   the old DTV unconditionally (`new_dtv->next = old_dtv`) and `__free_dynamic_tls` walks that chain
+   with bionic's own allocator, which would be a wild free of our memory. It is not, because the
+   free loop is `while (dtv->generation != kTlsGenerationNone)` — it stops *at* the zero DTV. So an
+   all-zero `TlsDtv` works (generation 0 == `kTlsGenerationNone`), and one process-wide instance
+   suffices, exactly as bionic's own `static const TlsDtv zero_dtv` does. The first dynamic-TLS
+   access then lazily builds the thread's real DTV.
+5. **`pthread_internal_t`**: fresh + zeroed, `tid` = this thread's `gettid()`, `bionic_tls` = the
+   block's, and stack bounds taken from the *glibc* thread (`pthread_getattr_np`) so unwinders and
+   `pthread_getattr_np` on the bionic side describe the stack the code is really on.
+6. Store the TCB in `t_bionic_fs`; the trampoline picks it up with no other change.
+
+That couples us to bionic's internal `pthread_internal_t` / `bionic_tls` / `StaticTlsLayout` /
+`TlsModules` layout. Keep it honest by **generating the offsets at stage time** — compile a probe
+against the private headers of the *pinned* bionic in `$AOSP` (`tools/stage-bionic-runtime.sh`
+already owns that pairing) and emit a header of `offsetof`s, rather than hand-copying structs that
+drift. Thread exit also needs `__libc_register_thread_exit_callback` (or an explicit detach) to run
+`__free_dynamic_tls` and unmap, or every attached thread leaks its block.
 
 NEXT (to real NDK apps): (1) per-thread attach-as-bionic (above); (2) NDK trampoline `.so`
 (`liblog`→acl `log`, `libandroid`→`wm`); then arm64.
