@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: Apache-2.0
+// Provenance: original acl design (acl-cxx docs/split-process-art.md). Sources copied verbatim from
+// the acl repo (src/runtime/art_host_main.cpp, src/ipc/*). Built as a linux_bionic-arm64 host binary
+// so it can dlopen the STOCK bionic host ART (libart.so) without the two-libc SIGTRAP a glibc acl
+// hits in-process. No GPL-3.0 sources.
+
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+cc_binary {
+    name: "acl-art-host",
+    host_supported: true,
+    device_supported: false,
+    srcs: [
+        "art_host_main.cpp",
+        "ipc/ipc.cpp",
+    ],
+    local_include_dirs: ["."],
+    header_libs: ["jni_headers"],
+    cpp_std: "c++20", // std::span, std::thread
+    // art-host dlopens libart.so at runtime; it only needs libdl + libc++ (host bionic defaults).
+    stl: "libc++",
+    target: {
+        linux_bionic: {
+            enabled: true,
+        },
+        // This helper is only meaningful for the bionic arm64 host; keep it off the primary hosts.
+        linux_glibc: {
+            enabled: false,
+        },
+        darwin: {
+            enabled: false,
+        },
+        windows: {
+            enabled: false,
+        },
+    },
+}

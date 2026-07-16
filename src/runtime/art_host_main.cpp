@@ -51,6 +51,42 @@ const char* opt_val(const char* arg, const char* key) {
   return (std::strncmp(arg, key, k) == 0) ? arg + k : nullptr;
 }
 
+// When driving the bionic host ART (libart.so), mirror ArtVm::create_java_vm's boot setup: point the
+// ANDROID_* roots at ACL_ART_HOME and build the core boot classpath from the apex javalib jars. ART's
+// JNI FindClass resolves against the BOOT classloader, so the app DEX (and any framework) must also
+// go on the boot classpath — passed in via --bcp and appended here. Returns the -Xbootclasspath /
+// -Xint option strings; sets the env as a side effect.
+std::vector<std::string> setup_art(const std::string& home, const std::string& extra_bcp) {
+  auto set = [](const char* k, const std::string& v) { ::setenv(k, v.c_str(), 1); };
+  set("ANDROID_ROOT", home);
+  set("ANDROID_ART_ROOT", home + "/apex/com.android.art");
+  set("ANDROID_I18N_ROOT", home + "/com.android.i18n");
+  set("ANDROID_TZDATA_ROOT", home + "/com.android.tzdata");
+  if (!std::getenv("ANDROID_DATA")) set("ANDROID_DATA", home + "/acl-android-data");
+
+  struct BcpJar { const char* module; const char* apex; };
+  static const BcpJar kBcp[] = {
+      {"core-oj", "com.android.art"},    {"core-libart", "com.android.art"},
+      {"okhttp", "com.android.art"},     {"bouncycastle", "com.android.art"},
+      {"apache-xml", "com.android.art"}, {"core-icu4j", "com.android.i18n"},
+      {"conscrypt", "com.android.conscrypt"}};
+  std::string bcp;
+  for (const BcpJar& j : kBcp) {
+    if (!bcp.empty()) bcp.push_back(':');
+    bcp += home + "/apex/" + j.apex + "/javalib/" + j.module + ".jar";
+  }
+  if (!extra_bcp.empty()) { bcp.push_back(':'); bcp += extra_bcp; }
+
+  std::vector<std::string> opts;
+  opts.push_back("-Xbootclasspath:" + bcp);
+  opts.push_back("-Xbootclasspath-locations:" + bcp);
+  if (const char* img = std::getenv("ACL_ART_BOOT_IMAGE"); img && *img)
+    opts.push_back(std::string("-Ximage:") + img);
+  else
+    opts.push_back("-Xint");  // imageless: interpret; no runtime dex2oat
+  return opts;
+}
+
 int fail(Channel& ch, const std::string& why) {
   std::string msg = "acl-art-host: " + why + "\n";
   Message m;
@@ -68,14 +104,18 @@ int fail(Channel& ch, const std::string& why) {
 
 int main(int argc, char** argv) {
   int ipc_fd = -1;
-  std::string vm_lib, main_class;
+  std::string vm_lib, main_class, home, bcp, cp;
   std::vector<std::string> jvm_opts;
   for (int i = 1; i < argc; ++i) {
     if (const char* v = opt_val(argv[i], "--ipc-fd=")) ipc_fd = std::atoi(v);
     else if (const char* v = opt_val(argv[i], "--vm-lib=")) vm_lib = v;
     else if (const char* v = opt_val(argv[i], "--main=")) main_class = v;
+    else if (const char* v = opt_val(argv[i], "--home=")) home = v;
+    else if (const char* v = opt_val(argv[i], "--bcp=")) bcp = v;      // ART: extra boot classpath (app dex + framework)
+    else if (const char* v = opt_val(argv[i], "--cp=")) cp = v;        // OpenJDK: app class path
     else if (const char* v = opt_val(argv[i], "--opt=")) jvm_opts.emplace_back(v);
   }
+  if (home.empty()) if (const char* h = std::getenv("ACL_ART_HOME")) home = h;
   if (ipc_fd < 0) { std::fprintf(stderr, "acl-art-host: --ipc-fd required\n"); return 2; }
   Channel ch(ipc_fd);
 
@@ -110,9 +150,23 @@ int main(int argc, char** argv) {
   auto create = reinterpret_cast<CreateFn>(::dlsym(h, "JNI_CreateJavaVM"));
   if (!create) return finish(fail(ch, "JNI_CreateJavaVM not found in " + vm_lib));
 
+  // Build the VM option list, backend-appropriate. ART (bionic libart.so): set the ANDROID_* roots
+  // and the core+app boot classpath (FindClass uses the boot loader). OpenJDK (x86 dev/CI): the app
+  // goes on -Djava.class.path. Passthrough --opt entries follow.
+  const bool is_art = vm_lib.find("libart") != std::string::npos;
+  std::vector<std::string> all_opts;
+  if (is_art) {
+    if (home.empty()) return finish(fail(ch, "ART requires --home or ACL_ART_HOME"));
+    auto art = setup_art(home, bcp);
+    all_opts.insert(all_opts.end(), art.begin(), art.end());
+  } else if (!cp.empty()) {
+    all_opts.push_back("-Djava.class.path=" + cp);
+  }
+  all_opts.insert(all_opts.end(), jvm_opts.begin(), jvm_opts.end());
+
   std::vector<JavaVMOption> opts;
-  opts.reserve(jvm_opts.size());
-  for (auto& o : jvm_opts) opts.push_back(JavaVMOption{const_cast<char*>(o.c_str()), nullptr});
+  opts.reserve(all_opts.size());
+  for (auto& o : all_opts) opts.push_back(JavaVMOption{const_cast<char*>(o.c_str()), nullptr});
   JavaVMInitArgs args{};
   args.version = JNI_VERSION_1_6;
   args.nOptions = static_cast<jint>(opts.size());

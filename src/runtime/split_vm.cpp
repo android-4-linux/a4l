@@ -84,17 +84,24 @@ class SplitVm final : public Vm {
     if (!acl_end.valid())
       return Error::of(Status::RuntimeError, "split: socketpair failed");
 
-    // Build the art-host command line, backend-appropriate. ART (bionic libart.so) wants the
-    // framework on -Xbootclasspath and the app on -Djava.class.path; OpenJDK (x86 dev/CI) has no
-    // separate boot classpath for our purposes — pass only the app classpath (the DEX->class
-    // conversion output). Raw config options pass through as --opt.
+    // art-host owns the VM-specific option construction; hand it the classpaths. ART (bionic
+    // libart.so): the app DEX + any framework go on the boot classpath (--bcp) because ART's
+    // FindClass uses the boot loader; art-host adds the apex core jars + ANDROID_* roots. OpenJDK
+    // (x86 dev/CI): the app classes go on --cp. Raw config options pass through as --opt.
     const bool is_art = vm_lib.find("libart") != std::string::npos;
-    const std::string cp = join(config_.classpath, ':');
-    const std::string bcp = join(config_.boot_classpath, ':');
+    const std::string app_cp = join(config_.classpath, ':');
+    const std::string fw_bcp = join(config_.boot_classpath, ':');
     std::vector<std::string> argv_s = {host, "--ipc-fd=0", "--vm-lib=" + vm_lib,
                                        "--main=" + std::string(main_class)};
-    if (is_art && !bcp.empty()) argv_s.push_back("--opt=-Xbootclasspath:" + bcp);
-    if (!cp.empty()) argv_s.push_back("--opt=-Djava.class.path=" + cp);
+    if (is_art) {
+      if (const char* h = std::getenv("ACL_ART_HOME"); h && *h)
+        argv_s.push_back("--home=" + std::string(h));
+      std::string bcp = fw_bcp;  // framework (if any) before the app so framework classes win
+      if (!app_cp.empty()) bcp += (bcp.empty() ? "" : ":") + app_cp;
+      if (!bcp.empty()) argv_s.push_back("--bcp=" + bcp);
+    } else if (!app_cp.empty()) {
+      argv_s.push_back("--cp=" + app_cp);
+    }
     for (const auto& o : config_.options) argv_s.push_back("--opt=" + o);
 
     // Child inherits child_end as fd 0 (matches --ipc-fd=0).
