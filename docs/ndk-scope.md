@@ -185,6 +185,66 @@ pinned:
   focused multi-step build, not a small shim. The two-libc coexistence (bionic libc for app `.so` +
   glibc for acl, bridged at the NDK/JNI boundary) is the R-6 risk to manage here.
 
+### Stage 0b — libhybris core vs a purpose-built bootstrap (the two paths, contrasted)
+
+They are **different philosophies**, not two ways to write the same thing:
+
+- **libhybris = one libc, bionic calls hooked to glibc.** libhybris carries its *own fork* of the
+  bionic linker (`hybris/common/<ver>/`) and a large `hooks.c` that intercepts bionic libc calls and
+  routes them onto glibc — because in its world (glibc apps using bionic **GL drivers**) FILE*/`pthread_t`/
+  `errno`/locale structs cross the boundary constantly, so both sides must share *one* libc's state.
+- **Purpose-built = two libcs, isolated, bridged only at JNI.** This is what **Stage 0 already proved**:
+  load the *real* AOSP `linker64` + real bionic `libc/libm/libdl` in their own namespace; the app `.so`
+  resolves its `NEEDED` against real bionic libc (no per-function hooking). glibc (ART, Skia, Mesa) and
+  bionic (app `.so`) never share libc state — the only thing crossing is the **JNI ABI** (`JNIEnv*` +
+  `jobject` handles) and the **NDK ABI** (our trampoline `.so`). A JNI boundary is far narrower than a
+  GL-driver boundary — no shared `FILE*`/`pthread_t` — so the hook surface collapses to nearly nothing.
+
+| Dimension | libhybris core | Purpose-built `src/ndk/` bootstrap |
+|---|---|---|
+| Libc model | one (glibc), bionic **hooked** | two, **isolated** (Stage-0 proven) |
+| Correctness for arbitrary app JNI | hooks tuned for **GL drivers**; an app's full bionic libc surface may exceed them | app gets **real bionic libc** → behaves as on-device |
+| Version coupling | pinned to libhybris' forked linker; must track our android-13 bionic separately | uses the **AOSP tree's own** `linker64`+bionic → auto-matched to the vendored build |
+| Direction fit | built for glibc→bionic-**GL**; must be re-patched for glibc-ART→bionic-**app-JNI** | built for exactly our direction |
+| Dependency | vendor + patch an external tree (Apache-2.0, per-file check) | fully in-tree, no new dep |
+| Time-to-first-`dlopen` | faster (proven loader) | slower (write the KAB/auxv/TLS bootstrap) |
+| Ongoing ownership | track upstream + our patches | we own a small, controlled loader |
+
+**The genuinely hard part is the same for both: TLS / thread-pointer coexistence.** Both glibc and
+bionic put the thread pointer in the *same* register — `%fs` on x86_64 (`arch_prctl(ARCH_SET_FS)`),
+`TPIDR_EL0` on arm64 — and each libc expects it to point at *its own* TCB. ART's threads (main + JNI)
+are glibc threads, so when app bionic code on an ART thread calls a bionic libc function it reads TLS
+off glibc's TCB → garbage. Resolutions (both approaches must pick one): (a) run app native code on
+**dedicated bionic-TLS threads** and marshal JNI upcalls across a known seam (cleanest for the
+two-libc model); (b) **swap the thread pointer** on every bionic entry/exit (what libhybris does in
+spots — fragile, per-call cost); (c) lay bionic's TLS slots so they don't collide with glibc's usage
+on that TP (brittle across libc versions). This is the R-6 crux and it is **arch-specific** — the
+register, the set-TLS syscall, and the ELF relocation types (`R_AARCH64_*` vs `R_X86_64_*`, handled by
+the target's own `linker64`) all differ per arch.
+
+### The architecture axis — loader vs CPU-ISA (they're orthogonal)
+
+The loader question is separate from *can the app's machine code even run here*:
+
+- **arm64 host (the automotive boards): app `lib/arm64-v8a/*.so` is native → the loader alone is
+  sufficient.** No CPU translation. This is the **tractable target** and it's the automotive critical
+  path — build the arm64 `linker64`+bionic, bootstrap in-process, done.
+- **x86_64 host (desktop): the corpus ships arm-only** (Spotify `libstub`, Rive `librive`) — so even a
+  perfect loader maps in an **arm64** `.so` that **cannot execute** on x86_64 without a CPU translator
+  (QEMU user-mode / houdini-class) — a separate, larger effort. The loader **is** sufficient on x86_64
+  for the **x86_64-native** NDK apps (a Flutter `--target-platform android-x64` build, apps that ship
+  `lib/x86_64/`).
+
+**Upshot:** the bootstrap *mechanism* is largely arch-neutral in structure (map PIE linker →
+`__linker_init(synthetic KAB)` → set TLS → `__loader_android_dlopen_ext`); only the TLS/auxv/reloc
+details are per-arch, and the target's own `linker64` already carries the reloc handling. So the
+smart target order is **arm64 first** (loader = complete story, matches the boards), and on x86_64
+scope to x86_64-native `.so` until/unless a CPU-translation layer is justified. Recommendation:
+**purpose-built** — Stage 0 already validated its exact substrate (real `linker64` + real bionic libc
+run here), it auto-matches the vendored bionic, keeps the JNI boundary a clean two-libc seam, and
+avoids owning a patched fork of someone else's linker aimed at a different direction; mine libhybris'
+`hooks.c` and TP-swap code as a **reference** for the TLS crux rather than vendoring the whole tree.
+
 ## Verify
 
 ```sh
