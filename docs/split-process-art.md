@@ -125,12 +125,19 @@ art-host; `present_dmabuf_loop` + input stay in acl.
   (fd + w/h/fourcc/modifier/stride/damage). Two display backends slot behind it (Null today, for
   plumbing bring-up):
   - **drm-cxx KMS scanout** — the **appliance / automotive** path (ADR-0004; plan.md drm-cxx allocator
-    lineage). `drm::fmt::ScanoutBuffer::import_dmabuf(fd, {w,h,fourcc,modifier,{stride,offset}})` wraps
-    the art-host dma-buf as a KMS framebuffer, and `drm::present::ScanoutBackend::present()` does one
-    atomic commit **straight to the display — no compositor**. This is the natural fit for an in-car /
+    lineage). `drm::fmt::ScanoutBuffer::import_dmabuf(disp_fd, {w,h,fourcc,modifier,planes[{fd,stride,
+    offset}]})` wraps the art-host dma-buf as a KMS framebuffer (→ `fb_id`), and an atomic commit
+    (`drmModeAtomicCommit`, à la the MIT `examples/common/kms_present.hpp` `pick_target`/`commit_fb`)
+    puts it **straight on the display — no compositor**. This is the natural fit for an in-car /
     embedded panel where acl is the sole client, and it is exactly what drm-cxx (MIT, `app/drm-cxx`) is
-    built for. Vendored as an optional meson subproject (`drm_cxx_dep`; deps libdrm/gbm/libinput/
-    libudev/xkbcommon); the sink compiles out to Null when absent so acl always links.
+    built for. **Validated on the Pi (2026-07-16):** drm-cxx built in the trixie arm64 container
+    (`meson setup -Dtests=false -Dvulkan=false`; self-contained on fmt — uses `<print>` / vendored
+    header-only fmt), and `software_present /dev/dri/card0 --no-seat --pattern` scanned out **60 frames
+    at 1280x1440@60 XRGB8888 via atomic flip** to the Pi's HDMI (DRM master; the desktop Weston must be
+    stopped — it holds card0/vc4). So the whole drm-cxx→KMS→display path works on the Pi; the acl sink
+    reuses `import_dmabuf` + commit for the IPC-arrived dma-buf. Vendored as an optional meson subproject
+    (`drm_cxx_dep`; deps libdrm/gbm/libinput/libudev/xkbcommon/libseat/libdisplay-info); the sink
+    compiles out to Null when absent so acl always links.
   - **Wayland** (`zwp_linux_dmabuf_v1`) — the **desktop** path, reusing `wm/dmabuf_presenter`'s import
     to attach the external fd as a `wl_buffer` (works alongside a running compositor, e.g. the Pi's
     labwc). The render side may allocate via drm-cxx's GBM producer or Vulkan export (`gfx_vk`).
