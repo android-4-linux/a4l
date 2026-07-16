@@ -8,6 +8,22 @@
 #include <string>
 #include <vector>
 
+#include "acl_config.h"
+#if ACL_HAVE_JNI
+#include <jni.h>
+#include <type_traits>
+#endif
+
+namespace acl::ndk {
+#if ACL_HAVE_JNI
+// The JNI function-table struct types, derived from the `functions` member so this is portable
+// across jni.h variants (OpenJDK names them JNINativeInterface_/JNIInvokeInterface_; Android drops
+// the trailing underscore). Same ABI layout either way.
+using JniEnvTable = std::remove_const_t<std::remove_pointer_t<decltype(JNIEnv::functions)>>;
+using JniVmTable = std::remove_const_t<std::remove_pointer_t<decltype(JavaVM::functions)>>;
+#endif
+}  // namespace acl::ndk
+
 namespace acl::ndk {
 
 // Where the bionic runtime lives on the host: the AOSP dynamic linker, a directory of bionic
@@ -51,6 +67,16 @@ class BionicRuntime {
   // return with both sides' TLS intact. Returns f's result, or -1 on unsupported arch.
   // (Main-thread only for now — uses the glibc %fs captured at bootstrap.)
   int run_boundary_selftest(void* bionic_fn, int (*cb)(int), int x);
+
+#if ACL_HAVE_JNI
+  // Wrap a real (glibc/ART) JavaVM so a bionic .so's JNI_OnLoad can drive it across the %fs
+  // boundary: the returned JavaVM's GetEnv hands back a wrapped JNIEnv whose entry points are
+  // %fs-restoring thunks over `real_env`'s. `real_env` is the ART JNIEnv for this thread. Returns
+  // nullptr on unsupported arch. NOTE: only the slots a JNI_OnLoad/RegisterNatives path needs are
+  // thunked so far (GetEnv/GetVersion/FindClass/RegisterNatives); the rest are copied through
+  // unwrapped and will misbehave if called under bionic %fs — the full table is the next step.
+  JavaVM* wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env);
+#endif
 
   // RAII: set the thread pointer to bionic for the scope's lifetime, restore glibc on exit. Wrap
   // any direct call into loaded app code in one of these. The swap itself is out-of-line in the

@@ -53,6 +53,23 @@ int acl_ndk_boundary(int (*cb)(int), int x) {
   int r = cb(x);                              // up-call into glibc (needs glibc %fs)
   return r + (t_marker == 7 ? 1000 : 0);      // bionic TLS intact after the round trip?
 }
+// A native bound via RegisterNatives (not name resolution) — the real JNI_OnLoad path.
+static jint the_registered(JNIEnv* env, jclass clazz) {
+  t_marker = 55;                              // bionic TLS under the down-call (bionic %fs)
+  return 4200;
+}
+// Exercises the JNIEnv/JavaVM boundary: GetEnv (VM up-call) then GetVersion/FindClass/
+// RegisterNatives (Env up-calls), each crossing bionic->glibc. Returns JNI_VERSION_1_6.
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+  JNIEnv* env = 0;
+  if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) return -1;
+  (void)(*env)->GetVersion(env);
+  jclass c = (*env)->FindClass(env, "com/acl/ndktest/Main");
+  JNINativeMethod m = { "answer", "()I", (void*)the_registered };
+  if ((*env)->RegisterNatives(env, c, &m, 1) != JNI_OK) return -1;
+  t_marker = 33;                              // bionic TLS after the up-calls returned
+  return JNI_VERSION_1_6;
+}
 EOF
 
 # Link against the real bionic libs by full path so NEEDED sonames are bionic (libc.so, not

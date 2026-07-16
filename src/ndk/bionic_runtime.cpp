@@ -326,4 +326,86 @@ int BionicRuntime::run_boundary_selftest(void* bionic_fn, int (*cb)(int), int x)
 #endif
 }
 
+// --- JNIEnv/JavaVM boundary trampolines (Rung 4b): each thunk runs the real (glibc/ART) function
+// under glibc %fs, so a bionic .so's JNI_OnLoad can call GetEnv/FindClass/RegisterNatives across
+// the boundary. Only the JNI_OnLoad/RegisterNatives slots are thunked so far. ---
+#if ACL_HAVE_JNI
+#if defined(__x86_64__)
+namespace {
+// Wrapper handles: first member is the fn table (JNIEnv/JavaVM ABI), then the real object.
+struct WrapEnv {
+  const JniEnvTable* functions;
+  JNIEnv* real;
+};
+struct WrapVM {
+  const JniVmTable* functions;
+  JavaVM* real;
+  JNIEnv* wrap_env;
+};
+JniEnvTable g_env_tbl;
+JniVmTable g_vm_tbl;
+WrapEnv g_wrap_env;
+WrapVM g_wrap_vm;
+std::uintptr_t g_jni_glibc_fs = 0, g_jni_bionic_fs = 0;
+
+// Entered under bionic %fs (from the bionic .so); restore glibc for the real call, then bionic.
+struct ToGlibc {
+  ToGlibc() { ndk_set_fs(g_jni_glibc_fs); }
+  ~ToGlibc() { ndk_set_fs(g_jni_bionic_fs); }
+};
+
+jint JNICALL w_GetVersion(JNIEnv* e) {
+  JNIEnv* r = reinterpret_cast<WrapEnv*>(e)->real;
+  ToGlibc g;
+  return r->functions->GetVersion(r);
+}
+jclass JNICALL w_FindClass(JNIEnv* e, const char* n) {
+  JNIEnv* r = reinterpret_cast<WrapEnv*>(e)->real;
+  ToGlibc g;
+  return r->functions->FindClass(r, n);
+}
+jint JNICALL w_RegisterNatives(JNIEnv* e, jclass c, const JNINativeMethod* m, jint n) {
+  JNIEnv* r = reinterpret_cast<WrapEnv*>(e)->real;
+  ToGlibc g;
+  return r->functions->RegisterNatives(r, c, m, n);
+}
+jint JNICALL w_GetEnv(JavaVM* vm, void** out, jint ver) {
+  WrapVM* w = reinterpret_cast<WrapVM*>(vm);
+  JNIEnv* tmp = nullptr;
+  {
+    ToGlibc g;
+    const jint rc = w->real->functions->GetEnv(w->real, reinterpret_cast<void**>(&tmp), ver);
+    if (rc != JNI_OK) { *out = nullptr; return rc; }
+  }
+  *out = w->wrap_env;  // hand the bionic caller the wrapped env, not the raw ART one
+  return JNI_OK;
+}
+}  // namespace
+#endif  // __x86_64__
+
+JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
+#if defined(__x86_64__)
+  if (!real_vm || !real_env) return nullptr;
+  g_jni_glibc_fs = glibc_fs_;
+  g_jni_bionic_fs = bionic_fs_;
+  g_env_tbl = *real_env->functions;  // copy every slot, then thunk the ones we support
+  g_env_tbl.GetVersion = w_GetVersion;
+  g_env_tbl.FindClass = w_FindClass;
+  g_env_tbl.RegisterNatives = w_RegisterNatives;
+  g_wrap_env.functions = &g_env_tbl;
+  g_wrap_env.real = real_env;
+  g_vm_tbl = *real_vm->functions;
+  g_vm_tbl.GetEnv = w_GetEnv;
+  g_wrap_vm.functions = &g_vm_tbl;
+  g_wrap_vm.real = real_vm;
+  g_wrap_vm.wrap_env = reinterpret_cast<JNIEnv*>(&g_wrap_env);
+  return reinterpret_cast<JavaVM*>(&g_wrap_vm);
+#else
+  (void)real_vm;
+  (void)real_env;
+  return nullptr;
+#endif
+}
+#endif  // ACL_HAVE_JNI
+
 }  // namespace acl::ndk

@@ -21,6 +21,81 @@ static int glibc_cb(int x) {
   return x * 2;
 }
 
+#if ACL_HAVE_JNI
+// A minimal FAKE "ART" JavaVM/JNIEnv living on the glibc side. Each function writes glibc TLS
+// (probe_tls) — if a trampoline failed to restore glibc %fs, that write would land in bionic's TLS
+// and the values below would not survive. RegisterNatives captures the bound function pointer.
+namespace {
+const void* g_captured_native = nullptr;
+int g_glibc_calls = 0;
+__thread int probe_tls;  // glibc TLS, exercised during the up-calls
+
+jint JNICALL fake_GetVersion(JNIEnv*) { probe_tls = 111; ++g_glibc_calls; return JNI_VERSION_1_6; }
+jclass JNICALL fake_FindClass(JNIEnv*, const char*) {
+  probe_tls = 222; ++g_glibc_calls; return reinterpret_cast<jclass>(0x1234);
+}
+jint JNICALL fake_RegisterNatives(JNIEnv*, jclass, const JNINativeMethod* m, jint n) {
+  probe_tls = 333; ++g_glibc_calls;
+  if (n >= 1) g_captured_native = m[0].fnPtr;
+  return JNI_OK;
+}
+acl::ndk::JniEnvTable g_fake_env_tbl;
+struct FakeEnv { const acl::ndk::JniEnvTable* functions; } g_fake_env;
+
+jint JNICALL fake_GetEnv(JavaVM*, void** out, jint) {
+  ++g_glibc_calls;
+  *out = &g_fake_env;
+  return JNI_OK;
+}
+acl::ndk::JniVmTable g_fake_vm_tbl;
+struct FakeVM { const acl::ndk::JniVmTable* functions; } g_fake_vm;
+}  // namespace
+
+static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, void* h) {
+  // Build the fake glibc "ART".
+  g_fake_env_tbl = {};
+  g_fake_env_tbl.GetVersion = fake_GetVersion;
+  g_fake_env_tbl.FindClass = fake_FindClass;
+  g_fake_env_tbl.RegisterNatives = fake_RegisterNatives;
+  g_fake_env.functions = &g_fake_env_tbl;
+  g_fake_vm_tbl = {};
+  g_fake_vm_tbl.GetEnv = fake_GetEnv;
+  g_fake_vm.functions = &g_fake_vm_tbl;
+
+  JNIEnv* real_env = reinterpret_cast<JNIEnv*>(&g_fake_env);
+  JavaVM* real_vm = reinterpret_cast<JavaVM*>(&g_fake_vm);
+  JavaVM* wrapped_vm = rt.wrap_java_vm(real_vm, real_env);
+  if (!wrapped_vm) { std::fprintf(stderr, "wrap_java_vm failed\n"); return false; }
+
+  void* onload = rt.symbol(h, "JNI_OnLoad");
+  if (!onload) { std::fprintf(stderr, "JNI_OnLoad not found\n"); return false; }
+
+  probe_tls = 0;
+  g_glibc_calls = 0;
+  g_captured_native = nullptr;
+  jint ver;
+  {
+    acl::ndk::BionicRuntime::RunScope scope(rt);  // JNI_OnLoad is bionic code -> bionic %fs
+    ver = reinterpret_cast<jint (*)(JavaVM*, void*)>(onload)(wrapped_vm, nullptr);
+  }
+
+  // Invoke the RegisterNatives'd native (down-call, bionic %fs). It ignores env, returns 4200.
+  jint native_ret = -1;
+  if (g_captured_native) {
+    acl::ndk::BionicRuntime::RunScope scope(rt);
+    native_ret = reinterpret_cast<jint (*)(JNIEnv*, jclass)>(
+        const_cast<void*>(g_captured_native))(real_env, nullptr);
+  }
+
+  const bool ok = ver == JNI_VERSION_1_6 && g_captured_native != nullptr && g_glibc_calls == 4 &&
+                  probe_tls == 333 && native_ret == 4200;
+  std::printf(
+      "acl-ndk-probe: JNI_OnLoad ver=%#x up-calls=%d probe_tls=%d native=%d -> %s\n", ver,
+      g_glibc_calls, probe_tls, native_ret, ok ? "(PASS)" : "(FAIL)");
+  return ok;
+}
+#endif  // ACL_HAVE_JNI
+
 int main(int argc, char** argv) {
   if (argc != 3) {
     std::fprintf(stderr, "usage: %s <abs-path-to.so> <symbol>|--boundary\n", argv[0]);
@@ -48,6 +123,16 @@ int main(int argc, char** argv) {
     std::printf("acl-ndk-probe: boundary selftest = %d %s\n", r, r == 1010 ? "(PASS)" : "(FAIL)");
     return r == 1010 ? 0 : 1;
   }
+
+#if ACL_HAVE_JNI
+  // JNI mode: drive the bionic .so's real JNI_OnLoad (GetEnv + FindClass + RegisterNatives) across
+  // the %fs boundary, using a FAKE glibc "ART" JavaVM/JNIEnv. Then invoke the RegisterNatives'd
+  // native. Proves the JNIEnv/JavaVM trampoline table (BionicRuntime::wrap_java_vm).
+  if (std::string(argv[2]) == "--jni") {
+    if (run_jni_selftest(*rt, h)) return 0;
+    return 1;
+  }
+#endif
   void* fn = rt->symbol(h, argv[2]);
   if (!fn) {
     std::fprintf(stderr, "symbol '%s' not found\n", argv[2]);

@@ -8,22 +8,29 @@
 # bionic_runtime.cpp is built -fno-stack-protector: it swaps the thread pointer (%fs on x86_64)
 # between glibc and bionic, and the stack canary lives at %fs:0x28 — a mid-function %fs change
 # would false-fail the check. The swap is confined to this TU.
+# jni_dep (when a JDK is present) provides jni.h for the JNIEnv/JavaVM boundary trampolines.
+ndk_deps = [fmt_dep]
+if have_jni
+  ndk_deps += jni_dep
+endif
+
 acl_ndk = static_library(
   'acl_ndk',
   files('ndk.cpp', 'bionic_runtime.cpp'),
   include_directories : [config_inc, core_inc],
-  dependencies : fmt_dep,
+  dependencies : ndk_deps,
   cpp_args : ['-fno-stack-protector'],
 )
 module_libs += acl_ndk
 
-# Dev tool: load a bionic .so in-process and call a symbol, to verify the loader end to end.
-# Needs a staged bionic runtime at run time (ACL_BIONIC_LINKER/_SYSROOT/_STUB); build always.
+# Dev tool: load a bionic .so in-process and call a symbol (or --boundary / --jni self-tests), to
+# verify the loader end to end. Needs a staged bionic runtime at run time
+# (ACL_BIONIC_LINKER/_SYSROOT/_STUB); build always.
 executable(
   'acl-ndk-probe',
   files('ndk_probe_main.cpp'),
   include_directories : [config_inc, core_inc],
   link_with : [acl_ndk, acl_log],
-  dependencies : fmt_dep,
+  dependencies : ndk_deps,
   install : false,
 )
