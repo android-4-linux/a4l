@@ -39,9 +39,12 @@ jint JNICALL fake_RegisterNatives(JNIEnv*, jclass, const JNINativeMethod* m, jin
   if (n >= 1) g_captured_native = m[0].fnPtr;
   return JNI_OK;
 }
-jint JNICALL fake_CallIntMethodV(JNIEnv*, jobject, jmethodID, va_list a) {
+jmethodID JNICALL fake_GetStaticMethodID(JNIEnv*, jclass, const char*, const char*) {
+  ++g_glibc_calls; return reinterpret_cast<jmethodID>(0x2);
+}
+jint JNICALL fake_CallStaticIntMethodV(JNIEnv*, jclass, jmethodID, va_list a) {
   probe_tls = 444; ++g_glibc_calls;
-  int x = va_arg(a, int), y = va_arg(a, int);  // pulls the varargs forwarded from w_CallIntMethod
+  int x = va_arg(a, int), y = va_arg(a, int);  // pulls the varargs forwarded from w_CallStaticIntMethod
   return x + y;
 }
 acl::ndk::JniEnvTable g_fake_env_tbl;
@@ -62,7 +65,8 @@ static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, const char* so_path) {
   g_fake_env_tbl.GetVersion = fake_GetVersion;
   g_fake_env_tbl.FindClass = fake_FindClass;
   g_fake_env_tbl.RegisterNatives = fake_RegisterNatives;
-  g_fake_env_tbl.CallIntMethodV = fake_CallIntMethodV;
+  g_fake_env_tbl.GetStaticMethodID = fake_GetStaticMethodID;
+  g_fake_env_tbl.CallStaticIntMethodV = fake_CallStaticIntMethodV;
   g_fake_env.functions = &g_fake_env_tbl;
   g_fake_vm_tbl = {};
   g_fake_vm_tbl.GetEnv = fake_GetEnv;
@@ -93,12 +97,52 @@ static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, const char* so_path) {
         const_cast<void*>(g_captured_native))(real_env, nullptr);
   }
 
-  // 5 up-calls: GetEnv, GetVersion, FindClass, RegisterNatives (JNI_OnLoad) + CallIntMethod (native).
-  const bool ok = ver == JNI_VERSION_1_6 && g_captured_native != nullptr && g_glibc_calls == 5 &&
+  // 6 up-calls: GetEnv, GetVersion, FindClass, RegisterNatives (JNI_OnLoad) + GetStaticMethodID,
+  // CallStaticIntMethod (native).
+  const bool ok = ver == JNI_VERSION_1_6 && g_captured_native != nullptr && g_glibc_calls == 6 &&
                   probe_tls == 444 && native_ret == 4250;
   std::printf(
       "acl-ndk-probe: JNI_OnLoad ver=%#x up-calls=%d probe_tls=%d native=%d (varargs up-call) -> %s\n",
       ver, g_glibc_calls, probe_tls, native_ret, ok ? "(PASS)" : "(FAIL)");
+  return ok;
+}
+
+// End-to-end against a REAL JVM (the host OpenJDK linked via jni_dep) — the strongest proof that the
+// jvm_vm.cpp Runtime.nativeLoad hook will work: boot a genuine JVM, load_library the bionic .so
+// (drives JNI_OnLoad -> FindClass(Main) -> RegisterNatives(answer) with a down-call trampoline), then
+// call Main.answer() from Java. The JVM's own dispatch invokes the trampoline -> bionic native ->
+// GetStaticMethodID/CallStaticIntMethod(helper,20,30) up-calls -> back. Expect 4250.
+static bool run_realvm(acl::ndk::BionicRuntime& rt, const char* so_path) {
+  const char* classes = std::getenv("ACL_NDK_TEST_CLASSES");
+  if (!classes) {
+    std::fprintf(stderr, "--realvm needs ACL_NDK_TEST_CLASSES (dir with com/acl/ndktest/Main.class)\n");
+    return false;
+  }
+  std::string cp = std::string("-Djava.class.path=") + classes;
+  JavaVMOption opt{};
+  opt.optionString = const_cast<char*>(cp.c_str());
+  JavaVMInitArgs args{};
+  args.version = JNI_VERSION_1_6;
+  args.nOptions = 1;
+  args.options = &opt;
+  args.ignoreUnrecognized = JNI_FALSE;
+  JavaVM* jvm = nullptr;
+  JNIEnv* env = nullptr;
+  if (JNI_CreateJavaVM(&jvm, reinterpret_cast<void**>(&env), &args) != JNI_OK) {
+    std::fprintf(stderr, "JNI_CreateJavaVM failed\n");
+    return false;
+  }
+  std::string err;
+  if (!rt.load_library(so_path, jvm, env, &err)) {
+    std::fprintf(stderr, "load_library: %s\n", err.c_str());
+    return false;
+  }
+  jclass c = env->FindClass("com/acl/ndktest/Main");
+  jmethodID mid = c ? env->GetStaticMethodID(c, "answer", "()I") : nullptr;
+  if (!mid) { std::fprintf(stderr, "resolve Main.answer failed\n"); return false; }
+  jint r = env->CallStaticIntMethod(c, mid);  // JVM dispatch -> down-call trampoline -> bionic native
+  const bool ok = (r == 4250);
+  std::printf("acl-ndk-probe: REAL JVM Main.answer() = %d %s\n", r, ok ? "(PASS)" : "(FAIL)");
   return ok;
 }
 #endif  // ACL_HAVE_JNI
@@ -138,6 +182,9 @@ int main(int argc, char** argv) {
   if (std::string(argv[2]) == "--jni") {
     if (run_jni_selftest(*rt, argv[1])) return 0;
     return 1;
+  }
+  if (std::string(argv[2]) == "--realvm") {
+    return run_realvm(*rt, argv[1]) ? 0 : 1;
   }
 #endif
   void* fn = rt->symbol(h, argv[2]);

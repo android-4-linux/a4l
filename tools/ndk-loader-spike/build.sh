@@ -62,6 +62,23 @@ echo "== [4/4] spike harness =="
 c++ -std=c++20 -O0 -g -fno-stack-protector -I"$HERE" \
   -o "$OUT/spike" "$HERE/bionic_bootstrap.cpp" "$HERE/spike_main.cpp"
 
+# Java fixture for the real-JVM end-to-end (acl-ndk-probe --realvm): a class matching the .so's
+# JNI_OnLoad (FindClass com/acl/ndktest/Main) with a native answer() bound via RegisterNatives and
+# a helper() the native up-calls. Compiled with the SAME JDK the probe links (class-file version).
+JH="$(java -XshowSettings:properties -version 2>&1 | awk -F'= ' '/java.home/{print $2; exit}')"
+if [ -n "$JH" ] && [ -x "$JH/bin/javac" ]; then
+  cat >"$OUT/Main.java" <<'EOJ'
+package com.acl.ndktest;
+public class Main {
+  public static native int answer();          // bound by the bionic .so's JNI_OnLoad
+  public static int helper(int a, int b) { return a + b; }  // up-called by the native
+}
+EOJ
+  rm -rf "$OUT/classes"; mkdir -p "$OUT/classes"
+  "$JH/bin/javac" -d "$OUT/classes" "$OUT/Main.java" \
+    && echo "== java fixture: $OUT/classes (ACL_NDK_TEST_CLASSES) =="
+fi
+
 echo
 echo "== run =="
 set -x

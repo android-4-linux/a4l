@@ -53,11 +53,13 @@ int acl_ndk_boundary(int (*cb)(int), int x) {
   int r = cb(x);                              // up-call into glibc (needs glibc %fs)
   return r + (t_marker == 7 ? 1000 : 0);      // bionic TLS intact after the round trip?
 }
-// A native bound via RegisterNatives (not name resolution) — the real JNI_OnLoad path. It also
-// makes a VARARGS up-call (CallIntMethod), exercising the va_list->...V thunk across the boundary.
+// A native bound via RegisterNatives (not name resolution) — the real JNI_OnLoad path. It makes a
+// VALID varargs up-call: GetStaticMethodID + CallStaticIntMethod(helper, 20, 30) on its own class.
+// Valid JNI, so it runs against a real JVM as well as the fake ART. Exercises the va_list->...V thunk.
 static jint the_registered(JNIEnv* env, jclass clazz) {
   t_marker = 55;                              // bionic TLS under the down-call (bionic %fs)
-  jint sum = (*env)->CallIntMethod(env, (jobject)0x1, (jmethodID)0x2, 20, 30);  // varargs -> 50
+  jmethodID mid = (*env)->GetStaticMethodID(env, clazz, "helper", "(II)I");
+  jint sum = (*env)->CallStaticIntMethod(env, clazz, mid, 20, 30);  // varargs up-call -> 50
   return 4200 + sum;                          // expect 4250
 }
 // Exercises the JNIEnv/JavaVM boundary: GetEnv (VM up-call) then GetVersion/FindClass/
