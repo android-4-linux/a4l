@@ -697,8 +697,14 @@ class JniVm : public Vm {
     JNIEnv* env = nullptr;
     if (Error e = create_java_vm(env)) return e;
     env_ = env;
-    log::i(kTag, "{} started: boot=[{}] classpath=[{}]", backend_name(backend()),
-           join(config_.boot_classpath, ':'), join(config_.classpath, ':'));
+    // ArtVm ignores config_.boot_classpath (it is .class/.jar; ART needs DEX — see
+    // create_java_vm), so do not print it as if ART were booting with it.
+    if (backend() == Backend::Art)
+      log::i(kTag, "{} started: classpath=[{}]", backend_name(backend()),
+             join(config_.classpath, ':'));
+    else
+      log::i(kTag, "{} started: boot=[{}] classpath=[{}]", backend_name(backend()),
+             join(config_.boot_classpath, ':'), join(config_.classpath, ':'));
     // Bind the android.* native methods on the classpath.
     register_natives(env_);
     return Error::ok();
@@ -2231,6 +2237,20 @@ class ArtVm final : public JniVm {
     std::vector<std::string> cp;
     if (const char* fw = std::getenv("ACL_ART_FRAMEWORK"); fw != nullptr && *fw != '\0') {
       cp.emplace_back(fw);
+    } else if (std::getenv("ACL_ART_BOOTCLASSPATH") == nullptr) {
+      // Say so here, plainly. Without a framework ART can read, android.* does not resolve, and
+      // the first thing that fails is the APP's own Activity — "could not load class
+      // com.example.MainActivity: ClassNotFoundException" — which points at the app rather than at
+      // the missing framework, and costs an hour to see through. acl's staged framework
+      // (config_.boot_classpath) is .class files + android.jar: that is what the JVM backend eats,
+      // but ART reads only DEX, so it is not usable here and is NOT what ART is booting with.
+      log::w(kTag,
+             "no framework for ART: neither ACL_ART_FRAMEWORK (d8'd android.* DEX) nor "
+             "ACL_ART_BOOTCLASSPATH (real framework jars) is set. acl's staged framework{} is "
+             ".class/.jar, which ART cannot read. android.* will not resolve, so any app with an "
+             "Activity fails to load its own class; a static-main DEX still runs. See "
+             "docs/ndk-scope.md and tests/integration/run_activity_art_test.py for the d8 recipe.",
+             config_.boot_classpath.empty() ? "" : (" (" + join(config_.boot_classpath, ':') + ")"));
     }
     // acl's host-ART runtime bootstrap DEX (org.acl.internal.HostBootstrap): the framework
     // environment (main Looper, no-Binder ServiceManager, minimal Context) an app expects
