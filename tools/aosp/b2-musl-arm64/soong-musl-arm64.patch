@@ -1,10 +1,10 @@
 # acl B2 musl-arm64: full patch set (Android 13 / T). Apply from the AOSP tree root.
-# build/soong, build/make, prebuilts/clang, external/llvm are separate git repos.
-# TOOLCHAIN + RUNTIME INTEGRATION (complete): arch.go, arm64_musl_host.go, cc/config/Android.bp,
-# configurability.go, envsetup.mk, clangprebuilts.go.
-# HOST-GRAPH ENABLEMENT (in progress): cc/sanitize.go (memtag host-guard + musl-arm64 sanitizer
-# disable), cc/fuzz.go (disable cc_fuzz on musl_arm64), external/llvm Android.bp (disable
-# libLLVM/renderscript tooling). Rust + more subsystems remain — see README.
+# Many separate git repos. TOOLCHAIN+RUNTIME (complete): build/soong (arch.go, arm64_musl_host.go,
+# cc/config/Android.bp, configurability.go), build/make (envsetup.mk), prebuilts/clang
+# (clangprebuilts.go). HOST-GRAPH ENABLEMENT (in progress): global subsystem disables =
+# cc/sanitize.go, cc/fuzz.go, rust/rust.go, python/python.go, external/llvm; plus per-module
+# disables for non-ART host tools/tests (simpleperf, rootcanal, mkbootimg/vts/libfec tests).
+# See README — the module-graph tail is multi-week; frontier at commit time: libbluetooth_rust_interop.
 # ============================================================================
 ### repo: build/soong ###
 diff --git a/android/arch.go b/android/arch.go
@@ -81,28 +81,26 @@ index 23d81d600..24e058ee4 100644
  	})
  
 diff --git a/cc/sanitize.go b/cc/sanitize.go
-index 814fef6a9..a9042c44b 100644
+index 814fef6a9..2a06689ec 100644
 --- a/cc/sanitize.go
 +++ b/cc/sanitize.go
-@@ -430,7 +430,10 @@ func (sanitize *sanitize) begin(ctx BaseModuleContext) {
+@@ -430,7 +430,9 @@ func (sanitize *sanitize) begin(ctx BaseModuleContext) {
  	}
  
  	// Enable Memtag for all components in the include paths (for Aarch64 only)
 -	if ctx.Arch().ArchType == android.Arm64 {
-+	// acl B2: memtag heap tagging (MTE) is an Android device feature; never enable it for host
-+	// builds (the note_memtag_heap_* objects are linux_bionic_supported only, so a musl arm64 host
-+	// binary would depend on a disabled module). Mirrors the !ctx.Host() guard on CFI below.
++	// acl B2: MTE is an Android device feature; never enable it for host builds (note_memtag_* is
++	// linux_bionic_supported only). Mirrors the !ctx.Host() guard on CFI below.
 +	if ctx.Arch().ArchType == android.Arm64 && !ctx.Host() {
  		if ctx.Config().MemtagHeapSyncEnabledForPath(ctx.ModuleDir()) {
  			if s.Memtag_heap == nil {
  				s.Memtag_heap = proptools.BoolPtr(true)
-@@ -496,6 +499,22 @@ func (sanitize *sanitize) begin(ctx BaseModuleContext) {
+@@ -496,6 +498,21 @@ func (sanitize *sanitize) begin(ctx BaseModuleContext) {
  		s.Diag.Cfi = nil
  	}
  
-+	// acl B2: the musl arm64 bring-up host ships only the core LLVM runtimes (builtins/crt/profile/
-+	// libunwind/libc++) — no sanitizer/fuzzer runtimes. Disable the sanitizers that would pull them
-+	// so Soong doesn't create musl_arm64 sanitizer/fuzzer variants depending on absent runtimes.
++	// acl B2: the musl arm64 bring-up host ships only core LLVM runtimes (builtins/crt/profile/
++	// libunwind/libc++) — no sanitizer/fuzzer runtimes. Disable sanitizers that would pull them.
 +	if ctx.toolchain().Musl() && ctx.Arch().ArchType == android.Arm64 {
 +		s.Address = nil
 +		s.Hwaddress = nil
@@ -119,7 +117,7 @@ index 814fef6a9..a9042c44b 100644
  	// Also disable CFI for VNDK variants of components
  	if ctx.isVndk() && ctx.useVndk() {
  		if ctx.static() {
-@@ -1128,7 +1147,7 @@ func sanitizerRuntimeMutator(mctx android.BottomUpMutatorContext) {
+@@ -1128,7 +1145,7 @@ func sanitizerRuntimeMutator(mctx android.BottomUpMutatorContext) {
  			sanitizers = append(sanitizers, "shadow-call-stack")
  		}
  
@@ -128,7 +126,7 @@ index 814fef6a9..a9042c44b 100644
  			noteDep := "note_memtag_heap_async"
  			if Bool(c.sanitize.Properties.Sanitize.Diag.Memtag_heap) {
  				noteDep = "note_memtag_heap_sync"
-@@ -1223,7 +1242,9 @@ func sanitizerRuntimeMutator(mctx android.BottomUpMutatorContext) {
+@@ -1223,7 +1240,9 @@ func sanitizerRuntimeMutator(mctx android.BottomUpMutatorContext) {
  			addStaticDeps(config.BuiltinsRuntimeLibrary(toolchain))
  		}
  
@@ -139,6 +137,334 @@ index 814fef6a9..a9042c44b 100644
  			// UBSan is supported on non-bionic linux host builds as well
  
  			// Adding dependency to the runtime library. We are using *FarVariation*
+diff --git a/python/python.go b/python/python.go
+index b100cc318..8c7f69415 100644
+--- a/python/python.go
++++ b/python/python.go
+@@ -264,6 +264,22 @@ func (p *Module) init(additionalProps ...interface{}) android.Module {
+ 	}
+ 
+ 	android.InitAndroidArchModule(p, p.hod, p.multilib)
++
++	// acl B2: CPython isn't built for the musl arm64 bring-up host, so the py3 launcher is disabled
++	// there; disable Python modules for that host too (they are build-time tools, not needed for ART).
++	android.AddLoadHook(p, func(ctx android.LoadHookContext) {
++		type props struct {
++			Target struct {
++				Linux_musl_arm64 struct {
++					Enabled *bool
++				}
++			}
++		}
++		pp := &props{}
++		pp.Target.Linux_musl_arm64.Enabled = proptools.BoolPtr(false)
++		ctx.AppendProperties(pp)
++	})
++
+ 	android.InitDefaultableModule(p)
+ 
+ 	return p
+diff --git a/rust/rust.go b/rust/rust.go
+index c4fd14859..f6b5d9f4b 100644
+--- a/rust/rust.go
++++ b/rust/rust.go
+@@ -728,6 +728,21 @@ func (mod *Module) Init() android.Module {
+ 	android.InitAndroidArchModule(mod, mod.hod, mod.multilib)
+ 	android.InitApexModule(mod)
+ 
++	// acl B2: Rust has no arm64-musl host toolchain or std, so Rust modules cannot target the
++	// musl arm64 bring-up host; disable them there (they are not needed for ART).
++	android.AddLoadHook(mod, func(ctx android.LoadHookContext) {
++		type props struct {
++			Target struct {
++				Linux_musl_arm64 struct {
++					Enabled *bool
++				}
++			}
++		}
++		p := &props{}
++		p.Target.Linux_musl_arm64.Enabled = proptools.BoolPtr(false)
++		ctx.AppendProperties(p)
++	})
++
+ 	android.InitDefaultableModule(mod)
+ 	return mod
+ }
+### repo: build/make ###
+diff --git a/core/envsetup.mk b/core/envsetup.mk
+index c32d380b0..308ccab23 100644
+--- a/core/envsetup.mk
++++ b/core/envsetup.mk
+@@ -164,6 +164,10 @@ ifeq ($(HOST_OS),linux)
+     ifeq (,$(HOST_CROSS_ARCH))
+       $(error HOST_CROSS_ARCH missing.)
+     endif
++  else ifeq ($(HOST_CROSS_OS),linux_musl)
++    ifeq (,$(HOST_CROSS_ARCH))
++      $(error HOST_CROSS_ARCH missing.)
++    endif
+   else
+     $(error Unsupported HOST_CROSS_OS $(HOST_CROSS_OS))
+   endif
+### repo: prebuilts/clang/host/linux-x86 ###
+diff --git a/soong/clangprebuilts.go b/soong/clangprebuilts.go
+index 989aca9..f8dc0a7 100644
+--- a/soong/clangprebuilts.go
++++ b/soong/clangprebuilts.go
+@@ -153,8 +153,9 @@ func llvmHostPrebuiltLibraryShared(ctx android.LoadHookContext) {
+ }
+ 
+ type archInnerProps struct {
+-	Srcs []string
+-	Stem *string
++	Srcs    []string
++	Stem    *string
++	Enabled *bool // acl B2: gate the musl_arm64 variant on the prebuilt existing
+ }
+ type archProps struct {
+ 	Android_arm         archInnerProps
+@@ -167,6 +168,7 @@ type archProps struct {
+ 	Glibc_x86_64        archInnerProps
+ 	Linux_musl_x86      archInnerProps
+ 	Linux_musl_x86_64   archInnerProps
++	Linux_musl_arm64    archInnerProps // acl B2
+ }
+ 
+ func llvmPrebuiltLibraryStatic(ctx android.LoadHookContext) {
+@@ -193,6 +195,13 @@ func llvmPrebuiltLibraryStatic(ctx android.LoadHookContext) {
+ 	p.Target.Linux_bionic_x86_64.Srcs = []string{path.Join(libDir, "x86_64", name)}
+ 	p.Target.Linux_musl_x86.Srcs = []string{path.Join(libDir, "i686-linux-musl/lib", name)}
+ 	p.Target.Linux_musl_x86_64.Srcs = []string{path.Join(libDir, "x86_64-linux-musl/lib", name)}
++	// acl B2: existence-gate the musl_arm64 variant (libunwind/libc++/libc++abi were built).
++	muslA := path.Join(libDir, "aarch64-linux-musl/lib", name)
++	if android.ExistentPathForSource(ctx, ctx.ModuleDir(), muslA).Valid() {
++		p.Target.Linux_musl_arm64.Srcs = []string{muslA}
++	} else {
++		p.Target.Linux_musl_arm64.Enabled = proptools.BoolPtr(false)
++	}
+ 	ctx.AppendProperties(p)
+ }
+ 
+@@ -309,6 +318,13 @@ func libClangRtPrebuiltLibraryStatic(ctx android.LoadHookContext, libProps *preb
+ 	p.Target.Glibc_x86_64.Srcs = []string{path.Join(libDir, name+"-x86_64"+suffix+".a")}
+ 	p.Target.Linux_musl_x86.Srcs = []string{path.Join(libDir, "i686-linux-musl/lib/linux", name+"-i386"+suffix+".a")}
+ 	p.Target.Linux_musl_x86_64.Srcs = []string{path.Join(libDir, "x86_64-linux-musl/lib/linux", name+"-x86_64"+suffix+".a")}
++	// acl B2: existence-gate the musl_arm64 variant (only builtins/profile were built).
++	muslA := path.Join(libDir, "aarch64-linux-musl/lib/linux", name+"-aarch64"+suffix+".a")
++	if android.ExistentPathForSource(ctx, ctx.ModuleDir(), muslA).Valid() {
++		p.Target.Linux_musl_arm64.Srcs = []string{muslA}
++	} else {
++		p.Target.Linux_musl_arm64.Enabled = proptools.BoolPtr(false)
++	}
+ 	p.System_shared_libs = []string{}
+ 	p.No_libcrt = proptools.BoolPtr(true)
+ 	p.Stl = proptools.StringPtr("none")
+@@ -326,6 +342,9 @@ func libClangRtPrebuiltObject(ctx android.LoadHookContext) {
+ 			X86_64 struct {
+ 				Srcs []string
+ 			}
++			Arm64 struct { // acl B2
++				Srcs []string
++			}
+ 		}
+ 		System_shared_libs []string
+ 		Stl                *string
+@@ -336,6 +355,7 @@ func libClangRtPrebuiltObject(ctx android.LoadHookContext) {
+ 	p := &props{}
+ 	p.Arch.X86.Srcs = []string{path.Join(libDir, name+"-i386.o")}
+ 	p.Arch.X86_64.Srcs = []string{path.Join(libDir, name+"-x86_64.o")}
++	p.Arch.Arm64.Srcs = []string{path.Join(libDir, name+"-aarch64.o")} // acl B2
+ 	p.System_shared_libs = []string{}
+ 	p.Stl = proptools.StringPtr("none")
+ 	ctx.AppendProperties(p)
+### repo: external/llvm ###
+diff --git a/Android.bp b/Android.bp
+index cbc59cb04a..e1dc228952 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -97,6 +97,10 @@ llvm_defaults {
+     header_libs: ["llvm-headers-no-generated-headers"],
+ 
+     target: {
++        // acl B2: no libLLVM/renderscript tooling on the musl arm64 bring-up host (not needed for ART).
++        linux_musl_arm64: {
++            enabled: false,
++        },
+         android: {
+             cflags: [
+                 "-finline-functions",
+### repo: packages/modules/Bluetooth ###
+diff --git a/tools/rootcanal/Android.bp b/tools/rootcanal/Android.bp
+index d0f6f51da8..6e15b13a12 100644
+--- a/tools/rootcanal/Android.bp
++++ b/tools/rootcanal/Android.bp
+@@ -21,6 +21,13 @@ cc_defaults {
+         "gd_clang_tidy",
+         "gd_clang_tidy_ignore_android",
+     ],
++    // acl B2: rootcanal (Bluetooth emulator, depends on Rust liblmp) isn't needed for ART; the musl
++    // arm64 bring-up host has no Rust toolchain.
++    target: {
++        linux_musl_arm64: {
++            enabled: false,
++        },
++    },
+     cflags: [
+         "-fvisibility=hidden",
+         "-DROOTCANAL_LMP",
+@@ -201,6 +208,10 @@ cc_test_host {
+         darwin: {
+             enabled: false,
+         },
++        // acl B2: depends on libbt-rootcanal (Rust liblmp, disabled on the musl arm64 host); not for ART.
++        linux_musl_arm64: {
++            enabled: false,
++        },
+     },
+ }
+ 
+### repo: system/extras/simpleperf ###
+diff --git a/libfec/test/Android.bp b/libfec/test/Android.bp
+index d6be78e5..17eeb393 100644
+--- a/libfec/test/Android.bp
++++ b/libfec/test/Android.bp
+@@ -77,4 +77,10 @@ cc_test_host {
+         "liblog",
+         "libbase",
+     ],
++    // acl B2: data dep on avbtool (python, disabled on the musl arm64 bring-up host); not needed for ART.
++    target: {
++        linux_musl_arm64: {
++            enabled: false,
++        },
++    },
+ }
+diff --git a/simpleperf/Android.bp b/simpleperf/Android.bp
+index 58943931..b2c6ab50 100644
+--- a/simpleperf/Android.bp
++++ b/simpleperf/Android.bp
+@@ -44,11 +44,21 @@ cc_defaults {
+         "libz",
+         "libziparchive",
+     ],
++    // acl B2: pulls libLLVM (disabled for the musl arm64 bring-up host); simpleperf isn't needed for ART.
++    target: {
++        linux_musl_arm64: {
++            enabled: false,
++        },
++    },
+ }
+ 
+ cc_defaults {
+     name: "simpleperf_cflags",
+     target: {
++        // acl B2: simpleperf pulls libLLVM (disabled on the musl arm64 bring-up host); not needed for ART.
++        linux_musl_arm64: {
++            enabled: false,
++        },
+         host: {
+             cflags: [
+                 "-DUSE_BIONIC_UAPI_HEADERS",
+@@ -95,6 +105,10 @@ cc_library_static {
+         windows: {
+             enabled: true,
+         },
++        // acl B2: pulls libLLVM (disabled for the musl arm64 bring-up host); not needed for ART.
++        linux_musl_arm64: {
++            enabled: false,
++        },
+     },
+ }
+ 
+### repo: system/tools/mkbootimg ###
+diff --git a/gki/Android.bp b/gki/Android.bp
+index c62e7d8..064c283 100644
+--- a/gki/Android.bp
++++ b/gki/Android.bp
+@@ -70,6 +70,12 @@ sh_test_host {
+     test_suites: [
+         "general-tests",
+     ],
++    // acl B2: uses python host tools (disabled on the musl arm64 bring-up host); not needed for ART.
++    target: {
++        linux_musl_arm64: {
++            enabled: false,
++        },
++    },
+ }
+ 
+ genrule {
+### repo: test/vts ###
+diff --git a/testcases/host/firmware_dtbo_test/Android.bp b/testcases/host/firmware_dtbo_test/Android.bp
+index 5a65226a1..223c889f6 100644
+--- a/testcases/host/firmware_dtbo_test/Android.bp
++++ b/testcases/host/firmware_dtbo_test/Android.bp
+@@ -32,4 +32,11 @@ java_test_host {
+         "mkdtboimg.py",
+     ],
+     target_required: ["ufdt_verify_overlay"],
++    // acl B2: uses a python host tool (disabled on the musl arm64 bring-up host); not needed for ART.
++    // Java host modules are arch-independent (linux_musl_common), so gate at the linux_musl OS level.
++    target: {
++        linux_musl: {
++            enabled: false,
++        },
++    },
+ }
+### repo: system/extras/libfec ###
+diff --git a/libfec/test/Android.bp b/libfec/test/Android.bp
+index d6be78e5..17eeb393 100644
+--- a/libfec/test/Android.bp
++++ b/libfec/test/Android.bp
+@@ -77,4 +77,10 @@ cc_test_host {
+         "liblog",
+         "libbase",
+     ],
++    // acl B2: data dep on avbtool (python, disabled on the musl arm64 bring-up host); not needed for ART.
++    target: {
++        linux_musl_arm64: {
++            enabled: false,
++        },
++    },
+ }
+diff --git a/simpleperf/Android.bp b/simpleperf/Android.bp
+index 58943931..b2c6ab50 100644
+--- a/simpleperf/Android.bp
++++ b/simpleperf/Android.bp
+@@ -44,11 +44,21 @@ cc_defaults {
+         "libz",
+         "libziparchive",
+     ],
++    // acl B2: pulls libLLVM (disabled for the musl arm64 bring-up host); simpleperf isn't needed for ART.
++    target: {
++        linux_musl_arm64: {
++            enabled: false,
++        },
++    },
+ }
+ 
+ cc_defaults {
+     name: "simpleperf_cflags",
+     target: {
++        // acl B2: simpleperf pulls libLLVM (disabled on the musl arm64 bring-up host); not needed for ART.
++        linux_musl_arm64: {
++            enabled: false,
++        },
+         host: {
+             cflags: [
+                 "-DUSE_BIONIC_UAPI_HEADERS",
+@@ -95,6 +105,10 @@ cc_library_static {
+         windows: {
+             enabled: true,
+         },
++        // acl B2: pulls libLLVM (disabled for the musl arm64 bring-up host); not needed for ART.
++        linux_musl_arm64: {
++            enabled: false,
++        },
+     },
+ }
+ 
+### repo: build/soong (NEW FILE) ###
 diff --git a/cc/config/arm64_musl_host.go b/cc/config/arm64_musl_host.go
 new file mode 100644
 index 000000000..dfdae55d1
@@ -250,100 +576,3 @@ index 000000000..dfdae55d1
 +func init() {
 +	registerToolchainFactory(android.LinuxMusl, android.Arm64, linuxMuslArm64ToolchainFactory)
 +}
-### repo: build/make ###
-diff --git a/core/envsetup.mk b/core/envsetup.mk
-index c32d380b0..308ccab23 100644
---- a/core/envsetup.mk
-+++ b/core/envsetup.mk
-@@ -164,6 +164,10 @@ ifeq ($(HOST_OS),linux)
-     ifeq (,$(HOST_CROSS_ARCH))
-       $(error HOST_CROSS_ARCH missing.)
-     endif
-+  else ifeq ($(HOST_CROSS_OS),linux_musl)
-+    ifeq (,$(HOST_CROSS_ARCH))
-+      $(error HOST_CROSS_ARCH missing.)
-+    endif
-   else
-     $(error Unsupported HOST_CROSS_OS $(HOST_CROSS_OS))
-   endif
-### repo: prebuilts/clang/host/linux-x86 ###
-diff --git a/soong/clangprebuilts.go b/soong/clangprebuilts.go
-index 989aca9..7dd69c9 100644
---- a/soong/clangprebuilts.go
-+++ b/soong/clangprebuilts.go
-@@ -155,6 +155,7 @@ func llvmHostPrebuiltLibraryShared(ctx android.LoadHookContext) {
- type archInnerProps struct {
- 	Srcs []string
- 	Stem *string
-+	Enabled *bool // acl B2
- }
- type archProps struct {
- 	Android_arm         archInnerProps
-@@ -167,6 +168,7 @@ type archProps struct {
- 	Glibc_x86_64        archInnerProps
- 	Linux_musl_x86      archInnerProps
- 	Linux_musl_x86_64   archInnerProps
-+	Linux_musl_arm64    archInnerProps // acl B2
- }
- 
- func llvmPrebuiltLibraryStatic(ctx android.LoadHookContext) {
-@@ -193,6 +195,12 @@ func llvmPrebuiltLibraryStatic(ctx android.LoadHookContext) {
- 	p.Target.Linux_bionic_x86_64.Srcs = []string{path.Join(libDir, "x86_64", name)}
- 	p.Target.Linux_musl_x86.Srcs = []string{path.Join(libDir, "i686-linux-musl/lib", name)}
- 	p.Target.Linux_musl_x86_64.Srcs = []string{path.Join(libDir, "x86_64-linux-musl/lib", name)}
-+	muslA := path.Join(libDir, "aarch64-linux-musl/lib", name) // acl B2
-+	if android.ExistentPathForSource(ctx, ctx.ModuleDir(), muslA).Valid() {
-+		p.Target.Linux_musl_arm64.Srcs = []string{muslA}
-+	} else {
-+		p.Target.Linux_musl_arm64.Enabled = proptools.BoolPtr(false)
-+	}
- 	ctx.AppendProperties(p)
- }
- 
-@@ -309,6 +317,12 @@ func libClangRtPrebuiltLibraryStatic(ctx android.LoadHookContext, libProps *preb
- 	p.Target.Glibc_x86_64.Srcs = []string{path.Join(libDir, name+"-x86_64"+suffix+".a")}
- 	p.Target.Linux_musl_x86.Srcs = []string{path.Join(libDir, "i686-linux-musl/lib/linux", name+"-i386"+suffix+".a")}
- 	p.Target.Linux_musl_x86_64.Srcs = []string{path.Join(libDir, "x86_64-linux-musl/lib/linux", name+"-x86_64"+suffix+".a")}
-+	muslA := path.Join(libDir, "aarch64-linux-musl/lib/linux", name+"-aarch64"+suffix+".a") // acl B2
-+	if android.ExistentPathForSource(ctx, ctx.ModuleDir(), muslA).Valid() {
-+		p.Target.Linux_musl_arm64.Srcs = []string{muslA}
-+	} else {
-+		p.Target.Linux_musl_arm64.Enabled = proptools.BoolPtr(false)
-+	}
- 	p.System_shared_libs = []string{}
- 	p.No_libcrt = proptools.BoolPtr(true)
- 	p.Stl = proptools.StringPtr("none")
-@@ -326,6 +340,9 @@ func libClangRtPrebuiltObject(ctx android.LoadHookContext) {
- 			X86_64 struct {
- 				Srcs []string
- 			}
-+			Arm64 struct { // acl B2
-+				Srcs []string
-+			}
- 		}
- 		System_shared_libs []string
- 		Stl                *string
-@@ -336,6 +353,7 @@ func libClangRtPrebuiltObject(ctx android.LoadHookContext) {
- 	p := &props{}
- 	p.Arch.X86.Srcs = []string{path.Join(libDir, name+"-i386.o")}
- 	p.Arch.X86_64.Srcs = []string{path.Join(libDir, name+"-x86_64.o")}
-+	p.Arch.Arm64.Srcs = []string{path.Join(libDir, name+"-aarch64.o")} // acl B2
- 	p.System_shared_libs = []string{}
- 	p.Stl = proptools.StringPtr("none")
- 	ctx.AppendProperties(p)
-### repo: external/llvm ###
-diff --git a/Android.bp b/Android.bp
-index cbc59cb04a..e1dc228952 100644
---- a/Android.bp
-+++ b/Android.bp
-@@ -97,6 +97,10 @@ llvm_defaults {
-     header_libs: ["llvm-headers-no-generated-headers"],
- 
-     target: {
-+        // acl B2: no libLLVM/renderscript tooling on the musl arm64 bring-up host (not needed for ART).
-+        linux_musl_arm64: {
-+            enabled: false,
-+        },
-         android: {
-             cflags: [
-                 "-finline-functions",
