@@ -1353,9 +1353,28 @@ class JniVm : public Vm {
     jclass bmp_cls = env_->GetObjectClass(bmp);
     jmethodID ptr_m = env_->GetMethodID(bmp_cls, "aclPtr", "()J");
     env_->DeleteLocalRef(bmp_cls);
-    if (ptr_m == nullptr) { clear_exception(); return; }
+    if (ptr_m == nullptr) {
+      // aclPtr() is acl's Bitmap SHIM handing us the gfx::Surface the View drew into. The REAL
+      // android.graphics.Bitmap has no such method, so on the real-framework path — the one every
+      // real app takes — this loop has no pixels to present and used to return in silence: the app
+      // ran to RESUMED, drew its whole view tree, and showed nothing, looking like success.
+      //
+      // The pixels DO exist: the real Bitmap is backed by acl's own libacl_graphics_jni (an
+      // SkBitmap inside its AclBitmap handle), reachable from Bitmap.mNativePtr. Presenting them
+      // needs that lib to export its pixels (pointer/size/rowbytes) so this loop can blit them —
+      // see docs/ndk-scope.md. Until then, say so instead of pretending.
+      clear_exception();
+      log::w(kTag,
+             "--present: this Bitmap has no aclPtr() — the real framework's Bitmap is not acl's "
+             "shim, so the drawn frame cannot be presented yet (needs the graphics_jni pixel "
+             "seam). The app ran and drew; nothing will be shown.");
+      return;
+    }
     auto* surface = reinterpret_cast<const gfx::Surface*>(env_->CallLongMethod(bmp, ptr_m));
-    if (surface == nullptr) return;
+    if (surface == nullptr) {
+      log::w(kTag, "--present: Bitmap.aclPtr() returned no surface; nothing will be shown");
+      return;
+    }
 
     jclass vcls = env_->GetObjectClass(view);
     jmethodID draw = env_->GetMethodID(vcls, "draw", "(Landroid/graphics/Canvas;)V");
