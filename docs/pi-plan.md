@@ -21,12 +21,19 @@ plus acl's `libacl_graphics_jni.so` / `libsoundpool.so` and the framework jars �
 **arm64 Linux host** target. Everything else (Skia, Vulkan/dma-buf, Wayland, PipeWire, the OAT
 cache) is available or tractable on a Pi; the ART lift is the critical path.
 
-**RESULT (2026-07-15, on a real Pi 4 / trixie, all artifacts host-built, nothing compiled on the
-device):** the arm64 ART *builds* and *runs natively* — but the only stock arm64 host ART is
-**bionic**, and **a glibc `acl` cannot `dlopen` a bionic `libart.so`** (SIGTRAP at load — two libcs
-can't coexist when bionic's can't be cold-loaded by glibc's loader). So the end state requires a
-**single-libc arm64 host ART (B2: a glibc/musl arm64 Soong toolchain)** or a split ART process.
-The **`--vm=jvm` OpenJDK-arm64 fallback works end-to-end on the Pi today** (M1). Details in §P-B / §2a.
+**RESULT (Pi 4 / trixie, all artifacts host-built, nothing compiled on the device):** the arm64 ART
+*builds* and *runs natively* — but the only stock arm64 host ART is **bionic**, and **a glibc `acl`
+cannot `dlopen` a bionic `libart.so`** in-process (SIGTRAP at load; two libcs can't coexist). Two ways
+out: **B2** (a single-libc musl arm64 host ART — toolchain + full LLVM-runtime port done, but consuming
+it is a multi-week host-graph port; `tools/aosp/b2-musl-arm64/`), and **B1-split** (run the stock
+bionic ART in its own process, IPC to glibc acl).
+
+**✅ B1-SPLIT WORKS ON THE PI (2026-07-16): `--vm=art` runs.** `acl run hello.apk --vm=art-split` →
+glibc acl spawns the bionic `acl-art-host` (stock `linux_bionic-arm64` Soong `cc_binary`), which
+`dlopen`s the bionic `libart.so`, boots ART, runs the app's DEX, and streams output back over `acl_ipc`
+— **no SIGTRAP** (art-host is bionic). This is the pragmatic path to a running host ART on the Pi, with
+no B2 host-graph port. Design + milestones in **docs/split-process-art.md**; `--vm=jvm` (M1) remains
+the framework-less interim. Details in §P-B / §2a.
 
 A `--vm=jvm` (ADR-0001 fallback, stock OpenJDK-arm64) path gets *something* running with no ART
 build, at reduced fidelity — useful for early bring-up, not the end state (§4).

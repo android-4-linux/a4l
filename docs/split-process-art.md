@@ -106,11 +106,18 @@ art-host; `present_dmabuf_loop` + input stay in acl.
 
 ## Bring-up milestones
 
-- **S1 — boot ART in the subprocess.** art-host (bionic) boots the ART VM from `ACL_ART_HOME` and runs
-  a static-`main` DEX; its `System.out` comes back to acl over the socket. Proves the process split +
-  IPC + the (already-working) bionic ART, end to end, on the Pi. *This is the split analog of the
-  earlier `--vm=art` test — and it should succeed where in-process `dlopen` SIGTRAPed, because art-host
-  is bionic.*
+- **S1 — boot ART in the subprocess. ✅ DONE (2026-07-16).** art-host boots the VM from `ACL_ART_HOME`
+  and runs a static-`main` DEX; its `System.out` comes back to acl over the socket. Proven **on x86**
+  (OpenJDK, `acl-art-host` built glibc via meson) and **on the real Pi with the stock bionic host ART**
+  (`acl-art-host` built `linux_bionic-arm64`, a Soong `cc_binary`; `tools/aosp/art-host/`):
+  `acl run hello.apk --vm=art-split` → the bionic art-host `dlopen`s the bionic `libart.so`, boots ART
+  (`JNI_CreateJavaVM` → `Runtime::Start`), runs `Hello.main`, and `acl-arm64-art: ART booted + main()
+  ran on the Pi` streams back over `acl_ipc`. **The two-libc SIGTRAP that killed in-process `dlopen`
+  (pi-plan §P-B/M3) is gone** — art-host being bionic, ART loads and runs. Getting there also completed
+  the ART tree: the core native libs `Runtime::InitNativeMethods()` loads at runtime
+  (`libicu_jni`/`libjavacore`/`libopenjdk`/`libandroidio` + closure, `linux_bionic_arm64`) are not in
+  `libart`'s NEEDED set — added to `lib64`; and the i18n/conscrypt boot jars must sit under
+  `apex/<name>/javalib/` (both fixes folded into `tools/assemble-arm64-art.sh`).
 - **S2 — one frame across the boundary.** art-host renders a solid-color (then a real View) dma-buf and
   sends `PresentFrame`; acl's `present_dmabuf_loop` puts it on screen via Wayland. First pixels on the
   Pi from a real app under host ART.
