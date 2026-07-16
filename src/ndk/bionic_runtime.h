@@ -15,6 +15,11 @@
 #endif
 
 namespace acl::ndk {
+
+// True if the ELF at `path` is bionic-linked (DT_NEEDED "libc.so", vs glibc's "libc.so.6"). Used to
+// route app native libs (bionic → BionicRuntime) apart from acl's own glibc supplemental libs.
+bool is_bionic_elf(const char* path);
+
 #if ACL_HAVE_JNI
 // The JNI function-table struct types, derived from the `functions` member so this is portable
 // across jni.h variants (OpenJDK names them JNINativeInterface_/JNIInvokeInterface_; Android drops

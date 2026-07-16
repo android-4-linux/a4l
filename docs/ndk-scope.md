@@ -243,13 +243,22 @@ works against a genuine VM, which is exactly what `jvm_vm.cpp` provides. The Jav
 (`com.acl.ndktest.Main` with a native `answer()` + a `helper()`) is built by
 `tools/ndk-loader-spike/build.sh` (`ACL_NDK_TEST_CLASSES`).
 
-The `jvm_vm.cpp` hook is now de-risked to a thin call. NEXT is pure integration: (1) override
-`Runtime.nativeLoad` in `jvm_vm.cpp` (the `register_*_override` pattern) to call
-`BionicRuntime::load_library(path, artVM, artEnv)` for app `lib/<abi>/*.so` (glibc supplemental libs
-chain to the original); (2) stage a bionic runtime for acl (linker+libs+stub) so `ACL_BIONIC_*`
-resolve in a real run; (3) per-thread attach-as-bionic (today uses the main thread's captured glibc
-`%fs` — ART worker/app threads each need a bionic TCB); (4) a bionic-JNI APK for the full acl run
-path; (5) NDK trampoline `.so` (`liblog`→acl `log`, `libandroid`→`wm`); then arm64.
+**`Runtime.nativeLoad` hook — WIRED (2026-07-16, gated).** `jvm_vm.cpp`
+`register_ndk_loadlibrary_override` (called in the ArtVm boot sequence next to the other
+`register_*_override`s) installs, **only when `ACL_BIONIC_LINKER` is set**, an override of
+`java.lang.Runtime.nativeLoad(String,ClassLoader,Class)`: it configures `BionicRuntime` from
+`ACL_BIONIC_*` (+ `ACL_BIONIC_APP_LIBS` for inter-lib deps), and `ndk_native_load` routes each load
+by `acl::ndk::is_bionic_elf(path)` — bionic app libs → `BionicRuntime::load_library(path, artVM,
+artEnv)`, acl's own glibc supplemental libs (e.g. soundpool) → `dlopen`+`JNI_OnLoad`. Unset ⇒ no-op,
+ART's own `nativeLoad` untouched (zero regression: full build + 33 tests green). `is_bionic_elf`
+(DT_NEEDED `libc.so` vs glibc `libc.so.6`) validated: bionic `.so`/stub → BIONIC, `libz.so.1`/`ls` →
+glibc. The mechanism it calls is the `--realvm`-proven stack.
+
+NEXT (to a real acl-app run): (1) stage a bionic runtime for acl (linker+libs+stub) + set
+`ACL_BIONIC_*`/`ACL_BIONIC_APP_LIBS` from the app's extracted `lib/<abi>` dir in the run path;
+(2) an x86_64 bionic-JNI APK to exercise the hook end-to-end on the acl ART path; (3) per-thread
+attach-as-bionic (today uses the main thread's captured glibc `%fs` — ART worker/app threads each
+need a bionic TCB); (4) NDK trampoline `.so` (`liblog`→acl `log`, `libandroid`→`wm`); then arm64.
 
 The mechanism, pinned:
 - The bionic `linker64`/`ld-android.so` export a programmatic loader — `__loader_dlopen`,

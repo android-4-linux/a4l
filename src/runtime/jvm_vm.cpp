@@ -39,6 +39,7 @@
 #include "gfx/gfx_vk.h"  // S3b: VkRenderTarget import_pixels_to_dmabuf
 #endif
 #include "log/log.h"
+#include "ndk/bionic_runtime.h"
 #include "runtime/framework_natives.h"
 #include "svc/svc.h"
 #include "wm/present.h"
@@ -51,6 +52,40 @@ namespace acl::runtime {
 namespace {
 
 constexpr std::string_view kTag = "acl.runtime.jvm";
+
+// ── NDK bionic native-library loading (ADR-5) ─────────────────────────────────────────────────
+// Opt-in via ACL_BIONIC_LINKER/_SYSROOT/_STUB: route the app's bionic lib/<abi>/*.so through the
+// in-process bionic loader (src/ndk/bionic_runtime), which drives their JNI_OnLoad across the two-
+// libc %fs boundary. acl's own glibc supplemental libs (e.g. soundpool) still load via dlopen +
+// JNI_OnLoad. When the env is unset this is a no-op and ART's own nativeLoad is left in place.
+#if ACL_HAVE_JNI
+acl::ndk::BionicRuntime* g_ndk_rt = nullptr;
+JavaVM* g_ndk_vm = nullptr;
+
+// Override of java.lang.Runtime.nativeLoad(String absPath, ClassLoader, Class): returns null on
+// success, an error String otherwise (the libcore contract).
+jstring JNICALL ndk_native_load(JNIEnv* env, jclass, jstring jpath, jobject, jobject) {
+  const char* c = jpath ? env->GetStringUTFChars(jpath, nullptr) : nullptr;
+  const std::string path = c ? c : "";
+  if (c) env->ReleaseStringUTFChars(jpath, c);
+  auto err = [&](const std::string& m) { return env->NewStringUTF(m.c_str()); };
+  if (path.empty()) return err("acl: empty library path");
+
+  if (acl::ndk::is_bionic_elf(path.c_str())) {
+    std::string why;
+    if (g_ndk_rt->load_library(path.c_str(), g_ndk_vm, env, &why) == nullptr)
+      return err("acl-bionic: " + why);
+    log::i(kTag, "loaded bionic native lib {}", path);
+    return nullptr;
+  }
+  // glibc supplemental lib: dlopen + JNI_OnLoad (acl's use RegisterNatives, so no name-based lookup).
+  void* h = ::dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+  if (h == nullptr) { const char* e = ::dlerror(); return err(e ? e : "dlopen failed"); }
+  if (void* onload = ::dlsym(h, "JNI_OnLoad"))
+    reinterpret_cast<jint (*)(JavaVM*, void*)>(onload)(g_ndk_vm, nullptr);
+  return nullptr;
+}
+#endif  // ACL_HAVE_JNI
 
 // ── JVMTI diagnostic (ACL_JVMTI_DIAG) ─────────────────────────────────────────────────────────
 // ART strips the class name/stack from boot-classloader NoClassDefFoundErrors, so an app-swallowed
@@ -2326,6 +2361,7 @@ class ArtVm final : public JniVm {
     load_system_resources(env);
     register_no_binder(env);
     register_systemproperties_override(env);  // neutralize the device-only fast-property abort
+    register_ndk_loadlibrary_override(env);    // route app bionic lib/<abi>/*.so (opt-in, ADR-5)
     bootstrap_host_env(env);
     load_acl_graphics(env);
     // Seed default typefaces now that the graphics Font/Typeface natives are registered
@@ -2388,6 +2424,38 @@ class ArtVm final : public JniVm {
   // it to return 0 (prop not found) so callers (SystemProperties.find()) fall back to the slow
   // native_get(name) path, which works on host. Must run after the libandroid_runtime native floor
   // (which binds the aborting one). Hit by Flutter's FlutterLoader.startInitialization + ACRA.
+  // Install the bionic NDK-loading path if configured (ACL_BIONIC_LINKER set). No-op otherwise, so
+  // default runs keep ART's own nativeLoad. See ndk_native_load above + docs/ndk-scope.md.
+  void register_ndk_loadlibrary_override(JNIEnv* env) {
+#if ACL_HAVE_JNI
+    const char* linker = std::getenv("ACL_BIONIC_LINKER");
+    if (linker == nullptr || *linker == '\0') return;
+    acl::ndk::BionicConfig cfg = acl::ndk::BionicConfig::from_env();
+    if (const char* app = std::getenv("ACL_BIONIC_APP_LIBS"); app != nullptr && *app != '\0')
+      cfg.extra_lib_paths.emplace_back(app);
+    std::string why;
+    acl::ndk::BionicRuntime* rt = acl::ndk::BionicRuntime::instance(cfg, &why);
+    if (rt == nullptr) { log::w(kTag, "NDK bionic loader unavailable: {}", why); return; }
+    g_ndk_rt = rt;
+    env->GetJavaVM(&g_ndk_vm);
+    if (jclass c = env->FindClass("java/lang/Runtime")) {
+      JNINativeMethod m[] = {
+          {const_cast<char*>("nativeLoad"),
+           const_cast<char*>(
+               "(Ljava/lang/String;Ljava/lang/ClassLoader;Ljava/lang/Class;)Ljava/lang/String;"),
+           reinterpret_cast<void*>(&ndk_native_load)},
+      };
+      if (env->RegisterNatives(c, m, 1) != JNI_OK) env->ExceptionClear();
+      else log::i(kTag, "NDK bionic loader active (Runtime.nativeLoad routed)");
+      env->DeleteLocalRef(c);
+    } else {
+      env->ExceptionClear();
+    }
+#else
+    (void)env;
+#endif
+  }
+
   void register_systemproperties_override(JNIEnv* env) {
     if (jclass c = env->FindClass("android/os/SystemProperties")) {
       JNINativeMethod m[] = {

@@ -10,24 +10,25 @@
 
 #include "ndk/bionic_runtime.h"
 
+#include <elf.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include <cstdarg>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <string_view>
 #include <vector>
 
 #if defined(__x86_64__)
 #include <asm/prctl.h>
-#include <elf.h>
-#include <fcntl.h>
 #include <sys/auxv.h>
-#include <sys/mman.h>
 #include <sys/syscall.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <cstdio>
-#include <cstring>
 #endif
 
 #include "log/log.h"
@@ -35,6 +36,37 @@
 namespace acl::ndk {
 namespace {
 constexpr std::string_view kTag = "acl.ndk";
+}
+
+bool is_bionic_elf(const char* path) {
+  // Bionic libs DT_NEEDED "libc.so"; glibc libs DT_NEEDED "libc.so.6". That soname is the reliable
+  // discriminator for routing app libs (bionic → BionicRuntime) vs acl's own glibc supplemental libs.
+  int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+  const off_t sz = ::lseek(fd, 0, SEEK_END);
+  if (sz < static_cast<off_t>(sizeof(Elf64_Ehdr))) { ::close(fd); return false; }
+  void* m = ::mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+  ::close(fd);
+  if (m == MAP_FAILED) return false;
+  const auto* f = static_cast<const std::uint8_t*>(m);
+  const auto& eh = *reinterpret_cast<const Elf64_Ehdr*>(f);
+  bool bionic = false;
+  if (std::memcmp(f, ELFMAG, SELFMAG) == 0 && eh.e_ident[EI_CLASS] == ELFCLASS64 && eh.e_shoff &&
+      eh.e_shoff + std::uint64_t(eh.e_shnum) * sizeof(Elf64_Shdr) <= std::uint64_t(sz)) {
+    const auto* sh = reinterpret_cast<const Elf64_Shdr*>(f + eh.e_shoff);
+    for (int i = 0; i < eh.e_shnum && !bionic; ++i) {
+      if (sh[i].sh_type != SHT_DYNAMIC || sh[i].sh_link >= eh.e_shnum) continue;
+      const auto* dyn = reinterpret_cast<const Elf64_Dyn*>(f + sh[i].sh_offset);
+      const char* str = reinterpret_cast<const char*>(f + sh[sh[i].sh_link].sh_offset);
+      for (; dyn->d_tag != DT_NULL; ++dyn)
+        if (dyn->d_tag == DT_NEEDED && std::strcmp(str + dyn->d_un.d_val, "libc.so") == 0) {
+          bionic = true;
+          break;
+        }
+    }
+  }
+  ::munmap(m, sz);
+  return bionic;
 }
 
 BionicConfig BionicConfig::from_env() {
