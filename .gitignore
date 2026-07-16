@@ -38,3 +38,6 @@ __pycache__/
 
 # Reports
 /reports/
+
+# ndk-loader-spike build outputs
+tools/ndk-loader-spike/out/

@@ -164,9 +164,29 @@ are `out/soong/.intermediates/bionic/{libc,libm,libdl}/…/**android_x86_64_shar
 32-bit); run `LD_LIBRARY_PATH=<bionic-libs> ./linker64 <ABSOLUTE-path-exe>` (the missing
 `/linkerconfig/ld.config.txt` warning is harmless).
 
-**Stage 0b — the in-process embedding (the hard, dedicated piece).** acl needs the app `.so` loaded
-*into* the glibc ART process (so its JNI reaches the JVM), not a child process. The mechanism is now
-pinned:
+**Stage 0b — the in-process embedding — PROVEN (2026-07-16).** `tools/ndk-loader-spike/` (run
+`build.sh`) does it end to end on the x86_64 host: `SPIKE: nativeAnswer() = 42 (PASS)`, deterministic.
+A **glibc** process maps `linker64`, calls `__dl___linker_init` *directly as a function* with a
+synthetic `KernelArgumentBlock` (standalone mode: `AT_ENTRY` = the linker's `_start`, a minimal
+bionic stub exe as `argv[1]`), then `__loader_dlopen`s a bionic `.so` — resolving its whole dep graph
+(bionic `libc`, `liblog`→`libc++`, `libdl`) — `__loader_dlsym`s the symbol, and **calls it** (its
+`__android_log_print` runs, no crash) → 42. So bionic app native code loads and runs *inside* a glibc
+process; the host NDK premise is de-risked. Key facts that made it work (all verified in the spike):
+- **The TLS crux is real but bounded.** `__linker_init` sets `%fs` to bionic's TCB; we `ARCH_GET_FS`
+  before and restore glibc's `%fs` after, and bracket every bionic call (dlopen/dlsym/the app fn) with
+  the swap. `__libc_init_main_thread_late` migrates `%fs` to a **permanent mmap'd TCB**, so calling
+  `__linker_init` and returning is safe (the stack `temp_tcb` isn't the lasting one). Harness is
+  `-fno-stack-protector` (the canary lives at `%fs:0x28`; a mid-function swap would false-fail it).
+- **No init-only mode**, so we hand the linker a throwaway bionic stub exe and call `__linker_init`
+  *directly* (not via `_start`, whose `jmp *%rax` would jump into the stub) to keep control.
+- **Linker input errors are fatal** (it `__linker_error`+aborts the process) — real integration must
+  pre-validate + absolute-path inputs. Bionic deps resolve via `LD_LIBRARY_PATH` (no host `ld.config`).
+
+The mechanism (map PIE → synthetic KAB → `__linker_init` → `__loader_*`) is arch-neutral in structure;
+the arm64 port swaps only the TLS register (`TPIDR_EL0`), auxv, and reloc details (the target
+`linker64` carries the relocs). The remaining work is integration, not feasibility:
+
+The mechanism, pinned:
 - The bionic `linker64`/`ld-android.so` export a programmatic loader — `__loader_dlopen`,
   `__loader_android_dlopen_ext`, `__loader_dlsym`, `__loader_android_create_namespace`, … (bionic
   `dlfcn.cpp`).

@@ -34,6 +34,8 @@ done
 
 # --- The bionic-ABI NDK library (what an app ships in lib/x86_64/) ---
 cat >"$OUT/ndktest.c" <<'EOF'
+// SPDX-License-Identifier: Apache-2.0
+// Provenance: original acl spike fixture (generated). No GPL-3.0 sources.
 #include <jni.h>
 #include <android/log.h>
 JNIEXPORT jint JNICALL
@@ -64,6 +66,8 @@ readelf -sW "$OUT/libndktest.so" | grep nativeAnswer | head -1
 
 # --- A glibc probe that tries to dlopen it (the failure) ---
 cat >"$OUT/dltest.c" <<'EOF'
+// SPDX-License-Identifier: Apache-2.0
+// Provenance: original acl spike fixture (generated). No GPL-3.0 sources.
 #include <dlfcn.h>
 #include <stdio.h>
 int main(int argc, char** argv) {
