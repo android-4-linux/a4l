@@ -126,11 +126,34 @@ musl fails ("depends on disabled module"). That is a Soong-linker root-cause fix
 note for non-bionic arm64 hosts), and it is the first of a real tail of small per-module Android.bp/Soong
 enablements — the standard cost of adding a new host OS×arch to AOSP.
 
-**Status:** toolchain + LLVM-runtime port + clang-prebuilt integration are **done and proven**;
-`libc_musl_arm64` builds. What's left is host-graph enablement (memtag-note injection first, then whatever
-else surfaces) before ART links. The AOSP tree is reverted after each spike (the Soong changes fail
-bp2build golden tests on a normal `m`); this dir + `soong-musl-arm64.patch` +
-`build-aarch64-musl-runtimes.sh` preserve everything. Once ART links, `tools/assemble-arm64-art.sh` (swap
+### Host-graph enablement — the method, and progress
+
+Enabling `musl_arm64` as a host forces `m <any target>` to analyze the **whole** AOSP host graph for
+the new target; each subsystem that assumes arm64==Android-device or that lacks a musl_arm64 runtime
+breaks. The fix pattern is **one lever per subsystem** — each clears hundreds of modules. Handled so
+far (all in `soong-musl-arm64.patch`, driving a `libbase` musl_arm64 build from dozens of errors down):
+
+| Subsystem | Symptom | Fix (root-cause, one lever) |
+|---|---|---|
+| **memtag (MTE)** | arm64 binaries pull `note_memtag_heap_sync` (bionic-only) | `sanitize.go`: `!ctx.Host()` guard on both the path-based enable and the note-dep add |
+| **sanitizers** | `_shared`/`_fuzzer` variants pull `libclang_rt.ubsan_standalone.so` | `sanitize.go`: clear runtime-dependent sanitizers for musl-arm64 + skip the shared-runtime dep |
+| **fuzzers** | `cc_fuzz` modules pull `libclang_rt.fuzzer` | `fuzz.go`: disable `cc_fuzz` for `linux_musl_arm64` (mirrors its existing darwin/linux_bionic disable) |
+| **LLVM/RenderScript** | `bcc`/`ld.mc`/`slang` pull `libLLVM_android` | `external/llvm/Android.bp`: disable `llvm-defaults-no-generated-headers` for musl-arm64 (cascades to clang-defaults) |
+
+**Frontier: Rust.** `libstd`/`tokio`/… get musl_arm64 variants pulling **bionic** `libc`/`crtbegin_dynamic`
+— Rust registers a `LinuxMusl×Arm64` *toolchain factory* for neither x86 nor arm64 host-arm64, and there's
+no Rust std for arm64-musl, so Rust must be **disabled** for this host (not ported). Less clean than the
+above (no existing disable hook); next lever to add. After Rust, expect a few more subsystem levers, then
+**ART's own build** (the real target) — its module set will surface its own musl_arm64 issues.
+
+**Honest status:** the hard, novel work is **done and proven** — the toolchain, the full LLVM-runtime port,
+the clang-prebuilt integration, and `libc_musl_arm64` all build; the systematic host-graph method works and
+has cleared the big global ripples. What remains — Rust + a handful more subsystem disables + then bringing
+up the ART module set on musl-arm64 — is **bounded but genuinely multi-session** (this is the standard cost
+of adding a host OS×arch to AOSP; the toolchain team does exactly this deliberately per target). The AOSP
+tree is reverted after each session (the Soong changes fail bp2build golden tests on a normal `m`); this dir
+(`soong-musl-arm64.patch` + `apply.sh` + `build-aarch64-musl-runtimes.sh` + the staged runtimes at
+`/mnt/dev/aarch64-musl-runtimes`) preserves everything. Once ART links, `tools/assemble-arm64-art.sh` (swap
 the `linux_bionic_arm64` glob → `linux_musl_arm64`) yields the single-libc `ACL_ART_HOME` that
 `acl run --vm=art` can `dlopen` on the Pi without the two-libc SIGTRAP.
 
