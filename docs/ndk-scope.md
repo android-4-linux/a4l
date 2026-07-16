@@ -265,6 +265,27 @@ run here), it auto-matches the vendored bionic, keeps the JNI boundary a clean t
 avoids owning a patched fork of someone else's linker aimed at a different direction; mine libhybris'
 `hooks.c` and TP-swap code as a **reference** for the TLS crux rather than vendoring the whole tree.
 
+## Security — signing & containment (R-10)
+
+Native libs are **not individually code-signed** — an ELF `.so` carries no signature, and the bionic
+linker verifies nothing at load (so our loader replicating bionic needs no signature logic). Integrity
+comes from the **whole-APK signature**: v1 (JAR) digests every entry in `MANIFEST.MF` (covers each
+`lib/<abi>/*.so`); v2/v3 sign the archive bytes as a blob. So the `.so` are vetted **exactly as much
+as the APK is** — nothing separate to vet at the `.so` level.
+
+- **Integrity is a `pkg/`-layer, one-time concern, not a per-load one.** The right design is a single
+  APK v2/v3 signature verification when acl *opens* the APK (mirroring Android install-time), after
+  which every extracted `.so` is trusted by construction. acl does **not** do this yet (`pkg/apk.cpp`
+  only parses ZIP structure) — a bounded, standard task to add before running untrusted APKs. The NDK
+  loader itself stays signature-free.
+- **The real runtime worry is containment, not signing.** Signing says *who authored* the code, not
+  that it's *safe*. Once an app `.so` runs it is arbitrary native code in acl's **single glibc
+  process** — no per-app UID / SELinux / seccomp cage like on-device Android — so it can reach ART,
+  Mesa, and the Wayland connection. That's an architectural sandboxing question (seccomp around the
+  bionic-namespace threads; process/UID isolation later), orthogonal to both signing and the loader,
+  and tracked as its own ADR. For the hash-pinned dev corpus the files are user-vetted, so neither
+  blocks bring-up.
+
 ## Verify
 
 ```sh

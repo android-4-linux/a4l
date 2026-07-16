@@ -197,10 +197,11 @@ Phase ≤3: Java/Kotlin-only apps (reject APKs with `lib/` unless `extractNative
 | R-3 | Clean-room defensibility given prior the predecessor exposure (§1.4) | M | H | Posture B documented; no further the predecessor access; counsel review; second engineer → posture A |
 | R-4 | Real apps use hidden APIs / reflection into internals | H | M | Vendored AOSP (not stubs) covers most internals; hidden-API allowlist like ART's own |
 | R-5 | hwui vs direct-Skia wrong call → repaint perf or fidelity gap | M | M | Phase-2 spike with per-stage budgets (reuse LVGL benchmark methodology) |
-| R-6 | bionic-on-glibc namespace bridging (TLS, ifuncs, pthread ABI) | M | H | Confine to Phase 4; libhybris (Apache) as reference; Java-only remains shippable |
+| R-6 | bionic-on-glibc namespace bridging (TLS, ifuncs, pthread ABI) | M | H | **De-risked (2026-07-16):** in-process bionic linker bootstrap PROVEN on the glibc host (`tools/ndk-loader-spike/`, `nativeAnswer()=42`); TLS handled by `%fs` save/restore + permanent-TCB migration. Remaining is integration, not feasibility. Java-only remains shippable |
 | R-7 | GMS-dependent apps dominate user expectations | H | M | Scope statement; microG later; publish compat list early |
 | R-8 | GPLv3 creep via transitive deps (e.g., readline, some codecs) | L | H | CI license scanner gate; dynamic-link-only LGPL policy |
 | R-9 | Wayland IME/clipboard/activation gaps on some compositors | M | M | Same portability matrix + fallbacks as the flatpak-activation plugin spec |
+| R-10 | Untrusted app native code runs unrestricted in acl's single glibc process (no per-app UID/SELinux/seccomp; a malicious/buggy `.so` reaches ART, Mesa, the Wayland conn) | M | H | Integrity = one-time **APK v2/v3 signature verification** in `pkg/` (the `.so` are covered by the whole-APK sig; not a per-load or loader concern). Containment = separate ADR (seccomp filter around the bionic-namespace threads; process/UID isolation later). Dev corpus is user-vetted; gate before untrusted APKs |
 
 ## 7. Effort estimate
 
