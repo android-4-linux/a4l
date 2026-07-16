@@ -76,6 +76,9 @@ class BionicRuntime {
   // thunked so far (GetEnv/GetVersion/FindClass/RegisterNatives); the rest are copied through
   // unwrapped and will misbehave if called under bionic %fs — the full table is the next step.
   JavaVM* wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env);
+  // The wrapped JNIEnv produced by the last wrap_java_vm() — what a loaded bionic native should be
+  // handed so its own JNI up-calls trampoline. Null before wrap_java_vm() succeeds.
+  JNIEnv* wrapped_env() const { return wrap_env_; }
 #endif
 
   // RAII: set the thread pointer to bionic for the scope's lifetime, restore glibc on exit. Wrap
@@ -96,6 +99,9 @@ class BionicRuntime {
   BionicRuntime() = default;
   std::uintptr_t bionic_fs_ = 0;
   std::uintptr_t glibc_fs_ = 0;  // the bootstrapping (main) thread's glibc thread pointer
+#if ACL_HAVE_JNI
+  JNIEnv* wrap_env_ = nullptr;
+#endif
   void* dlopen_fn_ = nullptr;
   void* dlsym_fn_ = nullptr;
   void* dlerror_fn_ = nullptr;

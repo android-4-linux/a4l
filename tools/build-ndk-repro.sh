@@ -53,10 +53,12 @@ int acl_ndk_boundary(int (*cb)(int), int x) {
   int r = cb(x);                              // up-call into glibc (needs glibc %fs)
   return r + (t_marker == 7 ? 1000 : 0);      // bionic TLS intact after the round trip?
 }
-// A native bound via RegisterNatives (not name resolution) — the real JNI_OnLoad path.
+// A native bound via RegisterNatives (not name resolution) — the real JNI_OnLoad path. It also
+// makes a VARARGS up-call (CallIntMethod), exercising the va_list->...V thunk across the boundary.
 static jint the_registered(JNIEnv* env, jclass clazz) {
   t_marker = 55;                              // bionic TLS under the down-call (bionic %fs)
-  return 4200;
+  jint sum = (*env)->CallIntMethod(env, (jobject)0x1, (jmethodID)0x2, 20, 30);  // varargs -> 50
+  return 4200 + sum;                          // expect 4250
 }
 // Exercises the JNIEnv/JavaVM boundary: GetEnv (VM up-call) then GetVersion/FindClass/
 // RegisterNatives (Env up-calls), each crossing bionic->glibc. Returns JNI_VERSION_1_6.

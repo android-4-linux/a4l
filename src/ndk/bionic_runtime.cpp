@@ -10,6 +10,7 @@
 
 #include "ndk/bionic_runtime.h"
 
+#include <cstdarg>
 #include <cstdlib>
 #include <filesystem>
 #include <string_view>
@@ -349,26 +350,147 @@ WrapVM g_wrap_vm;
 std::uintptr_t g_jni_glibc_fs = 0, g_jni_bionic_fs = 0;
 
 // Entered under bionic %fs (from the bionic .so); restore glibc for the real call, then bionic.
+// Sets the *constant* glibc/bionic %fs (not a save/restore), which composes correctly under JNI
+// re-entrancy with the down-call RunScope (up-calls always originate in bionic, down-calls in glibc).
 struct ToGlibc {
   ToGlibc() { ndk_set_fs(g_jni_glibc_fs); }
   ~ToGlibc() { ndk_set_fs(g_jni_bionic_fs); }
 };
 
-jint JNICALL w_GetVersion(JNIEnv* e) {
-  JNIEnv* r = reinterpret_cast<WrapEnv*>(e)->real;
-  ToGlibc g;
-  return r->functions->GetVersion(r);
-}
-jclass JNICALL w_FindClass(JNIEnv* e, const char* n) {
-  JNIEnv* r = reinterpret_cast<WrapEnv*>(e)->real;
-  ToGlibc g;
-  return r->functions->FindClass(r, n);
-}
+#define R() JNIEnv* r = reinterpret_cast<WrapEnv*>(e)->real
+#define RF r->functions
+
+// Fixed-signature thunks: run the real slot under glibc %fs, forwarding args unchanged.
+#define T0(RET, N)              RET JNICALL w_##N(JNIEnv* e){ R(); ToGlibc g; return RF->N(r); }
+#define T0V(N)                  void JNICALL w_##N(JNIEnv* e){ R(); ToGlibc g; RF->N(r); }
+#define T1(RET, N, A1)          RET JNICALL w_##N(JNIEnv* e, A1 a1){ R(); ToGlibc g; return RF->N(r,a1); }
+#define T1V(N, A1)              void JNICALL w_##N(JNIEnv* e, A1 a1){ R(); ToGlibc g; RF->N(r,a1); }
+#define T2(RET, N, A1, A2)      RET JNICALL w_##N(JNIEnv* e, A1 a1, A2 a2){ R(); ToGlibc g; return RF->N(r,a1,a2); }
+#define T2V(N, A1, A2)          void JNICALL w_##N(JNIEnv* e, A1 a1, A2 a2){ R(); ToGlibc g; RF->N(r,a1,a2); }
+#define T3(RET, N, A1, A2, A3)  RET JNICALL w_##N(JNIEnv* e, A1 a1, A2 a2, A3 a3){ R(); ToGlibc g; return RF->N(r,a1,a2,a3); }
+#define T3V(N, A1, A2, A3)      void JNICALL w_##N(JNIEnv* e, A1 a1, A2 a2, A3 a3){ R(); ToGlibc g; RF->N(r,a1,a2,a3); }
+#define T4(RET, N, A1,A2,A3,A4) RET JNICALL w_##N(JNIEnv* e, A1 a1,A2 a2,A3 a3,A4 a4){ R(); ToGlibc g; return RF->N(r,a1,a2,a3,a4); }
+#define T4V(N, A1,A2,A3,A4)     void JNICALL w_##N(JNIEnv* e, A1 a1,A2 a2,A3 a3,A4 a4){ R(); ToGlibc g; RF->N(r,a1,a2,a3,a4); }
+
+T0(jint, GetVersion)
+T4(jclass, DefineClass, const char*, jobject, const jbyte*, jsize)
+T1(jclass, FindClass, const char*)
+T1(jmethodID, FromReflectedMethod, jobject)
+T1(jfieldID, FromReflectedField, jobject)
+T3(jobject, ToReflectedMethod, jclass, jmethodID, jboolean)
+T1(jclass, GetSuperclass, jclass)
+T2(jboolean, IsAssignableFrom, jclass, jclass)
+T3(jobject, ToReflectedField, jclass, jfieldID, jboolean)
+T1(jint, Throw, jthrowable)
+T2(jint, ThrowNew, jclass, const char*)
+T0(jthrowable, ExceptionOccurred)
+T0V(ExceptionDescribe)
+T0V(ExceptionClear)
+T1V(FatalError, const char*)
+T1(jint, PushLocalFrame, jint)
+T1(jobject, PopLocalFrame, jobject)
+T1(jobject, NewGlobalRef, jobject)
+T1V(DeleteGlobalRef, jobject)
+T1V(DeleteLocalRef, jobject)
+T2(jboolean, IsSameObject, jobject, jobject)
+T1(jobject, NewLocalRef, jobject)
+T1(jint, EnsureLocalCapacity, jint)
+T1(jobject, AllocObject, jclass)
+T1(jclass, GetObjectClass, jobject)
+T2(jboolean, IsInstanceOf, jobject, jclass)
+T3(jmethodID, GetMethodID, jclass, const char*, const char*)
+T3(jfieldID, GetFieldID, jclass, const char*, const char*)
+T3(jmethodID, GetStaticMethodID, jclass, const char*, const char*)
+T3(jfieldID, GetStaticFieldID, jclass, const char*, const char*)
+T2(jstring, NewString, const jchar*, jsize)
+T1(jsize, GetStringLength, jstring)
+T2(const jchar*, GetStringChars, jstring, jboolean*)
+T2V(ReleaseStringChars, jstring, const jchar*)
+T1(jstring, NewStringUTF, const char*)
+T1(jsize, GetStringUTFLength, jstring)
+T2(const char*, GetStringUTFChars, jstring, jboolean*)
+T2V(ReleaseStringUTFChars, jstring, const char*)
+T1(jsize, GetArrayLength, jarray)
+T3(jobjectArray, NewObjectArray, jsize, jclass, jobject)
+T2(jobject, GetObjectArrayElement, jobjectArray, jsize)
+T3V(SetObjectArrayElement, jobjectArray, jsize, jobject)
+T1(jint, UnregisterNatives, jclass)
+T1(jint, MonitorEnter, jobject)
+T1(jint, MonitorExit, jobject)
+T4V(GetStringRegion, jstring, jsize, jsize, jchar*)
+T4V(GetStringUTFRegion, jstring, jsize, jsize, char*)
+T2(void*, GetPrimitiveArrayCritical, jarray, jboolean*)
+T3V(ReleasePrimitiveArrayCritical, jarray, void*, jint)
+T2(const jchar*, GetStringCritical, jstring, jboolean*)
+T2V(ReleaseStringCritical, jstring, const jchar*)
+T1(jweak, NewWeakGlobalRef, jobject)
+T1V(DeleteWeakGlobalRef, jweak)
+T0(jboolean, ExceptionCheck)
+T2(jobject, NewDirectByteBuffer, void*, jlong)
+T1(void*, GetDirectBufferAddress, jobject)
+T1(jlong, GetDirectBufferCapacity, jobject)
+T1(jobjectRefType, GetObjectRefType, jobject)
+
 jint JNICALL w_RegisterNatives(JNIEnv* e, jclass c, const JNINativeMethod* m, jint n) {
-  JNIEnv* r = reinterpret_cast<WrapEnv*>(e)->real;
-  ToGlibc g;
-  return r->functions->RegisterNatives(r, c, m, n);
+  R(); ToGlibc g; return RF->RegisterNatives(r, c, m, n);
 }
+
+// NewObject varargs family (forwards varargs through NewObjectV).
+jobject JNICALL w_NewObject(JNIEnv* e, jclass c, jmethodID m, ...) {
+  R(); va_list a; va_start(a, m); ToGlibc g; jobject x = RF->NewObjectV(r, c, m, a); va_end(a); return x;
+}
+jobject JNICALL w_NewObjectV(JNIEnv* e, jclass c, jmethodID m, va_list a) { R(); ToGlibc g; return RF->NewObjectV(r, c, m, a); }
+jobject JNICALL w_NewObjectA(JNIEnv* e, jclass c, jmethodID m, const jvalue* a) { R(); ToGlibc g; return RF->NewObjectA(r, c, m, a); }
+
+// Call<T>Method value families (varargs -> ...V). One macro instantiation per return type.
+#define CALL_T(RET, T) \
+  RET JNICALL w_Call##T##Method(JNIEnv* e, jobject o, jmethodID m, ...) { R(); va_list a; va_start(a,m); ToGlibc g; RET x = RF->Call##T##MethodV(r,o,m,a); va_end(a); return x; } \
+  RET JNICALL w_Call##T##MethodV(JNIEnv* e, jobject o, jmethodID m, va_list a) { R(); ToGlibc g; return RF->Call##T##MethodV(r,o,m,a); } \
+  RET JNICALL w_Call##T##MethodA(JNIEnv* e, jobject o, jmethodID m, const jvalue* a) { R(); ToGlibc g; return RF->Call##T##MethodA(r,o,m,a); } \
+  RET JNICALL w_CallNonvirtual##T##Method(JNIEnv* e, jobject o, jclass c, jmethodID m, ...) { R(); va_list a; va_start(a,m); ToGlibc g; RET x = RF->CallNonvirtual##T##MethodV(r,o,c,m,a); va_end(a); return x; } \
+  RET JNICALL w_CallNonvirtual##T##MethodV(JNIEnv* e, jobject o, jclass c, jmethodID m, va_list a) { R(); ToGlibc g; return RF->CallNonvirtual##T##MethodV(r,o,c,m,a); } \
+  RET JNICALL w_CallNonvirtual##T##MethodA(JNIEnv* e, jobject o, jclass c, jmethodID m, const jvalue* a) { R(); ToGlibc g; return RF->CallNonvirtual##T##MethodA(r,o,c,m,a); } \
+  RET JNICALL w_CallStatic##T##Method(JNIEnv* e, jclass c, jmethodID m, ...) { R(); va_list a; va_start(a,m); ToGlibc g; RET x = RF->CallStatic##T##MethodV(r,c,m,a); va_end(a); return x; } \
+  RET JNICALL w_CallStatic##T##MethodV(JNIEnv* e, jclass c, jmethodID m, va_list a) { R(); ToGlibc g; return RF->CallStatic##T##MethodV(r,c,m,a); } \
+  RET JNICALL w_CallStatic##T##MethodA(JNIEnv* e, jclass c, jmethodID m, const jvalue* a) { R(); ToGlibc g; return RF->CallStatic##T##MethodA(r,c,m,a); }
+CALL_T(jobject, Object) CALL_T(jboolean, Boolean) CALL_T(jbyte, Byte) CALL_T(jchar, Char)
+CALL_T(jshort, Short) CALL_T(jint, Int) CALL_T(jlong, Long) CALL_T(jfloat, Float) CALL_T(jdouble, Double)
+
+// Call void family (explicit — no return value).
+void JNICALL w_CallVoidMethod(JNIEnv* e, jobject o, jmethodID m, ...) { R(); va_list a; va_start(a,m); ToGlibc g; RF->CallVoidMethodV(r,o,m,a); va_end(a); }
+void JNICALL w_CallVoidMethodV(JNIEnv* e, jobject o, jmethodID m, va_list a) { R(); ToGlibc g; RF->CallVoidMethodV(r,o,m,a); }
+void JNICALL w_CallVoidMethodA(JNIEnv* e, jobject o, jmethodID m, const jvalue* a) { R(); ToGlibc g; RF->CallVoidMethodA(r,o,m,a); }
+void JNICALL w_CallNonvirtualVoidMethod(JNIEnv* e, jobject o, jclass c, jmethodID m, ...) { R(); va_list a; va_start(a,m); ToGlibc g; RF->CallNonvirtualVoidMethodV(r,o,c,m,a); va_end(a); }
+void JNICALL w_CallNonvirtualVoidMethodV(JNIEnv* e, jobject o, jclass c, jmethodID m, va_list a) { R(); ToGlibc g; RF->CallNonvirtualVoidMethodV(r,o,c,m,a); }
+void JNICALL w_CallNonvirtualVoidMethodA(JNIEnv* e, jobject o, jclass c, jmethodID m, const jvalue* a) { R(); ToGlibc g; RF->CallNonvirtualVoidMethodA(r,o,c,m,a); }
+void JNICALL w_CallStaticVoidMethod(JNIEnv* e, jclass c, jmethodID m, ...) { R(); va_list a; va_start(a,m); ToGlibc g; RF->CallStaticVoidMethodV(r,c,m,a); va_end(a); }
+void JNICALL w_CallStaticVoidMethodV(JNIEnv* e, jclass c, jmethodID m, va_list a) { R(); ToGlibc g; RF->CallStaticVoidMethodV(r,c,m,a); }
+void JNICALL w_CallStaticVoidMethodA(JNIEnv* e, jclass c, jmethodID m, const jvalue* a) { R(); ToGlibc g; RF->CallStaticVoidMethodA(r,c,m,a); }
+
+// Get/Set<T>Field (instance + static).
+#define FIELD_T(CT, T) \
+  CT JNICALL w_Get##T##Field(JNIEnv* e, jobject o, jfieldID f) { R(); ToGlibc g; return RF->Get##T##Field(r,o,f); } \
+  void JNICALL w_Set##T##Field(JNIEnv* e, jobject o, jfieldID f, CT v) { R(); ToGlibc g; RF->Set##T##Field(r,o,f,v); } \
+  CT JNICALL w_GetStatic##T##Field(JNIEnv* e, jclass c, jfieldID f) { R(); ToGlibc g; return RF->GetStatic##T##Field(r,c,f); } \
+  void JNICALL w_SetStatic##T##Field(JNIEnv* e, jclass c, jfieldID f, CT v) { R(); ToGlibc g; RF->SetStatic##T##Field(r,c,f,v); }
+FIELD_T(jobject, Object) FIELD_T(jboolean, Boolean) FIELD_T(jbyte, Byte) FIELD_T(jchar, Char)
+FIELD_T(jshort, Short) FIELD_T(jint, Int) FIELD_T(jlong, Long) FIELD_T(jfloat, Float) FIELD_T(jdouble, Double)
+
+// Primitive array families.
+#define ARR_T(CT, AT, T) \
+  AT JNICALL w_New##T##Array(JNIEnv* e, jsize n) { R(); ToGlibc g; return RF->New##T##Array(r,n); } \
+  CT* JNICALL w_Get##T##ArrayElements(JNIEnv* e, AT a, jboolean* c) { R(); ToGlibc g; return RF->Get##T##ArrayElements(r,a,c); } \
+  void JNICALL w_Release##T##ArrayElements(JNIEnv* e, AT a, CT* el, jint m) { R(); ToGlibc g; RF->Release##T##ArrayElements(r,a,el,m); } \
+  void JNICALL w_Get##T##ArrayRegion(JNIEnv* e, AT a, jsize s, jsize l, CT* b) { R(); ToGlibc g; RF->Get##T##ArrayRegion(r,a,s,l,b); } \
+  void JNICALL w_Set##T##ArrayRegion(JNIEnv* e, AT a, jsize s, jsize l, const CT* b) { R(); ToGlibc g; RF->Set##T##ArrayRegion(r,a,s,l,b); }
+ARR_T(jboolean, jbooleanArray, Boolean) ARR_T(jbyte, jbyteArray, Byte) ARR_T(jchar, jcharArray, Char)
+ARR_T(jshort, jshortArray, Short) ARR_T(jint, jintArray, Int) ARR_T(jlong, jlongArray, Long)
+ARR_T(jfloat, jfloatArray, Float) ARR_T(jdouble, jdoubleArray, Double)
+
+// GetJavaVM must hand back the WRAPPER vm so nested GetEnv keeps trampolining.
+jint JNICALL w_GetJavaVM(JNIEnv*, JavaVM** vm) { *vm = reinterpret_cast<JavaVM*>(&g_wrap_vm); return JNI_OK; }
+
+// JavaVM (invoke interface) GetEnv: hand the bionic caller the wrapped env.
 jint JNICALL w_GetEnv(JavaVM* vm, void** out, jint ver) {
   WrapVM* w = reinterpret_cast<WrapVM*>(vm);
   JNIEnv* tmp = nullptr;
@@ -377,7 +499,7 @@ jint JNICALL w_GetEnv(JavaVM* vm, void** out, jint ver) {
     const jint rc = w->real->functions->GetEnv(w->real, reinterpret_cast<void**>(&tmp), ver);
     if (rc != JNI_OK) { *out = nullptr; return rc; }
   }
-  *out = w->wrap_env;  // hand the bionic caller the wrapped env, not the raw ART one
+  *out = w->wrap_env;
   return JNI_OK;
 }
 }  // namespace
@@ -388,10 +510,44 @@ JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
   if (!real_vm || !real_env) return nullptr;
   g_jni_glibc_fs = glibc_fs_;
   g_jni_bionic_fs = bionic_fs_;
-  g_env_tbl = *real_env->functions;  // copy every slot, then thunk the ones we support
-  g_env_tbl.GetVersion = w_GetVersion;
-  g_env_tbl.FindClass = w_FindClass;
-  g_env_tbl.RegisterNatives = w_RegisterNatives;
+  g_env_tbl = *real_env->functions;  // start from the real table, then thunk every slot below
+
+#define S(N) g_env_tbl.N = w_##N
+#define S_CALL(T) S(Call##T##Method); S(Call##T##MethodV); S(Call##T##MethodA); \
+  S(CallNonvirtual##T##Method); S(CallNonvirtual##T##MethodV); S(CallNonvirtual##T##MethodA); \
+  S(CallStatic##T##Method); S(CallStatic##T##MethodV); S(CallStatic##T##MethodA)
+#define S_FIELD(T) S(Get##T##Field); S(Set##T##Field); S(GetStatic##T##Field); S(SetStatic##T##Field)
+#define S_ARR(T) S(New##T##Array); S(Get##T##ArrayElements); S(Release##T##ArrayElements); \
+  S(Get##T##ArrayRegion); S(Set##T##ArrayRegion)
+
+  S(GetVersion); S(DefineClass); S(FindClass); S(FromReflectedMethod); S(FromReflectedField);
+  S(ToReflectedMethod); S(GetSuperclass); S(IsAssignableFrom); S(ToReflectedField); S(Throw);
+  S(ThrowNew); S(ExceptionOccurred); S(ExceptionDescribe); S(ExceptionClear); S(FatalError);
+  S(PushLocalFrame); S(PopLocalFrame); S(NewGlobalRef); S(DeleteGlobalRef); S(DeleteLocalRef);
+  S(IsSameObject); S(NewLocalRef); S(EnsureLocalCapacity); S(AllocObject); S(NewObject);
+  S(NewObjectV); S(NewObjectA); S(GetObjectClass); S(IsInstanceOf); S(GetMethodID);
+  S(GetFieldID); S(GetStaticMethodID); S(GetStaticFieldID); S(NewString); S(GetStringLength);
+  S(GetStringChars); S(ReleaseStringChars); S(NewStringUTF); S(GetStringUTFLength);
+  S(GetStringUTFChars); S(ReleaseStringUTFChars); S(GetArrayLength); S(NewObjectArray);
+  S(GetObjectArrayElement); S(SetObjectArrayElement); S(RegisterNatives); S(UnregisterNatives);
+  S(MonitorEnter); S(MonitorExit); S(GetJavaVM); S(GetStringRegion); S(GetStringUTFRegion);
+  S(GetPrimitiveArrayCritical); S(ReleasePrimitiveArrayCritical); S(GetStringCritical);
+  S(ReleaseStringCritical); S(NewWeakGlobalRef); S(DeleteWeakGlobalRef); S(ExceptionCheck);
+  S(NewDirectByteBuffer); S(GetDirectBufferAddress); S(GetDirectBufferCapacity); S(GetObjectRefType);
+  S(CallVoidMethod); S(CallVoidMethodV); S(CallVoidMethodA); S(CallNonvirtualVoidMethod);
+  S(CallNonvirtualVoidMethodV); S(CallNonvirtualVoidMethodA); S(CallStaticVoidMethod);
+  S(CallStaticVoidMethodV); S(CallStaticVoidMethodA);
+  S_CALL(Object); S_CALL(Boolean); S_CALL(Byte); S_CALL(Char); S_CALL(Short); S_CALL(Int);
+  S_CALL(Long); S_CALL(Float); S_CALL(Double);
+  S_FIELD(Object); S_FIELD(Boolean); S_FIELD(Byte); S_FIELD(Char); S_FIELD(Short); S_FIELD(Int);
+  S_FIELD(Long); S_FIELD(Float); S_FIELD(Double);
+  S_ARR(Boolean); S_ARR(Byte); S_ARR(Char); S_ARR(Short); S_ARR(Int); S_ARR(Long); S_ARR(Float);
+  S_ARR(Double);
+#undef S
+#undef S_CALL
+#undef S_FIELD
+#undef S_ARR
+
   g_wrap_env.functions = &g_env_tbl;
   g_wrap_env.real = real_env;
   g_vm_tbl = *real_vm->functions;
@@ -399,6 +555,7 @@ JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
   g_wrap_vm.functions = &g_vm_tbl;
   g_wrap_vm.real = real_vm;
   g_wrap_vm.wrap_env = reinterpret_cast<JNIEnv*>(&g_wrap_env);
+  wrap_env_ = reinterpret_cast<JNIEnv*>(&g_wrap_env);
   return reinterpret_cast<JavaVM*>(&g_wrap_vm);
 #else
   (void)real_vm;

@@ -39,6 +39,11 @@ jint JNICALL fake_RegisterNatives(JNIEnv*, jclass, const JNINativeMethod* m, jin
   if (n >= 1) g_captured_native = m[0].fnPtr;
   return JNI_OK;
 }
+jint JNICALL fake_CallIntMethodV(JNIEnv*, jobject, jmethodID, va_list a) {
+  probe_tls = 444; ++g_glibc_calls;
+  int x = va_arg(a, int), y = va_arg(a, int);  // pulls the varargs forwarded from w_CallIntMethod
+  return x + y;
+}
 acl::ndk::JniEnvTable g_fake_env_tbl;
 struct FakeEnv { const acl::ndk::JniEnvTable* functions; } g_fake_env;
 
@@ -57,6 +62,7 @@ static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, void* h) {
   g_fake_env_tbl.GetVersion = fake_GetVersion;
   g_fake_env_tbl.FindClass = fake_FindClass;
   g_fake_env_tbl.RegisterNatives = fake_RegisterNatives;
+  g_fake_env_tbl.CallIntMethodV = fake_CallIntMethodV;
   g_fake_env.functions = &g_fake_env_tbl;
   g_fake_vm_tbl = {};
   g_fake_vm_tbl.GetEnv = fake_GetEnv;
@@ -79,19 +85,21 @@ static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, void* h) {
     ver = reinterpret_cast<jint (*)(JavaVM*, void*)>(onload)(wrapped_vm, nullptr);
   }
 
-  // Invoke the RegisterNatives'd native (down-call, bionic %fs). It ignores env, returns 4200.
+  // Invoke the RegisterNatives'd native (down-call, bionic %fs), handing it the WRAPPED env so its
+  // own CallIntMethod up-call trampolines back into glibc. It returns 4200 + (20+30) = 4250.
   jint native_ret = -1;
   if (g_captured_native) {
     acl::ndk::BionicRuntime::RunScope scope(rt);
     native_ret = reinterpret_cast<jint (*)(JNIEnv*, jclass)>(
-        const_cast<void*>(g_captured_native))(real_env, nullptr);
+        const_cast<void*>(g_captured_native))(rt.wrapped_env(), nullptr);
   }
 
-  const bool ok = ver == JNI_VERSION_1_6 && g_captured_native != nullptr && g_glibc_calls == 4 &&
-                  probe_tls == 333 && native_ret == 4200;
+  // 5 up-calls: GetEnv, GetVersion, FindClass, RegisterNatives (JNI_OnLoad) + CallIntMethod (native).
+  const bool ok = ver == JNI_VERSION_1_6 && g_captured_native != nullptr && g_glibc_calls == 5 &&
+                  probe_tls == 444 && native_ret == 4250;
   std::printf(
-      "acl-ndk-probe: JNI_OnLoad ver=%#x up-calls=%d probe_tls=%d native=%d -> %s\n", ver,
-      g_glibc_calls, probe_tls, native_ret, ok ? "(PASS)" : "(FAIL)");
+      "acl-ndk-probe: JNI_OnLoad ver=%#x up-calls=%d probe_tls=%d native=%d (varargs up-call) -> %s\n",
+      ver, g_glibc_calls, probe_tls, native_ret, ok ? "(PASS)" : "(FAIL)");
   return ok;
 }
 #endif  // ACL_HAVE_JNI

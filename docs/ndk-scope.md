@@ -212,12 +212,15 @@ intact across them) — and the `RegisterNatives`-bound native is then invoked v
 (returns 4200). Impl: `BionicRuntime::wrap_java_vm(real_vm, real_env)` returns a wrapper `JavaVM`
 whose `GetEnv` hands back a wrapper `JNIEnv`; the thunked slots run the real ART fn under a `ToGlibc`
 guard. Portable across jni.h variants via `JniEnvTable`/`JniVmTable` (derived from the `functions`
-member — OpenJDK names the structs `*_`, Android drops it; same ABI). Only the `JNI_OnLoad`/
-`RegisterNatives` slots are thunked so far — the rest are copied through unwrapped (a TODO: an app
-calling an un-thunked slot under bionic `%fs` would read ART's TLS wrong).
+member — OpenJDK names the structs `*_`, Android drops it; same ABI). **The full JNIEnv/JavaVM thunk table is now complete (2026-07-16)** — all ~232 JNIEnv slots +
+the JavaVM invoke interface are `%fs`-thunked (`ToGlibc`), generated via type-family macros
+(`Call*Method` ×10 types ×3 kinds ×3 forms, `Get/Set*Field` instance+static, primitive `*Array*`
+families) plus the fixed-signature functions. Varargs `Call*Method`/`NewObject` forward through
+their `...V` variants; `GetJavaVM`/`GetEnv` hand back the wrapper. Runtime-verified including the
+riskiest path: `acl-ndk-probe --jni` now does a `CallIntMethod(20,30)` **varargs up-call** from the
+registered native → `native=4250` (`4200+50`), proving `va_list`→`...V` across the boundary.
 
-NEXT: (1) fill out the full JNIEnv/JavaVM thunk table (mechanical — every slot gets a `ToGlibc`
-thunk); (2) hook ART's `libnativeloader`/`System.loadLibrary` (override `Runtime.nativeLoad`) to
+NEXT: (1) ~~full table~~ done; (2) hook ART's `libnativeloader`/`System.loadLibrary` (override `Runtime.nativeLoad`) to
 route app `lib/<abi>/*.so` through `BionicRuntime` + pass ART's real `JavaVM`/`JNIEnv` to
 `wrap_java_vm`, driving the loaded `.so`'s `JNI_OnLoad`; (3) per-thread attach-as-bionic (today uses
 the main thread's captured glibc `%fs`); (4) an x86_64 bionic-JNI APK fixture for a real end-to-end
