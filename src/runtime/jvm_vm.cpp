@@ -54,6 +54,47 @@ namespace {
 
 constexpr std::string_view kTag = "acl.runtime.jvm";
 
+// Bitmap.createBitmap(w, h) — the way BOTH framework layers spell it.
+//
+// The REAL android.graphics.Bitmap has no 2-arg overload: it is createBitmap(w, h, Config).
+// acl's shim grew a 2-arg convenience, so code written against the shim (this file) resolved it
+// happily and then died on the real framework with a bare
+//   NoSuchMethodError: no static method Landroid/graphics/Bitmap;.createBitmap(II)...
+// which ART turns into a process abort at its next check ("No pending exception expected"),
+// because a failed GetStaticMethodID leaves the error PENDING — the same trap as a failed
+// FindClass. So: ask for the real signature first, fall back to the shim's, and clear after a
+// failed lookup rather than leaving a live exception behind. Returns nullptr on failure, with no
+// pending exception.
+jobject create_bitmap(JNIEnv* env, jclass bitmap_cls, jint w, jint h) {
+  if (jclass config_cls = env->FindClass("android/graphics/Bitmap$Config"); config_cls != nullptr) {
+    jmethodID create = env->GetStaticMethodID(
+        bitmap_cls, "createBitmap", "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
+    jfieldID argb_f =
+        create != nullptr
+            ? env->GetStaticFieldID(config_cls, "ARGB_8888", "Landroid/graphics/Bitmap$Config;")
+            : nullptr;
+    if (create != nullptr && argb_f != nullptr) {
+      jobject argb = env->GetStaticObjectField(config_cls, argb_f);
+      jobject bmp = env->CallStaticObjectMethod(bitmap_cls, create, w, h, argb);
+      env->DeleteLocalRef(config_cls);
+      if (argb != nullptr) env->DeleteLocalRef(argb);
+      if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionClear(); return nullptr; }
+      return bmp;
+    }
+    env->DeleteLocalRef(config_cls);
+  }
+  if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();  // no real API here: try the shim
+  jmethodID create2 = env->GetStaticMethodID(bitmap_cls, "createBitmap", "(II)Landroid/graphics/Bitmap;");
+  if (create2 == nullptr) {
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+    log::w(kTag, "Bitmap.createBitmap: neither (II,Config) nor acl's (II) is on this classpath");
+    return nullptr;
+  }
+  jobject bmp = env->CallStaticObjectMethod(bitmap_cls, create2, w, h);
+  if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionClear(); return nullptr; }
+  return bmp;
+}
+
 // FindClass for a class acl can do without — its own org.acl.internal.* helpers, which are absent
 // whenever an app runs on the REAL framework boot classpath rather than acl's staged one.
 //
@@ -1234,17 +1275,31 @@ class JniVm : public Vm {
     jclass canvas_cls = env_->FindClass("android/graphics/Canvas");
     jobject bmp = nullptr;
     if (bmp_cls != nullptr && canvas_cls != nullptr) {
-      jmethodID create = env_->GetStaticMethodID(bmp_cls, "createBitmap",
-                                                 "(II)Landroid/graphics/Bitmap;");
       jmethodID cctor = env_->GetMethodID(canvas_cls, "<init>",
                                           "(Landroid/graphics/Bitmap;)V");
-      if (create != nullptr && cctor != nullptr) {
-        bmp = env_->CallStaticObjectMethod(bmp_cls, create, w, h);
+      if (cctor != nullptr) {
+        bmp = create_bitmap(env_, bmp_cls, w, h);
         jobject canvas = bmp != nullptr ? env_->NewObject(canvas_cls, cctor, bmp) : nullptr;
         if (canvas != nullptr) {
           env_->CallVoidMethod(view, draw, canvas);
-          jmethodID describe = env_->GetMethodID(bmp_cls, "aclDescribe", "()V");
-          if (describe != nullptr) env_->CallVoidMethod(bmp, describe);
+          // The app's view tree just ran arbitrary framework code, which can throw — an unbound
+          // graphics native is the usual one (P2.4). Check here: leaving it pending makes the NEXT
+          // JNI call that throws abort the process with "unexpected pending exception", naming that
+          // innocent call instead of this draw. Report what actually happened and carry on.
+          if (env_->ExceptionCheck() == JNI_TRUE) {
+            log::w(kTag, "View.draw threw; the drawn content is incomplete");
+            env_->ExceptionDescribe();  // names the throw (e.g. an unimplemented Canvas native)
+            env_->ExceptionClear();
+          }
+          // aclDescribe is a debug aid on acl's Bitmap shim; the real framework's Bitmap has no
+          // such method, so this lookup legitimately fails there — clear it, or the pending
+          // NoSuchMethodError trips ART's next "No pending exception expected" check.
+          if (jmethodID describe = env_->GetMethodID(bmp_cls, "aclDescribe", "()V");
+              describe != nullptr) {
+            env_->CallVoidMethod(bmp, describe);
+          } else if (env_->ExceptionCheck() == JNI_TRUE) {
+            env_->ExceptionClear();
+          }
           // Present the content view in a Wayland window (--present), driving a
           // Choreographer loop: each vsync tick fires the app's frame callbacks and
           // re-draws. No-op if no compositor / built without wcs. ACL_PRESENT_GPU routes
