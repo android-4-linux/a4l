@@ -19,6 +19,17 @@ if py3.found()
     timeout : 60,
   )
 
+  # The bionic struct offsets the per-thread attach path needs (docs/ndk-scope.md). The no-AOSP
+  # half runs everywhere and pins that a checkout-less build stays green; the measuring half runs
+  # only where $AOSP has bionic sources, and pins the slot ABI + struct bounds — a wrong offset
+  # would not fail a build, it would corrupt a hand-built TCB.
+  test(
+    'bionic-offsets',
+    py3,
+    args : [files('bionic_offsets_test.py'), meson.project_source_root()],
+    timeout : 300,
+  )
+
   # `acl tone` manual audio-check command: run silent (ACL_AUDIO=null) so it is
   # deterministic and device-independent; asserts generation + frame accounting and
   # that it never hangs. Needs only the binary.
