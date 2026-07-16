@@ -350,23 +350,35 @@ bionic's `gettid()` agrees with the kernel, and `pthread_self()` hands back that
 `pthread_internal_t`. `RunScope` now runs bionic code as the calling thread and refuses an
 unattached one by name instead of borrowing the bootstrapping thread's TCB.
 
-**Not yet wired into the down-call path**, so an app's native called off the main thread is still
-refused (`run-apk-ndk-art-worker`). Three things stand between here and multi-threaded natives:
-- **Lazy attach from the trampoline.** The unattached branch must save and restore the argument
-  registers (6 GPR + `xmm0-7`, ~192B, 16-byte aligned) around the attach call, because the
-  trampoline is signature-agnostic and cannot know what is live.
-- **The up-call thunks still use a constant `%fs` pair** (`ToGlibc`). Correct only while the
-  single attached thread runs every native — the moment a second one does, an up-call restores
-  the *main* thread's glibc `%fs`, which is precisely the corruption the per-thread trampoline
-  removed. This must land with lazy attach, not after it. Appending our own word past
-  `layout.size()` in the blocks acl allocates would give a constant `%fs` displacement, but not
-  for the bootstrapping thread, whose block belongs to the linker — so a small
-  bionic-`%fs`→glibc-`%fs` lookup is the likelier answer.
-- **Thread exit leaks.** `__free_dynamic_tls` is hidden, so bionic's own per-thread dynamic-TLS
-  blocks cannot be freed by acl; a glibc `pthread_key_create` destructor can at least unmap the
-  block and the thread struct. Today every attached thread leaks both.
+**Wired into the down-call path (2026-07-16): an app's native now runs on ANY thread.** An ART
+worker thread attaches itself on its first native call and the native works —
+`run-apk-ndk-art-worker` asserts exactly that, plus a clean exit and the absence of
+`Check failed: self == thread` (the ART corruption a borrowed TCB used to cause). Three pieces had
+to become per-thread together; shipping any one alone would have re-introduced that corruption:
+- **Lazy attach.** The trampoline's unattached branch calls `acl_ndk_attach_thunk`, which saves and
+  restores every argument register (`rdi/rsi/rdx/rcx/r8/r9` + `xmm0-7`) around the attach — the
+  trampoline is signature-agnostic and cannot know which are live. Real assembly, not emitted
+  bytes: the assembler checks it, and it is the same for every native.
+- **Per-thread up-calls.** `ToGlibc` no longer restores a constant glibc `%fs` (the bootstrapping
+  thread's). An up-call runs under bionic `%fs`, where glibc TLS is unreachable, so the pairing is
+  looked up by bionic `%fs` in an append-only table registered at attach.
+- **A per-thread wrapped JNIEnv.** A JNIEnv belongs to one thread; a single global handed every
+  thread the env of whichever one loaded the library. The trampoline points this thread's
+  `t_wrap_env` at the real env ART just passed, before swapping.
 
-The design, for reference — bionic offers no attach API: it
+**The trap worth naming: a glibc TLS access under bionic `%fs` is silently wrong.** `w_GetEnv` took
+`&t_wrap_env` just *after* its `ToGlibc` scope closed, so the displacement resolved against bionic's
+TCB and produced a garbage JNIEnv that segfaulted on first use. Keep glibc TLS reads inside the
+scope that holds glibc `%fs`.
+
+**Still open:** an attached thread leaks its TLS block and thread struct at exit — a glibc
+`pthread_key_create` destructor can unmap those, but bionic's own per-thread dynamic-TLS blocks
+cannot be freed by acl at all (`__free_dynamic_tls` is hidden). Attach also reads the TLS module
+table without bionic's rwlock (taking it would mean calling bionic code from a thread that has no
+TCB yet — the chicken-and-egg attach breaks); the static modules are fixed after startup, so the
+race is a `dlopen` concurrent with an attach.
+
+The design, for reference — bionic offers no attach API: itThe design, for reference — bionic offers no attach API: it
 exports `pthread_create`, `__libc_get_static_tls_bounds`, `__libc_register_thread_exit_callback`,
 `__tls_get_addr` — nothing that adopts an already-running (glibc-created) thread, and the
 `__init_static_tls` / `__init_tcb*` / `__init_thread` helpers that build a TCB are `__LIBC_HIDDEN__`,
@@ -413,9 +425,11 @@ already owns that pairing) and emit a header of `offsetof`s, rather than hand-co
 drift. Thread exit also needs `__libc_register_thread_exit_callback` (or an explicit detach) to run
 `__free_dynamic_tls` and unmap, or every attached thread leaks its block.
 
-NEXT (to real NDK apps): (1) finish per-thread attach — lazy attach from the trampoline + the
-per-thread up-call pair + thread-exit cleanup (above); (2) NDK trampoline `.so` (`liblog`→acl
-`log`, `libandroid`→`wm`); then arm64.
+NEXT (to real NDK apps): (1) thread-exit cleanup for attached threads (above); (2) NDK trampoline
+`.so` (`liblog`→acl `log`, `libandroid`→`wm`) for NativeActivity/GPU apps; then **arm64** (the
+mechanism is arch-neutral: swap `%fs`→`TPIDR_EL0`, redo auxv/reloc details, and note
+`MIN_TLS_SLOT` is negative there, so the thread pointer is NOT the TCB address —
+`StaticTlsLayout::offset_thread_pointer()` must be used).
 
 The mechanism, pinned:
 - The bionic `linker64`/`ld-android.so` export a programmatic loader — `__loader_dlopen`,
