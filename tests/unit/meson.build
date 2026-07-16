@@ -13,6 +13,7 @@ catch2_dep = dependency(
 unit_test_sources = files(
   'smoke_test.cpp',
   'log_test.cpp',
+  'ipc_test.cpp',
   'runtime_test.cpp',
   'pkg_test.cpp',
   'manifest_test.cpp',
