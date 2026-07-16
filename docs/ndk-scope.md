@@ -51,6 +51,42 @@ with the search path wired. Two hard pieces remain (Phase 4 / R-6):
 
 The front of the chain (this change) is what every later step builds on.
 
+### GPU-from-NDK: decouple at the buffer, not the API (Vulkan external memory)
+
+Item 2 lists `libEGL`/`libGLESv3`/`libvulkan` "→ host Mesa" as if the whole GPU API is thunked
+across the bionic↔glibc line. For a **NativeActivity / native-GPU** app (a bionic Vulkan or GLES
+renderer, not just JNI glue) that naive thunk is the wrong primitive — huge surface, fragile, and it
+drags the app's driver state through a foreign libc. The correct decoupling is at the **buffer**:
+
+- Give the NDK GPU code its **own bionic Vulkan ICD** (bionic V3DV / turnip — Android's own Mesa
+  build) inside its namespace. It renders with its native driver, no API thunk.
+- Hand images to the host glibc side via **`VK_KHR_external_memory_fd` (dma-buf)** +
+  **`VK_KHR_external_semaphore_fd` (`sync_file`/`drm_syncobj`)**. The two drivers share **buffers +
+  fences, never address space** — zero-copy, explicit sync, in-process (two Vulkan instances).
+
+This is Android's own contract, not a new interop: **`AHardwareBuffer`/gralloc + `ANativeWindow`
+ARE dma-buf + external-memory interop**. So acl implements the contract it already owns:
+1. **`AHardwareBuffer_allocate` → the HOST allocator** (`gbm`/minigbm on the glibc side) → dma-buf
+   fd + stride + offset + modifier in the AHB handle. Single allocator ⇒ every buffer is
+   host-Mesa- and display-consumable; the app only ever *imports*, never allocates.
+2. **`ANativeWindow` = acl BufferQueue over host AHBs** (`src/ndk/`): `dequeueBuffer` → a free host
+   AHB + acquire fence; `queueBuffer` → return + completion fence.
+3. **Two producers import the same host AHB:** the framework (glibc ART, HWUI-equiv on host
+   Skia/Vulkan — trivial, no bionic) and NDK GPU code (bionic ICD, via
+   `VK_ANDROID_external_memory_android_hardware_buffer`, or — since acl owns the AHB — the raw
+   dma-buf fd + `VK_KHR_external_memory_fd`).
+4. **Consumer = host glibc Mesa / drm-cxx** imports the same dma-buf for composition/scanout.
+5. **Sync** via `sync_file`/`drm_syncobj` fds on both handoffs — libc-agnostic.
+
+The only things crossing the bionic↔glibc line are the AHB handle (dma-buf fd + format/stride/
+modifier ints) and sync fds — no shared libc, no Vulkan-API thunk, no copy. So `libEGL`/`libGLESv2`
+still thunk (small, legacy), but the **Vulkan/Impeller path decouples at AHardwareBuffer**. This
+extends acl's "re-own `android.graphics` on host Skia+Vulkan-dmabuf" decision to the NDK GPU-app
+case. Open questions: modifier agreement between the two V3DV builds (same silicon ⇒ should match);
+V3DV `sync_file`/`drm_syncobj` export; whether the bionic ICD loads in the libhybris namespace
+in-process or needs a bionic sidecar — and if a sidecar, *that* (the app's native GPU context,
+decoupled by external memory) is the only justified process split, never the framework render path.
+
 ## What a real engine expects — Flutter, read from source (so we don't implement blind)
 
 Read from `flutter/engine/src/flutter/shell/platform/android/`. `libflutter.so` (x86_64 build,
@@ -152,7 +188,11 @@ pinned:
 ## Verify
 
 ```sh
-# Stage 0 (scratchpad /tmp/acl/scratchpad/bionic0/): bionic .so runs on host
+# The gap, reproducibly (negative control): build a real bionic-ABI .so and show that a plain
+# glibc dlopen CANNOT load it — glibc's ld.so can't satisfy its NEEDED bionic libc.so.
+# This is WHY Stage 0b (a bionic linker bootstrapped in-process) is needed, not glibc dlopen.
+tools/build-ndk-repro.sh    # -> NEEDED libc.so/liblog.so/libdl.so; "dlopen FAILED: .../libc.so: invalid ELF header"
+# Stage 0 (scratchpad /tmp/acl/scratchpad/bionic0/): bionic .so runs on host via linker64
 LD_LIBRARY_PATH=broot/lib64 broot/linker64 $PWD/broot/hello_exe   # -> answer()=42
 # host-.so fixture (scratchpad): proves the loadLibrary plumbing
 acl run ndkdemo.apk --main=com.acl.ndkdemo.NativeMain   # -> "loaded libacldemo; answer()=42"

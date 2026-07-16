@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Provenance: original acl tooling. Uses AOSP prebuilt clang + built bionic intermediates from a
-# local AOSP checkout (paths overridable via env). Grounds docs/ndk-loading.md. No GPL-3.0 sources.
+# local AOSP checkout (paths overridable via env). Grounds docs/ndk-scope.md. No GPL-3.0 sources.
 #
 # Builds a real x86_64-linux-android (bionic-ABI) NDK-style .so and proves the host two-libc gap:
 # a glibc process cannot dlopen it (glibc ld.so can't satisfy the bionic NEEDED libc.so/liblog.so).
-# This is the failure the host NDK loader (ADR-5) must close. See docs/ndk-loading.md.
+# This is the negative control for docs/ndk-scope.md Stage 0b: it's why the bionic linker must be
+# bootstrapped in-process (ADR-5 / R-6), not called via glibc dlopen.
 #
 # Usage: tools/build-ndk-repro.sh [out_dir]
 #   AOSP=/path/to/aosp   AOSP checkout root (default /mnt/dev/aosp)
