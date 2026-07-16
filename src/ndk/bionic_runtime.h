@@ -90,6 +90,19 @@ class BionicRuntime {
   // boundary (its RegisterNatives'd methods get down-call trampolines so ART can invoke them).
   // Returns the bionic handle, or nullptr + sets `error`. `real_vm`/`real_env` are ART's.
   void* load_library(const char* abs_path, JavaVM* real_vm, JNIEnv* real_env, std::string* error);
+
+  // dlsym `sym` in `handle` and wrap it in a down-call trampoline ART can invoke directly. The raw
+  // symbol must never be called by ART: it is bionic code expecting bionic %fs + the wrapped
+  // JNIEnv, which is exactly what the trampoline substitutes. Null if the symbol is absent (the
+  // normal "this native isn't exported by name" case) or on unsupported arch. load_library must
+  // have run first (the trampoline needs the wrapped env). Used to bind natives by NAME —
+  // JNI_OnLoad's RegisterNatives path gets its trampolines inside the wrapped RegisterNatives.
+  void* downcall_symbol(void* handle, const char* sym);
+
+  // True if a JNI_OnLoad already RegisterNatives'd (name, sig) on `klass`. Those bindings are the
+  // app's explicit choice, so name resolution must not overwrite them (a .so may both export
+  // Java_pkg_Class_m and register a *different* implementation for m).
+  bool was_registered(JNIEnv* env, jclass klass, const char* name, const char* sig) const;
 #endif
 
   // RAII: set the thread pointer to bionic for the scope's lifetime, restore glibc on exit. Wrap

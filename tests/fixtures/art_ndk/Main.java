@@ -9,13 +9,17 @@
 // in-process bionic linker, which drives the .so's JNI_OnLoad across the two-libc %fs
 // boundary; JNI_OnLoad FindClass'es THIS class and RegisterNatives-binds answer().
 //
-// answer() is deliberately RegisterNatives-bound, not name-resolved: the .so is loaded by
-// the bionic linker, so ART holds no dlopen handle to dlsym Java_..._answer against.
-// Name-based binding of a bionic native is a separate rung (see docs/ndk-scope.md).
+// Both ways a native can bind are exercised here:
+//   answer()        RegisterNatives'd by the .so's JNI_OnLoad — the .so hands acl the pointer.
+//   nativeAnswer()  bound by NAME: the .so exports Java_com_acl_ndktest_Main_nativeAnswer and
+//                   nothing registers it. ART binds such a native by dlsym'ing that symbol on a
+//                   handle *it* dlopen'ed; the lib lives in the bionic linker's namespace, so ART
+//                   has no handle and the lookup can never succeed. acl resolves the name itself
+//                   at load time and hands ART a trampoline (src/ndk/native_bind.h).
 //
 // The native answer() up-calls helper(20, 30) (a varargs CallStaticIntMethod back across the
 // boundary into ART) and returns 4200 + 50 = 4250 — so the printed value proves the whole
-// round trip ran, not merely that the library loaded.
+// round trip ran, not merely that the library loaded. nativeAnswer() returns a flat 42.
 package com.acl.ndktest;
 
 import android.app.Activity;
@@ -30,6 +34,9 @@ public class Main extends Activity {
     // Bound by the bionic .so's JNI_OnLoad via RegisterNatives.
     public static native int answer();
 
+    // Bound by NAME: the .so exports Java_com_acl_ndktest_Main_nativeAnswer, nothing registers it.
+    public static native int nativeAnswer();
+
     // Up-called BY the native, from bionic %fs back into ART's glibc %fs.
     public static int helper(int a, int b) {
         return a + b;
@@ -38,6 +45,7 @@ public class Main extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        Log.i("acl", "Main.onCreate: bionic native answer()=" + answer());
+        Log.i("acl", "Main.onCreate: bionic native answer()=" + answer()
+                     + " nativeAnswer()=" + nativeAnswer());
     }
 }

@@ -286,14 +286,43 @@ sigactions across `__linker_init` and restores them, so acl stays the crash hand
 alt stack; bionic's stay mapped but unreferenced. A bionic crash is then reported by the host —
 what we want from a translation layer anyway.
 
-NEXT (to real NDK apps): (1) **name-resolved natives** — `answer()` above is bound by
-`RegisterNatives` from `JNI_OnLoad`, which works because the .so hands acl the pointers; a native
-declared but NOT registered (the common case: ART `dlsym`s `Java_pkg_Class_method` on the handle
-*it* opened) can't bind, since the lib lives in the bionic linker's namespace and ART holds no
-handle — needs the `nativeLoad` hook to also resolve+trampoline by name on ART's behalf;
-(2) per-thread attach-as-bionic (today uses the main thread's captured glibc `%fs` — ART worker/app
-threads each need a bionic TCB); (3) NDK trampoline `.so` (`liblog`→acl `log`, `libandroid`→`wm`);
-then arm64.
+**Name-resolved natives — DONE for the loading class (2026-07-16).** The other half of binding.
+ART binds a native lazily by `dlsym`ing `Java_pkg_Class_method` on the handles *it* opened
+(`JavaVMExt::FindCodeForNativeMethod` → `Libraries::FindNativeMethod`); a bionic app lib is opened
+by the bionic linker, so ART holds no handle and that lookup can **never** succeed
+(`UnsatisfiedLinkError: No implementation found for … (tried Java_com_acl_ndktest_Main_nativeAnswer
+…)`). The lazy path can't be hooked either: `ClassLinker::RegisterNative` CHECKs a non-null address,
+so JVMTI's `NativeMethodBind` only fires for an address ART **already** found — it can redirect a
+binding, not create one. So acl binds **eagerly** at load time (`src/ndk/native_bind.{h,cpp}`):
+enumerate the loading class's declared natives by reflection, mangle each per the JNI spec (short
+name, then the overload long name), `__loader_dlsym` it in the bionic lib, wrap it in a down-call
+trampoline (`BionicRuntime::downcall_symbol`) and `RegisterNatives` it. `load_library` now wraps the
+JavaVM unconditionally (a name-bound-only lib has no `JNI_OnLoad`, but its trampolines still need
+the wrapped env).
+
+Two subtleties worth keeping:
+- **Which class?** `nativeLoad`'s `caller` argument is null exactly when it matters: libcore's
+  `Runtime.loadLibrary0` passes `callerClass` only on the boot-classloader path — for an app (a
+  `PathClassLoader`) it calls the 2-arg `nativeLoad(filename, loader)`, which hardcodes
+  `caller=null`. So `loading_class()` recovers it from the Java stack (the first frame below
+  `java.lang.*`) and resolves it through the `ClassLoader` argument with `initialize=false` (that
+  class is mid-`<clinit>` — its static initializer is what called `loadLibrary`).
+- **A `JNI_OnLoad` registration wins.** A lib may both export `Java_pkg_Class_m` and register a
+  *different* implementation for `m`; the registration is the app's explicit choice, so name binding
+  skips methods `JNI_OnLoad` already registered (`BionicRuntime::was_registered`). The repro .so
+  exports a **decoy** `Java_com_acl_ndktest_Main_answer` returning 9999 to keep this honest —
+  drop the guard and the end-to-end test's `answer()=4250` becomes 9999 (verified).
+
+**Still NOT covered: natives declared in a class OTHER than the one that called `loadLibrary`.** The
+canonical NDK idiom (a class loads its lib in its own static initializer and declares its natives) is
+covered; a `Loader` class loading the lib for natives declared elsewhere is not, and there is no hook
+for it — ART's lazy resolution is closed to us. The only complete fix in sight is handing ART a
+*glibc proxy `.so`* to `dlopen` whose exported `Java_*` symbols forward into the bionic lib, which
+means synthesizing an ELF at run time (bounded, but real work). Revisit when a corpus app needs it.
+
+NEXT (to real NDK apps): (1) per-thread attach-as-bionic (today uses the main thread's captured
+glibc `%fs` — ART worker/app threads each need a bionic TCB); (2) NDK trampoline `.so`
+(`liblog`→acl `log`, `libandroid`→`wm`); then arm64.
 
 The mechanism, pinned:
 - The bionic `linker64`/`ld-android.so` export a programmatic loader — `__loader_dlopen`,

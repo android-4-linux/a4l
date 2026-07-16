@@ -16,7 +16,7 @@ endif
 
 acl_ndk = static_library(
   'acl_ndk',
-  files('ndk.cpp', 'bionic_runtime.cpp'),
+  files('ndk.cpp', 'bionic_runtime.cpp', 'native_bind.cpp'),
   include_directories : [config_inc, core_inc],
   dependencies : ndk_deps,
   cpp_args : ['-fno-stack-protector'],

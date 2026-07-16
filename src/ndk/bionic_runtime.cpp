@@ -524,12 +524,28 @@ void* make_downcall(void* real_native) {
   return p;
 }
 
+// What a JNI_OnLoad explicitly bound, so later name resolution can leave those methods alone (see
+// BionicRuntime::was_registered). Global refs: these outlive the JNI_OnLoad call's local frame.
+struct Registered {
+  jobject cls;  // global ref
+  std::string name, sig;
+};
+std::vector<Registered> g_registered;
+
 jint JNICALL w_RegisterNatives(JNIEnv* e, jclass c, const JNINativeMethod* m, jint n) {
   R();
   ToGlibc g;  // glibc %fs for the host allocator + the real RegisterNatives
   std::vector<JNINativeMethod> wrapped(m, m + n);
   for (auto& wm : wrapped) wm.fnPtr = make_downcall(wm.fnPtr);  // ART calls the trampoline, not the raw native
-  return RF->RegisterNatives(r, c, wrapped.data(), n);
+  const jint rc = RF->RegisterNatives(r, c, wrapped.data(), n);
+  // Record what the lib explicitly bound, so name resolution won't overwrite it (was_registered).
+  // NewGlobalRef is always present on a real VM; tolerate a partial env (the probe's fake ART)
+  // rather than crashing on a null slot — nothing name-binds against that env anyway.
+  if (rc == JNI_OK && RF->NewGlobalRef != nullptr)
+    for (jint i = 0; i < n; ++i)
+      g_registered.push_back({RF->NewGlobalRef(r, c), m[i].name ? m[i].name : "",
+                              m[i].signature ? m[i].signature : ""});
+  return rc;
 }
 
 // NewObject varargs family (forwards varargs through NewObjectV).
@@ -666,10 +682,13 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
 #if defined(__x86_64__)
   void* h = load(abs_path, error);
   if (!h) return nullptr;
+  // Wrap unconditionally, not just for JNI_OnLoad: a lib whose natives are all bound by NAME has
+  // no JNI_OnLoad, and its down-call trampolines still need the wrapped env + the %fs pair that
+  // wrap_java_vm establishes (see downcall_symbol).
+  JavaVM* wvm = wrap_java_vm(real_vm, real_env);
+  if (!wvm) { if (error) *error = "wrap_java_vm failed"; return nullptr; }
   void* onload = symbol(h, "JNI_OnLoad");
   if (onload) {
-    JavaVM* wvm = wrap_java_vm(real_vm, real_env);
-    if (!wvm) { if (error) *error = "wrap_java_vm failed"; return nullptr; }
     jint ver;
     { RunScope scope(*this); ver = reinterpret_cast<jint (*)(JavaVM*, void*)>(onload)(wvm, nullptr); }
     if (ver == JNI_ERR || ver < JNI_VERSION_1_2) {
@@ -683,6 +702,29 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
   (void)abs_path; (void)real_vm; (void)real_env;
   if (error) *error = "bionic loader: arm64 TLS port pending";
   return nullptr;
+#endif
+}
+
+void* BionicRuntime::downcall_symbol(void* handle, const char* sym) {
+#if defined(__x86_64__)
+  void* raw = symbol(handle, sym);
+  if (raw == nullptr) return nullptr;  // not exported by name — the common, non-error case
+  return make_downcall(raw);
+#else
+  (void)handle; (void)sym;
+  return nullptr;
+#endif
+}
+
+bool BionicRuntime::was_registered(JNIEnv* env, jclass klass, const char* name,
+                                   const char* sig) const {
+#if defined(__x86_64__)
+  for (const Registered& r : g_registered)
+    if (r.name == name && r.sig == sig && env->IsSameObject(r.cls, klass)) return true;
+  return false;
+#else
+  (void)env; (void)klass; (void)name; (void)sig;
+  return false;
 #endif
 }
 #endif  // ACL_HAVE_JNI

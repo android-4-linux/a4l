@@ -39,6 +39,11 @@ jint JNICALL fake_RegisterNatives(JNIEnv*, jclass, const JNINativeMethod* m, jin
   if (n >= 1) g_captured_native = m[0].fnPtr;
   return JNI_OK;
 }
+// The wrapped RegisterNatives records each binding (so name resolution won't overwrite it), which
+// needs NewGlobalRef. No GC here, so handing back the same ref is a faithful enough fake.
+// Deliberately NOT counted in g_glibc_calls: that counter means "up-calls the .so made", and this
+// is acl's own bookkeeping inside the RegisterNatives thunk, not a call the .so asked for.
+jobject JNICALL fake_NewGlobalRef(JNIEnv*, jobject o) { return o; }
 jmethodID JNICALL fake_GetStaticMethodID(JNIEnv*, jclass, const char*, const char*) {
   ++g_glibc_calls; return reinterpret_cast<jmethodID>(0x2);
 }
@@ -65,6 +70,7 @@ static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, const char* so_path) {
   g_fake_env_tbl.GetVersion = fake_GetVersion;
   g_fake_env_tbl.FindClass = fake_FindClass;
   g_fake_env_tbl.RegisterNatives = fake_RegisterNatives;
+  g_fake_env_tbl.NewGlobalRef = fake_NewGlobalRef;
   g_fake_env_tbl.GetStaticMethodID = fake_GetStaticMethodID;
   g_fake_env_tbl.CallStaticIntMethodV = fake_CallStaticIntMethodV;
   g_fake_env.functions = &g_fake_env_tbl;

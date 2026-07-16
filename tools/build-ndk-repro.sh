@@ -62,6 +62,13 @@ static jint the_registered(JNIEnv* env, jclass clazz) {
   jint sum = (*env)->CallStaticIntMethod(env, clazz, mid, 20, 30);  // varargs up-call -> 50
   return 4200 + sum;                          // expect 4250
 }
+// Decoy for the bind-by-name path: an EXPORTED Java_<class>_answer, while JNI_OnLoad below ALSO
+// RegisterNatives-binds answer() to the_registered (4250). A RegisterNatives binding is the app's
+// explicit choice and must win, so acl's name binding has to skip methods JNI_OnLoad already
+// registered (BionicRuntime::was_registered). If it ever stops doing so, this 9999 silently
+// replaces the real implementation and the end-to-end test's answer()=4250 catches it.
+JNIEXPORT jint JNICALL
+Java_com_acl_ndktest_Main_answer(JNIEnv* e, jclass c) { return 9999; }
 // Exercises the JNIEnv/JavaVM boundary: GetEnv (VM up-call) then GetVersion/FindClass/
 // RegisterNatives (Env up-calls), each crossing bionic->glibc. Returns JNI_VERSION_1_6.
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {

@@ -40,6 +40,7 @@
 #endif
 #include "log/log.h"
 #include "ndk/bionic_runtime.h"
+#include "ndk/native_bind.h"
 #include "runtime/framework_natives.h"
 #include "svc/svc.h"
 #include "wm/present.h"
@@ -62,9 +63,11 @@ constexpr std::string_view kTag = "acl.runtime.jvm";
 acl::ndk::BionicRuntime* g_ndk_rt = nullptr;
 JavaVM* g_ndk_vm = nullptr;
 
-// Override of java.lang.Runtime.nativeLoad(String absPath, ClassLoader, Class): returns null on
-// success, an error String otherwise (the libcore contract).
-jstring JNICALL ndk_native_load(JNIEnv* env, jclass, jstring jpath, jobject, jobject) {
+// Override of java.lang.Runtime.nativeLoad(String absPath, ClassLoader, Class caller): returns null
+// on success, an error String otherwise (the libcore contract). `caller` is the class whose
+// System.loadLibrary triggered the load (libcore Runtime.loadLibrary0's fromClass); it is null on
+// the 2-arg nativeLoad(filename, loader) overload.
+jstring JNICALL ndk_native_load(JNIEnv* env, jclass, jstring jpath, jobject loader, jobject caller) {
   const char* c = jpath ? env->GetStringUTFChars(jpath, nullptr) : nullptr;
   const std::string path = c ? c : "";
   if (c) env->ReleaseStringUTFChars(jpath, c);
@@ -73,9 +76,18 @@ jstring JNICALL ndk_native_load(JNIEnv* env, jclass, jstring jpath, jobject, job
 
   if (acl::ndk::is_bionic_elf(path.c_str())) {
     std::string why;
-    if (g_ndk_rt->load_library(path.c_str(), g_ndk_vm, env, &why) == nullptr)
-      return err("acl-bionic: " + why);
+    void* h = g_ndk_rt->load_library(path.c_str(), g_ndk_vm, env, &why);
+    if (h == nullptr) return err("acl-bionic: " + why);
     log::i(kTag, "loaded bionic native lib {}", path);
+    // JNI_OnLoad's RegisterNatives (driven by load_library) binds what the lib chose to register.
+    // Natives ART would otherwise bind by dlsym'ing Java_pkg_Class_method can't resolve at all —
+    // the lib lives in the bionic linker's namespace, so ART has no handle for it — so bind them
+    // here, eagerly, for the class that asked for the library. See ndk/native_bind.h.
+    if (jclass k = acl::ndk::loading_class(env, caller, loader)) {
+      const int n = acl::ndk::bind_class_natives(*g_ndk_rt, h, env, k);
+      if (n > 0) log::i(kTag, "bound {} native(s) by name for the loading class", n);
+      env->DeleteLocalRef(k);
+    }
     return nullptr;
   }
   // glibc supplemental lib: dlopen + JNI_OnLoad (acl's use RegisterNatives, so no name-based lookup).

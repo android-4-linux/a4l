@@ -14,9 +14,13 @@
 #     -> Main.<clinit> System.loadLibrary("ndktest") -> nativeLoad -> is_bionic_elf => true
 #     -> in-process bionic linker dlopens it, JNI_OnLoad runs across the %fs boundary,
 #        RegisterNatives binds answer()
+#     -> acl binds the loading class's remaining natives BY NAME (ART can't: it has no handle on
+#        a lib the bionic linker opened), skipping what JNI_OnLoad already registered
 #     -> Main.onCreate calls answer() -> down-call trampoline -> bionic native
 #        -> helper(20,30) varargs up-call into ART -> 4250
-# So the asserted 4250 proves load + JNI_OnLoad + down-call + up-call, not just a load.
+# So the asserted 4250 proves load + JNI_OnLoad + down-call + up-call, not just a load; and
+# nativeAnswer()=42 proves the bind-by-name path. answer()=4250 (not 9999) additionally proves a
+# JNI_OnLoad registration beats the .so's exported Java_..._answer decoy — see build-ndk-repro.sh.
 #
 # Needs a host ART build ($ACL_ART_HOME), the AOSP host toolchain (d8/zipalign/jdk) and a built
 # bionic ($AOSP, for the linker/sysroot/stub + the target .so). SKIPs (exit 77) when any is
@@ -32,9 +36,13 @@ import tempfile
 SKIP = 77  # meson interprets exit 77 as "skipped"
 
 CHECKS = [
-    "NDK bionic loader active",                     # the gated nativeLoad hook installed
-    "loaded bionic native lib",                     # routed as bionic (not glibc dlopen)
-    "Main.onCreate: bionic native answer()=4250",   # load+OnLoad+down-call+up-call all ran
+    "NDK bionic loader active",   # the gated nativeLoad hook installed
+    "loaded bionic native lib",   # routed as bionic (not glibc dlopen)
+    # bind-by-name resolved the exported symbol ART could never have dlsym'd itself
+    "bind-by-name: com.acl.ndktest.Main.nativeAnswer()I",
+    # answer()=4250: load+OnLoad+down-call+up-call all ran (RegisterNatives path)
+    # nativeAnswer()=42: the name-bound native ran (bind-by-name path)
+    "Main.onCreate: bionic native answer()=4250 nativeAnswer()=42",
 ]
 
 
@@ -159,8 +167,9 @@ def main() -> int:
     if not ok:
         sys.stderr.write("--- captured output ---\n" + out + "\n")
         return 1
-    sys.stdout.write("OK: app's bionic lib/x86_64/*.so loaded in-process; "
-                     "JNI round-trip answer()=4250 on host ART\n")
+    sys.stdout.write("OK: app's bionic lib/x86_64/*.so loaded in-process on host ART; "
+                     "JNI round-trip answer()=4250 (RegisterNatives, and NOT the exported 9999 "
+                     "decoy) + nativeAnswer()=42 (bound by name)\n")
     return 0
 
 
