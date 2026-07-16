@@ -62,13 +62,13 @@ stub_exports
   -DCMAKE_C_FLAGS="$MINC" -DCMAKE_ASM_FLAGS="$MINC" \
   -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DLLVM_CONFIG_PATH="$CLANG/bin/llvm-config" \
   -DCOMPILER_RT_STANDALONE_BUILD=ON -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
-  -DCOMPILER_RT_BUILD_BUILTINS=ON -DCOMPILER_RT_BUILD_CRT=ON \
+  -DCOMPILER_RT_BUILD_BUILTINS=ON -DCOMPILER_RT_BUILD_CRT=ON -DCOMPILER_RT_BUILD_PROFILE=ON \
   -DCOMPILER_RT_BUILD_SANITIZERS=OFF -DCOMPILER_RT_BUILD_XRAY=OFF -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
-  -DCOMPILER_RT_BUILD_PROFILE=OFF -DCOMPILER_RT_BUILD_MEMPROF=OFF -DCOMPILER_RT_BUILD_ORC=OFF \
+  -DCOMPILER_RT_BUILD_MEMPROF=OFF -DCOMPILER_RT_BUILD_ORC=OFF \
   -DCOMPILER_RT_INCLUDE_TESTS=OFF -DLLVM_ENABLE_PER_TARGET_RUNTIME_DIR=OFF
-"$NINJA" -C "$B" builtins crt
+"$NINJA" -C "$B" builtins crt profile   # profile: ART's host build references libclang_rt.profile
 find "$B" -name 'clang_rt.crt*-aarch64.o' -exec cp {} "$STAGE/" \;
-find "$B" -name 'libclang_rt.builtins-aarch64.a' -exec cp {} "$STAGE/" \;
+find "$B" -name 'libclang_rt.builtins-aarch64.a' -o -name 'libclang_rt.profile-aarch64.a' -exec cp {} "$STAGE/" \;
 unstub_exports
 
 echo "== 3. libunwind + libc++abi + libc++ for $TRIPLE (static) =="

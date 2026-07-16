@@ -1,40 +1,33 @@
-# acl B2: musl-arm64 host toolchain for Soong (Android 13 / T AOSP, clang-r450784d)
-# Apply from the AOSP tree root. build/soong and build/make are separate git repos.
-#
-# FIVE sites (all validated: 'm nothing' reaches musl-arm64 variant instantiation of
-# external/musl; see ./README.md and docs/pi-plan.md P-B for the terminus + next step):
-#   1. build/soong/android/arch.go            - add Arm64 to the LinuxMusl OsType
-#   2. build/soong/cc/config/arm64_musl_host.go (NEW) - the LinuxMusl x Arm64 toolchain
-#   3. build/soong/cc/config/Android.bp        - add the new file to the soong-cc-config srcs
-#   4. build/soong/bazel/configurability.go    - register linux_musl_arm64 in the bp2build maps
-#   5. build/make/core/envsetup.mk             - accept HOST_CROSS_OS=linux_musl
-# Build with:  HOST_CROSS_OS=linux_musl HOST_CROSS_ARCH=arm64 m --skip-soong-tests <target>
+# acl B2: musl-arm64 host toolchain + LLVM-runtime integration for Soong (Android 13 / T).
+# Apply from the AOSP tree root. build/soong, build/make, prebuilts/clang are separate git repos.
+# SIX sites — 5 toolchain (see README) + clangprebuilts.go (map the aarch64-linux-musl LLVM
+# runtime prebuilts built by build-aarch64-musl-runtimes.sh into Soong module variants).
+# ==== NOTE: consumption is incomplete — enabling musl_arm64 as a host makes the whole AOSP
+# ==== host graph analyze; arm64-memtag-note injection + test-module ripples remain (README).
 # ============================================================================
-### 1+3+4. build/soong (tracked files) ###
+### build/soong: android/arch.go, cc/config/Android.bp, bazel/configurability.go ###
 diff --git a/android/arch.go b/android/arch.go
-index 3587b469f..f589f95c6 100644
+index 3587b469f..625cef216 100644
 --- a/android/arch.go
 +++ b/android/arch.go
-@@ -307,7 +307,9 @@ var (
+@@ -307,7 +307,7 @@ var (
  	// Linux is the OS for the Linux kernel plus the glibc runtime.
  	Linux = newOsType("linux_glibc", Host, false, X86, X86_64)
  	// LinuxMusl is the OS for the Linux kernel plus the musl runtime.
 -	LinuxMusl = newOsType("linux_musl", Host, false, X86, X86_64)
-+	// Arm64 added for acl B2: a single-libc arm64 host ART (musl) that can be dlopen'd into a
-+	// glibc process, unlike stock linux_bionic-arm64 (bionic libc cannot cold-load under glibc).
 +	LinuxMusl = newOsType("linux_musl", Host, false, Arm64, X86, X86_64)
  	// Darwin is the OS for MacOS/Darwin host machines.
  	Darwin = newOsType("darwin", Host, false, Arm64, X86_64)
  	// LinuxBionic is the OS for the Linux kernel plus the Bionic libc runtime, but without the
 diff --git a/bazel/configurability.go b/bazel/configurability.go
-index 7355ac7d3..acf011dac 100644
+index 7355ac7d3..a7d655cbd 100644
 --- a/bazel/configurability.go
 +++ b/bazel/configurability.go
 @@ -43,6 +43,7 @@ const (
  	osArchDarwinX86_64      = "darwin_x86_64"
  	osArchLinuxX86          = "linux_glibc_x86"
  	osArchLinuxX86_64       = "linux_glibc_x86_64"
-+	osArchLinuxMuslArm64    = "linux_musl_arm64" // acl B2: musl arm64 host
++	osArchLinuxMuslArm64    = "linux_musl_arm64"
  	osArchLinuxMuslX86      = "linux_musl_x86"
  	osArchLinuxMuslX86_64   = "linux_musl_x86_64"
  	osArchLinuxBionicArm64  = "linux_bionic_arm64"
@@ -51,7 +44,7 @@ index 7355ac7d3..acf011dac 100644
  		osAndroid:     {archArm, archArm64, archX86, archX86_64},
  		osLinux:       {archX86, archX86_64},
 -		osLinuxMusl:   {archX86, archX86_64},
-+		osLinuxMusl:   {archArm64, archX86, archX86_64}, // acl B2: + archArm64
++		osLinuxMusl:   {archArm64, archX86, archX86_64},
  		osDarwin:      {archArm64, archX86_64},
  		osLinuxBionic: {archArm64, archX86_64},
  		// TODO(cparsons): According to arch.go, this should contain archArm, archArm64, as well.
@@ -67,7 +60,7 @@ index 1a21c1361..7621aebfa 100644
      ],
      testSrcs: [
          "tidy_test.go",
-### 2. build/soong: NEW FILE cc/config/arm64_musl_host.go ###
+### build/soong: NEW cc/config/arm64_musl_host.go ###
 diff --git a/cc/config/arm64_musl_host.go b/cc/config/arm64_musl_host.go
 new file mode 100644
 index 000000000..dfdae55d1
@@ -179,21 +172,93 @@ index 000000000..dfdae55d1
 +func init() {
 +	registerToolchainFactory(android.LinuxMusl, android.Arm64, linuxMuslArm64ToolchainFactory)
 +}
-### 5. build/make: core/envsetup.mk ###
+### build/make: core/envsetup.mk ###
 diff --git a/core/envsetup.mk b/core/envsetup.mk
-index c32d380b0..6d4f595c9 100644
+index c32d380b0..308ccab23 100644
 --- a/core/envsetup.mk
 +++ b/core/envsetup.mk
-@@ -164,6 +164,12 @@ ifeq ($(HOST_OS),linux)
+@@ -164,6 +164,10 @@ ifeq ($(HOST_OS),linux)
      ifeq (,$(HOST_CROSS_ARCH))
        $(error HOST_CROSS_ARCH missing.)
      endif
 +  else ifeq ($(HOST_CROSS_OS),linux_musl)
-+    # acl B2: musl arm64 host-cross (single-libc arm64 host ART). See build/soong/cc/config/
-+    # arm64_musl_host.go and docs/pi-plan.md P-B.
 +    ifeq (,$(HOST_CROSS_ARCH))
 +      $(error HOST_CROSS_ARCH missing.)
 +    endif
    else
      $(error Unsupported HOST_CROSS_OS $(HOST_CROSS_OS))
    endif
+### prebuilts/clang/host/linux-x86: soong/clangprebuilts.go ###
+diff --git a/soong/clangprebuilts.go b/soong/clangprebuilts.go
+index 989aca9..7395692 100644
+--- a/soong/clangprebuilts.go
++++ b/soong/clangprebuilts.go
+@@ -153,8 +153,9 @@ func llvmHostPrebuiltLibraryShared(ctx android.LoadHookContext) {
+ }
+ 
+ type archInnerProps struct {
+-	Srcs []string
+-	Stem *string
++	Srcs    []string
++	Stem    *string
++	Enabled *bool // acl B2: gate the musl_arm64 variant on the prebuilt existing
+ }
+ type archProps struct {
+ 	Android_arm         archInnerProps
+@@ -167,6 +168,7 @@ type archProps struct {
+ 	Glibc_x86_64        archInnerProps
+ 	Linux_musl_x86      archInnerProps
+ 	Linux_musl_x86_64   archInnerProps
++	Linux_musl_arm64    archInnerProps // acl B2
+ }
+ 
+ func llvmPrebuiltLibraryStatic(ctx android.LoadHookContext) {
+@@ -193,6 +195,14 @@ func llvmPrebuiltLibraryStatic(ctx android.LoadHookContext) {
+ 	p.Target.Linux_bionic_x86_64.Srcs = []string{path.Join(libDir, "x86_64", name)}
+ 	p.Target.Linux_musl_x86.Srcs = []string{path.Join(libDir, "i686-linux-musl/lib", name)}
+ 	p.Target.Linux_musl_x86_64.Srcs = []string{path.Join(libDir, "x86_64-linux-musl/lib", name)}
++	// acl B2: musl_arm64 gets libunwind/libc++/libc++abi we built; gate on existence so modules we
++	// did not provide (e.g. libFuzzer) disable the variant instead of validating a missing file.
++	muslArm64 := path.Join(libDir, "aarch64-linux-musl/lib", name)
++	if android.ExistentPathForSource(ctx, ctx.ModuleDir(), muslArm64).Valid() {
++		p.Target.Linux_musl_arm64.Srcs = []string{muslArm64}
++	} else {
++		p.Target.Linux_musl_arm64.Enabled = proptools.BoolPtr(false)
++	}
+ 	ctx.AppendProperties(p)
+ }
+ 
+@@ -309,6 +319,15 @@ func libClangRtPrebuiltLibraryStatic(ctx android.LoadHookContext, libProps *preb
+ 	p.Target.Glibc_x86_64.Srcs = []string{path.Join(libDir, name+"-x86_64"+suffix+".a")}
+ 	p.Target.Linux_musl_x86.Srcs = []string{path.Join(libDir, "i686-linux-musl/lib/linux", name+"-i386"+suffix+".a")}
+ 	p.Target.Linux_musl_x86_64.Srcs = []string{path.Join(libDir, "x86_64-linux-musl/lib/linux", name+"-x86_64"+suffix+".a")}
++	// acl B2: only enable the musl_arm64 variant for the runtimes we actually built
++	// (builtins, profile); disable it for the rest (fuzzer/asan/tsan/ubsan) so Soong does not
++	// validate a nonexistent prebuilt for a variant nothing links.
++	muslArm64 := path.Join(libDir, "aarch64-linux-musl/lib/linux", name+"-aarch64"+suffix+".a")
++	if android.ExistentPathForSource(ctx, ctx.ModuleDir(), muslArm64).Valid() {
++		p.Target.Linux_musl_arm64.Srcs = []string{muslArm64}
++	} else {
++		p.Target.Linux_musl_arm64.Enabled = proptools.BoolPtr(false)
++	}
+ 	p.System_shared_libs = []string{}
+ 	p.No_libcrt = proptools.BoolPtr(true)
+ 	p.Stl = proptools.StringPtr("none")
+@@ -326,6 +345,9 @@ func libClangRtPrebuiltObject(ctx android.LoadHookContext) {
+ 			X86_64 struct {
+ 				Srcs []string
+ 			}
++			Arm64 struct { // acl B2
++				Srcs []string
++			}
+ 		}
+ 		System_shared_libs []string
+ 		Stl                *string
+@@ -336,6 +358,7 @@ func libClangRtPrebuiltObject(ctx android.LoadHookContext) {
+ 	p := &props{}
+ 	p.Arch.X86.Srcs = []string{path.Join(libDir, name+"-i386.o")}
+ 	p.Arch.X86_64.Srcs = []string{path.Join(libDir, name+"-x86_64.o")}
++	p.Arch.Arm64.Srcs = []string{path.Join(libDir, name+"-aarch64.o")} // acl B2
+ 	p.System_shared_libs = []string{}
+ 	p.Stl = proptools.StringPtr("none")
+ 	ctx.AppendProperties(p)

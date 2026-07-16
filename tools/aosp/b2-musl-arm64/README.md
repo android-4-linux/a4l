@@ -100,12 +100,39 @@ compiler):
   AOSP's **sanitized** headers (Apache-2.0/BSD): the `bionic/libc/kernel/uapi` tree + the
   `android/uapi` overlay (which carries `linux/compiler.h`) — not the GPL-2.0 originals.
 
-**The whole `aarch64-linux-musl` host LLVM runtime set is built (3.6 MB total).** Remaining B2 work is
-now purely *consumption*: drop this set under the `clang-r450784d/.../lib/linux/aarch64-linux-musl/`
-path the toolchain resolves (mirroring the `x86_64-linux-musl` layout), apply `soong-musl-arm64.patch`,
-and build ART for `linux_musl_arm64`. Then `tools/assemble-arm64-art.sh` (swap the `linux_bionic_arm64`
-glob for `linux_musl_arm64`) yields a single-libc `ACL_ART_HOME` that `acl run --vm=art` can `dlopen`
-on the Pi without the two-libc SIGTRAP.
+**The whole `aarch64-linux-musl` host LLVM runtime set is built (3.6 MB total).**
+
+## Step 3 — consumption (in progress)
+
+Drop the runtime set under the clang prebuilt (crt+builtins+profile → `.../lib/linux/aarch64-linux-musl/lib/linux/`,
+libc++/libc++abi/libunwind → `.../aarch64-linux-musl/lib/`; the flat `.../lib/linux/clang_rt.crt*-aarch64.o`
+too), then teach Soong to map those files into module variants — the **6th patch site**,
+`prebuilts/clang/host/linux-x86/soong/clangprebuilts.go`:
+- `libClangRtPrebuiltObject` gained an `Arm64` arch case (crtbegin/crtend `-aarch64.o`) — it previously
+  handled only x86/x86_64, which is why `clang_rt.crtend` had no `linux_musl_arm64` variant.
+- `archProps` gained `Linux_musl_arm64`; `libClangRtPrebuiltLibraryStatic` (builtins, profile) and
+  `llvmPrebuiltLibraryStatic` (libunwind, libc++, libc++abi) gained musl_arm64 entries, **existence-gated**
+  (only enable the variant when the built `.a` is present, else disable it — so libs we didn't build,
+  e.g. libFuzzer/asan/tsan, don't validate a missing file). `archInnerProps` gained `Enabled`.
+- Also build `libclang_rt.profile-aarch64.a` (add `COMPILER_RT_BUILD_PROFILE=ON`) — ART's host build
+  references it.
+
+**With these, `libc_musl_arm64` and the clang-runtime layer analyze cleanly.** The remaining blocker is
+**the blast radius of enabling a brand-new host arch**: `m <any musl_arm64 target>` forces Soong to
+analyze the *entire* host module graph for `linux_musl_arm64`, and modules with arm64+bionic assumptions
+break. First one hit: **arm64 executable linking auto-injects `note_memtag_heap_sync`** (a bionic MTE
+note; `crt_and_memtag_defaults` is `linux_bionic_supported` only), so every arm64 host executable/test on
+musl fails ("depends on disabled module"). That is a Soong-linker root-cause fix (don't inject the memtag
+note for non-bionic arm64 hosts), and it is the first of a real tail of small per-module Android.bp/Soong
+enablements — the standard cost of adding a new host OS×arch to AOSP.
+
+**Status:** toolchain + LLVM-runtime port + clang-prebuilt integration are **done and proven**;
+`libc_musl_arm64` builds. What's left is host-graph enablement (memtag-note injection first, then whatever
+else surfaces) before ART links. The AOSP tree is reverted after each spike (the Soong changes fail
+bp2build golden tests on a normal `m`); this dir + `soong-musl-arm64.patch` +
+`build-aarch64-musl-runtimes.sh` preserve everything. Once ART links, `tools/assemble-arm64-art.sh` (swap
+the `linux_bionic_arm64` glob → `linux_musl_arm64`) yields the single-libc `ACL_ART_HOME` that
+`acl run --vm=art` can `dlopen` on the Pi without the two-libc SIGTRAP.
 
 **Strategic fork this exposes:** B2's remaining cost is an **LLVM-runtime port** (llvm sync + a
 runtimes cross-build for a host triple no one has shipped). Meanwhile the **bionic** arm64 ART

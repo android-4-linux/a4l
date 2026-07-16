@@ -148,10 +148,18 @@ plus **`libunwind.a` + `libc++abi.a` + `libc++.a`** (2.3 MB, 861 symbols) — 3.
 `external/musl` (`configure`/`make install-headers`, arch-generated `bits/alltypes.h`) + AOSP's
 **sanitized** kernel UAPI headers (Apache-2.0/BSD, not the GPL-2.0 originals). cmake wrinkles handled:
 `CMAKE_POLICY_VERSION_MINIMUM=3.5` for cmake-4-vs-LLVM-14, and the prebuilt clang's incomplete
-`LLVMExports.cmake` stubbed-then-restored. **Remaining B2 work is now pure consumption:** drop the set
-under the clang prebuilt's `.../aarch64-linux-musl/` path, apply `soong-musl-arm64.patch`, build ART for
-`linux_musl_arm64`, then `assemble-arm64-art.sh` (swap the `linux_bionic_arm64` glob → `linux_musl_arm64`)
-yields a single-libc `ACL_ART_HOME`. The AOSP tree was reverted after the Soong spike (the bp2build map
+`LLVMExports.cmake` stubbed-then-restored. **Consumption phase (in progress).** Integrated the runtime set into Soong via a 6th patch site
+(`prebuilts/clang/host/linux-x86/soong/clangprebuilts.go`: an `Arm64` crt-object case + existence-gated
+`linux_musl_arm64` entries for builtins/profile/libunwind/libc++/libc++abi); also built
+`libclang_rt.profile-aarch64.a`. With these **`libc_musl_arm64` and the clang-runtime layer analyze
+cleanly.** The remaining blocker is the **blast radius of a new host arch**: `m <any musl_arm64 target>`
+analyzes the *whole* host graph, and modules with arm64+bionic assumptions break — first hit is
+`note_memtag_heap_sync` (arm64 executables auto-inject a bionic MTE note; `crt_and_memtag_defaults` is
+`linux_bionic_supported` only), so every arm64 host executable on musl fails. That's a Soong-linker
+root-cause fix, and the first of a bounded tail of per-module enablements (the standard cost of adding a
+host OS×arch to AOSP). Full detail + next steps in `tools/aosp/b2-musl-arm64/README.md`. Then
+`assemble-arm64-art.sh` (swap the `linux_bionic_arm64` glob → `linux_musl_arm64`) yields the single-libc
+`ACL_ART_HOME`. The AOSP tree was reverted after the Soong spike (the bp2build map
 change fails golden tests on a normal `m`); `tools/aosp/b2-musl-arm64/` preserves everything.
 
 **Decision point (B2 LLVM-runtime port vs. split-process).** The spike reframes P-B as a fork, because
