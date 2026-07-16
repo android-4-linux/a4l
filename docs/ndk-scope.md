@@ -92,6 +92,24 @@ decoupled by external memory) is the only justified process split, never the fra
 
 ## What a real engine expects — Flutter, read from source (so we don't implement blind)
 
+**MEASURED against a real Flutter APK (2026-07-16).** F-Droid's Feeel (`com.enjoyingfoss.feeel`,
+versionCode 4241) ships `lib/x86_64/{libflutter.so, libapp.so, libsqlite3.so}`. The prediction below
+(read from Flutter's source) matches its `libflutter.so` DT_NEEDED exactly: libc/libdl/libm +
+**libandroid, libEGL, libGLESv2, liblog, libjnigraphics**. Status on acl today:
+
+- **`libapp.so` — the app's Dart AOT snapshot (7.3 MB) — LOADS in-process** (no DT_NEEDED at all).
+- **`libsqlite3.so` LOADS** (needs only libm/libdl/libc, which the staged sysroot has).
+- **`libflutter.so` stops at `library "libandroid.so" not found`** — the trampoline rung, and now
+  with an exact size rather than a guess. Of its 456 undefined symbols, the NDK surface is:
+  **libandroid 19, liblog 3, libjnigraphics 3, libEGL 18, libGLESv2 105** (~148 total).
+- The **whole libandroid surface it links** is small and is precisely the set predicted below:
+  `AAsset_{close,getBuffer,getLength,isAllocated}`, `AAssetManager_{fromJava,open}`,
+  `ALooper_{acquire,addFd,forThread,pollOnce,prepare,release,removeFd,wake}`,
+  `ANativeWindow_{fromSurface,getFormat,lock,release,unlockAndPost}`.
+- Note `ANativeWindow_lock`/`unlockAndPost` are linked directly: this build can drive the **software**
+  surface path, not only EGL/GLES. `AChoreographer_*`/`AHardwareBuffer_*`/`ASurfaceControl_*` are
+  absent from the direct imports, confirming they are `dlsym`'d lazily and tolerated missing.
+
 Read from `flutter/engine/src/flutter/shell/platform/android/`. `libflutter.so` (x86_64 build,
 still bionic-linked) is a concrete, representative NDK client. What it needs:
 
