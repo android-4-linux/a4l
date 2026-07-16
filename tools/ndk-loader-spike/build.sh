@@ -38,24 +38,11 @@ AOSP="$AOSP" "$HERE/../build-ndk-repro.sh" "$OUT/repro" >/dev/null
 SO="$OUT/repro/libndktest.so"
 SYM="Java_com_acl_ndktest_Main_nativeAnswer"
 
-# 2. bionic sysroot (soname-named copies so NEEDED resolves via LD_LIBRARY_PATH)
-echo "== [2/4] bionic sysroot =="
+# 2+3. bionic sysroot + PIE stub exe — the same runtime `acl` itself stages, so the spike and the
+# real run path bootstrap identical bits (tools/stage-bionic-runtime.sh owns what that means).
+echo "== [2/4] bionic sysroot + [3/4] stub exe =="
+AOSP="$AOSP" "$HERE/../stage-bionic-runtime.sh" "$OUT" >/dev/null
 SYS="$OUT/bionic"
-mkdir -p "$SYS"
-cp -f "$BLIBC" "$SYS/libc.so"
-cp -f "$BLIBM" "$SYS/libm.so"
-cp -f "$BLIBDL" "$SYS/libdl.so"
-cp -f "$BLIBLOG" "$SYS/liblog.so"
-cp -f "$LDANDROID" "$SYS/ld-android.so"
-cp -f "$BLIBCXX" "$SYS/libc++.so"
-
-# 3. minimal bionic PIE stub exe (entry never runs; must link + pull bionic libc)
-echo "== [3/4] bionic stub exe =="
-"$CLANG" --target=x86_64-linux-android31 -fPIC -pie -nostdlib \
-  -o "$OUT/stub" "$CRTBEGIN" "$HERE/stub.c" "$CRTEND" \
-  "$BLIBC" "$BLIBDL" -fuse-ld=lld -Wl,-soname,stub -Wl,-e,main 2>/dev/null \
-|| "$CLANG" --target=x86_64-linux-android31 -fPIC -pie -nostdlib \
-     -o "$OUT/stub" "$CRTBEGIN" "$HERE/stub.c" "$CRTEND" "$BLIBC" "$BLIBDL" -fuse-ld=lld
 
 # 4. glibc spike harness (system clang; -fno-stack-protector for the %fs-swap windows)
 echo "== [4/4] spike harness =="

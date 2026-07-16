@@ -289,6 +289,12 @@ int cmd_run(const std::vector<std::string>& args) {
       }
       cfg.options.push_back("-Djava.library.path=" + libdir);
       acl::log::i(kTag, "native libs: extracted {} lib(s) for abi '{}' -> {}", nlibs, abi, libdir);
+      // Hand the extracted dir to the bionic loader as an extra search path, so an app lib's
+      // NEEDED on a *sibling* app lib resolves (the staged sysroot only carries bionic itself).
+      // The loader is gated on ACL_BIONIC_LINKER; setting this when it is unset is inert. An
+      // explicit ACL_BIONIC_APP_LIBS from the environment wins (overwrite=0) so a caller can
+      // point the search elsewhere. See jvm_vm register_ndk_loadlibrary_override + docs/ndk-scope.md.
+      ::setenv("ACL_BIONIC_APP_LIBS", libdir.c_str(), 0);
     }
   }
 
