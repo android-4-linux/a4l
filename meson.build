@@ -175,6 +175,19 @@ endif
 # libdrm for the dma-buf format/modifier constants (drm_fourcc.h: DRM_FORMAT_XRGB8888,
 # DRM_FORMAT_MOD_LINEAR) the V2 export path names. When absent, gfx/ is the software/
 # CPU-Skia rasterizer only. (drm_syncobj explicit sync is a later, separately-gated add.)
+# drm-cxx (MIT, sibling checkout via subprojects/drm-cxx symlink): the KMS-direct scanout backend for
+# the split-process present sink (wm/present_sink DrmScanout, docs/split-process-art.md S2) — the
+# appliance/automotive path (no compositor). Optional: when absent, the sink stays Null. Build its
+# heavy/irrelevant features off.
+drm_cxx_dep = dependency('drm-cxx',
+  fallback : ['drm-cxx', 'drm_cxx_dep'],
+  required : false,
+  default_options : ['tests=false', 'vulkan=false', 'examples=false', 'benchmarks=false'])
+have_drm_cxx = drm_cxx_dep.found()
+if have_drm_cxx
+  message('wm/ drm-cxx KMS scanout present sink enabled')
+endif
+
 have_vulkan = false
 vulkan_dep = declare_dependency()
 libdrm_dep = declare_dependency()
@@ -204,6 +217,7 @@ conf.set('ACL_VERSION', '"' + meson.project_version() + '"')
 conf.set10('ACL_PROFILE_AUTOMOTIVE', profile_automotive)
 conf.set10('ACL_HAVE_JNI', have_jni)
 conf.set10('ACL_HAVE_PIPEWIRE', have_pipewire)
+conf.set10('ACL_HAVE_DRM_CXX', have_drm_cxx)
 conf.set10('ACL_HAVE_FFMPEG', have_ffmpeg)
 conf.set10('ACL_HAVE_WCS', have_wcs)
 conf.set10('ACL_HAVE_SKIA', have_skia)

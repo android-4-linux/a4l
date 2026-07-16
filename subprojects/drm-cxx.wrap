@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# drm-cxx (MIT, Joel Winarske) — the KMS-direct scanout backend for the split-process present sink.
+# Consumed as a local sibling checkout via the subprojects/drm-cxx symlink (app/drm-cxx), so this
+# wrap only documents the dependency; point it at the git remote for a clean checkout instead.
+[wrap-git]
+url = https://github.com/jwinarske/drm-cxx.git
+revision = main
+depth = 1
+[provide]
+drm-cxx = drm_cxx_dep

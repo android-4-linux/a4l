@@ -140,9 +140,19 @@ class SplitVm final : public Vm {
           break;
         case ipc::MsgType::PresentFrame: {
           const auto& p = r.msg.present;
-          wm::ExternalFrame f{r.fd0,       p.w,        p.h,        p.drm_format, p.modifier,
-                              p.stride,    p.offset,   p.damage_x, p.damage_y,   p.damage_w,
-                              p.damage_h,  r.fd1};
+          wm::ExternalFrame f{.fd = r.fd0,
+                              .buffer_id = p.buffer_id,
+                              .width = p.w,
+                              .height = p.h,
+                              .drm_format = p.drm_format,
+                              .modifier = p.modifier,
+                              .stride = p.stride,
+                              .offset = p.offset,
+                              .damage_x = p.damage_x,
+                              .damage_y = p.damage_y,
+                              .damage_w = p.damage_w,
+                              .damage_h = p.damage_h,
+                              .acquire_fence = r.fd1};
           sink->present(f);  // takes the fds (closes them)
           r.fd0 = r.fd1 = -1;
           break;

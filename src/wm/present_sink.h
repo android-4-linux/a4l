@@ -14,6 +14,7 @@ namespace acl::wm {
 // (owned by the caller / the IPC layer); a sink that must retain the buffer past present() dups it.
 struct ExternalFrame {
   int fd = -1;                 // dma-buf fd
+  std::uint32_t buffer_id = 0; // producer's ring-slot id (a scanout sink caches its FB by this)
   std::uint32_t width = 0;
   std::uint32_t height = 0;
   std::uint32_t drm_format = 0;  // fourcc (e.g. XR24)

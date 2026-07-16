@@ -124,6 +124,14 @@ else
   wm_sources += files('present_stub.cpp')
 endif
 
+# drm-cxx KMS scanout present sink (split-process appliance path, docs/split-process-art.md S2):
+# imports the art-host dma-buf and atomic-flips it straight to the display. Gated on the optional
+# drm-cxx dependency; without it the DrmScanout backend stays Null (present_sink.cpp).
+if have_drm_cxx
+  wm_sources += files('drm_scanout_sink.cpp')
+  wm_deps += [drm_cxx_dep, dependency('libdrm', required : true)]  # xf86drmMode.h atomic commit
+endif
+
 wm_lib = static_library(
   'acl_wm',
   wm_sources,

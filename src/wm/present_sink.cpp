@@ -8,9 +8,15 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "acl_config.h"
 #include "log/log.h"
 
 namespace acl::wm {
+
+#if ACL_HAVE_DRM_CXX
+std::unique_ptr<PresentSink> make_drm_scanout_sink();  // drm_scanout_sink.cpp
+#endif
+
 namespace {
 
 constexpr std::string_view kTag = "acl.wm.present";
@@ -48,8 +54,12 @@ std::unique_ptr<PresentSink> make_present_sink(PresentBackend backend) {
       log::w(kTag, "present sink 'wayland' not yet wired; using null");
       return std::make_unique<NullPresentSink>();
     case PresentBackend::DrmScanout:
-      // TODO(S2): drm-cxx ScanoutBuffer::import_dmabuf + ScanoutBackend::present (appliance path).
+#if ACL_HAVE_DRM_CXX
+      if (auto s = make_drm_scanout_sink()) return s;
+      log::w(kTag, "drm-scanout sink unavailable (no DRM master / output); using null");
+#else
       log::w(kTag, "present sink 'drm-scanout' needs the drm-cxx dependency; using null");
+#endif
       return std::make_unique<NullPresentSink>();
     case PresentBackend::Null:
     default:
