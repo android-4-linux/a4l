@@ -1354,20 +1354,21 @@ class JniVm : public Vm {
     jmethodID ptr_m = env_->GetMethodID(bmp_cls, "aclPtr", "()J");
     env_->DeleteLocalRef(bmp_cls);
     if (ptr_m == nullptr) {
-      // aclPtr() is acl's Bitmap SHIM handing us the gfx::Surface the View drew into. The REAL
-      // android.graphics.Bitmap has no such method, so on the real-framework path — the one every
-      // real app takes — this loop has no pixels to present and used to return in silence: the app
-      // ran to RESUMED, drew its whole view tree, and showed nothing, looking like success.
+      // aclPtr() is acl's Bitmap SHIM handing back the gfx::Surface the View drew into, which this
+      // loop blits from. The REAL android.graphics.Bitmap has no such method, so this shm path
+      // cannot serve a real app — it is the shim/demo path.
       //
-      // The pixels DO exist: the real Bitmap is backed by acl's own libacl_graphics_jni (an
-      // SkBitmap inside its AclBitmap handle), reachable from Bitmap.mNativePtr. Presenting them
-      // needs that lib to export its pixels (pointer/size/rowbytes) so this loop can blit them —
-      // see docs/ndk-scope.md. Until then, say so instead of pretending.
+      // That is not a gap to close HERE: blitting a real Bitmap's pixels through shm would be a
+      // CPU copy, and the architecture is the opposite (ADR-4 / P2.4) — Skia renders through
+      // Ganesh Vulkan into a dma-buf with a TILED format modifier, handed to the compositor for
+      // direct scanout, zero copy, no detiling. That path exists and works: ACL_PRESENT_GPU=1
+      // (present_content_looper), which real apps render through today. So point the way rather
+      // than silently showing nothing.
       clear_exception();
       log::w(kTag,
-             "--present: this Bitmap has no aclPtr() — the real framework's Bitmap is not acl's "
-             "shim, so the drawn frame cannot be presented yet (needs the graphics_jni pixel "
-             "seam). The app ran and drew; nothing will be shown.");
+             "--present: this Bitmap has no aclPtr(), so the shm present path (acl's Bitmap shim) "
+             "cannot show a real app's frame. Use ACL_PRESENT_GPU=1 — the zero-copy tiled-dmabuf "
+             "path Skia renders through. The app ran and drew; nothing will be shown.");
       return;
     }
     auto* surface = reinterpret_cast<const gfx::Surface*>(env_->CallLongMethod(bmp, ptr_m));
