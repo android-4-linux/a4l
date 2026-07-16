@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <string_view>
+#include <vector>
 
 #if defined(__x86_64__)
 #include <asm/prctl.h>
@@ -431,8 +432,38 @@ T1(void*, GetDirectBufferAddress, jobject)
 T1(jlong, GetDirectBufferCapacity, jobject)
 T1(jobjectRefType, GetObjectRefType, jobject)
 
+// Down-call trampoline: ART invokes a registered native under GLIBC %fs, but the native is bionic
+// code expecting bionic %fs + the wrapped JNIEnv. We emit, per native, a tiny stub that replaces
+// arg0 (JNIEnv*) with the wrapper env, sets %fs=bionic (wrfsbase — no register clobber, FSGSBASE),
+// calls the real native, sets %fs=glibc, returns. Signature-agnostic for register-argument natives
+// (no stack args) — the JNI norm; a stack-arg native would need arg copying (TODO).
+void* make_downcall(void* real_native) {
+  auto* p = static_cast<unsigned char*>(
+      ::mmap(nullptr, kPage, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  if (p == MAP_FAILED) return nullptr;
+  std::size_t o = 0;
+  auto emit = [&](std::initializer_list<unsigned char> b) { for (unsigned char x : b) p[o++] = x; };
+  auto imm64 = [&](std::uint64_t v) { std::memcpy(p + o, &v, 8); o += 8; };
+  emit({0x48, 0xBF}); imm64(reinterpret_cast<std::uintptr_t>(&g_wrap_env));  // mov $wrap_env,%rdi
+  emit({0x49, 0xBB}); imm64(g_jni_bionic_fs);                               // mov $bionic_fs,%r11
+  emit({0xF3, 0x49, 0x0F, 0xAE, 0xD3});                                     // wrfsbase %r11
+  emit({0x48, 0x83, 0xEC, 0x08});                                          // sub $8,%rsp (align)
+  emit({0x49, 0xBB}); imm64(reinterpret_cast<std::uintptr_t>(real_native)); // mov $real,%r11
+  emit({0x41, 0xFF, 0xD3});                                                // call *%r11
+  emit({0x48, 0x83, 0xC4, 0x08});                                          // add $8,%rsp
+  emit({0x49, 0xBB}); imm64(g_jni_glibc_fs);                               // mov $glibc_fs,%r11
+  emit({0xF3, 0x49, 0x0F, 0xAE, 0xD3});                                    // wrfsbase %r11
+  emit({0xC3});                                                            // ret
+  __builtin___clear_cache(reinterpret_cast<char*>(p), reinterpret_cast<char*>(p + o));
+  return p;
+}
+
 jint JNICALL w_RegisterNatives(JNIEnv* e, jclass c, const JNINativeMethod* m, jint n) {
-  R(); ToGlibc g; return RF->RegisterNatives(r, c, m, n);
+  R();
+  ToGlibc g;  // glibc %fs for the host allocator + the real RegisterNatives
+  std::vector<JNINativeMethod> wrapped(m, m + n);
+  for (auto& wm : wrapped) wm.fnPtr = make_downcall(wm.fnPtr);  // ART calls the trampoline, not the raw native
+  return RF->RegisterNatives(r, c, wrapped.data(), n);
 }
 
 // NewObject varargs family (forwards varargs through NewObjectV).
@@ -560,6 +591,31 @@ JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
 #else
   (void)real_vm;
   (void)real_env;
+  return nullptr;
+#endif
+}
+
+void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv* real_env,
+                                  std::string* error) {
+#if defined(__x86_64__)
+  void* h = load(abs_path, error);
+  if (!h) return nullptr;
+  void* onload = symbol(h, "JNI_OnLoad");
+  if (onload) {
+    JavaVM* wvm = wrap_java_vm(real_vm, real_env);
+    if (!wvm) { if (error) *error = "wrap_java_vm failed"; return nullptr; }
+    jint ver;
+    { RunScope scope(*this); ver = reinterpret_cast<jint (*)(JavaVM*, void*)>(onload)(wvm, nullptr); }
+    if (ver == JNI_ERR || ver < JNI_VERSION_1_2) {
+      if (error) *error = "JNI_OnLoad rejected the VM";
+      return nullptr;
+    }
+    log::i(kTag, "{}: JNI_OnLoad ok (requested JNI {:#x})", abs_path, ver);
+  }
+  return h;
+#else
+  (void)abs_path; (void)real_vm; (void)real_env;
+  if (error) *error = "bionic loader: arm64 TLS port pending";
   return nullptr;
 #endif
 }

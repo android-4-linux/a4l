@@ -56,7 +56,7 @@ acl::ndk::JniVmTable g_fake_vm_tbl;
 struct FakeVM { const acl::ndk::JniVmTable* functions; } g_fake_vm;
 }  // namespace
 
-static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, void* h) {
+static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, const char* so_path) {
   // Build the fake glibc "ART".
   g_fake_env_tbl = {};
   g_fake_env_tbl.GetVersion = fake_GetVersion;
@@ -70,28 +70,27 @@ static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, void* h) {
 
   JNIEnv* real_env = reinterpret_cast<JNIEnv*>(&g_fake_env);
   JavaVM* real_vm = reinterpret_cast<JavaVM*>(&g_fake_vm);
-  JavaVM* wrapped_vm = rt.wrap_java_vm(real_vm, real_env);
-  if (!wrapped_vm) { std::fprintf(stderr, "wrap_java_vm failed\n"); return false; }
-
-  void* onload = rt.symbol(h, "JNI_OnLoad");
-  if (!onload) { std::fprintf(stderr, "JNI_OnLoad not found\n"); return false; }
 
   probe_tls = 0;
   g_glibc_calls = 0;
   g_captured_native = nullptr;
-  jint ver;
-  {
-    acl::ndk::BionicRuntime::RunScope scope(rt);  // JNI_OnLoad is bionic code -> bionic %fs
-    ver = reinterpret_cast<jint (*)(JavaVM*, void*)>(onload)(wrapped_vm, nullptr);
-  }
 
-  // Invoke the RegisterNatives'd native (down-call, bionic %fs), handing it the WRAPPED env so its
-  // own CallIntMethod up-call trampolines back into glibc. It returns 4200 + (20+30) = 4250.
+  // The exact operation Runtime.nativeLoad will call: load + drive JNI_OnLoad across the boundary.
+  std::string err;
+  if (!rt.load_library(so_path, real_vm, real_env, &err)) {
+    std::fprintf(stderr, "load_library failed: %s\n", err.c_str());
+    return false;
+  }
+  const jint ver = JNI_VERSION_1_6;  // load_library validated JNI_OnLoad's requested version
+
+  // Invoke the registered native exactly as ART would: from GLIBC %fs, and what RegisterNatives
+  // handed ART is the down-call TRAMPOLINE (not the raw bionic native). The trampoline swaps to
+  // bionic %fs and substitutes the wrapped env; the native's CallIntMethod up-call trampolines back
+  // to glibc. Round-trip: 4200 + (20+30) = 4250. (No RunScope here — glibc %fs, like ART.)
   jint native_ret = -1;
   if (g_captured_native) {
-    acl::ndk::BionicRuntime::RunScope scope(rt);
     native_ret = reinterpret_cast<jint (*)(JNIEnv*, jclass)>(
-        const_cast<void*>(g_captured_native))(rt.wrapped_env(), nullptr);
+        const_cast<void*>(g_captured_native))(real_env, nullptr);
   }
 
   // 5 up-calls: GetEnv, GetVersion, FindClass, RegisterNatives (JNI_OnLoad) + CallIntMethod (native).
@@ -137,7 +136,7 @@ int main(int argc, char** argv) {
   // the %fs boundary, using a FAKE glibc "ART" JavaVM/JNIEnv. Then invoke the RegisterNatives'd
   // native. Proves the JNIEnv/JavaVM trampoline table (BionicRuntime::wrap_java_vm).
   if (std::string(argv[2]) == "--jni") {
-    if (run_jni_selftest(*rt, h)) return 0;
+    if (run_jni_selftest(*rt, argv[1])) return 0;
     return 1;
   }
 #endif

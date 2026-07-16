@@ -79,6 +79,12 @@ class BionicRuntime {
   // The wrapped JNIEnv produced by the last wrap_java_vm() — what a loaded bionic native should be
   // handed so its own JNI up-calls trampoline. Null before wrap_java_vm() succeeds.
   JNIEnv* wrapped_env() const { return wrap_env_; }
+
+  // The operation the ART Runtime.nativeLoad hook calls: dlopen the app's bionic .so in-process,
+  // and if it exports JNI_OnLoad, wrap ART's real JavaVM and drive JNI_OnLoad across the %fs
+  // boundary (its RegisterNatives'd methods get down-call trampolines so ART can invoke them).
+  // Returns the bionic handle, or nullptr + sets `error`. `real_vm`/`real_env` are ART's.
+  void* load_library(const char* abs_path, JavaVM* real_vm, JNIEnv* real_env, std::string* error);
 #endif
 
   // RAII: set the thread pointer to bionic for the scope's lifetime, restore glibc on exit. Wrap

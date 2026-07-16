@@ -220,11 +220,26 @@ their `...V` variants; `GetJavaVM`/`GetEnv` hand back the wrapper. Runtime-verif
 riskiest path: `acl-ndk-probe --jni` now does a `CallIntMethod(20,30)` **varargs up-call** from the
 registered native → `native=4250` (`4200+50`), proving `va_list`→`...V` across the boundary.
 
-NEXT: (1) ~~full table~~ done; (2) hook ART's `libnativeloader`/`System.loadLibrary` (override `Runtime.nativeLoad`) to
-route app `lib/<abi>/*.so` through `BionicRuntime` + pass ART's real `JavaVM`/`JNIEnv` to
-`wrap_java_vm`, driving the loaded `.so`'s `JNI_OnLoad`; (3) per-thread attach-as-bionic (today uses
-the main thread's captured glibc `%fs`); (4) an x86_64 bionic-JNI APK fixture for a real end-to-end
-run on host ART; (5) NDK trampoline `.so` (`liblog`→acl `log`, `libandroid`→`wm`); then arm64.
+**Down-call trampoline + `load_library` — PROVEN (2026-07-16).** The reverse direction: when ART
+invokes a `RegisterNatives`'d bionic native it calls under **glibc** `%fs`, but the native is bionic
+code needing bionic `%fs` + the wrapped `JNIEnv`. `w_RegisterNatives` now emits, per native, a tiny
+**runtime-generated machine-code trampoline** (`make_downcall`) that substitutes the wrapped env,
+`wrfsbase`→bionic, calls the native, `wrfsbase`→glibc, returns — signature-agnostic for
+register-argument natives (the JNI norm; stack-arg natives would need arg copying, TODO). Uses
+FSGSBASE (verified available: CPU flag + kernel 7.1 + userspace `rdfsbase`). `acl-ndk-probe --jni`
+now invokes the native **from glibc `%fs`, exactly as ART would**, through the trampoline →
+`native=4250`: the complete realistic round-trip **glibc(ART) → down-call trampoline → bionic native
+→ varargs up-call trampoline → glibc → back**. And `BionicRuntime::load_library(path, real_vm,
+real_env)` packages the whole thing — dlopen the app `.so`, wrap ART's `JavaVM`, drive `JNI_OnLoad`
+across the boundary — the single call the `nativeLoad` hook makes.
+
+All the mechanism is now proven. NEXT is pure integration: (1) hook ART's `libnativeloader` /
+override `Runtime.nativeLoad` in `jvm_vm.cpp` to call `BionicRuntime::load_library` with ART's real
+`JavaVM`/`JNIEnv` for app `lib/<abi>/*.so`; (2) stage a bionic runtime for acl (linker+libs+stub) so
+`ACL_BIONIC_*` resolve in a real run; (3) per-thread attach-as-bionic (today uses the main thread's
+captured glibc `%fs` — ART worker/app threads each need a bionic TCB); (4) an x86_64 bionic-JNI APK
+fixture for a real end-to-end on host ART; (5) NDK trampoline `.so` (`liblog`→acl `log`,
+`libandroid`→`wm`); then arm64 (swap `%fs`→`TPIDR_EL0`, auxv, relocs).
 
 The mechanism, pinned:
 - The bionic `linker64`/`ld-android.so` export a programmatic loader — `__loader_dlopen`,
