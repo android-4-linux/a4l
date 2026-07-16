@@ -118,7 +118,9 @@ def main() -> int:
         so_dir = os.path.join(work, "repro")
         try:
             run([os.path.join(tools, "stage-bionic-runtime.sh"), stage], env=tool_env)
-            run([os.path.join(tools, "build-ndk-repro.sh"), so_dir], env=tool_env)
+            # The fixture links acl's libandroid.so, so build it against the runtime just staged.
+            run([os.path.join(tools, "build-ndk-repro.sh"), so_dir],
+                env=dict(tool_env, ACL_BIONIC_SYSROOT=os.path.join(stage, "bionic")))
         except subprocess.CalledProcessError as e:
             sys.stdout.write(f"SKIP: no built bionic in {root} ({os.path.basename(e.cmd[0])})\n")
             return SKIP

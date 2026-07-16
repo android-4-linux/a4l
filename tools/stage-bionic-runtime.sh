@@ -11,6 +11,10 @@
 #                            — the linker resolves an app lib's NEEDED from here
 #   <outdir>/stub            a minimal bionic PIE exe handed to the linker as the "main
 #                            executable" so linker_main() completes (its entry never runs)
+#   <outdir>/bionic/libandroid.so   acl's own (src/ndk/bionic/acl_libandroid.c), NOT AOSP's: an
+#                            app's native code links libandroid.so, and on a host the NDK APIs have
+#                            to be acl's (ALooper is real; the rest announce themselves — see the
+#                            source and docs/ndk-scope.md)
 #
 # The three ACL_BIONIC_* vars the loader reads (src/ndk/bionic_runtime.cpp BionicConfig::from_env)
 # map 1:1 onto those paths; --print-env emits them ready to eval.
@@ -64,6 +68,32 @@ cp -f "$BLIBDL" "$SYS/libdl.so"
 cp -f "$BLIBLOG" "$SYS/liblog.so"
 cp -f "$LDANDROID" "$SYS/ld-android.so"
 cp -f "$BLIBCXX" "$SYS/libc++.so"
+
+# 2b. acl's libandroid.so. AOSP's is a device library (Binder, SurfaceFlinger, logd); on a host the
+# NDK API belongs to acl, so this one is ours — compiled for bionic here rather than by meson,
+# which builds only host code. Linked against bionic libc + liblog by full path so its NEEDED
+# sonames are bionic's, exactly like an app's own .so.
+#
+# -nostdlibinc is not optional: this is bionic-target code, and without it the HOST's /usr/include
+# supplies the headers. pthread_mutex_t and epoll_event are not the same shape in glibc and bionic,
+# so it would compile and then corrupt memory at run time inside bionic libc. Every header must
+# come from the same bionic these libs are linked against (same rule as tools/gen-bionic-offsets.sh).
+BIONIC_INC=(
+  -nostdlibinc
+  -I"$AOSP/bionic/libc/include"
+  -I"$AOSP/bionic/libc/kernel/uapi"
+  -I"$AOSP/bionic/libc/kernel/uapi/asm-x86"
+  -I"$AOSP/bionic/libc/kernel/android/uapi"
+  -I"$AOSP/system/logging/liblog/include"
+)
+"$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls \
+  -fvisibility=hidden -O2 -Wl,-soname,libandroid.so \
+  "${BIONIC_INC[@]}" \
+  -o "$SYS/libandroid.so" \
+  "$INT/bionic/libc/crtbegin_so/android_x86_64/crtbegin_so.o" \
+  "$HERE/../src/ndk/bionic/acl_libandroid.c" \
+  "$INT/bionic/libc/crtend_so/android_x86_64/obj/bionic/libc/arch-common/bionic/crtend_so.o" \
+  "$BLIBC" "$BLIBLOG" "$BLIBDL" -fuse-ld=lld
 
 # 3. the bionic PIE stub exe (must link + pull bionic libc; entry never runs).
 "$CLANG" --target=x86_64-linux-android31 -fPIC -pie -nostdlib \

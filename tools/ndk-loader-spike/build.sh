@@ -32,17 +32,18 @@ for f in "$CLANG" "$LINKER" "$BLIBC" "$BLIBM" "$BLIBDL" "$BLIBLOG" "$LDANDROID" 
   [ -e "$f" ] || { echo "MISSING: $f  (build bionic in \$AOSP, or set AOSP=)" >&2; exit 1; }
 done
 
-# 1. target .so
-echo "== [1/4] target .so =="
-AOSP="$AOSP" "$HERE/../build-ndk-repro.sh" "$OUT/repro" >/dev/null
-SO="$OUT/repro/libndktest.so"
-SYM="Java_com_acl_ndktest_Main_nativeAnswer"
-
-# 2+3. bionic sysroot + PIE stub exe — the same runtime `acl` itself stages, so the spike and the
+# 1+2. bionic sysroot + PIE stub exe — the same runtime `acl` itself stages, so the spike and the
 # real run path bootstrap identical bits (tools/stage-bionic-runtime.sh owns what that means).
-echo "== [2/4] bionic sysroot + [3/4] stub exe =="
+# Must come FIRST: the target .so links acl's libandroid.so out of this sysroot.
+echo "== [1/4] bionic sysroot + [2/4] stub exe =="
 AOSP="$AOSP" "$HERE/../stage-bionic-runtime.sh" "$OUT" >/dev/null
 SYS="$OUT/bionic"
+
+# 3. target .so, built against that sysroot
+echo "== [3/4] target .so =="
+AOSP="$AOSP" ACL_BIONIC_SYSROOT="$SYS" "$HERE/../build-ndk-repro.sh" "$OUT/repro" >/dev/null
+SO="$OUT/repro/libndktest.so"
+SYM="Java_com_acl_ndktest_Main_nativeAnswer"
 
 # 4. glibc spike harness (system clang; -fno-stack-protector for the %fs-swap windows)
 echo "== [4/4] spike harness =="

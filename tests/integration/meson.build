@@ -41,6 +41,16 @@ if py3.found()
     timeout : 300,
   )
 
+  # acl's own libandroid.so: the ALooper family, driven from a bionic .so that links it exactly as
+  # a real engine does. Needs a staged bionic ($AOSP); SKIPs (exit 77) when absent.
+  test(
+    'ndk-libandroid',
+    py3,
+    args : [files('run_ndk_libandroid_test.py'), ndk_probe_exe, meson.project_source_root()],
+    depends : [ndk_probe_exe],
+    timeout : 300,
+  )
+
   # `acl tone` manual audio-check command: run silent (ACL_AUDIO=null) so it is
   # deterministic and device-independent; asserts generation + frame accounting and
   # that it never hangs. Needs only the binary.

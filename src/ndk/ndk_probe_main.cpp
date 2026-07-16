@@ -251,7 +251,7 @@ static bool run_thread_selftest(acl::ndk::BionicRuntime& rt, void* h) {
 
 int main(int argc, char** argv) {
   if (argc != 3) {
-    std::fprintf(stderr, "usage: %s <abs-path-to.so> <symbol>|--boundary|--jni|--realvm|--thread\n",
+    std::fprintf(stderr, "usage: %s <abs-path-to.so> <symbol>|--boundary|--jni|--realvm|--thread|--looper|--load\n",
                  argv[0]);
     return 2;
   }
@@ -266,6 +266,19 @@ int main(int argc, char** argv) {
   if (!h) {
     std::fprintf(stderr, "load failed: %s\n", err.c_str());
     return 1;
+  }
+
+  // Looper mode: drive acl's libandroid.so (ALooper) from the bionic .so, the way a real engine
+  // does — see Java_com_acl_ndktest_Main_looperTest in tools/build-ndk-repro.sh for what 55 means.
+  if (std::string(argv[2]) == "--looper") {
+    void* fn = rt->symbol(h, "Java_com_acl_ndktest_Main_looperTest");
+    if (!fn) { std::fprintf(stderr, "looperTest not in the target (staged libandroid.so?)\n"); return 1; }
+    int r;
+    { acl::ndk::BionicRuntime::RunScope scope(*rt);
+      r = reinterpret_cast<int (*)(void*, void*)>(fn)(nullptr, nullptr); }
+    std::printf("acl-ndk-probe: ALooper round trip (prepare/addFd/wake/pollOnce) = %d %s\n",
+                r, r == 55 ? "(PASS)" : "(FAIL)");
+    return r == 55 ? 0 : 1;
   }
 
   // Load mode: just load the .so in-process and report. For a REAL app's library, where we do not

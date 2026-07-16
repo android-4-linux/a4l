@@ -120,6 +120,9 @@ def main() -> int:
         run([zipalign, "-f", "4", unaligned, apk])
 
         env = dict(os.environ)
+        # Keep this run's caches inside the sandbox: meson runs tests in parallel, and several
+        # exercise `acl run`, so a shared ~/.cache/acl makes them race each other.
+        env["XDG_CACHE_HOME"] = os.path.join(work, "cache")
         env["ACL_ART_BOOTCLASSPATH"] = framework  # P2.1: framework on the bootclasspath
         env["ACL_ART_NATIVE"] = "1"
         env["ACL_ART_FRAMEWORK_RES"] = framework_res  # R3: framework-res.apk resource data

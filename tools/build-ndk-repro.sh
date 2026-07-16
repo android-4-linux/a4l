@@ -32,12 +32,30 @@ for f in "$CLANG" "$BIONIC_LIBC" "$BIONIC_LIBLOG" "$BIONIC_LIBDL" "$CRTBEGIN" "$
   [ -e "$f" ] || { echo "MISSING: $f  (build bionic in \$AOSP, or set AOSP=)" >&2; exit 1; }
 done
 
+# acl's libandroid.so, if a bionic runtime has been staged ($ACL_BIONIC_SYSROOT, or the sibling
+# stage a caller just built). Linking it makes the repro exercise the NDK API exactly as an app
+# does — DT_NEEDED libandroid.so — instead of only bionic libc.
+ACL_LIBANDROID=""
+for cand in "${ACL_BIONIC_SYSROOT:-}/libandroid.so" "$OUT/../bionic/libandroid.so" \
+            "$(dirname "$0")/../build/bionic-runtime/bionic/libandroid.so"; do
+  [ -f "$cand" ] && { ACL_LIBANDROID="$cand"; break; }
+done
+if [ -z "$ACL_LIBANDROID" ]; then
+  # The fixture calls ALooper, so it must link acl's libandroid.so — building without it yields a
+  # .so with an unresolvable ALooper_prepare, which fails at dlopen rather than here.
+  echo "MISSING: libandroid.so. Stage a bionic runtime first (tools/stage-bionic-runtime.sh)" >&2
+  echo "         and point ACL_BIONIC_SYSROOT at its bionic/ dir." >&2
+  exit 1
+fi
+
 # --- The bionic-ABI NDK library (what an app ships in lib/x86_64/) ---
 cat >"$OUT/ndktest.c" <<'EOF'
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: original acl spike fixture (generated). No GPL-3.0 sources.
 #include <jni.h>
+#include <unistd.h>
 #include <android/log.h>
+typedef struct ALooper ALooper;
 JNIEXPORT jint JNICALL
 Java_com_acl_ndktest_Main_nativeAnswer(JNIEnv* e, jclass c) {
   __android_log_print(ANDROID_LOG_INFO, "ndktest", "nativeAnswer called");
@@ -69,6 +87,41 @@ static jint the_registered(JNIEnv* env, jclass clazz) {
 // replaces the real implementation and the end-to-end test's answer()=4250 catches it.
 JNIEXPORT jint JNICALL
 Java_com_acl_ndktest_Main_answer(JNIEnv* e, jclass c) { return 9999; }
+// Exercises acl's libandroid.so (staged by tools/stage-bionic-runtime.sh) the way a real engine
+// does: prepare a looper, register a pipe on it, wake it through that pipe, and poll. Flutter's
+// engine threads each run exactly this pattern over real fds. Returns 55 iff pollOnce reported OUR
+// registration back (the ident + the fd we added), which is what makes it a real epoll round trip
+// and not just a linkable symbol.
+extern ALooper* ALooper_prepare(int opts);
+extern ALooper* ALooper_forThread(void);
+extern int ALooper_addFd(ALooper* l, int fd, int ident, int events,
+                         int (*cb)(int, int, void*), void* data);
+extern int ALooper_pollOnce(int timeoutMillis, int* outFd, int* outEvents, void** outData);
+extern int ALooper_removeFd(ALooper* l, int fd);
+extern void ALooper_wake(ALooper* l);
+JNIEXPORT jint JNICALL
+Java_com_acl_ndktest_Main_looperTest(JNIEnv* e, jclass c) {
+  ALooper* l = ALooper_prepare(1 /*ALOOPER_PREPARE_ALLOW_NON_CALLBACKS*/);
+  if (!l || ALooper_forThread() != l) return -1;   // prepare must be idempotent per thread
+  int fds[2];
+  if (pipe(fds) != 0) return -2;
+  if (ALooper_addFd(l, fds[0], 7 /*ident*/, 1 /*ALOOPER_EVENT_INPUT*/, NULL, (void*)0x1234) != 1)
+    return -3;
+  // Nothing is readable yet: the looper must time out rather than invent an event.
+  if (ALooper_pollOnce(0, NULL, NULL, NULL) != -3 /*ALOOPER_POLL_TIMEOUT*/) return -4;
+  // ALooper_wake must break a poll and report WAKE, distinctly from our fd.
+  ALooper_wake(l);
+  if (ALooper_pollOnce(1000, NULL, NULL, NULL) != -1 /*ALOOPER_POLL_WAKE*/) return -5;
+  if (write(fds[1], "x", 1) != 1) return -6;
+  int out_fd = -1, out_events = 0;
+  void* out_data = NULL;
+  const int r = ALooper_pollOnce(1000, &out_fd, &out_events, &out_data);
+  ALooper_removeFd(l, fds[0]);
+  close(fds[0]);
+  close(fds[1]);
+  if (r != 7 || out_fd != fds[0] || !(out_events & 1) || out_data != (void*)0x1234) return -7;
+  return 55;
+}
 // Exercises the JNIEnv/JavaVM boundary: GetEnv (VM up-call) then GetVersion/FindClass/
 // RegisterNatives (Env up-calls), each crossing bionic->glibc. Returns JNI_VERSION_1_6.
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
@@ -92,12 +145,12 @@ EOF
   -I"$INC_JNI" -I"$INC_LOG" \
   -o "$OUT/libndktest.so" \
   "$CRTBEGIN" "$OUT/ndktest.c" "$CRTEND" \
-  "$BIONIC_LIBC" "$BIONIC_LIBLOG" "$BIONIC_LIBDL" \
+  "$BIONIC_LIBC" "$BIONIC_LIBLOG" "$BIONIC_LIBDL" $ACL_LIBANDROID \
   -fuse-ld=lld 2>/dev/null \
 || "$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls \
      -Wl,-soname,libndktest.so -I"$INC_JNI" -I"$INC_LOG" -o "$OUT/libndktest.so" \
      "$CRTBEGIN" "$OUT/ndktest.c" "$CRTEND" \
-     "$BIONIC_LIBC" "$BIONIC_LIBLOG" "$BIONIC_LIBDL" -fuse-ld=lld
+     "$BIONIC_LIBC" "$BIONIC_LIBLOG" "$BIONIC_LIBDL" $ACL_LIBANDROID -fuse-ld=lld
 
 echo "== built $OUT/libndktest.so =="
 readelf -d "$OUT/libndktest.so" | grep -E 'NEEDED|SONAME'
