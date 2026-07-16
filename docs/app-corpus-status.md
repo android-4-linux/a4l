@@ -51,6 +51,13 @@ which exists only on acl's Bitmap **shim** — so it cannot show a real app's fr
 | `barilyuk.batterytemperature` | Views (XML layout) | fails inflating `android.widget.CheckBox` (below) |
 | `app.fedilab.castlab` | React Native | native libs need `libjnigraphics.so` + `libz.so` (below) |
 
+Also tried, outside the F-Droid corpus (not redistributable, run locally only):
+
+| App | Result |
+| --- | --- |
+| `com.uptodown` (the Uptodown store app) | launcher + natives fine; dies because acl runs no ContentProviders (below) |
+| `com.spotify.music` (apkmirror base APK) | not launchable by anything: the APK declares no launcher (below) |
+
 ### SVS.pdfinspector — Jetpack Compose (MIT)
 Draws its real Compose UI: the document icon, the "Inspect any PDF" heading and body text, the
 "Open a PDF" button, and the Feature/Bug/Sponsor row. Compose composes on the frame clock, so this
@@ -77,6 +84,22 @@ LOAD DEVICES / START SERVICE) and the "Car Dock" entry — measured, laid out an
   acl's own (`src/ndk/bionic/acl_libandroid.c`), but `libfbjni`/`libreactnative`/`libhermesvm` also
   need **`libjnigraphics.so`** and **`libz.so`**, which acl does not stage yet. See
   `docs/ndk-scope.md`.
+
+- **`com.uptodown`** — resolves its launcher, extracts its 4 x86_64 natives, then:
+  `Application com.uptodown.UptodownApp construct failed`, and onCreate throws
+  `IllegalStateException: Default FirebaseApp is not initialized in this process`. Nothing is wrong
+  with the app: Firebase initializes itself from a `<provider>` (`FirebaseInitProvider`) that
+  Android runs before `Application.onCreate`, and **acl runs no ContentProviders at all**. The same
+  mechanism backs `androidx.startup` and WorkManager, so this gates a whole class of real apps —
+  arguably the next framework item after the Activity/Window layer.
+- **`com.spotify.music`** (apkmirror, x86_64 among its ABIs) — acl says "no launcher activity in the
+  manifest and no --main given", and that is correct: `aapt2 dump badging` reports no
+  `launchable-activity`, and the manifest contains **zero** `android.intent.action.MAIN` /
+  `android.intent.category.LAUNCHER` entries. It is an app-bundle **base** APK whose launcher lives
+  in a split that is not in the file, so no runtime can start it as-is. acl still parses it,
+  extracts all 6 x86_64 libs (`libfull-jni-spotify.so` + crashlytics), and brings up audio. Worth
+  noting `libfull-jni-spotify.so` needs `libandroid.so` (now acl's own) plus `libOpenSLES.so` and
+  `libmediandk.so`, which acl does not stage.
 
 ## Notes
 
