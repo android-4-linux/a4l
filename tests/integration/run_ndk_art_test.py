@@ -1,0 +1,168 @@
+# SPDX-License-Identifier: Apache-2.0
+# Provenance: original test harness; plan.md §5 (Tier B), docs/ndk-scope.md (ADR-5 / R-6);
+# AOSP d8/zipalign host tooling. No GPL-3.0 sources.
+#
+# The bionic-NDK end-to-end on REAL host ART: an app's *bionic-ABI* native library, shipped in
+# the APK as lib/x86_64/libndktest.so, is loaded in-process by acl's bionic loader and its JNI
+# round-trips back into ART — driven the way a real app does it (System.loadLibrary from an
+# Activity), not by the acl-ndk-probe harness.
+#
+# The chain under test:
+#   acl run ndk.apk --vm=art
+#     -> pkg extracts lib/x86_64/*.so -> $XDG_CACHE_HOME/acl/<pkg>/lib, exports ACL_BIONIC_APP_LIBS
+#     -> ART boots; ACL_BIONIC_LINKER set => Runtime.nativeLoad is routed to acl (jvm_vm)
+#     -> Main.<clinit> System.loadLibrary("ndktest") -> nativeLoad -> is_bionic_elf => true
+#     -> in-process bionic linker dlopens it, JNI_OnLoad runs across the %fs boundary,
+#        RegisterNatives binds answer()
+#     -> Main.onCreate calls answer() -> down-call trampoline -> bionic native
+#        -> helper(20,30) varargs up-call into ART -> 4250
+# So the asserted 4250 proves load + JNI_OnLoad + down-call + up-call, not just a load.
+#
+# Needs a host ART build ($ACL_ART_HOME), the AOSP host toolchain (d8/zipalign/jdk) and a built
+# bionic ($AOSP, for the linker/sysroot/stub + the target .so). SKIPs (exit 77) when any is
+# absent, so CI stays green without them.
+#
+# Usage: run_ndk_art_test.py <acl> <source_root> <android.jar> <ndk.apk>
+import glob
+import os
+import subprocess
+import sys
+import tempfile
+
+SKIP = 77  # meson interprets exit 77 as "skipped"
+
+CHECKS = [
+    "NDK bionic loader active",                     # the gated nativeLoad hook installed
+    "loaded bionic native lib",                     # routed as bionic (not glibc dlopen)
+    "Main.onCreate: bionic native answer()=4250",   # load+OnLoad+down-call+up-call all ran
+]
+
+
+def first_executable(*paths):
+    for pat in paths:
+        for p in sorted(glob.glob(pat)):
+            if os.access(p, os.X_OK):
+                return p
+    return None
+
+
+def main() -> int:
+    if len(sys.argv) != 5:
+        sys.stderr.write("usage: run_ndk_art_test.py <acl> <src_root> <android.jar> <ndk.apk>\n")
+        return 2
+    acl, src_root, android_jar, ndk_apk = sys.argv[1:5]
+
+    home = os.environ.get("ACL_ART_HOME", "")
+    if not home or not os.path.isdir(home):
+        sys.stdout.write("SKIP: ACL_ART_HOME not set (host ART build required)\n")
+        return SKIP
+    if not android_jar or not os.path.isfile(android_jar):
+        sys.stdout.write("SKIP: no staged android.jar (framework stub layer)\n")
+        return SKIP
+
+    # AOSP tree root is three levels above out/host/linux-x86; $AOSP may point elsewhere.
+    root = os.path.abspath(os.environ.get("AOSP", os.path.join(home, "..", "..", "..")))
+    d8 = os.path.join(home, "bin", "d8")
+    # linux*-x86 only — prebuilts/build-tools also ships darwin-x86 (sorts first).
+    zipalign = first_executable(os.path.join(root, "prebuilts/build-tools/linux*-x86/bin/zipalign"))
+    javac = first_executable(
+        os.path.join(root, "prebuilts/jdk/jdk11/linux-x86/bin/javac"),
+        os.path.join(root, "prebuilts/jdk/jdk17/linux-x86/bin/javac"))
+    for name, tool in (("d8", d8), ("zipalign", zipalign), ("javac", javac)):
+        if not tool or not os.access(tool, os.X_OK):
+            sys.stdout.write(f"SKIP: {name} not found under {root}\n")
+            return SKIP
+
+    def run(cmd, env=None, cwd=None):
+        subprocess.run(cmd, check=True, capture_output=True, text=True, env=env, cwd=cwd)
+
+    work = tempfile.mkdtemp(prefix="acl-art-ndk-")
+    try:
+        tools = os.path.join(src_root, "tools")
+        tool_env = dict(os.environ, AOSP=root)
+        # 1. the bionic runtime acl bootstraps (linker64 + sysroot + stub), and the app's
+        #    bionic-ABI .so. Both need a built bionic in $AOSP -> SKIP, not FAIL, if missing.
+        stage = os.path.join(work, "bionic-runtime")
+        so_dir = os.path.join(work, "repro")
+        try:
+            run([os.path.join(tools, "stage-bionic-runtime.sh"), stage], env=tool_env)
+            run([os.path.join(tools, "build-ndk-repro.sh"), so_dir], env=tool_env)
+        except subprocess.CalledProcessError as e:
+            sys.stdout.write(f"SKIP: no built bionic in {root} ({os.path.basename(e.cmd[0])})\n")
+            return SKIP
+
+        # 2. framework shim dex + android.jar stub dex (acl's build compiles the shims with the
+        #    host javac, whose class-file version android-13's d8 rejects -> recompile at
+        #    --release 8). Same recipe as run_activity_art_test.py.
+        shim_srcs = (glob.glob(os.path.join(src_root, "framework/shim/**/*.java"), recursive=True)
+                     + glob.glob(os.path.join(src_root, "third_party/aosp/frameworks/**/*.java"),
+                                 recursive=True))
+        shim_cls = os.path.join(work, "shimclasses")
+        os.makedirs(shim_cls)
+        run([javac, "--release", "8", "-cp", android_jar, "-d", shim_cls] + shim_srcs)
+        shim_dex = os.path.join(work, "shim")
+        os.makedirs(shim_dex)
+        run([d8, "--min-api", "24", "--lib", android_jar, "--output", shim_dex]
+            + glob.glob(os.path.join(shim_cls, "**/*.class"), recursive=True))
+        stub_dex = os.path.join(work, "stub")
+        os.makedirs(stub_dex)
+        run([d8, "--min-api", "24", "--output", stub_dex, android_jar])
+
+        # 3. the app: Main.java -> dex, + ndk.apk's binary manifest, + the bionic .so under
+        #    lib/x86_64/ (where pkg looks). STORED + zipalign 4: ART mmaps the dex.
+        app_java = os.path.join(src_root, "tests/fixtures/art_ndk/Main.java")
+        app_cls = os.path.join(work, "appclasses")
+        os.makedirs(app_cls)
+        run([javac, "--release", "8", "-cp", android_jar, "-d", app_cls, app_java])
+        app = os.path.join(work, "app")
+        os.makedirs(app)
+        run([d8, "--min-api", "24", "--lib", android_jar, "--output", app]
+            + glob.glob(os.path.join(app_cls, "**/*.class"), recursive=True))
+        run(["unzip", "-o", ndk_apk, "AndroidManifest.xml", "-d", app])
+        os.makedirs(os.path.join(app, "lib/x86_64"))
+        run(["cp", os.path.join(so_dir, "libndktest.so"), os.path.join(app, "lib/x86_64/")])
+        unaligned = os.path.join(work, "unaligned.apk")
+        apk = os.path.join(work, "ndk_art.apk")
+        # -j flattens the top-level entries; the second pass runs in `app` (no -j) so the .so
+        # keeps its lib/x86_64/ path, which is what pkg's ABI selection matches on.
+        run(["zip", "-X", "-0", "-j", "-q", unaligned,
+             os.path.join(app, "AndroidManifest.xml"), os.path.join(app, "classes.dex")])
+        run(["zip", "-X", "-0", "-q", unaligned, "lib/x86_64/libndktest.so"], cwd=app)
+        run([zipalign, "-f", "4", unaligned, apk])
+
+        # 4. run it on host ART with the bionic loader armed. ACL_BIONIC_APP_LIBS is NOT set
+        #    here on purpose — acl must export it itself from the extracted lib dir.
+        env = dict(os.environ)
+        env["ACL_ART_FRAMEWORK"] = (os.path.join(shim_dex, "classes.dex") + ":"
+                                    + os.path.join(stub_dex, "classes.dex"))
+        env["ACL_BIONIC_LINKER"] = os.path.join(stage, "linker64")
+        env["ACL_BIONIC_SYSROOT"] = os.path.join(stage, "bionic")
+        env["ACL_BIONIC_STUB"] = os.path.join(stage, "stub")
+        env["XDG_CACHE_HOME"] = os.path.join(work, "cache")  # keep lib extraction in the sandbox
+        env.pop("ACL_BIONIC_APP_LIBS", None)
+        p = subprocess.run([acl, "run", apk, "--vm=art"],
+                           env=env, capture_output=True, text=True, timeout=300)
+        out = p.stdout + p.stderr
+    except subprocess.CalledProcessError as e:
+        sys.stderr.write(f"FAIL: fixture build step failed: {e.cmd}\n{e.stderr}\n")
+        return 1
+    finally:
+        subprocess.run(["rm", "-rf", work], check=False)
+
+    ok = p.returncode == 0
+    if not ok:
+        sys.stderr.write(f"FAIL: acl run --vm=art exit {p.returncode}\n")
+    for c in CHECKS:
+        if c not in out:
+            sys.stderr.write(f"FAIL: missing '{c}'\n")
+            ok = False
+    if not ok:
+        sys.stderr.write("--- captured output ---\n" + out + "\n")
+        return 1
+    sys.stdout.write("OK: app's bionic lib/x86_64/*.so loaded in-process; "
+                     "JNI round-trip answer()=4250 on host ART\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

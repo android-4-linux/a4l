@@ -38,7 +38,10 @@ The corpus apps that hit this ship **arm-only** (Spotify `libstub.so`: arm64/arm
 x86-32** (Rive `librive.so`) — no x86_64 — so on an x86_64 host they fail on **architecture** even
 with the search path wired. Two hard pieces remain (Phase 4 / R-6):
 
-1. **Bionic ABI bridge** — app `.so` are linked against **bionic**, not glibc (different libc /
+1. **Bionic ABI bridge** — **DONE on x86_64** (see "The bionic bridge" below: the linker is
+   bootstrapped in-process, the JNI `%fs` boundary is bridged, and a real APK's bionic
+   `lib/x86_64/*.so` loads and round-trips JNI on host ART). Kept here for the arch framing:
+   app `.so` are linked against **bionic**, not glibc (different libc /
    `pthread`/TLS layout / ifuncs). Build AOSP `bionic` + `linker64` for the host and load app `.so`
    in a **bionic linker namespace**, bridging only at the NDK-API boundary. The tractable target is
    an **arm64 host** (the automotive boards) where no CPU translation is needed; on x86_64 desktop
@@ -254,11 +257,43 @@ ART's own `nativeLoad` untouched (zero regression: full build + 33 tests green).
 (DT_NEEDED `libc.so` vs glibc `libc.so.6`) validated: bionic `.so`/stub → BIONIC, `libz.so.1`/`ls` →
 glibc. The mechanism it calls is the `--realvm`-proven stack.
 
-NEXT (to a real acl-app run): (1) stage a bionic runtime for acl (linker+libs+stub) + set
-`ACL_BIONIC_*`/`ACL_BIONIC_APP_LIBS` from the app's extracted `lib/<abi>` dir in the run path;
-(2) an x86_64 bionic-JNI APK to exercise the hook end-to-end on the acl ART path; (3) per-thread
-attach-as-bionic (today uses the main thread's captured glibc `%fs` — ART worker/app threads each
-need a bionic TCB); (4) NDK trampoline `.so` (`liblog`→acl `log`, `libandroid`→`wm`); then arm64.
+**A REAL APK's native lib, on REAL host ART — PROVEN end-to-end (2026-07-16).** The mechanism above
+is now reached the way an app reaches it, with no probe harness in the loop. `tests/integration/
+run_ndk_art_test.py` (`meson test run-apk-ndk-art`; SKIPs without `ACL_ART_HOME`/AOSP) runs
+`acl run ndk.apk --vm=art` on an APK carrying a **bionic-ABI `lib/x86_64/libndktest.so`** and a real
+`Activity` (`tests/fixtures/art_ndk/Main.java`). The whole vertical runs: `pkg` extracts the `.so` →
+`main.cpp` exports `ACL_BIONIC_APP_LIBS` → ART boots → the gated hook routes
+`Main.<clinit>`'s `System.loadLibrary("ndktest")` → `is_bionic_elf` ⇒ bionic → in-process linker
+dlopen + `JNI_OnLoad` across the `%fs` boundary (`RegisterNatives`) → `onCreate` calls `answer()` →
+down-call trampoline → bionic native → `helper(20,30)` varargs up-call into ART → **4250**. The
+asserted value proves load + `JNI_OnLoad` + down-call + up-call, not merely that a library loaded.
+
+`tools/stage-bionic-runtime.sh [outdir] [--print-env]` stages what the loader bootstraps (linker64 +
+soname-named bionic sysroot + PIE stub) and is the single definition of "a bionic runtime" — the
+Stage-0b spike (`tools/ndk-loader-spike/build.sh`) now consumes it too, so spike and run path
+bootstrap identical bits.
+
+**Signal state is host state (found by the above, fixed).** The linker's init claims two pieces of
+process/thread state for bionic: the crash handlers (`linker_debuggerd_init` →
+`debuggerd_register_handlers`: SIGABRT/BUS/FPE/ILL/SEGV/STKFLT/SYS/TRAP + `BIONIC_SIGNAL_DEBUGGER`)
+and **this thread's `sigaltstack`** (`__libc_init_main_thread_late` → `__init_alternate_signal_stack`
+mmaps a guarded region and installs it). Both must stay acl's: ART installs its own SIGSEGV handler
+(implicit null checks are SEGVs it fixes up), and on host `art::Thread::TearDownAlternateSignalStack`
+reads back whatever `sigaltstack` is installed and `delete[]`s it — with bionic's mmap there, **ART
+shutdown `free()`d a bionic guard-page address and SIGSEGV'd** (the app had already run correctly;
+the crash was in teardown). `bootstrap_x86_64` now snapshots the host's `sigaltstack` + those
+sigactions across `__linker_init` and restores them, so acl stays the crash handler and owns its own
+alt stack; bionic's stay mapped but unreferenced. A bionic crash is then reported by the host —
+what we want from a translation layer anyway.
+
+NEXT (to real NDK apps): (1) **name-resolved natives** — `answer()` above is bound by
+`RegisterNatives` from `JNI_OnLoad`, which works because the .so hands acl the pointers; a native
+declared but NOT registered (the common case: ART `dlsym`s `Java_pkg_Class_method` on the handle
+*it* opened) can't bind, since the lib lives in the bionic linker's namespace and ART holds no
+handle — needs the `nativeLoad` hook to also resolve+trampoline by name on ART's behalf;
+(2) per-thread attach-as-bionic (today uses the main thread's captured glibc `%fs` — ART worker/app
+threads each need a bionic TCB); (3) NDK trampoline `.so` (`liblog`→acl `log`, `libandroid`→`wm`);
+then arm64.
 
 The mechanism, pinned:
 - The bionic `linker64`/`ld-android.so` export a programmatic loader — `__loader_dlopen`,

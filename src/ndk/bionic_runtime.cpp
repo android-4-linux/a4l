@@ -12,6 +12,7 @@
 
 #include <elf.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -220,8 +221,16 @@ void* build_kab(const Mapped& lk, const char* stub_path, const std::string& ld) 
   return g_block;
 }
 
+// The signals bionic's crash handler takes over during the bootstrap. linker_main calls
+// linker_debuggerd_init(), whose debuggerd_register_handlers() (system/core/debuggerd/include/
+// debuggerd/handler.h) sigaction()s exactly this set. BIONIC_SIGNAL_DEBUGGER is bionic's
+// __SIGRTMIN + 3; __SIGRTMIN is the kernel's 32, so the raw number is 35 — glibc's SIGRTMIN
+// macro is 34 (it reserves 32/33 for NPTL) and would restore the wrong signal, hence the literal.
+constexpr int kBionicSignals[] = {SIGABRT, SIGBUS, SIGFPE,  SIGILL, SIGSEGV,
+                                  SIGSTKFLT, SIGSYS, SIGTRAP, 32 + 3};
+
 // Bootstrap the linker; on success fill the loader fn ptrs and bionic %fs. Returns true/false.
-// (%fs is restored to glibc before returning.)
+// (%fs — and the host's signal state, see below — are restored to glibc/host before returning.)
 bool bootstrap_x86_64(const BionicConfig& cfg, std::uintptr_t* out_bionic_fs, void** out_dlopen,
                       void** out_dlsym, void** out_dlerror) {
   Mapped lk;
@@ -236,10 +245,35 @@ bool bootstrap_x86_64(const BionicConfig& cfg, std::uintptr_t* out_bionic_fs, vo
   for (const std::string& p : cfg.extra_lib_paths) { ld += ':'; ld += p; }
   void* kab = build_kab(lk, cfg.stub.c_str(), ld);
 
+  // Signal state is HOST state, and the linker's init claims two pieces of it for bionic:
+  //   1. the crash handlers (linker_debuggerd_init -> kBionicSignals above), and
+  //   2. THIS thread's sigaltstack — __libc_init_main_thread_late -> __init_additional_stacks ->
+  //      __init_alternate_signal_stack (bionic/libc/bionic/pthread_create.cpp) mmaps a guarded
+  //      SIGNAL_STACK_SIZE region and sigaltstack()s it in.
+  // acl must keep both. ART installs its own SIGSEGV handler (implicit null checks are SEGVs it
+  // fixes up), and on host art::Thread::TearDownAlternateSignalStack (art/runtime/thread_linux.cc)
+  // reads back whatever sigaltstack is installed and `delete[]`s it — with bionic's mmap there,
+  // ART shutdown free()s a bionic guard-page address and SIGSEGVs. So snapshot the host's signal
+  // state, let the linker do as it likes, then put it back: acl stays the crash handler and the
+  // owner of its own alt stack. Bionic's handlers/stack stay mapped, just unreferenced — a bionic
+  // crash is then reported by the host, which is what we want from a translation layer anyway.
+  stack_t saved_ss{};
+  const bool have_ss = ::sigaltstack(nullptr, &saved_ss) == 0;
+  struct sigaction saved_sa[std::size(kBionicSignals)];
+  bool have_sa[std::size(kBionicSignals)];
+  for (std::size_t i = 0; i < std::size(kBionicSignals); ++i)
+    have_sa[i] = ::sigaction(kBionicSignals[i], nullptr, &saved_sa[i]) == 0;
+
   const std::uintptr_t glibc_fs = get_fs();
   reinterpret_cast<std::uintptr_t (*)(void*)>(init_addr)(kab);  // sets %fs -> permanent bionic TCB
   *out_bionic_fs = get_fs();
   set_fs(glibc_fs);
+
+  // Back on glibc %fs, so these libc calls are safe again.
+  for (std::size_t i = 0; i < std::size(kBionicSignals); ++i)
+    if (have_sa[i]) ::sigaction(kBionicSignals[i], &saved_sa[i], nullptr);
+  if (have_ss) ::sigaltstack(&saved_ss, nullptr);  // SS_DISABLE when the host had none: still correct
+
   *out_dlopen = dlopen_a;
   *out_dlsym = dlsym_a;
   *out_dlerror = dlerror_a;

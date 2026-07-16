@@ -157,6 +157,29 @@ if py3.found() and have_jni
       )
     endif
 
+    # ADR-5 / R-6: an app's BIONIC-ABI lib/<abi>/*.so, loaded in-process by acl's bionic
+    # loader on the real ART path — System.loadLibrary from an Activity, routed through the
+    # gated Runtime.nativeLoad hook, JNI_OnLoad + a full down/up-call round trip (=4250).
+    # Needs a host ART build (ACL_ART_HOME) + the AOSP host toolchain + a built bionic
+    # ($AOSP, for the linker/sysroot/stub); SKIPs (exit 77) when absent. See docs/ndk-scope.md.
+    if framework_android_jar != ''
+      ndk_apk = custom_target(
+        'ndk-apk',
+        input : files('../fixtures/make_ndk_apk.py'),
+        output : 'ndk.apk',
+        command : [py3, '@INPUT@', '@OUTPUT@'],
+        depend_files : files('../fixtures/make_axml.py'),
+      )
+      test(
+        'run-apk-ndk-art',
+        py3,
+        args : [files('run_ndk_art_test.py'), acl_exe,
+                meson.project_source_root(), framework_android_jar, ndk_apk],
+        depends : [acl_exe, ndk_apk],
+        timeout : 300,
+      )
+    endif
+
     # P2.2 / ADR-0008: acl registers the REAL framework native floor from the host
     # libandroid_runtime (--vm=art + ACL_ART_NATIVE) and a framework native executes.
     # Needs a host ART build + the real framework DEX (m framework-minus-apex); SKIPs

@@ -2287,6 +2287,10 @@ class ArtVm final : public JniVm {
   // are exported, so acl calls a curated set of the pure-framework ones directly (no
   // AndroidRuntime/gCurRuntime dependency).
   void register_natives(JNIEnv* env) override {
+    // The app's own bionic lib/<abi>/*.so loading (ADR-5) is orthogonal to the framework
+    // native floor below — an app ships native code whether or not the real
+    // libandroid_runtime is in play — so arm it first, ahead of the floor's early returns.
+    register_ndk_loadlibrary_override(env);  // opt-in (ACL_BIONIC_LINKER); no-op otherwise
     const char* opt = std::getenv("ACL_ART_NATIVE");
     const char* home_c = std::getenv("ACL_ART_HOME");
     if (opt == nullptr || *opt == '\0' || home_c == nullptr || *home_c == '\0') {
@@ -2361,7 +2365,6 @@ class ArtVm final : public JniVm {
     load_system_resources(env);
     register_no_binder(env);
     register_systemproperties_override(env);  // neutralize the device-only fast-property abort
-    register_ndk_loadlibrary_override(env);    // route app bionic lib/<abi>/*.so (opt-in, ADR-5)
     bootstrap_host_env(env);
     load_acl_graphics(env);
     // Seed default typefaces now that the graphics Font/Typeface natives are registered
