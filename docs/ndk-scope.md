@@ -184,7 +184,18 @@ process; the host NDK premise is de-risked. Key facts that made it work (all ver
 
 The mechanism (map PIE → synthetic KAB → `__linker_init` → `__loader_*`) is arch-neutral in structure;
 the arm64 port swaps only the TLS register (`TPIDR_EL0`), auxv, and reloc details (the target
-`linker64` carries the relocs). The remaining work is integration, not feasibility:
+`linker64` carries the relocs). The remaining work is integration, not feasibility.
+
+**Rung 3 — promoted into `src/ndk/` (2026-07-16).** The spike is now a real acl API:
+`src/ndk/bionic_runtime.{h,cpp}` — `BionicRuntime` (process-singleton; the linker bootstraps once),
+`BionicConfig` (paths from `ACL_BIONIC_LINKER`/`_SYSROOT`/`_STUB`, validated up front because linker
+input errors are fatal), `load()`/`symbol()`, and an RAII `RunScope` that brackets bionic calls with
+the `%fs` swap (the swap confined to the `-fno-stack-protector` TU). Arch-guarded: non-x86_64 returns
+a clean "arm64 TLS port pending" error so cross builds stay green. Verified via `acl-ndk-probe`
+(`nativeAnswer()=42 (PASS)`, logging through acl's `log/`). NEXT: hook ART's `libnativeloader` /
+`System.loadLibrary` to route app libs through it (with the app's `lib/<abi>/` on the search path via
+`extra_lib_paths`), resolve NDK trampoline `.so` (`liblog`→acl `log`, `libandroid`→`wm`), then the
+per-thread attach for JNI up/down calls (Rung 4), then arm64.
 
 The mechanism, pinned:
 - The bionic `linker64`/`ld-android.so` export a programmatic loader — `__loader_dlopen`,
