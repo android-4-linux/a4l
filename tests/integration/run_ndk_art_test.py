@@ -35,6 +35,21 @@ import tempfile
 
 SKIP = 77  # meson interprets exit 77 as "skipped"
 
+# --worker mode: the fixture also calls the native from a NON-main thread. Only the thread that
+# bootstrapped the bionic linker has a bionic TCB, so acl must refuse — loudly and at the call.
+# Left to its own test because the refusal aborts by design. What this pins down: the refusal must
+# name the reason, and it must happen INSTEAD OF the corruption it prevents. Without the guard the
+# native returns fine and ART dies later in the GC ("Check failed: self == thread") because the
+# thread came back with the main thread's glibc %fs — i.e. reading another thread's TLS.
+WORKER_CHECKS = [
+    "WORKER: calling nativeAnswer() off the main thread",   # got as far as the call
+    "bionic native called from a thread with no bionic TCB",  # refused, by name
+]
+WORKER_MUST_NOT = [
+    "Check failed: self == thread",   # the ART corruption the guard exists to prevent
+    "WORKER: nativeAnswer()=",        # the call must not have returned a value
+]
+
 CHECKS = [
     "NDK bionic loader active",   # the gated nativeLoad hook installed
     "loaded bionic native lib",   # routed as bionic (not glibc dlopen)
@@ -55,10 +70,15 @@ def first_executable(*paths):
 
 
 def main() -> int:
-    if len(sys.argv) != 5:
-        sys.stderr.write("usage: run_ndk_art_test.py <acl> <src_root> <android.jar> <ndk.apk>\n")
+    argv = list(sys.argv[1:])
+    worker = "--worker" in argv           # off-main-thread refusal mode; see WORKER_CHECKS
+    if worker:
+        argv.remove("--worker")
+    if len(argv) != 4:
+        sys.stderr.write(
+            "usage: run_ndk_art_test.py <acl> <src_root> <android.jar> <ndk.apk> [--worker]\n")
         return 2
-    acl, src_root, android_jar, ndk_apk = sys.argv[1:5]
+    acl, src_root, android_jar, ndk_apk = argv
 
     home = os.environ.get("ACL_ART_HOME", "")
     if not home or not os.path.isdir(home):
@@ -148,6 +168,8 @@ def main() -> int:
         env["ACL_BIONIC_STUB"] = os.path.join(stage, "stub")
         env["XDG_CACHE_HOME"] = os.path.join(work, "cache")  # keep lib extraction in the sandbox
         env.pop("ACL_BIONIC_APP_LIBS", None)
+        if worker:
+            env["ACL_NDK_TEST_WORKER"] = "1"  # the fixture also calls the native off-main-thread
         p = subprocess.run([acl, "run", apk, "--vm=art"],
                            env=env, capture_output=True, text=True, timeout=300)
         out = p.stdout + p.stderr
@@ -157,19 +179,38 @@ def main() -> int:
     finally:
         subprocess.run(["rm", "-rf", work], check=False)
 
-    ok = p.returncode == 0
-    if not ok:
-        sys.stderr.write(f"FAIL: acl run --vm=art exit {p.returncode}\n")
-    for c in CHECKS:
-        if c not in out:
-            sys.stderr.write(f"FAIL: missing '{c}'\n")
+    ok = True
+    if worker:
+        # The guard aborts on purpose, so a clean exit would mean it never fired.
+        if p.returncode == 0:
+            sys.stderr.write("FAIL: expected the off-main-thread native call to be refused\n")
             ok = False
+        for c in WORKER_CHECKS:
+            if c not in out:
+                sys.stderr.write(f"FAIL: missing '{c}'\n")
+                ok = False
+        for c in WORKER_MUST_NOT:
+            if c in out:
+                sys.stderr.write(f"FAIL: '{c}' present — the guard did not fire in time\n")
+                ok = False
+    else:
+        if p.returncode != 0:
+            sys.stderr.write(f"FAIL: acl run --vm=art exit {p.returncode}\n")
+            ok = False
+        for c in CHECKS:
+            if c not in out:
+                sys.stderr.write(f"FAIL: missing '{c}'\n")
+                ok = False
     if not ok:
         sys.stderr.write("--- captured output ---\n" + out + "\n")
         return 1
-    sys.stdout.write("OK: app's bionic lib/x86_64/*.so loaded in-process on host ART; "
-                     "JNI round-trip answer()=4250 (RegisterNatives, and NOT the exported 9999 "
-                     "decoy) + nativeAnswer()=42 (bound by name)\n")
+    if worker:
+        sys.stdout.write("OK: a bionic native called off the main thread is refused by name, "
+                         "instead of corrupting the caller's TLS\n")
+    else:
+        sys.stdout.write("OK: app's bionic lib/x86_64/*.so loaded in-process on host ART; "
+                         "JNI round-trip answer()=4250 (RegisterNatives, and NOT the exported 9999 "
+                         "decoy) + nativeAnswer()=42 (bound by name)\n")
     return 0
 
 

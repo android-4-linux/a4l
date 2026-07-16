@@ -178,6 +178,18 @@ if py3.found() and have_jni
         depends : [acl_exe, ndk_apk],
         timeout : 300,
       )
+      # The multi-thread boundary: only the thread that bootstrapped the bionic linker has a
+      # bionic TCB, so a native called off the main thread must be refused BY NAME rather than
+      # run on another thread's TCB and return with its glibc %fs (which detaches the caller from
+      # its own TLS — ART then dies later in the GC). Same fixture, ACL_NDK_TEST_WORKER=1.
+      test(
+        'run-apk-ndk-art-worker',
+        py3,
+        args : [files('run_ndk_art_test.py'), acl_exe,
+                meson.project_source_root(), framework_android_jar, ndk_apk, '--worker'],
+        depends : [acl_exe, ndk_apk],
+        timeout : 300,
+      )
     endif
 
     # P2.2 / ADR-0008: acl registers the REAL framework native floor from the host

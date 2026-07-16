@@ -47,5 +47,23 @@ public class Main extends Activity {
         super.onCreate(savedInstanceState);
         Log.i("acl", "Main.onCreate: bionic native answer()=" + answer()
                      + " nativeAnswer()=" + nativeAnswer());
+
+        // Opt-in (run_ndk_thread_test.py): call the same native from a NON-main thread. Only the
+        // thread that bootstrapped the bionic linker has a bionic TCB, so acl must refuse this
+        // loudly. Left out of the default run because the refusal aborts the process by design.
+        if (System.getenv("ACL_NDK_TEST_WORKER") != null) {
+            Thread t = new Thread(new Runnable() {
+                public void run() {
+                    Log.i("acl", "WORKER: calling nativeAnswer() off the main thread");
+                    Log.i("acl", "WORKER: nativeAnswer()=" + nativeAnswer());
+                }
+            });
+            t.start();
+            try {
+                t.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 }

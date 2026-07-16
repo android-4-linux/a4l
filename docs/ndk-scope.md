@@ -320,8 +320,39 @@ for it — ART's lazy resolution is closed to us. The only complete fix in sight
 *glibc proxy `.so`* to `dlopen` whose exported `Java_*` symbols forward into the bionic lib, which
 means synthesizing an ELF at run time (bounded, but real work). Revisit when a corpus app needs it.
 
-NEXT (to real NDK apps): (1) per-thread attach-as-bionic (today uses the main thread's captured
-glibc `%fs` — ART worker/app threads each need a bionic TCB); (2) NDK trampoline `.so`
+**The thread boundary — made explicit, not yet crossed (2026-07-16).** A bionic TCB belongs to ONE
+thread (errno, `pthread_self`, pthread TLS, the DTV), and only the thread that bootstrapped the
+linker has one. The down-call trampoline used to bake BOTH thread pointers in as immediates, so a
+native called from an ART worker thread ran on the main thread's bionic TCB and — the real damage —
+returned with the **main thread's glibc `%fs`** installed. Measured, not theorised: the native
+returned 42 quite happily and the process then died inside the GC with `Check failed: self == thread`
+(`concurrent_copying.cc`), because `Thread::Current()` is a TLS read and the worker was now reading
+the main thread's TLS. Nothing in that abort points at the NDK bridge.
+
+Both pointers are now per-thread: the trampoline `rdfsbase`s the **caller's own** glibc `%fs` and
+stashes it on the stack (restoring a constant would detach any other caller from its TLS), and takes
+the bionic side from a per-thread `t_bionic_fs` slot, read at a fixed `%fs` displacement while still
+on the caller's glibc `%fs` (hence `initial-exec`: it guarantees a constant offset from the thread
+pointer for every thread). A zero slot — a thread that was never attached — calls
+`acl_ndk_unattached()`, which logs what happened and aborts **at the call**, rather than running on
+another thread's TCB. `meson test run-apk-ndk-art-worker` pins this: the refusal must name the
+reason, and `Check failed: self == thread` must NOT appear. The up-call thunks (`ToGlibc`) still use
+a constant `%fs` pair, which is correct exactly because a native can only run on the (single)
+attached thread; per-thread attach must revisit that too.
+
+**Per-thread attach-as-bionic is therefore the next rung**, and bionic offers no API for it: it
+exports `pthread_create`, `__libc_get_static_tls_bounds`, `__libc_register_thread_exit_callback`,
+`__tls_get_addr` — nothing that adopts an already-running (glibc-created) thread. `pthread_create`
+is no use: the native must run on ART's own thread, which holds ART's `Thread::Current()` and JNIEnv.
+So acl must synthesize the TCB. The plausible design: `__libc_get_static_tls_bounds` gives the main
+thread's static TLS block, which bionic laid out correctly; copy it per thread and fix the
+self-referential fields (`TLS_SLOT_SELF`, `TLS_SLOT_THREAD_ID` → a fresh `pthread_internal_t` with
+this thread's `tid`, and the DTV entries, which point INTO the block and must be rebased), then
+store the result in `t_bionic_fs`. That couples us to bionic's internal `pthread_internal_t`/TLS
+layout — acceptable only because acl pins the bionic it stages, and the reason the trampoline reads
+the TCB from a slot rather than assuming one.
+
+NEXT (to real NDK apps): (1) per-thread attach-as-bionic (above); (2) NDK trampoline `.so`
 (`liblog`→acl `log`, `libandroid`→`wm`); then arm64.
 
 The mechanism, pinned:

@@ -416,6 +416,32 @@ WrapEnv g_wrap_env;
 WrapVM g_wrap_vm;
 std::uintptr_t g_jni_glibc_fs = 0, g_jni_bionic_fs = 0;
 
+// ── Per-thread bionic thread pointer ─────────────────────────────────────────────────────────
+// A bionic TCB belongs to ONE thread (it holds errno, pthread_self, pthread TLS, the DTV), so a
+// thread running bionic code needs its own. This slot holds the calling thread's bionic TCB, or 0
+// when the thread has never been attached. The down-call trampoline reads it *before* swapping
+// (i.e. still on the caller's glibc %fs) via a constant %fs-relative displacement — hence
+// initial-exec, which guarantees the slot lives in the static TLS block at a fixed offset from the
+// thread pointer for EVERY thread. (Local-exec would do as well here; initial-exec states the
+// requirement explicitly and survives this TU moving into a shared library.)
+__thread __attribute__((tls_model("initial-exec"))) std::uintptr_t t_bionic_fs = 0;
+std::int64_t g_tls_disp = 0;  // &t_bionic_fs - glibc %fs base; constant across threads
+
+// Called by the trampoline when a native is invoked on a thread with no bionic TCB. Runs on the
+// caller's own (glibc) %fs — nothing has been swapped yet — so plain host calls are safe here.
+// It must not return: continuing would run bionic code on another thread's TCB and, worse, return
+// with that thread's glibc %fs installed, which detaches the caller from its own TLS. That is not
+// a theoretical worry: ART's Thread::Current() is a TLS read, so the process dies later inside the
+// GC ("Check failed: self == thread") with nothing pointing back at here. Fail here instead.
+[[noreturn]] void acl_ndk_unattached() {
+  log::e(kTag,
+         "bionic native called from a thread with no bionic TCB. Per-thread attach-as-bionic is "
+         "not implemented yet (docs/ndk-scope.md): only the thread that bootstrapped the loader "
+         "(the main thread) may run app native code. Aborting rather than corrupting this "
+         "thread's TLS.");
+  std::abort();
+}
+
 // Entered under bionic %fs (from the bionic .so); restore glibc for the real call, then bionic.
 // Sets the *constant* glibc/bionic %fs (not a save/restore), which composes correctly under JNI
 // re-entrancy with the down-call RunScope (up-calls always originate in bionic, down-calls in glibc).
@@ -501,8 +527,16 @@ T1(jobjectRefType, GetObjectRefType, jobject)
 // Down-call trampoline: ART invokes a registered native under GLIBC %fs, but the native is bionic
 // code expecting bionic %fs + the wrapped JNIEnv. We emit, per native, a tiny stub that replaces
 // arg0 (JNIEnv*) with the wrapper env, sets %fs=bionic (wrfsbase — no register clobber, FSGSBASE),
-// calls the real native, sets %fs=glibc, returns. Signature-agnostic for register-argument natives
+// calls the real native, restores %fs, returns. Signature-agnostic for register-argument natives
 // (no stack args) — the JNI norm; a stack-arg native would need arg copying (TODO).
+//
+// Both thread pointers are per-thread, never baked in: the caller's glibc %fs is read with
+// rdfsbase and stashed on the stack (restoring a *constant* main-thread value would silently
+// detach any other caller from its own TLS), and the bionic side comes from this thread's
+// t_bionic_fs slot, read at %fs:g_tls_disp while still on the caller's glibc %fs. A zero slot
+// means the thread was never attached -> acl_ndk_unattached() (see above), never a wrong TCB.
+// Only %r10/%r11 are touched: both are caller-saved and neither carries an argument (nor the
+// varargs vector count in %al — JNI natives are not variadic).
 void* make_downcall(void* real_native) {
   auto* p = static_cast<unsigned char*>(
       ::mmap(nullptr, kPage, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
@@ -510,16 +544,23 @@ void* make_downcall(void* real_native) {
   std::size_t o = 0;
   auto emit = [&](std::initializer_list<unsigned char> b) { for (unsigned char x : b) p[o++] = x; };
   auto imm64 = [&](std::uint64_t v) { std::memcpy(p + o, &v, 8); o += 8; };
+  auto imm32 = [&](std::int32_t v) { std::memcpy(p + o, &v, 4); o += 4; };
+  // Entry: %rsp ≡ 8 (mod 16). The push below realigns to 0, so the call sees the ABI's ≡ 8.
+  emit({0xF3, 0x49, 0x0F, 0xAE, 0xC2});                 // rdfsbase %r10   (caller's glibc %fs)
+  emit({0x41, 0x52});                                   // push %r10
+  emit({0x64, 0x4C, 0x8B, 0x1C, 0x25});                 // mov %fs:disp32,%r11  (this thread's
+  imm32(static_cast<std::int32_t>(g_tls_disp));         //   bionic TCB, or 0 = unattached)
+  emit({0x4D, 0x85, 0xDB});                             // test %r11,%r11
+  emit({0x75, 0x0D});                                   // jnz +13 (over the unattached call)
+  emit({0x49, 0xBB}); imm64(reinterpret_cast<std::uintptr_t>(&acl_ndk_unattached));
+  emit({0x41, 0xFF, 0xD3});                             // call *%r11 — [[noreturn]]
+  emit({0xF3, 0x49, 0x0F, 0xAE, 0xD3});                 // wrfsbase %r11  (-> this thread's bionic)
   emit({0x48, 0xBF}); imm64(reinterpret_cast<std::uintptr_t>(&g_wrap_env));  // mov $wrap_env,%rdi
-  emit({0x49, 0xBB}); imm64(g_jni_bionic_fs);                               // mov $bionic_fs,%r11
-  emit({0xF3, 0x49, 0x0F, 0xAE, 0xD3});                                     // wrfsbase %r11
-  emit({0x48, 0x83, 0xEC, 0x08});                                          // sub $8,%rsp (align)
-  emit({0x49, 0xBB}); imm64(reinterpret_cast<std::uintptr_t>(real_native)); // mov $real,%r11
-  emit({0x41, 0xFF, 0xD3});                                                // call *%r11
-  emit({0x48, 0x83, 0xC4, 0x08});                                          // add $8,%rsp
-  emit({0x49, 0xBB}); imm64(g_jni_glibc_fs);                               // mov $glibc_fs,%r11
-  emit({0xF3, 0x49, 0x0F, 0xAE, 0xD3});                                    // wrfsbase %r11
-  emit({0xC3});                                                            // ret
+  emit({0x49, 0xBB}); imm64(reinterpret_cast<std::uintptr_t>(real_native));  // mov $real,%r11
+  emit({0x41, 0xFF, 0xD3});                             // call *%r11
+  emit({0x41, 0x5A});                                   // pop %r10
+  emit({0xF3, 0x49, 0x0F, 0xAE, 0xD2});                 // wrfsbase %r10  (caller's OWN glibc %fs)
+  emit({0xC3});                                         // ret
   __builtin___clear_cache(reinterpret_cast<char*>(p), reinterpret_cast<char*>(p + o));
   return p;
 }
@@ -621,8 +662,23 @@ jint JNICALL w_GetEnv(JavaVM* vm, void** out, jint ver) {
 JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
 #if defined(__x86_64__)
   if (!real_vm || !real_env) return nullptr;
+  // Up-call thunks (ToGlibc) still use this constant pair. That is correct exactly because a
+  // native can only run on an attached thread, and the only attached thread is the one that
+  // bootstrapped — an up-call always originates inside a down-call on that same thread. Per-thread
+  // attach must revisit this: the pair becomes per-thread state, reachable from bionic %fs.
   g_jni_glibc_fs = glibc_fs_;
   g_jni_bionic_fs = bionic_fs_;
+
+  // Attach the bootstrapping thread: give it the bionic TCB __linker_init built, and record the
+  // slot's fixed displacement from the thread pointer for the trampolines. Called on that thread,
+  // under its glibc %fs (ART's nativeLoad -> load_library), so ndk_get_fs() is its glibc base.
+  t_bionic_fs = bionic_fs_;
+  g_tls_disp = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(&t_bionic_fs)) -
+               static_cast<std::int64_t>(ndk_get_fs());
+  if (g_tls_disp < INT32_MIN || g_tls_disp > INT32_MAX) {
+    log::e(kTag, "bionic loader: TLS slot displacement {} does not fit a disp32", g_tls_disp);
+    return nullptr;  // the trampoline encodes it as a disp32; refuse rather than emit a wrong one
+  }
   g_env_tbl = *real_env->functions;  // start from the real table, then thunk every slot below
 
 #define S(N) g_env_tbl.N = w_##N
