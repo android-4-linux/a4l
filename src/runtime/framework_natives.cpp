@@ -11,6 +11,8 @@
 
 #include "runtime/framework_natives.h"
 
+#include <time.h>
+
 #include <array>
 #include <cstdint>
 #include <string>
@@ -177,10 +179,61 @@ bool bind(JNIEnv* env, const char* name, const JNINativeMethod* methods, int n) 
   return ok;
 }
 
+// android.os.SystemClock — the boot classpath declares these native (the api-33 stub layer keeps
+// the modifier), and on a device they come from libandroid_runtime. Without the real native floor
+// (ADR-0008, ACL_ART_NATIVE) nothing binds them, and the very first framework call an app makes
+// tends to be one of these: a real app died on "No implementation found for
+// android.os.SystemClock.uptimeMillis()" before it reached its own code. They are pure clock
+// reads with no device dependency, so acl can answer them honestly on the host.
+//
+// uptimeMillis is CLOCK_MONOTONIC — Android's contract is "milliseconds since boot, not counting
+// deep sleep", and a host has no deep sleep, so monotonic is exactly right. elapsedRealtime counts
+// deep sleep too, which likewise makes it the same clock here (CLOCK_BOOTTIME on device).
+jlong clock_ms(clockid_t id) {
+  timespec ts{};
+  if (::clock_gettime(id, &ts) != 0) return 0;
+  return static_cast<jlong>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+}
+jlong JNICALL SystemClock_uptimeMillis(JNIEnv*, jclass) { return clock_ms(CLOCK_MONOTONIC); }
+jlong JNICALL SystemClock_elapsedRealtime(JNIEnv*, jclass) { return clock_ms(CLOCK_BOOTTIME); }
+jlong JNICALL SystemClock_elapsedRealtimeNanos(JNIEnv*, jclass) {
+  timespec ts{};
+  if (::clock_gettime(CLOCK_BOOTTIME, &ts) != 0) return 0;
+  return static_cast<jlong>(ts.tv_sec) * 1000000000 + ts.tv_nsec;
+}
+// Per-thread CPU time, as on device (CLOCK_THREAD_CPUTIME_ID).
+jlong JNICALL SystemClock_currentThreadTimeMillis(JNIEnv*, jclass) {
+  return clock_ms(CLOCK_THREAD_CPUTIME_ID);
+}
+
 }  // namespace
 
 void register_framework_natives(JNIEnv* env) {
   if (env == nullptr) return;
+
+  if (jclass cls = env->FindClass("android/os/SystemClock"); cls != nullptr) {
+    const std::array<JNINativeMethod, 4> methods{{
+        {const_cast<char*>("uptimeMillis"), const_cast<char*>("()J"),
+         reinterpret_cast<void*>(&SystemClock_uptimeMillis)},
+        {const_cast<char*>("elapsedRealtime"), const_cast<char*>("()J"),
+         reinterpret_cast<void*>(&SystemClock_elapsedRealtime)},
+        {const_cast<char*>("elapsedRealtimeNanos"), const_cast<char*>("()J"),
+         reinterpret_cast<void*>(&SystemClock_elapsedRealtimeNanos)},
+        {const_cast<char*>("currentThreadTimeMillis"), const_cast<char*>("()J"),
+         reinterpret_cast<void*>(&SystemClock_currentThreadTimeMillis)},
+    }};
+    if (env->RegisterNatives(cls, methods.data(), static_cast<jint>(methods.size())) != JNI_OK) {
+      env->ExceptionClear();
+      log::write(log::Level::Warn, "acl.runtime.jvm",
+                 "RegisterNatives(android.os.SystemClock) failed");
+    } else {
+      log::write(log::Level::Info, "acl.runtime.jvm",
+                 "framework native bound: android.os.SystemClock");
+    }
+    env->DeleteLocalRef(cls);
+  } else {
+    env->ExceptionClear();
+  }
 
   // android.util.Log — the first vendored framework class with an acl native.
   if (jclass log_cls = env->FindClass("android/util/Log"); log_cls != nullptr) {
