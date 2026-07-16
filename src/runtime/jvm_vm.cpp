@@ -54,6 +54,19 @@ namespace {
 
 constexpr std::string_view kTag = "acl.runtime.jvm";
 
+// FindClass for a class acl can do without — its own org.acl.internal.* helpers, which are absent
+// whenever an app runs on the REAL framework boot classpath rather than acl's staged one.
+//
+// A failed FindClass leaves a pending ClassNotFoundException behind. ART is not forgiving about
+// that: the next time it checks (runtime.cc "No pending exception expected") it aborts the process,
+// far from the lookup that caused it. So an optional lookup must always clear. Returns nullptr when
+// the class is absent, with no pending exception either way.
+jclass find_class_optional(JNIEnv* env, const char* name) {
+  jclass c = env->FindClass(name);
+  if (c == nullptr && env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  return c;
+}
+
 // ── NDK bionic native-library loading (ADR-5) ─────────────────────────────────────────────────
 // Opt-in via ACL_BIONIC_LINKER/_SYSROOT/_STUB: route the app's bionic lib/<abi>/*.so through the
 // in-process bionic loader (src/ndk/bionic_runtime), which drives their JNI_OnLoad across the two-
@@ -2381,7 +2394,7 @@ class ArtVm final : public JniVm {
     load_acl_graphics(env);
     // Seed default typefaces now that the graphics Font/Typeface natives are registered
     // (the system font map isn't pushed to a standalone run).
-    if (jclass boot = env->FindClass("org/acl/internal/HostBootstrap"); boot != nullptr) {
+    if (jclass boot = find_class_optional(env, "org/acl/internal/HostBootstrap"); boot != nullptr) {
       if (jmethodID m = env->GetStaticMethodID(boot, "seedTypefaces", "()V"))
         env->CallStaticVoidMethod(boot, m);
       if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
@@ -2590,7 +2603,7 @@ class ArtVm final : public JniVm {
     g_acl_typeface_from_path =
         reinterpret_cast<jlong (*)(const char*)>(::dlsym(h, "acl_typeface_from_path"));
     if (g_acl_typeface_from_path != nullptr) {
-      if (jclass boot = env->FindClass("org/acl/internal/HostBootstrap"); boot != nullptr) {
+      if (jclass boot = find_class_optional(env, "org/acl/internal/HostBootstrap"); boot != nullptr) {
         JNINativeMethod m[] = {
             {const_cast<char*>("nTypefaceFromPath"), const_cast<char*>("(Ljava/lang/String;)J"),
              reinterpret_cast<void*>(
