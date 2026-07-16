@@ -8,14 +8,22 @@
 // int(JNIEnv*,jclass) (the tools/ndk-loader-spike repro's nativeAnswer ignores both args).
 // Prints the returned int; exit 0 iff it returns 42 (the repro's value).
 
+#include <cerrno>
 #include <cstdio>
 #include <string>
 
 #include "ndk/bionic_runtime.h"
 
+// A glibc-side callback for the boundary self-test: writes glibc TLS (errno) and doubles x. If the
+// up-call trampoline failed to restore glibc %fs, this errno write would corrupt bionic's TLS.
+static int glibc_cb(int x) {
+  errno = 99;
+  return x * 2;
+}
+
 int main(int argc, char** argv) {
   if (argc != 3) {
-    std::fprintf(stderr, "usage: %s <abs-path-to.so> <symbol>\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <abs-path-to.so> <symbol>|--boundary\n", argv[0]);
     return 2;
   }
   acl::ndk::BionicConfig cfg = acl::ndk::BionicConfig::from_env();
@@ -29,6 +37,16 @@ int main(int argc, char** argv) {
   if (!h) {
     std::fprintf(stderr, "load failed: %s\n", err.c_str());
     return 1;
+  }
+
+  // Boundary mode: prove a bionic .so can call back into glibc and return with TLS intact.
+  if (std::string(argv[2]) == "--boundary") {
+    void* fn = rt->symbol(h, "acl_ndk_boundary");
+    if (!fn) { std::fprintf(stderr, "symbol 'acl_ndk_boundary' not found\n"); return 1; }
+    errno = 0;
+    const int r = rt->run_boundary_selftest(fn, &glibc_cb, 5);  // expect 5*2 + 1000 = 1010
+    std::printf("acl-ndk-probe: boundary selftest = %d %s\n", r, r == 1010 ? "(PASS)" : "(FAIL)");
+    return r == 1010 ? 0 : 1;
   }
   void* fn = rt->symbol(h, argv[2]);
   if (!fn) {

@@ -192,10 +192,24 @@ the arm64 port swaps only the TLS register (`TPIDR_EL0`), auxv, and reloc detail
 input errors are fatal), `load()`/`symbol()`, and an RAII `RunScope` that brackets bionic calls with
 the `%fs` swap (the swap confined to the `-fno-stack-protector` TU). Arch-guarded: non-x86_64 returns
 a clean "arm64 TLS port pending" error so cross builds stay green. Verified via `acl-ndk-probe`
-(`nativeAnswer()=42 (PASS)`, logging through acl's `log/`). NEXT: hook ART's `libnativeloader` /
-`System.loadLibrary` to route app libs through it (with the app's `lib/<abi>/` on the search path via
-`extra_lib_paths`), resolve NDK trampoline `.so` (`liblog`→acl `log`, `libandroid`→`wm`), then the
-per-thread attach for JNI up/down calls (Rung 4), then arm64.
+(`nativeAnswer()=42 (PASS)`, logging through acl's `log/`).
+
+**Rung 4a — the bidirectional %fs boundary, PROVEN (2026-07-16).** `acl-ndk-probe --boundary` →
+`boundary selftest = 1010 (PASS)`. A bionic `.so` under bionic `%fs` writes a bionic thread-local,
+calls **back into glibc** (which writes glibc `errno` under glibc `%fs`) through an internal up-call
+trampoline that restores glibc `%fs` for the callback and bionic `%fs` on return, and the bionic TLS
+is **intact** afterward (the `+1000`). This is the JNI up-call/down-call mechanism in miniature —
+`BionicRuntime::run_boundary_selftest` + the `-fno-stack-protector` `upcall_trampoline`. So a loaded
+app `.so` can safely call ART's JNI and return. Toolchain note: android clang defaults to
+**emulated-TLS** (`__emutls_get_address`, a compiler-rt symbol absent from bionic) — app/fixture
+`.so` need `-fno-emulated-tls` so `__thread` uses native ELF TLS (`__tls_get_addr`, bionic-provided).
+
+NEXT (Rung 4b): hook ART's `libnativeloader` / `System.loadLibrary` to route app libs through
+`BionicRuntime` (app `lib/<abi>/` on the search path via `extra_lib_paths`); build the real JNIEnv/
+JavaVM trampoline table (each fn a `%fs`-restoring thunk over ART's, generalizing `upcall_trampoline`)
+so `JNI_OnLoad`+`RegisterNatives` work; then per-thread attach-as-bionic (Rung 4 uses the main
+thread's captured glibc `%fs`); resolve NDK trampoline `.so` (`liblog`→acl `log`, `libandroid`→`wm`);
+then arm64.
 
 The mechanism, pinned:
 - The bionic `linker64`/`ld-android.so` export a programmatic loader — `__loader_dlopen`,

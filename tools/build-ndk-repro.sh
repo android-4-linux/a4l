@@ -43,18 +43,30 @@ Java_com_acl_ndktest_Main_nativeAnswer(JNIEnv* e, jclass c) {
   __android_log_print(ANDROID_LOG_INFO, "ndktest", "nativeAnswer called");
   return 42;
 }
+// Bidirectional %fs-boundary self-test. Writes a bionic thread-local (bionic's dynamic TLS, via
+// %fs), calls back into glibc via cb (which must be trampolined to glibc %fs), then confirms the
+// bionic thread-local survived the round trip. __thread avoids any libc header (the repro compiles
+// against host headers). Expected via BionicRuntime::run_boundary_selftest with cb(x)=x*2: cb(x)+1000.
+static __thread volatile int t_marker;
+int acl_ndk_boundary(int (*cb)(int), int x) {
+  t_marker = 7;                               // bionic TLS write (needs bionic %fs)
+  int r = cb(x);                              // up-call into glibc (needs glibc %fs)
+  return r + (t_marker == 7 ? 1000 : 0);      // bionic TLS intact after the round trip?
+}
 EOF
 
 # Link against the real bionic libs by full path so NEEDED sonames are bionic (libc.so, not
 # libc.so.6) and no glibc crt/loader leaks in. -nostdlib + explicit crt = a clean bionic .so.
+# -fno-emulated-tls: use native ELF TLS (__tls_get_addr, provided by bionic) for __thread rather
+# than clang's android-default emulated-TLS (__emutls_get_address, a compiler-rt symbol not in bionic).
 "$CLANG" --target=x86_64-linux-android31 \
-  -fPIC -shared -nostdlib -Wl,-soname,libndktest.so \
+  -fPIC -shared -nostdlib -fno-emulated-tls -Wl,-soname,libndktest.so \
   -I"$INC_JNI" -I"$INC_LOG" \
   -o "$OUT/libndktest.so" \
   "$CRTBEGIN" "$OUT/ndktest.c" "$CRTEND" \
   "$BIONIC_LIBC" "$BIONIC_LIBLOG" "$BIONIC_LIBDL" \
   -fuse-ld=lld 2>/dev/null \
-|| "$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib \
+|| "$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls \
      -Wl,-soname,libndktest.so -I"$INC_JNI" -I"$INC_LOG" -o "$OUT/libndktest.so" \
      "$CRTBEGIN" "$OUT/ndktest.c" "$CRTEND" \
      "$BIONIC_LIBC" "$BIONIC_LIBLOG" "$BIONIC_LIBDL" -fuse-ld=lld

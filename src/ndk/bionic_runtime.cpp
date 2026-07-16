@@ -12,7 +12,6 @@
 
 #include <cstdlib>
 #include <filesystem>
-#include <mutex>
 #include <string_view>
 
 #if defined(__x86_64__)
@@ -238,7 +237,6 @@ bool BionicRuntime_bootstrap(const BionicConfig&, std::uintptr_t*, void**, void*
 // --- portable class surface (compiled in the same TU; no stack-protector) ---
 
 namespace {
-std::once_flag g_once;
 BionicRuntime* g_rt = nullptr;
 }
 
@@ -253,6 +251,7 @@ BionicRuntime* BionicRuntime::instance(const BionicConfig& cfg, std::string* err
   return nullptr;
 #endif
   static BionicRuntime rt;
+  rt.glibc_fs_ = ndk_get_fs();  // this (main) thread's glibc thread pointer, before bootstrap
   std::uintptr_t fs = 0;
   void *dlo = nullptr, *dls = nullptr, *dle = nullptr;
   if (!BionicRuntime_bootstrap(cfg, &fs, &dlo, &dls, &dle)) {
@@ -293,6 +292,38 @@ void* BionicRuntime::symbol(void* handle, const char* name) {
   RunScope scope(*this);
   return reinterpret_cast<void* (*)(void*, const char*, const void*)>(dlsym_fn_)(handle, name,
                                                                                  dlsym_fn_);
+}
+
+// --- bidirectional-boundary self-test (the JNI up-call mechanism, in miniature) ---
+#if defined(__x86_64__)
+namespace {
+int (*g_glibc_cb)(int) = nullptr;
+std::uintptr_t g_up_glibc_fs = 0, g_up_bionic_fs = 0;
+// Entered under bionic %fs (called from the bionic .so). Restore glibc for the callback, then
+// bionic. Lives in this -fno-stack-protector TU. Models a JNIEnv function-pointer trampoline.
+int upcall_trampoline(int x) {
+  ndk_set_fs(g_up_glibc_fs);
+  int r = g_glibc_cb(x);
+  ndk_set_fs(g_up_bionic_fs);
+  return r;
+}
+}  // namespace
+#endif
+
+int BionicRuntime::run_boundary_selftest(void* bionic_fn, int (*cb)(int), int x) {
+#if defined(__x86_64__)
+  if (!bionic_fn || !cb) return -1;
+  g_glibc_cb = cb;
+  g_up_glibc_fs = glibc_fs_;
+  g_up_bionic_fs = bionic_fs_;
+  RunScope scope(*this);  // %fs -> bionic for the down-call
+  return reinterpret_cast<int (*)(int (*)(int), int)>(bionic_fn)(&upcall_trampoline, x);
+#else
+  (void)bionic_fn;
+  (void)cb;
+  (void)x;
+  return -1;
+#endif
 }
 
 }  // namespace acl::ndk

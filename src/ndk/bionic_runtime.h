@@ -45,6 +45,13 @@ class BionicRuntime {
   // dlsym in a loaded handle. Runs with the thread pointer as bionic.
   void* symbol(void* handle, const char* name);
 
+  // Bidirectional-boundary self-test (docs/ndk-scope.md Rung 4). Calls a loaded bionic function
+  // `int f(int(*cb)(int), int)` under bionic %fs, passing an internal up-call trampoline that
+  // restores glibc %fs around `cb` — proving a bionic .so can call back into glibc (JNI) and
+  // return with both sides' TLS intact. Returns f's result, or -1 on unsupported arch.
+  // (Main-thread only for now — uses the glibc %fs captured at bootstrap.)
+  int run_boundary_selftest(void* bionic_fn, int (*cb)(int), int x);
+
   // RAII: set the thread pointer to bionic for the scope's lifetime, restore glibc on exit. Wrap
   // any direct call into loaded app code in one of these. The swap itself is out-of-line in the
   // -fno-stack-protector TU (a mid-function %fs change would false-fail the caller's canary).
@@ -62,6 +69,7 @@ class BionicRuntime {
  private:
   BionicRuntime() = default;
   std::uintptr_t bionic_fs_ = 0;
+  std::uintptr_t glibc_fs_ = 0;  // the bootstrapping (main) thread's glibc thread pointer
   void* dlopen_fn_ = nullptr;
   void* dlsym_fn_ = nullptr;
   void* dlerror_fn_ = nullptr;
