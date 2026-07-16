@@ -268,6 +268,14 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // Load mode: just load the .so in-process and report. For a REAL app's library, where we do not
+  // know a safe symbol to call — the point is whether the bionic linker can map it and satisfy its
+  // DT_NEEDED out of the staged sysroot + ACL_BIONIC_APP_LIBS.
+  if (std::string(argv[2]) == "--load") {
+    std::printf("acl-ndk-probe: loaded %s (PASS)\n", argv[1]);
+    return 0;
+  }
+
   // Thread mode: attach a second thread and run bionic code as that thread.
   if (std::string(argv[2]) == "--thread") {
     return run_thread_selftest(*rt, h) ? 0 : 1;

@@ -98,6 +98,11 @@ BionicConfig BionicConfig::from_env() {
   if (const char* v = std::getenv("ACL_BIONIC_LINKER")) c.linker = v;
   if (const char* v = std::getenv("ACL_BIONIC_SYSROOT")) c.sysroot = v;
   if (const char* v = std::getenv("ACL_BIONIC_STUB")) c.stub = v;
+  // The app's own lib/<abi> dir, exported by `acl run` (and settable by hand for the probe): a real
+  // app's libs mostly NEED each other — React Native's libjsi.so needs the libc++_shared.so shipped
+  // beside it — so without this the sysroot alone cannot resolve them.
+  if (const char* v = std::getenv("ACL_BIONIC_APP_LIBS"); v != nullptr && *v != '\0')
+    c.extra_lib_paths.emplace_back(v);
   return c;
 }
 
@@ -665,13 +670,20 @@ void* BionicRuntime::load(const char* abs_path, std::string* error) {
     if (error) *error = "bionic load: absolute path required";
     return nullptr;
   }
-  RunScope scope(*this);
-  void* h = reinterpret_cast<void* (*)(const char*, int, const void*)>(dlopen_fn_)(
-      abs_path, 2 /*RTLD_NOW*/, dlopen_fn_);
-  if (!h && error) {
-    char* e = dlerror_fn_ ? reinterpret_cast<char* (*)()>(dlerror_fn_)() : nullptr;
-    *error = e ? e : "dlopen failed";
+  void* h = nullptr;
+  const char* why = nullptr;
+  {
+    RunScope scope(*this);
+    h = reinterpret_cast<void* (*)(const char*, int, const void*)>(dlopen_fn_)(
+        abs_path, 2 /*RTLD_NOW*/, dlopen_fn_);
+    // Take only the POINTER here. Building the std::string inside this scope would call glibc's
+    // malloc under bionic %fs, and malloc reads its tcache out of glibc TLS — so the failure path
+    // would segfault inside the allocator instead of reporting why the load failed. (dlerror's
+    // buffer is bionic's, but reading it from glibc %fs is just a memory read.)
+    if (h == nullptr && dlerror_fn_ != nullptr)
+      why = reinterpret_cast<const char* (*)()>(dlerror_fn_)();
   }
+  if (h == nullptr && error != nullptr) *error = why != nullptr ? why : "dlopen failed";
   return h;
 }
 

@@ -2445,9 +2445,8 @@ class ArtVm final : public JniVm {
 #if ACL_HAVE_JNI
     const char* linker = std::getenv("ACL_BIONIC_LINKER");
     if (linker == nullptr || *linker == '\0') return;
+    // from_env() picks up ACL_BIONIC_APP_LIBS (the app lib dir main.cpp exports) too.
     acl::ndk::BionicConfig cfg = acl::ndk::BionicConfig::from_env();
-    if (const char* app = std::getenv("ACL_BIONIC_APP_LIBS"); app != nullptr && *app != '\0')
-      cfg.extra_lib_paths.emplace_back(app);
     std::string why;
     acl::ndk::BionicRuntime* rt = acl::ndk::BionicRuntime::instance(cfg, &why);
     if (rt == nullptr) { log::w(kTag, "NDK bionic loader unavailable: {}", why); return; }
