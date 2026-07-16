@@ -20,8 +20,11 @@
 namespace acl::runtime {
 
 // ADR-0001: Art is the target; Jvm is the documented fallback; Null is the
-// no-Java plumbing/test backend.
-enum class Backend { Art, Jvm, Null };
+// no-Java plumbing/test backend. ArtSplit is the arm64 split-process path
+// (docs/split-process-art.md): the bionic host ART runs in the acl-art-host
+// subprocess, driven over acl_ipc — used where a glibc acl cannot dlopen a
+// bionic libart.so in-process (arm64).
+enum class Backend { Art, Jvm, Null, ArtSplit };
 
 const char* backend_name(Backend backend) noexcept;
 

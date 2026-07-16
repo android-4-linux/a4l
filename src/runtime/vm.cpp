@@ -12,6 +12,7 @@
 #if ACL_HAVE_JNI
 #include "runtime/jvm_vm.h"
 #endif
+#include "runtime/split_vm.h"
 
 namespace acl::runtime {
 namespace {
@@ -110,17 +111,19 @@ class NullVm final : public Vm {
 
 const char* backend_name(Backend backend) noexcept {
   switch (backend) {
-    case Backend::Art:  return "art";
-    case Backend::Jvm:  return "jvm";
-    case Backend::Null: return "null";
+    case Backend::Art:      return "art";
+    case Backend::Jvm:      return "jvm";
+    case Backend::Null:     return "null";
+    case Backend::ArtSplit: return "art-split";
   }
   return "?";
 }
 
 bool parse_backend(std::string_view name, Backend& out) noexcept {
-  if (iequals(name, "art"))  { out = Backend::Art;  return true; }
-  if (iequals(name, "jvm"))  { out = Backend::Jvm;  return true; }
-  if (iequals(name, "null")) { out = Backend::Null; return true; }
+  if (iequals(name, "art"))       { out = Backend::Art;      return true; }
+  if (iequals(name, "jvm"))       { out = Backend::Jvm;      return true; }
+  if (iequals(name, "null"))      { out = Backend::Null;     return true; }
+  if (iequals(name, "art-split")) { out = Backend::ArtSplit; return true; }
   return false;
 }
 
@@ -150,6 +153,13 @@ std::unique_ptr<Vm> create_vm(Backend backend, VmConfig config, Error& out_error
     case Backend::Null:
       out_error = Error::ok();
       return std::make_unique<NullVm>(std::move(config));
+
+    case Backend::ArtSplit:
+      // arm64 split-process (docs/split-process-art.md): the bionic host ART runs in
+      // the acl-art-host subprocess, driven over acl_ipc. Availability is checked at
+      // launch (art-host binary + ACL_ART_SPLIT_VMLIB/ACL_ART_HOME).
+      out_error = Error::ok();
+      return make_split_vm(std::move(config));
 
     case Backend::Art:
 #if ACL_HAVE_JNI
