@@ -371,9 +371,19 @@ to become per-thread together; shipping any one alone would have re-introduced t
 TCB and produced a garbage JNIEnv that segfaulted on first use. Keep glibc TLS reads inside the
 scope that holds glibc `%fs`.
 
-**Still open:** an attached thread leaks its TLS block and thread struct at exit — a glibc
-`pthread_key_create` destructor can unmap those, but bionic's own per-thread dynamic-TLS blocks
-cannot be freed by acl at all (`__free_dynamic_tls` is hidden). Attach also reads the TLS module
+**Thread exit is handled** (2026-07-16): attach arms a glibc `pthread_key_create` destructor, which
+runs on the exiting thread and unmaps its TLS block + thread struct and frees its fs-pair slot
+(unregistering before the unmap, so no up-call can be routed to a TCB about to disappear). Bionic
+cannot help here — it never created the thread, so it runs no exit path for it, and
+`__libc_register_thread_exit_callback` only fires for its own. The fs-pair table reuses slots for
+the same reason: append-only, it would exhaust under thread churn alone. `acl-ndk-probe --thread`
+churns 300 attach/exit cycles (more than the table holds) and asserts the mapping count does not
+grow; with the destructor disabled it aborts at 256, so the test fails when the code is wrong.
+
+**Still leaks, and cannot be fixed from out here:** if an attached thread's native touched a
+dlopen'ed module's `__thread` variable, bionic's allocator holds blocks off that thread's DTV, and
+`__free_dynamic_tls` — the only thing that knows how to release them — is `__LIBC_HIDDEN__`.
+Bounded by how many threads touch dynamic TLS, not by thread count. Attach also reads the TLS module
 table without bionic's rwlock (taking it would mean calling bionic code from a thread that has no
 TCB yet — the chicken-and-egg attach breaks); the static modules are fixed after startup, so the
 race is a `dlopen` concurrent with an attach.
