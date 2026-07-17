@@ -159,10 +159,34 @@ extern "C" bool acl_graphics_canvas_borrowed(void* c);
 // replay block) — the Canvas finalizer must not delete it. Defined below.
 bool is_recording_canvas(void* p);
 
+// A software Canvas — Canvas(Bitmap) / Canvas() — can be retargeted to a new Bitmap via
+// Canvas.setBitmap (AdaptiveIconDrawable composites into an offscreen Bitmap this way). A plain
+// SkCanvas cannot rebind its target, so a raster canvas is a tiny wrapper holding a swappable
+// SkCanvas, and its Java handle carries a low tag bit to distinguish it from the raw SkCanvas*
+// handles the recording/GPU paths hand out (heap pointers are >=8-byte aligned, so bit 0 is free,
+// and a tagged handle never collides with an untagged SkCanvas* used as a g_recorders key or as
+// g_present_gpu_canvas). canvas_sk() resolves either kind with one bit test — no lock, no lookup
+// on the draw path.
+struct AclRasterCanvas {
+  std::unique_ptr<SkCanvas> sk;
+};
+constexpr jlong kRasterTag = 1;
+inline bool is_raster_handle(jlong h) { return (h & kRasterTag) != 0; }
+inline AclRasterCanvas* raster_of(jlong h) {
+  return reinterpret_cast<AclRasterCanvas*>(h & ~kRasterTag);
+}
+inline SkCanvas* canvas_sk(jlong h) {
+  if (h == 0) return nullptr;
+  if (is_raster_handle(h)) return raster_of(h)->sk.get();
+  return reinterpret_cast<SkCanvas*>(h);
+}
+
 // NativeAllocationRegistry finalizers (returned as function pointers to Java).
 void free_bitmap(void* p) { delete reinterpret_cast<AclBitmap*>(p); }
 void free_paint(void* p) { delete reinterpret_cast<AclPaint*>(p); }
 void free_canvas(void* p) {
+  const jlong h = reinterpret_cast<jlong>(p);
+  if (is_raster_handle(h)) { delete raster_of(h); return; }  // our wrapper owns its SkCanvas
   if (acl_graphics_canvas_borrowed(p)) return;  // surface-owned (GPU); not ours to delete
   if (is_recording_canvas(p)) return;           // owned by its SkPictureRecorder; not ours
   delete reinterpret_cast<SkCanvas*>(p);
@@ -292,8 +316,19 @@ void Bitmap_nativeReconfigure(JNIEnv*, jclass, jlong ptr, jint w, jint h, jint c
 // ── Canvas / BaseCanvas ─────────────────────────────────────────────────────────
 jlong Canvas_nInitRaster(JNIEnv*, jclass, jlong bitmapHandle) {  // @FastNative (normal sig)
   auto* w = reinterpret_cast<AclBitmap*>(bitmapHandle);
-  SkCanvas* c = (w != nullptr) ? new SkCanvas(w->bitmap) : new SkCanvas();
-  return reinterpret_cast<jlong>(c);
+  auto* rc = new AclRasterCanvas();
+  rc->sk.reset(w != nullptr ? new SkCanvas(w->bitmap) : new SkCanvas());
+  return reinterpret_cast<jlong>(rc) | kRasterTag;
+}
+
+// Canvas.setBitmap(bitmap): retarget a software canvas onto a new Bitmap (or an empty one when
+// null), resetting matrix/clip — which falls out of building a fresh SkCanvas. Only raster canvases
+// retarget; a recording/GPU handle here would be a caller error, so ignore it rather than corrupt
+// the present canvas.
+void Canvas_nSetBitmap(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle) {
+  if (!is_raster_handle(canvas)) return;
+  auto* w = reinterpret_cast<AclBitmap*>(bitmapHandle);
+  raster_of(canvas)->sk.reset(w != nullptr ? new SkCanvas(w->bitmap) : new SkCanvas());
 }
 
 jlong Canvas_nGetNativeFinalizer(JNIEnv*, jclass) {
@@ -308,14 +343,14 @@ inline void tick_draw() { g_draw_ops.fetch_add(1, std::memory_order_relaxed); }
 
 void Canvas_nDrawColor(JNIEnv*, jclass, jlong canvas, jint color, jint /*mode*/) {
   tick_draw();
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   if (c != nullptr) c->drawColor(static_cast<SkColor>(color), SkBlendMode::kSrcOver);
 }
 
 void Canvas_nDrawRect(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b,
                       jlong paint) {
   tick_draw();
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
   SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
   if (c != nullptr) c->drawRect(SkRect::MakeLTRB(l, t, r, b), p ? *p : SkPaint());
@@ -324,7 +359,7 @@ void Canvas_nDrawRect(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat 
 void Canvas_nDrawLine(JNIEnv*, jclass, jlong canvas, jfloat x0, jfloat y0, jfloat x1, jfloat y1,
                       jlong paint) {
   tick_draw();
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
   SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
   if (c != nullptr) c->drawLine(x0, y0, x1, y1, p ? *p : SkPaint());
@@ -333,7 +368,7 @@ void Canvas_nDrawLine(JNIEnv*, jclass, jlong canvas, jfloat x0, jfloat y0, jfloa
 void Canvas_nDrawOval(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b,
                       jlong paint) {
   tick_draw();
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
   SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
   if (c != nullptr) c->drawOval(SkRect::MakeLTRB(l, t, r, b), p ? *p : SkPaint());
@@ -342,7 +377,7 @@ void Canvas_nDrawOval(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat 
 void Canvas_nDrawCircle(JNIEnv*, jclass, jlong canvas, jfloat cx, jfloat cy, jfloat radius,
                         jlong paint) {
   tick_draw();
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
   SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
   if (c != nullptr) c->drawCircle(cx, cy, radius, p ? *p : SkPaint());
@@ -351,7 +386,7 @@ void Canvas_nDrawCircle(JNIEnv*, jclass, jlong canvas, jfloat cx, jfloat cy, jfl
 void Canvas_nDrawRoundRect(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b,
                            jfloat rx, jfloat ry, jlong paint) {
   tick_draw();
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
   SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
   if (c != nullptr) c->drawRoundRect(SkRect::MakeLTRB(l, t, r, b), rx, ry, p ? *p : SkPaint());
@@ -380,7 +415,7 @@ void Canvas_nDrawText(JNIEnv* env, jclass, jlong canvas, jstring text, jint star
   if (text == nullptr) return;
   const jchar* chars = env->GetStringChars(text, nullptr);
   if (chars != nullptr) {
-    draw_utf16(reinterpret_cast<SkCanvas*>(canvas), reinterpret_cast<AclPaint*>(paint),
+    draw_utf16(canvas_sk(canvas), reinterpret_cast<AclPaint*>(paint),
                chars, env->GetStringLength(text), start, end - start, x, y);
     env->ReleaseStringChars(text, chars);
   }
@@ -392,7 +427,7 @@ void Canvas_nDrawTextChars(JNIEnv* env, jclass, jlong canvas, jcharArray text, j
   if (text == nullptr) return;
   jchar* chars = env->GetCharArrayElements(text, nullptr);
   if (chars != nullptr) {
-    draw_utf16(reinterpret_cast<SkCanvas*>(canvas), reinterpret_cast<AclPaint*>(paint),
+    draw_utf16(canvas_sk(canvas), reinterpret_cast<AclPaint*>(paint),
                chars, env->GetArrayLength(text), index, count, x, y);
     env->ReleaseCharArrayElements(text, chars, JNI_ABORT);
   }
@@ -404,7 +439,7 @@ void Canvas_nDrawTextRunString(JNIEnv* env, jclass, jlong canvas, jstring text, 
   if (text == nullptr) return;
   const jchar* chars = env->GetStringChars(text, nullptr);
   if (chars != nullptr) {
-    draw_utf16(reinterpret_cast<SkCanvas*>(canvas), reinterpret_cast<AclPaint*>(paint),
+    draw_utf16(canvas_sk(canvas), reinterpret_cast<AclPaint*>(paint),
                chars, env->GetStringLength(text), start, end - start, x, y);
     env->ReleaseStringChars(text, chars);
   }
@@ -417,7 +452,7 @@ void Canvas_nDrawTextRunChars(JNIEnv* env, jclass, jlong canvas, jcharArray text
   if (text == nullptr) return;
   jchar* chars = env->GetCharArrayElements(text, nullptr);
   if (chars != nullptr) {
-    draw_utf16(reinterpret_cast<SkCanvas*>(canvas), reinterpret_cast<AclPaint*>(paint),
+    draw_utf16(canvas_sk(canvas), reinterpret_cast<AclPaint*>(paint),
                chars, env->GetArrayLength(text), start, count, x, y);
     env->ReleaseCharArrayElements(text, chars, JNI_ABORT);
   }
@@ -428,7 +463,7 @@ void Canvas_nDrawGlyphs(JNIEnv* env, jclass, jlong canvas, jintArray glyphIds, j
                         jint glyphIdStart, jint positionStart, jint glyphCount, jlong /*font*/,
                         jlong paint) {
   tick_draw();
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
   if (c == nullptr || ap == nullptr || glyphIds == nullptr || positions == nullptr || glyphCount <= 0)
     return;
@@ -456,7 +491,7 @@ void Canvas_nDrawBitmap(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, jfloa
                         jlong paint, jint /*canvasDensity*/, jint /*screenDensity*/,
                         jint /*bitmapDensity*/) {
   tick_draw();
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* b = reinterpret_cast<AclBitmap*>(bitmapHandle);
   if (c == nullptr || b == nullptr) return;
   auto* ap = reinterpret_cast<AclPaint*>(paint);
@@ -469,7 +504,7 @@ void Canvas_nDrawBitmapRect(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, j
                             jfloat sr, jfloat sb, jfloat dl, jfloat dt, jfloat dr, jfloat db,
                             jlong paint, jint /*screenDensity*/, jint /*bitmapDensity*/) {
   tick_draw();
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* b = reinterpret_cast<AclBitmap*>(bitmapHandle);
   if (c == nullptr || b == nullptr) return;
   auto* ap = reinterpret_cast<AclPaint*>(paint);
@@ -481,7 +516,7 @@ void Canvas_nDrawBitmapRect(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, j
 
 void Canvas_nDrawPath(JNIEnv*, jclass, jlong canvas, jlong path, jlong paint) {
   tick_draw();
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* sp = reinterpret_cast<SkPath*>(path);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
   if (c != nullptr && sp != nullptr) c->drawPath(*sp, ap != nullptr ? ap->paint : SkPaint());
@@ -697,39 +732,39 @@ jint Path_nGetFillType(jlong p) {
 
 // ── Canvas transform/clip — all @CriticalNative (handle-only, no JNIEnv/jclass) ──
 jint Canvas_nSave(jlong canvas, jint /*saveFlags*/) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   return c != nullptr ? c->save() : 0;
 }
 jboolean Canvas_nRestore(jlong canvas) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   if (c == nullptr || c->getSaveCount() <= 1) return JNI_FALSE;
   c->restore();
   return JNI_TRUE;
 }
 void Canvas_nRestoreToCount(jlong canvas, jint saveCount) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   if (c != nullptr) c->restoreToCount(saveCount);
 }
 jint Canvas_nGetSaveCount(jlong canvas) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   return c != nullptr ? c->getSaveCount() : 0;
 }
 void Canvas_nTranslate(jlong canvas, jfloat dx, jfloat dy) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   if (c != nullptr) c->translate(dx, dy);
 }
 void Canvas_nScale(jlong canvas, jfloat sx, jfloat sy) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   if (c != nullptr) c->scale(sx, sy);
 }
 void Canvas_nRotate(jlong canvas, jfloat degrees) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   if (c != nullptr) c->rotate(degrees);
 }
 // Region.Op nativeInt: 0=DIFFERENCE, 1=INTERSECT (default clipRect), others map to intersect
 // (modern Skia only has Intersect/Difference). Returns whether the clip is non-empty.
 jboolean Canvas_nClipRect(jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b, jint regionOp) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   if (c == nullptr) return JNI_FALSE;
   c->clipRect(SkRect::MakeLTRB(l, t, r, b),
               regionOp == 0 ? SkClipOp::kDifference : SkClipOp::kIntersect, /*doAA=*/false);
@@ -744,7 +779,7 @@ jboolean Canvas_nClipRect(jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b, 
 // DecorView.draw -> ViewGroup.dispatchDraw -> View.draw, and an unimplemented native there does
 // not just skip a clip — it throws UnsatisfiedLinkError out of the middle of the draw.
 jboolean Canvas_nClipPath(jlong canvas, jlong path, jint regionOp) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* p = reinterpret_cast<SkPath*>(path);
   if (c == nullptr || p == nullptr) return JNI_FALSE;
   c->clipPath(*p, regionOp == 0 ? SkClipOp::kDifference : SkClipOp::kIntersect, /*doAA=*/true);
@@ -753,7 +788,7 @@ jboolean Canvas_nClipPath(jlong canvas, jlong path, jint regionOp) {
 // nGetClipBounds(canvas, Rect): the current clip's local-space integer bounds (false if empty).
 // Regular native (takes a Rect object), unlike the @CriticalNative clip ops above.
 jboolean Canvas_nGetClipBounds(JNIEnv* env, jclass, jlong canvas, jobject bounds) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   if (c == nullptr) return JNI_FALSE;
   const SkRect local = c->getLocalClipBounds();
   if (local.isEmpty()) return JNI_FALSE;
@@ -768,31 +803,31 @@ jboolean Canvas_nGetClipBounds(JNIEnv* env, jclass, jlong canvas, jobject bounds
 }
 // @CriticalNative — concat the CTM with the Matrix.
 void Canvas_nConcat(jlong canvas, jlong matrix) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* m = reinterpret_cast<SkMatrix*>(matrix);
   if (c != nullptr && m != nullptr) c->concat(*m);
 }
 // @CriticalNative — replace the CTM with the Matrix (matrix==0 → identity).
 void Canvas_nSetMatrix(jlong canvas, jlong matrix) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   if (c == nullptr) return;
   c->resetMatrix();
   if (auto* m = reinterpret_cast<SkMatrix*>(matrix)) c->concat(*m);
 }
 // @CriticalNative — read the CTM into the Matrix.
 void Canvas_nGetMatrix(jlong canvas, jlong matrix) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* m = reinterpret_cast<SkMatrix*>(matrix);
   if (c != nullptr && m != nullptr) *m = c->getTotalMatrix();
 }
 // @CriticalNative — true if the rect/path is wholly outside the current clip (cull hint).
 // ViewGroup.drawChild calls this per child.
 jboolean Canvas_nQuickRejectRect(jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   return (c != nullptr && c->quickReject(SkRect::MakeLTRB(l, t, r, b))) ? JNI_TRUE : JNI_FALSE;
 }
 jboolean Canvas_nQuickRejectPath(jlong canvas, jlong path) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* p = reinterpret_cast<SkPath*>(path);
   return (c != nullptr && p != nullptr && c->quickReject(*p)) ? JNI_TRUE : JNI_FALSE;
 }
@@ -965,6 +1000,19 @@ jlong LinearGradient_nativeCreate(JNIEnv* env, jobject, jlong matrix, jfloat x0,
       pts, colors.data(), pos.empty() ? nullptr : pos.data(),
       static_cast<int>(colors.size()), tile_mode(tileMode), 0,
       reinterpret_cast<const SkMatrix*>(matrix));
+  return reinterpret_cast<jlong>(sh.release());
+}
+
+// BitmapShader.nativeCreate is a STATIC native: an image shader over the bitmap's pixels, tiled per
+// axis. AdaptiveIconDrawable masks its layers through one of these. filterFromPaint picks bilinear
+// vs nearest sampling; isDirectSampled is a HWUI texture-atlas hint acl doesn't need.
+jlong BitmapShader_nativeCreate(JNIEnv*, jclass, jlong matrix, jlong bitmapHandle, jint tileX,
+                                jint tileY, jboolean filter, jboolean /*isDirectSampled*/) {
+  auto* b = reinterpret_cast<AclBitmap*>(bitmapHandle);
+  if (b == nullptr) return 0;
+  const SkSamplingOptions sampling(filter ? SkFilterMode::kLinear : SkFilterMode::kNearest);
+  sk_sp<SkShader> sh = b->bitmap.makeShader(tile_mode(tileX), tile_mode(tileY), sampling,
+                                            reinterpret_cast<const SkMatrix*>(matrix));
   return reinterpret_cast<jlong>(sh.release());
 }
 
@@ -1984,7 +2032,7 @@ jboolean VD_nGetGroupProperties(JNIEnv* env, jclass, jlong p, jfloatArray out, j
 jint VD_nDraw(JNIEnv* env, jclass, jlong treePtr, jlong canvasPtr, jlong colorFilterPtr,
               jobject boundsRect, jboolean needsMirroring, jboolean /*canReuseCache*/) {
   auto* tree = reinterpret_cast<VDTree*>(treePtr);
-  auto* canvas = reinterpret_cast<SkCanvas*>(canvasPtr);
+  auto* canvas = canvas_sk(canvasPtr);
   if (tree == nullptr || canvas == nullptr || !tree->root || boundsRect == nullptr) return 0;
 
   static jfieldID f_left = nullptr, f_top = nullptr, f_right = nullptr, f_bottom = nullptr;
@@ -2679,7 +2727,7 @@ void Canvas_nDrawNinePatch(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, jl
                            jfloat left, jfloat top, jfloat right, jfloat bottom, jlong paintHandle,
                            jint /*screenDensity*/, jint /*bitmapDensity*/) {
   tick_draw();
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   auto* b = reinterpret_cast<AclBitmap*>(bitmapHandle);
   const auto* chunk = reinterpret_cast<const android::Res_png_9patch*>(chunkHandle);
   if (c == nullptr || b == nullptr || chunk == nullptr) return;
@@ -2910,7 +2958,7 @@ jlong RecordingCanvas_nCreate(jlong node, jint w, jint h) {
 }
 // nResetDisplayListCanvas(canvas, node, w, h): re-begin recording on the SAME recorder (stable ptr).
 void RecordingCanvas_nReset(jlong canvas, jlong /*node*/, jint w, jint h) {
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   if (canvas == g_present_gpu_canvas) return;  // root draws immediate; nothing to reset
   std::lock_guard<std::mutex> lk(g_rec_mu);
   auto it = g_recorders.find(c);
@@ -2921,7 +2969,7 @@ void RecordingCanvas_nFinish(jlong canvas, jlong node) {
   g_rn_finishes.fetch_add(1, std::memory_order_relaxed);
   auto* n = reinterpret_cast<AclRenderNode*>(node);
   if (canvas == g_present_gpu_canvas) return;  // root: content already drawn immediate
-  auto* c = reinterpret_cast<SkCanvas*>(canvas);
+  auto* c = canvas_sk(canvas);
   std::lock_guard<std::mutex> lk(g_rec_mu);
   auto it = g_recorders.find(c);
   if (it != g_recorders.end() && n != nullptr) n->picture = it->second->finishRecordingAsPicture();
@@ -2931,7 +2979,7 @@ void RecordingCanvas_nFinish(jlong canvas, jlong node) {
 void RecordingCanvas_nDrawRenderNode(jlong canvas, jlong node) {
   g_rn_replays.fetch_add(1, std::memory_order_relaxed);
   tick_draw();
-  draw_rendernode(reinterpret_cast<SkCanvas*>(canvas), reinterpret_cast<AclRenderNode*>(node));
+  draw_rendernode(canvas_sk(canvas), reinterpret_cast<AclRenderNode*>(node));
 }
 void RecordingCanvas_nEnableZ(jlong, jboolean) {}
 void RecordingCanvas_nDrawTextureLayer(jlong, jlong) {}
@@ -3272,6 +3320,7 @@ const JNINativeMethod kRuntimeShader[] = {
 
 const JNINativeMethod kCanvas[] = {
     {"nInitRaster", "(J)J", reinterpret_cast<void*>(Canvas_nInitRaster)},
+    {"nSetBitmap", "(JJ)V", reinterpret_cast<void*>(Canvas_nSetBitmap)},
     {"nGetNativeFinalizer", "()J", reinterpret_cast<void*>(Canvas_nGetNativeFinalizer)},
     // @CriticalNative transform/clip (handle-only).
     {"nSave", "(JI)I", reinterpret_cast<void*>(Canvas_nSave)},
@@ -3487,6 +3536,9 @@ const JNINativeMethod kLinearGradient[] = {
 };
 const JNINativeMethod kRadialGradient[] = {
     {"nativeCreate", "(JFFFFFF[J[FIJ)J", reinterpret_cast<void*>(RadialGradient_nativeCreate)},
+};
+const JNINativeMethod kBitmapShader[] = {
+    {"nativeCreate", "(JJIIZZ)J", reinterpret_cast<void*>(BitmapShader_nativeCreate)},
 };
 #define RNM(name, sig, fn) {name, sig, reinterpret_cast<void*>(fn)}
 const JNINativeMethod kRenderNode[] = {
@@ -3959,6 +4011,7 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/Shader", kShader, n(kShader)) && ok;
   ok = reg(env, "android/graphics/LinearGradient", kLinearGradient, n(kLinearGradient)) && ok;
   ok = reg(env, "android/graphics/RadialGradient", kRadialGradient, n(kRadialGradient)) && ok;
+  ok = reg(env, "android/graphics/BitmapShader", kBitmapShader, n(kBitmapShader)) && ok;
   ok = reg(env, "android/graphics/ColorSpace$Rgb", kColorSpaceRgb, n(kColorSpaceRgb)) && ok;
   ok = reg(env, "android/graphics/Region", kRegion, n(kRegion)) && ok;
   ok = reg(env, "android/graphics/Typeface", kTypeface, n(kTypeface)) && ok;
