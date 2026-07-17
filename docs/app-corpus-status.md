@@ -55,7 +55,7 @@ which exists only on acl's Bitmap **shim** — so it cannot show a real app's fr
 | `SVS.pdfinspector` | Jetpack Compose | **renders** — Activity → RESUMED, full UI |
 | `agrigolo.opendrummer` | Views / Material | **renders** — full UI; also registers `SoundPool` natives |
 | `a2dp.Vol` | Views / ActionBar | **renders** — ActionBar + buttons |
-| `barilyuk.batterytemperature` | Views (XML layout) | fails inflating `android.widget.CheckBox` (below) |
+| `barilyuk.batterytemperature` | Views (XML layout) | inflates + onCreate; draw hits `Canvas.nSetBitmap` (below) |
 | `app.fedilab.castlab` | React Native | native libs need `libjnigraphics.so` + `libz.so` (below) |
 
 Also tried, outside the F-Droid corpus (not redistributable, run locally only):
@@ -82,10 +82,14 @@ LOAD DEVICES / START SERVICE) and the "Car Dock" entry — measured, laid out an
 
 ## Not yet
 
-- **`barilyuk.batterytemperature`** — `InflateException: Binary XML file line #198 ...
-  Error inflating class android.widget.CheckBox`. It reaches its own layout inflation, so the
-  framework, resources and classloader are all working; a specific widget's construction is not.
-  The next step is naming what CheckBox's constructor actually throws (`ACL_JVMTI_DIAG=1`).
+- **`barilyuk.batterytemperature`** — layout inflation and `onCreate` now work (was: CheckBox
+  inflation failed because `PathData.nCanMorph` was a stub returning false, so every animated
+  button drawable threw "Can't morph"; fixed by comparing SkPath verb sequences, plus the
+  `NativeInterpolatorFactory` stubs RadioButton needs). It now stops in `draw`:
+  `UnsatisfiedLinkError: android.graphics.Canvas.nSetBitmap`, from `AdaptiveIconDrawable.draw`
+  compositing an icon offscreen. `setBitmap` retargets a Canvas to a new Bitmap, which acl cannot do
+  because its Canvas handle is a raw `SkCanvas*` (SkCanvas can't rebind its target) — supporting it
+  needs a Canvas wrapper that owns a swappable SkCanvas. Distinct from the inflation gap.
 - **`app.fedilab.castlab`** (React Native) — its `.so`s load as far as their dependencies allow:
   `libjsi.so`, `libc++_shared.so`, `libglob.so`, `libpcre2-8.so` load, and `libandroid.so` is now
   acl's own (`src/ndk/bionic/acl_libandroid.c`), but `libfbjni`/`libreactnative`/`libhermesvm` also
