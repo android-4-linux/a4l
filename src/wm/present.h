@@ -207,6 +207,39 @@ std::unique_ptr<IPresenter> presenter_open(int width, int height, std::string_vi
                                            bool want_ime = false) noexcept;
 #endif  // ACL_HAVE_VULKAN && ACL_HAVE_WCS
 
+#if ACL_HAVE_WCS
+// ── Externally-rendered (GL / Mesa-owned) present ───────────────────────────────────
+// The GLSurfaceView path: an app's GLThread renders with host Mesa (EGL_PLATFORM_WAYLAND)
+// straight into the toplevel's wl_surface, so Mesa — not acl — owns buffer allocation,
+// attach, commit and the vsync throttle (all inside eglSwapBuffers). wm/ only creates the
+// xdg_toplevel role and dispatches events, handing the caller the raw wl_display + wl_surface
+// to build its GL device/window on. This keeps wm/ free of any EGL/GL types.
+struct GlPresentHooks {
+  // Called once after the first xdg configure, with acl's wl_display, the toplevel
+  // wl_surface, and the logical size — build the GlDevice/GlWindow here. False aborts.
+  std::function<bool(void* wl_display, void* wl_surface, int width, int height)> configure;
+  // Called each loop iteration with a monotonically increasing frame index: draw the GL
+  // frame and eglSwapBuffers (which commits + throttles to vsync). False stops the loop.
+  std::function<bool(std::uint64_t frame_index)> render;
+  // Called on a compositor resize (xdg toplevel configure) with the new logical size (may
+  // be empty). The caller resizes its wl_egl_window.
+  std::function<void(int width, int height)> resize;
+  // Called once when the loop ends, BEFORE acl disconnects the wl_display (may be empty).
+  // The caller MUST destroy its GL device/window here: they are EGL objects built on this
+  // wl_display, so tearing them down after the display is gone is a use-after-free.
+  std::function<void()> teardown;
+};
+
+// Set up a titled xdg_toplevel and run an externally-rendered present loop: after the first
+// configure, call hooks.configure so the caller can bind a Mesa GL window to the surface,
+// then each iteration call hooks.render (GL draw + swap) while dispatching input and xdg
+// events. Presents until render returns false, `max_frames` frames are shown (0 = unbounded),
+// or the toplevel closes. `input` (may be empty) delivers pointer/key/IME. Clean stop -> true.
+bool present_gl_loop(int width, int height, std::string_view title, std::string_view app_id,
+                     const GlPresentHooks& hooks, const InputCallback& input,
+                     std::uint64_t max_frames = 0) noexcept;
+#endif  // ACL_HAVE_WCS
+
 const char* module_name() noexcept;
 
 }  // namespace acl::wm

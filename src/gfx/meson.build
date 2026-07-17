@@ -19,6 +19,14 @@ if have_vulkan
   gfx_sources += files('gfx_vk.cpp')
   gfx_deps += [vulkan_dep, libdrm_dep]
 endif
+# The host GL device (GLSurfaceView Stage 1): gbm-backed headless GLES rendering into a
+# dma-buf, presented via the same zwp_linux_dmabuf_v1 path as the Vulkan frame. Needs
+# EGL + GLESv2 + gbm + libdrm (drm_fourcc.h). gl_egl.h includes gfx_vk.h for DmabufFrame,
+# so this is compiled independently of have_vulkan.
+if have_gl
+  gfx_sources += files('gl_egl.cpp')
+  gfx_deps += [egl_dep, glesv2_dep, gbm_dep, gl_libdrm_dep]
+endif
 gfx_lib = static_library(
   'acl_gfx',
   gfx_sources,

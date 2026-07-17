@@ -164,6 +164,18 @@ if build_tests and have_wcs
       dependencies : wm_deps + [fmt_dep],
     )
   endif
+  # GLSurfaceView Stage 1 probe: host Mesa GL (gfx::GlDevice, Wayland backend) rendering
+  # into acl's toplevel wl_surface, presented by Mesa via wm::present_gl_loop. Run manually
+  # against a live compositor. Links acl_gfx (GlDevice) + the GL deps.
+  if have_gl
+    wm_gl_probe = executable(
+      'wm_gl_probe',
+      files('gl_probe_main.cpp'),
+      include_directories : [config_inc, core_inc],
+      link_with : [wm_lib, gfx_lib, acl_log],
+      dependencies : wm_deps + [fmt_dep, egl_dep, glesv2_dep, gbm_dep, wl_egl_dep, gl_libdrm_dep],
+    )
+  endif
   py3_wm = find_program('python3', required : false)
   weston_prog = find_program('weston', required : false)
   if py3_wm.found() and weston_prog.found()

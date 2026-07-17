@@ -188,6 +188,18 @@ class Presenter : public wl::ime::TextInputListener {
   Presenter& operator=(const Presenter&) = delete;
   ~Presenter() override { presentation_.Release(); }
 
+  // The externally-rendered (Mesa GL) present: same connection/xdg/input setup as Run,
+  // but after the first configure the caller's hooks own rendering + eglSwapBuffers
+  // (Mesa attaches/commits/throttles the wl_surface). See RunGlLoop.
+  bool RunGl(int w, int h, std::string_view title, std::string_view app_id,
+             const GlPresentHooks& hooks, const InputCallback& input,
+             std::uint64_t max_frames) {
+    gl_hooks_ = &hooks;
+    // A never-invoked shm render callback: Run branches to RunGlLoop before MakeBuffers.
+    const FrameCallback unused = [](gfx::Surface&, std::uint64_t, std::uint64_t) { return false; };
+    return Run(w, h, title, app_id, unused, input, false, max_frames);
+  }
+
   bool Run(int w, int h, std::string_view title, std::string_view app_id,
            const FrameCallback& render, const InputCallback& input, bool want_ime,
            std::uint64_t max_frames) {
@@ -290,6 +302,7 @@ class Presenter : public wl::ime::TextInputListener {
     surface_.Get()->Commit();
     (void)wl::RoundtripWithTimeout(display_.Get());
     apply_scale();
+    if (gl_hooks_ != nullptr) return RunGlLoop();  // externally-rendered (Mesa GL) present
     if (!MakeBuffers()) { log::w(kTag, "present: shm buffer allocation failed"); return false; }
 
     const int fd = wl_display_get_fd(display_.Get());
@@ -350,7 +363,14 @@ class Presenter : public wl::ime::TextInputListener {
 
   // xdg callbacks (invoked by wl::XdgSurfaceHandler / XdgToplevelHandler)
   void OnXdgSurfaceConfigure(uint32_t) { configured_ = true; need_frame_ = true; }
-  void OnToplevelConfigure(int32_t, int32_t) {}
+  void OnToplevelConfigure(int32_t w, int32_t h) {
+    // GL path: a real (non-zero) size change is a compositor resize — tell the caller so
+    // it can wl_egl_window_resize. (The shm path ignores server sizing and keeps w_/h_.)
+    if (gl_hooks_ != nullptr && w > 0 && h > 0 && (w != w_ || h != h_)) {
+      w_ = w; h_ = h;
+      if (gl_hooks_->resize) gl_hooks_->resize(w, h);
+    }
+  }
   void OnToplevelClose() { closed_ = true; }
 
   // wl_pointer -> app input (the native side of a MotionEvent). A left-button
@@ -427,6 +447,54 @@ class Presenter : public wl::ime::TextInputListener {
     bufs_[b].busy = true;
     ++frame_index_;
     return true;
+  }
+
+  // The externally-rendered present loop: Mesa owns the wl_surface's buffers/commit/vsync
+  // throttle (all inside the caller's eglSwapBuffers), so acl only hands over the
+  // wl_display + wl_surface, then dispatches input/xdg events and calls the render hook.
+  bool RunGlLoop() {
+    // Let the caller bind a Mesa GL window (EGL_PLATFORM_WAYLAND) to the toplevel surface.
+    if (!gl_hooks_->configure(display_.Get(), surface_.Get()->GetProxy(), w_, h_)) {
+      log::w(kTag, "present(gl): configure hook failed");
+      return false;
+    }
+    const int fd = wl_display_get_fd(display_.Get());
+    const bool bounded = max_frames_ != 0;
+    const std::uint64_t deadline = now_ns(CLOCK_MONOTONIC) + 15ull * 1000000000ull;
+    bool clean = true;
+    while (!closed_) {
+      if (bounded && now_ns(CLOCK_MONOTONIC) > deadline) {
+        log::w(kTag, "present(gl): loop deadline exceeded"); clean = false; break;
+      }
+      // Mesa's eglSwapBuffers reads the socket for its own event queue, leaving OUR
+      // (default-queue) input/xdg events queued — drain them without blocking.
+      if (wl_display_dispatch_pending(display_.Get()) < 0) { clean = false; break; }
+      if (closed_) break;
+      const bool have_budget = max_frames_ == 0 || frame_index_ < max_frames_;
+      if (configured_ && have_budget) {
+        if (!gl_hooks_->render(frame_index_)) break;  // GL draw + eglSwapBuffers (commit+throttle)
+        ++frame_index_;
+      }
+      if (max_frames_ != 0 && frame_index_ >= max_frames_) break;
+      while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
+      // When rendering, eglSwapBuffers already paced us to vsync, so poll non-blocking to
+      // pick up input; when idle (pre-configure / budget spent) block so we don't spin.
+      const int timeout = (configured_ && have_budget) ? 0 : 200;
+      const int rfd = keyboard_.IsNull() ? -1 : keyboard_.Get()->GetRepeatFd();
+      pollfd pfds[2] = {{fd, POLLIN, 0}, {rfd, POLLIN, 0}};
+      const int n = poll(pfds, 2, timeout);
+      if (n < 0) { if (errno == EINTR) continue; clean = false; break; }
+      if ((pfds[1].revents & POLLIN) != 0) keyboard_.Get()->DispatchRepeat();
+      if ((pfds[0].revents & POLLIN) != 0 && wl_display_dispatch(display_.Get()) < 0) {
+        log::w(kTag, "present(gl): dispatch error"); clean = false; break;
+      }
+    }
+    // Destroy the caller's GL objects while display_ is still connected (Presenter's
+    // dtor disconnects it right after we return) — EGL teardown touches the wl_display.
+    if (gl_hooks_->teardown) gl_hooks_->teardown();
+    log::i(kTag, "present(gl) loop stopped: {} frame(s), {} ({})", frame_index_,
+           closed_ ? "toplevel closed" : "done", clean ? "clean" : "aborted");
+    return clean && frame_index_ > 0;
   }
 
   // Choose the buffer scale and how it maps to the surface:
@@ -547,6 +615,7 @@ class Presenter : public wl::ime::TextInputListener {
   std::string title_, app_id_;
   const FrameCallback* render_ = nullptr;
   const InputCallback* input_ = nullptr;
+  const GlPresentHooks* gl_hooks_ = nullptr;  // non-null -> externally-rendered (Mesa GL) present
   double px_ = 0.0, py_ = 0.0;
   bool pointer_down_ = false;
 
@@ -614,6 +683,13 @@ bool present_surface(const gfx::Surface& surface, std::string_view title,
   };
   return present_loop(surface.width(), surface.height(), title, app_id, one,
                       InputCallback{}, false, 1);
+}
+
+bool present_gl_loop(int width, int height, std::string_view title, std::string_view app_id,
+                     const GlPresentHooks& hooks, const InputCallback& input,
+                     std::uint64_t max_frames) noexcept {
+  Presenter presenter;
+  return presenter.RunGl(width, height, title, app_id, hooks, input, max_frames);
 }
 
 }  // namespace acl::wm

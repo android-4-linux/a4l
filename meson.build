@@ -201,6 +201,28 @@ if have_skia
   endif
 endif
 
+# The host GL device (gfx/gl_egl.cpp): headless GPU OpenGL ES on a DRM render node via
+# gbm, the native underside of an app's GLSurfaceView (com.google.android.gles_jni.
+# EGLImpl + android.opengl.GLES20 run on host Mesa). Needs EGL + GLESv2 + gbm + libdrm
+# (drm_fourcc.h). When any is absent the GLSurfaceView path is compiled out (apps that
+# need it hit the same UnsatisfiedLinkError as before, just reported).
+have_gl = false
+egl_dep = declare_dependency()
+glesv2_dep = declare_dependency()
+gbm_dep = declare_dependency()
+wl_egl_dep = declare_dependency()
+gl_libdrm_dep = dependency('libdrm', required : false)
+if gl_libdrm_dep.found()
+  egl_dep = dependency('egl', required : false)
+  glesv2_dep = dependency('glesv2', required : false)
+  gbm_dep = dependency('gbm', required : false)
+  wl_egl_dep = dependency('wayland-egl', required : false)  # wl_egl_window (Wayland backend)
+  if egl_dep.found() and glesv2_dep.found() and gbm_dep.found() and wl_egl_dep.found()
+    have_gl = true
+    message('gfx/ host GL device enabled (EGL + GLESv2 + gbm + wayland-egl — GLSurfaceView path)')
+  endif
+endif
+
 # svc/net connectivity backend: a host D-Bus daemon (systemd-networkd on desktop,
 # ConnMan on device, NetworkManager elsewhere) is translated to android.net.
 # ConnectivityManager state. sdbus-c++ (LGPL-2.1, dynamically linked = policy-OK)
@@ -222,6 +244,7 @@ conf.set10('ACL_HAVE_FFMPEG', have_ffmpeg)
 conf.set10('ACL_HAVE_WCS', have_wcs)
 conf.set10('ACL_HAVE_SKIA', have_skia)
 conf.set10('ACL_HAVE_VULKAN', have_vulkan)
+conf.set10('ACL_HAVE_GL', have_gl)
 conf.set10('ACL_HAVE_SDBUS', have_sdbus)
 # Connectivity backend build mode: auto (compile all, probe the bus) | networkd |
 # networkmanager | connman | null. Backends whose macro is 0 are compiled out.
