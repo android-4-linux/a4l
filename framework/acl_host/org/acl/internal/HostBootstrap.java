@@ -1919,4 +1919,83 @@ public final class HostBootstrap {
         f.setAccessible(true);
         f.set(null, proxy);
     }
+
+    // ── GLSurfaceView (Stage 3) ────────────────────────────────────────────────────────────
+    // acl has no Binder/ViewRootImpl-backed Surface, so a SurfaceView's updateSurface() never
+    // creates a Surface and surfaceCreated never fires — its GLThread blocks forever in
+    // eglCreateWindowSurface. These helpers let acl route a GLSurfaceView app to the GL present
+    // and hand its SurfaceView a ready Surface (backed natively by acl's toplevel wl_surface).
+
+    // Does the view tree contain an android.view.SurfaceView (e.g. a GLSurfaceView)?
+    public static boolean hasSurfaceView(android.view.View v) {
+        return findSurfaceView(v) != null;
+    }
+
+    private static android.view.SurfaceView findSurfaceView(android.view.View v) {
+        if (v instanceof android.view.SurfaceView) return (android.view.SurfaceView) v;
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                android.view.SurfaceView sv = findSurfaceView(g.getChildAt(i));
+                if (sv != null) return sv;
+            }
+        }
+        return null;
+    }
+
+    // Inject a ready Surface into the SurfaceView, bypassing updateSurface() entirely: mark the
+    // state fields and invoke the registered SurfaceHolder.Callbacks (a GLSurfaceView registers
+    // itself). The GLThread then unblocks and calls eglCreateWindowSurface(holder); acl's EGLImpl
+    // hook backs it with the toplevel wl_surface, so mNativeObject stays 0 (the GL path never
+    // dereferences it). Runs on the main thread.
+    public static void injectGlSurface(android.view.View decor, int w, int h) {
+        try {
+            android.view.SurfaceView sv = findSurfaceView(decor);
+            if (sv == null) return;
+            Class<?> c = android.view.SurfaceView.class;
+            int fmt = getIntField(c, sv, "mRequestedFormat", android.graphics.PixelFormat.RGBX_8888);
+            setField(c, sv, "mHaveFrame", Boolean.TRUE);
+            setField(c, sv, "mVisible", Boolean.TRUE);
+            setField(c, sv, "mRequestedVisible", Boolean.TRUE);
+            setField(c, sv, "mSurfaceCreated", Boolean.TRUE);
+            setIntField(c, sv, "mSurfaceWidth", w);
+            setIntField(c, sv, "mSurfaceHeight", h);
+            setIntField(c, sv, "mFormat", fmt);
+            android.view.SurfaceHolder holder = sv.getHolder();
+            for (android.view.SurfaceHolder.Callback cb : snapshotCallbacks(c, sv)) {
+                if (cb == null) continue;
+                cb.surfaceCreated(holder);
+                cb.surfaceChanged(holder, fmt, w, h);
+            }
+            android.util.Log.i("acl", "injectGlSurface: SurfaceView surfaceCreated (" + w + "x" + h + ")");
+        } catch (Throwable t) {
+            android.util.Log.w("acl", "injectGlSurface failed: " + t);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static android.view.SurfaceHolder.Callback[] snapshotCallbacks(Class<?> c, Object sv)
+            throws Exception {
+        java.lang.reflect.Field f = c.getDeclaredField("mCallbacks");
+        f.setAccessible(true);
+        java.util.ArrayList<android.view.SurfaceHolder.Callback> list =
+                (java.util.ArrayList<android.view.SurfaceHolder.Callback>) f.get(sv);
+        return list.toArray(new android.view.SurfaceHolder.Callback[0]);
+    }
+
+    private static int getIntField(Class<?> c, Object obj, String name, int dflt) {
+        try {
+            java.lang.reflect.Field f = c.getDeclaredField(name);
+            f.setAccessible(true);
+            return f.getInt(obj);
+        } catch (Throwable t) {
+            return dflt;
+        }
+    }
+
+    private static void setIntField(Class<?> c, Object obj, String name, int val) throws Exception {
+        java.lang.reflect.Field f = c.getDeclaredField(name);
+        f.setAccessible(true);
+        f.setInt(obj, val);
+    }
 }

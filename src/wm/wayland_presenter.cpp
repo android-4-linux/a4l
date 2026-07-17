@@ -458,28 +458,32 @@ class Presenter : public wl::ime::TextInputListener {
       log::w(kTag, "present(gl): configure hook failed");
       return false;
     }
+    // External-render mode: no render hook -> the caller (an app's own GLThread) renders and
+    // eglSwapBuffers on ITS thread; acl only pumps input/xdg events here. (When render IS set,
+    // acl drives the frames itself — the probe/self-contained path.)
+    const bool external = !gl_hooks_->render;
     const int fd = wl_display_get_fd(display_.Get());
-    const bool bounded = max_frames_ != 0;
+    const bool bounded = max_frames_ != 0 && !external;
     const std::uint64_t deadline = now_ns(CLOCK_MONOTONIC) + 15ull * 1000000000ull;
     bool clean = true;
     while (!closed_) {
       if (bounded && now_ns(CLOCK_MONOTONIC) > deadline) {
         log::w(kTag, "present(gl): loop deadline exceeded"); clean = false; break;
       }
-      // Mesa's eglSwapBuffers reads the socket for its own event queue, leaving OUR
-      // (default-queue) input/xdg events queued — drain them without blocking.
+      // Mesa's eglSwapBuffers (here or on the app's GLThread) reads the socket for its own
+      // event queue, leaving OUR (default-queue) input/xdg events queued — drain them first.
       if (wl_display_dispatch_pending(display_.Get()) < 0) { clean = false; break; }
       if (closed_) break;
       const bool have_budget = max_frames_ == 0 || frame_index_ < max_frames_;
-      if (configured_ && have_budget) {
+      if (!external && configured_ && have_budget) {
         if (!gl_hooks_->render(frame_index_)) break;  // GL draw + eglSwapBuffers (commit+throttle)
         ++frame_index_;
       }
-      if (max_frames_ != 0 && frame_index_ >= max_frames_) break;
+      if (!external && max_frames_ != 0 && frame_index_ >= max_frames_) break;
       while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
-      // When rendering, eglSwapBuffers already paced us to vsync, so poll non-blocking to
-      // pick up input; when idle (pre-configure / budget spent) block so we don't spin.
-      const int timeout = (configured_ && have_budget) ? 0 : 200;
+      // acl-render: eglSwapBuffers already paced us to vsync, so poll non-blocking for input.
+      // external: acl renders nothing, so block on the fd (the app GLThread paces itself).
+      const int timeout = (!external && configured_ && have_budget) ? 0 : 200;
       const int rfd = keyboard_.IsNull() ? -1 : keyboard_.Get()->GetRepeatFd();
       pollfd pfds[2] = {{fd, POLLIN, 0}, {rfd, POLLIN, 0}};
       const int n = poll(pfds, 2, timeout);
@@ -494,7 +498,7 @@ class Presenter : public wl::ime::TextInputListener {
     if (gl_hooks_->teardown) gl_hooks_->teardown();
     log::i(kTag, "present(gl) loop stopped: {} frame(s), {} ({})", frame_index_,
            closed_ ? "toplevel closed" : "done", clean ? "clean" : "aborted");
-    return clean && frame_index_ > 0;
+    return clean && (external || frame_index_ > 0);
   }
 
   // Choose the buffer scale and how it maps to the surface:

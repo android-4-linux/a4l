@@ -143,12 +143,14 @@ class WaylandGlWindow final : public GlWindow {
     if (egl_win_ != nullptr) wl_egl_window_destroy(egl_win_);
   }
 
-  bool init(void* wl_surface, int w, int h, std::string* error) {
+  bool init(void* wl_surface, int w, int h, void* egl_config, std::string* error) {
     if (wl_surface == nullptr) { if (error) *error = "make_window(wayland): null wl_surface"; return false; }
     wl_surf_ = static_cast<struct wl_surface*>(wl_surface);
     egl_win_ = wl_egl_window_create(wl_surf_, w, h);
     if (egl_win_ == nullptr) { if (error) *error = "wl_egl_window_create failed"; return false; }
-    EGLSurface s = eglCreateWindowSurface(static_cast<EGLDisplay>(dpy_), static_cast<EGLConfig>(cfg_),
+    // The EGLSurface must share the app's context config (else eglMakeCurrent EGL_BAD_MATCH).
+    EGLConfig cfg = egl_config != nullptr ? static_cast<EGLConfig>(egl_config) : static_cast<EGLConfig>(cfg_);
+    EGLSurface s = eglCreateWindowSurface(static_cast<EGLDisplay>(dpy_), cfg,
                                           reinterpret_cast<EGLNativeWindowType>(egl_win_), nullptr);
     if (s == EGL_NO_SURFACE) { if (error) *error = with_egl("eglCreateWindowSurface(wl_egl_window) failed"); return false; }
     egl_ = s;
@@ -212,9 +214,9 @@ class WaylandGlDevice final : public GlDevice {
 
   std::unique_ptr<GlWindow> make_window(int width, int height, void* native_surface,
                                         const std::vector<std::uint64_t>& /*modifiers*/,
-                                        std::string* error) override {
+                                        std::string* error, void* egl_config) override {
     auto win = std::make_unique<WaylandGlWindow>(dpy_, ctx_, cfg_);
-    if (!win->init(native_surface, width, height, error)) return nullptr;
+    if (!win->init(native_surface, width, height, egl_config, error)) return nullptr;
     return win;
   }
 };
@@ -363,7 +365,8 @@ class GbmGlDevice final : public GlDevice {
 
   std::unique_ptr<GlWindow> make_window(int width, int height, void* /*native_surface*/,
                                         const std::vector<std::uint64_t>& modifiers,
-                                        std::string* error) override {
+                                        std::string* error, void* /*egl_config*/) override {
+    // gbm needs its own visual-matched config (the gbm format); the app config doesn't apply.
     auto win = std::make_unique<GbmGlWindow>(dpy_, ctx_, cfg_, gbm_);
     if (!win->init(width, height, modifiers, error)) return nullptr;
     return win;

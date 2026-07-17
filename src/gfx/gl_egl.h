@@ -118,9 +118,12 @@ class GlDevice {
   //     subsurface, or the toplevel for a fullscreen GL app); `modifiers` unused.
   //   Gbm: `native_surface` ignored; `modifiers` is the compositor's advertised DRM set so
   //     the gbm_bo is allocated scanout-tiled.
+  // `egl_config` (an EGLConfig, opaque here) is the config the EGLSurface is created with; pass
+  // the app's chosen config so its context and this window surface match on eglMakeCurrent.
+  // nullptr -> the device's own config (the standalone probe path).
   virtual std::unique_ptr<GlWindow> make_window(int width, int height, void* native_surface,
                                                 const std::vector<std::uint64_t>& modifiers,
-                                                std::string* error) = 0;
+                                                std::string* error, void* egl_config = nullptr) = 0;
 
  protected:
   explicit GlDevice(GlBackend backend) : backend_(backend) {}

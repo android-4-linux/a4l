@@ -10,6 +10,10 @@
 
 #include "runtime/jvm_vm.h"
 
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <string>
 #include <utility>
 #include <variant>
@@ -57,6 +61,32 @@ namespace acl::runtime {
 namespace {
 
 constexpr std::string_view kTag = "acl.runtime.jvm";
+
+#if ACL_HAVE_GL
+// The single active GLSurfaceView present session (Stage 3): the wayland GL device on acl's
+// wl_display, the toplevel wl_surface the app's GLThread renders GL into, and the resulting GL
+// window. Populated by present_glsurfaceview when a GLSurfaceView app presents; read by the
+// EGLImpl get_display / create_window_surface hooks (which run on the app's GLThread). File-scope
+// so the captureless-lambda hooks in load_acl_egl10 can reach it.
+struct GlPresentSession {
+  std::unique_ptr<gfx::GlDevice> device;         // wayland device on acl's wl_display
+  void* wl_surface = nullptr;                    // the toplevel wl_surface (borrowed)
+  std::unique_ptr<gfx::GlWindow> window;         // the app's GL window (one; fullscreen first cut)
+  int w = 0, h = 0;                              // the GL surface size (= the toplevel size)
+  // The app's GLThread calls eglGetDisplay EARLY (during onCreate, before acl's present sets up
+  // the wayland device). get_display blocks on this until present publishes the device, so the
+  // app's context is created on the SAME device as its window surface (else eglMakeCurrent
+  // EGL_BAD_MATCH). Published by present_glsurfaceview's configure hook.
+  std::mutex mtx;
+  std::condition_variable cv;
+  bool ready = false;
+};
+GlPresentSession g_gl_session;
+// The VM boot thread == the app main/UI thread. eglGetDisplay from HERE is the throwaway
+// AndroidGraphics.checkGL20 probe (during onCreate, before present); it must NOT block for the
+// wayland device (that only comes after onCreate) — only the app's separate GLThread blocks.
+std::thread::id g_gl_main_thread;
+#endif
 
 // Bitmap.createBitmap(w, h) — the way BOTH framework layers spell it.
 //
@@ -1229,6 +1259,70 @@ class JniVm : public Vm {
   // against the WindowManager display metrics, into a Bitmap-backed Canvas — and
   // describe the resulting pixels. Proves View(Context) + a real measure/layout/draw
   // traversal over the app's view tree renders verifiable output (no compositor).
+#if ACL_HAVE_GL
+  // Stage 3 routing: does the decor tree host an android.view.SurfaceView (e.g. a GLSurfaceView)?
+  bool has_surface_view(jobject view) {
+    jclass boot = env_->FindClass("org/acl/internal/HostBootstrap");
+    if (boot == nullptr) { clear_exception(); return false; }
+    bool r = false;
+    if (jmethodID m = env_->GetStaticMethodID(boot, "hasSurfaceView", "(Landroid/view/View;)Z"))
+      r = env_->CallStaticBooleanMethod(boot, m, view) == JNI_TRUE;
+    clear_exception();
+    env_->DeleteLocalRef(boot);
+    return r;
+  }
+
+  // Inject a ready Surface into the SurfaceView (HostBootstrap reflection) so its holder's
+  // surfaceCreated/Changed fire on the main thread and the app's GLThread unblocks.
+  void inject_gl_surface(jobject view, int w, int h) {
+    jclass boot = env_->FindClass("org/acl/internal/HostBootstrap");
+    if (boot == nullptr) { clear_exception(); return; }
+    if (jmethodID m = env_->GetStaticMethodID(boot, "injectGlSurface", "(Landroid/view/View;II)V"))
+      env_->CallStaticVoidMethod(boot, m, view, w, h);
+    clear_exception();
+    env_->DeleteLocalRef(boot);
+  }
+
+  // Present a GLSurfaceView app (Stage 3). The app's OWN GLThread renders GL; acl creates the
+  // toplevel wl_surface + a wayland GL device on it (the toplevel IS the GL surface, fullscreen
+  // first cut), injects a Surface into the SurfaceView so the GLThread unblocks, and pumps wl
+  // events while the app renders + eglSwapBuffers on its thread.
+  void present_glsurfaceview(jobject view, int w, int h) {
+    jobject gview = env_->NewGlobalRef(view);
+    const std::string pkg = config_.package_name.empty() ? "acl" : config_.package_name;
+    wm::GlPresentHooks hooks;
+    hooks.configure = [this, gview, w, h](void* wl_display, void* wl_surface, int cw, int ch) -> bool {
+      std::string err;
+      auto dev = gfx::GlDevice::CreateWayland(wl_display, &err);
+      if (!dev) { log::w(kTag, "glsv: CreateWayland failed: {}", err); return false; }
+      {
+        // Publish the device + wake the GLThread parked in get_display, so its context is created
+        // on THIS wayland device (matching the window surface it will make below).
+        std::lock_guard<std::mutex> lk(g_gl_session.mtx);
+        g_gl_session.device = std::move(dev);
+        g_gl_session.wl_surface = wl_surface;
+        g_gl_session.w = cw > 0 ? cw : w;
+        g_gl_session.h = ch > 0 ? ch : h;
+        g_gl_session.ready = true;
+      }
+      g_gl_session.cv.notify_all();
+      log::i(kTag, "glsv: GL device on acl's wl_display ({}); injecting Surface", g_gl_session.device->renderer());
+      inject_gl_surface(gview, g_gl_session.w, g_gl_session.h);  // -> surfaceCreated -> GLThread runs
+      return true;
+    };
+    // No render hook -> external mode: the app's GLThread renders + swaps; acl pumps events.
+    hooks.teardown = [] {
+      std::lock_guard<std::mutex> lk(g_gl_session.mtx);
+      g_gl_session.window.reset();
+      g_gl_session.device.reset();
+      g_gl_session.wl_surface = nullptr;
+      g_gl_session.ready = false;
+    };
+    wm::present_gl_loop(w, h, pkg, pkg, hooks, wm::InputCallback{}, config_.present_frames);
+    env_->DeleteGlobalRef(gview);
+  }
+#endif
+
   void render_content_view(jobject activity) {
     jclass acls = env_->GetObjectClass(activity);
     jobject view = nullptr;
@@ -1300,6 +1394,16 @@ class JniVm : public Vm {
     // once the loop's doFrame pumps it (chicken-and-egg).
     if (config_.present) {
       if (const char* gpu = std::getenv("ACL_PRESENT_GPU"); gpu != nullptr && *gpu != '\0') {
+#if ACL_HAVE_GL
+        // GLSurfaceView (Stage 3): if the content hosts a SurfaceView, its own GLThread renders
+        // GL to a wl_surface — route to the dedicated GL present (the toplevel IS the GL surface),
+        // not the Skia View-tree present, which cannot show the GL content.
+        if (has_surface_view(view)) {
+          present_glsurfaceview(view, w, h);
+          env_->DeleteLocalRef(view);
+          return;
+        }
+#endif
         // Default: the Looper-driven present (approach A). ACL_PRESENT_LEGACY selects the old
         // native poll loop (kept for comparison; it starves the Android Looper so Compose hangs).
         const char* legacy = std::getenv("ACL_PRESENT_LEGACY");
@@ -2854,25 +2958,50 @@ class ArtVm final : public JniVm {
   // lazily on the first eglGetDisplay, so non-GL apps pay nothing.
   void load_acl_egl10([[maybe_unused]] JNIEnv* env) {
 #if ACL_HAVE_GL
+    g_gl_main_thread = std::this_thread::get_id();  // boot thread = app main/UI thread
     gfx::AclEgl10Hooks hooks;
     hooks.get_display = [](void*) -> EGLDisplay {
-      // No standing wl_display yet (present_gl_loop owns that connection — Stage 3/4), so a gbm
-      // device gives a real EGLDisplay on which the app's context path works. Wayland
-      // unification (window surface on acl's wl_surface) lands with Stage 3.
-      static std::unique_ptr<gfx::GlDevice> dev = [] {
+      // The app's GLThread (NOT the main thread) blocks up to 10s for present_glsurfaceview to
+      // publish the wayland device, so its context is created on the SAME device as its window
+      // surface (else eglMakeCurrent EGL_BAD_MATCH). The main thread's checkGL20 probe never
+      // blocks (present only runs after onCreate) — it takes the headless gbm fallback below.
+      if (std::this_thread::get_id() != g_gl_main_thread) {
+        std::unique_lock<std::mutex> lk(g_gl_session.mtx);
+        g_gl_session.cv.wait_for(lk, std::chrono::seconds(10), [] { return g_gl_session.ready; });
+        if (g_gl_session.ready && g_gl_session.device != nullptr)
+          return static_cast<EGLDisplay>(g_gl_session.device->egl_display());
+      } else if (g_gl_session.device != nullptr) {
+        return static_cast<EGLDisplay>(g_gl_session.device->egl_display());
+      }
+      // Headless gbm fallback: the checkGL20 probe, or an app that uses EGL without a GLSurfaceView.
+      static std::unique_ptr<gfx::GlDevice> gbm = [] {
         std::string err;
         auto d = gfx::GlDevice::CreateGbm(&err);
-        if (!d) log::w(kTag, "egl10: GL device unavailable: {}", err);
+        if (!d) log::w(kTag, "egl10: fallback GL device unavailable: {}", err);
         return d;
       }();
-      return dev ? static_cast<EGLDisplay>(dev->egl_display()) : EGL_NO_DISPLAY;
+      return gbm ? static_cast<EGLDisplay>(gbm->egl_display()) : EGL_NO_DISPLAY;
     };
-    hooks.create_window_surface = [](JNIEnv*, jobject, EGLConfig, const EGLint*, void*) -> EGLSurface {
-      log::w(kTag, "egl10: eglCreateWindowSurface needs Surface -> wl_surface (Stage 3)");
-      return EGL_NO_SURFACE;
+    hooks.create_window_surface = [](JNIEnv*, jobject, EGLConfig config, const EGLint*, void*) -> EGLSurface {
+      // Route (a): the app's GLThread asks for a window surface on its GLSurfaceView's Surface;
+      // for the fullscreen first cut there is one GL surface = the toplevel wl_surface. Ignore
+      // the native_window jobject identity and back it with the session's toplevel. Pass the
+      // app's chosen `config` so the surface matches its context (eglMakeCurrent).
+      if (g_gl_session.device == nullptr || g_gl_session.wl_surface == nullptr) {
+        log::w(kTag, "egl10: eglCreateWindowSurface with no active GL present session");
+        return EGL_NO_SURFACE;
+      }
+      std::string err;
+      auto win = g_gl_session.device->make_window(
+          g_gl_session.w, g_gl_session.h, g_gl_session.wl_surface, {}, &err, config);
+      if (!win) { log::w(kTag, "egl10: make_window failed: {}", err); return EGL_NO_SURFACE; }
+      auto* egl = static_cast<EGLSurface>(win->egl_surface());
+      g_gl_session.window = std::move(win);  // keep the wl_egl_window alive
+      log::i(kTag, "egl10: eglCreateWindowSurface -> GL window on acl's toplevel wl_surface");
+      return egl;
     };
     if (gfx::register_egl10(env, hooks) == JNI_OK)
-      log::i(kTag, "egl10: EGLImpl registered (GLThread context path live; window surface = Stage 3)");
+      log::i(kTag, "egl10: EGLImpl registered (GLThread context + window-surface path live)");
 #endif
   }
 
