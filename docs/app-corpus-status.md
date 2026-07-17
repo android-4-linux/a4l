@@ -90,14 +90,14 @@ plus a retargetable software Canvas + BitmapShader (the adaptive icon composites
 
 ## Not yet
 
-- **`S.N.A.K.E`** — presents a frame that is **all black** (0 non-black pixels), yet acl IS drawing:
-  `PresentDriver.nTraverse` reports 5-7 draw ops and 8 RenderNodes replaying each frame. So its
-  custom view (superclass `android.view.View`, drawn via `onDraw`/`invalidate` — **not** a
-  SurfaceView, verified by dexdump) runs through the normal View-tree draw acl captures, but the
-  result is empty. Most likely its own initial state (a black board that starts on a tap/swipe, i.e.
-  it needs input delivered to a custom-View game) or an app-content draw acl mishandles; not yet
-  pinned. Note: this is NOT the SurfaceView case — see the wall note below — an earlier version of
-  this doc mislabeled it.
+- **`S.N.A.K.E`** — presents a frame that is **all black** (0 non-black pixels). Pinned with
+  `ACL_DRAWPATH_DIAG`: it draws its snake as a single stroked `Canvas.drawPath` (custom View,
+  superclass `android.view.View` — **not** a SurfaceView, verified by dexdump), and under the diag
+  it makes **zero** drawPath calls. So the game's own render never runs; the 5-7 ops acl logs each
+  frame are the framework decor, not the game. This is neither an acl drawing bug nor SurfaceView —
+  the app's content is simply not produced (the game does not initialize/start without input in a
+  headless run). `app.flicky` presents black the same way. Reaching game content would need input
+  delivered to the running app, not a rendering fix.
 
 **SurfaceView (a real, unimplemented gap — no corpus app exercises it yet).** Games, video players,
 camera and GL/Vulkan apps draw into a `SurfaceView`, whose pixels live in a separate graphics buffer
