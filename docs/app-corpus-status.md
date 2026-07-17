@@ -16,11 +16,18 @@ license hygiene; note the CI license gate scans source, not images, so this is a
 a gate). Regenerate them locally instead:
 
 ```sh
-ACL_ART_HOME=<aosp>/out/host/linux-x86 tools/shot-app.sh <app.apk> /tmp/<app>.png
+# a compositor DEDICATED to this run, sized to acl's 1024x768 surface (any wlroots one; grim needs
+# wlr-screencopy, so NOT mutter/GNOME):
+weston --backend=headless-backend.so --renderer=pixman --socket=acl-wl \
+       --width=1024 --height=768 --idle-time=0 &   # or a tinywl/sway on its own WAYLAND_DISPLAY
+ACL_ART_HOME=<aosp>/out/host/linux-x86 tools/shot-app.sh <app.apk> /tmp/<app>.png acl-wl
 ```
 
-which runs the app the canonical way (`tools/run-apk.sh`) on the GPU present path and grabs just its
-surface. To simply watch it:
+`shot-app.sh <apk> <out.png> <wayland-display>` runs the app the canonical way (`tools/run-apk.sh`)
+on the GPU present path **against that one compositor**, waits for its first presented frame, and
+`grim`s that compositor's whole output — which, for a compositor dedicated to the run, is exactly
+the app. The `<wayland-display>` is explicit so one invocation targets one compositor; it does not
+read the ambient session. To simply watch it on your desktop:
 
 ```sh
 ACL_ART_HOME=<aosp>/out/host/linux-x86 ACL_PRESENT_GPU=1 \
@@ -104,10 +111,10 @@ LOAD DEVICES / START SERVICE) and the "Car Dock" entry — measured, laid out an
 ## Notes
 
 - The window is 1024x768 because that is the display acl seeds from the compositor's `wl_output`.
-  A tiling compositor gives the window whatever the layout gives it, so `tools/shot-app.sh` floats
-  it and sets it to the surface size before grabbing — otherwise the grab catches desktop around
-  the app, or clips it (which is what made an early capture of opendrummer look like a bare
-  toolbar).
+  `tools/shot-app.sh` therefore expects a compositor **dedicated** to the run (its whole output is
+  the app) rather than a shared desktop — pointing it at a normal desktop grabs the whole desktop.
+  `grim` needs `wlr-screencopy`, so the compositor must be wlroots-based (sway, tinywl, weston);
+  mutter/GNOME has no such protocol and `shot-app.sh` says so instead of producing a blank grab.
 - `--present` still defaults to the shm path, which by construction cannot serve a real app (it
   needs acl's Bitmap shim). Every real app therefore needs `ACL_PRESENT_GPU=1` today; making the
   GPU path the default is a separate change.
