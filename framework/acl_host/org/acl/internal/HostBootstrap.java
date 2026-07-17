@@ -420,26 +420,36 @@ public final class HostBootstrap {
             String name = x.getAttributeValue(NS, "name");
             if (name == null) return;
             // android:resource wins over android:value (the framework treats it as an int res id).
-            int resIdx = x.getAttributeResourceValue(NS, "resource", 0);
-            if (resIdx != 0) { b.putInt(name, resIdx); return; }
-            // android:value — the binary-XML type tells us how to read it. TypedValue types:
-            // INT_BOOLEAN=18, INT_DEC=16/INT_HEX=17, FLOAT=4; anything else -> string.
+            int resId = x.getAttributeResourceValue(NS, "resource", 0);
+            if (resId != 0) { b.putInt(name, resId); return; }
+            // XmlResourceParser exposes no typed-value kind, so find the android:value attribute and
+            // recover the type from its resolved string (binary XML already resolved any ref), with
+            // a boolean/int probe for a pure-typed value that has no string form.
             int vi = -1;
             for (int i = 0; i < x.getAttributeCount(); i++) {
                 if ("value".equals(x.getAttributeName(i))) { vi = i; break; }
             }
             if (vi < 0) return;
-            int type = x.getAttributeValueType(vi);
-            if (type == android.util.TypedValue.TYPE_INT_BOOLEAN) {
-                b.putBoolean(name, x.getAttributeBooleanValue(vi, false));
-            } else if (type >= android.util.TypedValue.TYPE_FIRST_INT
-                    && type <= android.util.TypedValue.TYPE_LAST_INT) {
-                b.putInt(name, x.getAttributeIntValue(vi, 0));
-            } else if (type == android.util.TypedValue.TYPE_FLOAT) {
-                b.putFloat(name, x.getAttributeFloatValue(vi, 0f));
-            } else {
-                b.putString(name, x.getAttributeValue(vi));
+            String s = x.getAttributeValue(vi);
+            if (s != null && !s.isEmpty()) {
+                if ("true".equalsIgnoreCase(s) || "false".equalsIgnoreCase(s)) {
+                    b.putBoolean(name, Boolean.parseBoolean(s));
+                    return;
+                }
+                try { b.putInt(name, Integer.parseInt(s.trim())); return; }
+                catch (NumberFormatException ignore) {}
+                try { b.putFloat(name, Float.parseFloat(s.trim())); return; }
+                catch (NumberFormatException ignore) {}
+                b.putString(name, s);
+                return;
             }
+            // No string form: getAttributeBooleanValue returns the real value for a boolean type and
+            // the default otherwise, so two calls with opposite defaults agreeing means it IS a
+            // boolean; otherwise treat it as an int.
+            boolean t = x.getAttributeBooleanValue(vi, false);
+            boolean f = x.getAttributeBooleanValue(vi, true);
+            if (t == f) b.putBoolean(name, t);
+            else b.putInt(name, x.getAttributeIntValue(vi, 0));
         }
         // AppContext has a null base (super(null)), so Context methods not overridden here
         // would NPE. Device-protected (direct-boot) storage isn't modeled → plain storage.
