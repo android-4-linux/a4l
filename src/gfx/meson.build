@@ -26,6 +26,12 @@ endif
 if have_gl
   gfx_sources += files('gl_egl.cpp')
   gfx_deps += [egl_dep, glesv2_dep, gbm_dep, gl_libdrm_dep]
+  # GLSurfaceView Stage 2a: the com.google.android.gles_jni.EGLImpl natives (EGL10 on host
+  # libEGL). Needs JNI headers; compiled only when the JVM/JNI is present.
+  if have_jni
+    gfx_sources += files('egl10_jni.cpp')
+    gfx_deps += jni_dep
+  endif
 endif
 gfx_lib = static_library(
   'acl_gfx',
