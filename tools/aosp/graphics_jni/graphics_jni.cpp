@@ -264,6 +264,8 @@ jboolean Bitmap_nativeHasAlpha(JNIEnv*, jclass, jlong ptr) {
   auto* w = reinterpret_cast<AclBitmap*>(ptr);
   return (w != nullptr && !w->bitmap.isOpaque()) ? JNI_TRUE : JNI_FALSE;
 }
+// acl's SkBitmaps carry no mipmap chain (a hint set via Bitmap.setHasMipMap), so always false.
+jboolean Bitmap_nativeHasMipMap(JNIEnv*, jclass, jlong) { return JNI_FALSE; }
 
 jint Bitmap_nativeConfig(JNIEnv*, jclass, jlong ptr) {
   auto* w = reinterpret_cast<AclBitmap*>(ptr);
@@ -2876,6 +2878,7 @@ const JNINativeMethod kBitmap[] = {
     {"nativeErase", "(JI)V", reinterpret_cast<void*>(Bitmap_nativeErase)},
     {"nativeIsPremultiplied", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeIsPremultiplied)},
     {"nativeHasAlpha", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeHasAlpha)},
+    {"nativeHasMipMap", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeHasMipMap)},
     {"nativeConfig", "(J)I", reinterpret_cast<void*>(Bitmap_nativeConfig)},
     {"nativeIsImmutable", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeIsImmutable)},
     {"nativeIsBackedByAshmem", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeIsBackedByAshmem)},
