@@ -139,6 +139,29 @@ corpus does not include.
   noting `libfull-jni-spotify.so` needs `libandroid.so` (now acl's own) plus `libOpenSLES.so` and
   `libmediandk.so`, which acl does not stage.
 
+## Wider survey (newer additions)
+
+A larger batch of F-Droid APKs was iterated (`tools/shot-app.sh` / a batch of `run-apk.sh` runs,
+classified by whether the presented frame has non-black content). Roughly half reach a real UI:
+
+- **Render a UI**: `app.areada`, `alt.nainapps.aer`, `app.floatdeck`, `app.weatheroverview`
+  (amber app bar + search box), `app.sterna`, `app.crossword.yourealwaysbe.forkyz`,
+  `allen.town.focus.podcast` (after the `Bitmap.nativeHasMipMap` native was added),
+  `app.fedilab.castlab` (React Native — now presents its splash instead of crashing, but the JS UI
+  has not drawn yet).
+- **Present a black frame** (custom-View content not showing, as with S.N.A.K.E): `app.flicky`.
+- **No frame, with a specific cause**:
+  - `app.halma`, `ardash.doodledudette` — `dlopen failed: library "libstdc++.so" not found`. That is
+    the **legacy NDK C++ runtime** (gnustl-era), which AOSP no longer builds here (modern apps link
+    `libc++_shared.so`, which acl stages). Staging a `libstdc++.so` would need one from an old NDK.
+  - `at.manuelbichler.octalsuntime` — NPE (a null String in the Clock activity's setup).
+  - `app.smarzaro.foss4g2024.schedule` — `Resources$NotFoundException` for a layout resource id.
+  - `app.crossword.yourealwaysbe.forkyzscanner` — launcher activity construction failed.
+
+Recurring, actionable gaps this surfaced: **`libstdc++.so`** (two apps) and single missing natives
+like **`Bitmap.nativeHasMipMap`** (fixed) — the latter is the cheap kind, one function unblocks an
+app. The black-frame apps share the S.N.A.K.E question (custom-View content not reaching the screen).
+
 ## Notes
 
 - The window is 1024x768 because that is the display acl seeds from the compositor's `wl_output`.
