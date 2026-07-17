@@ -57,7 +57,7 @@ which exists only on acl's Bitmap **shim** — so it cannot show a real app's fr
 | `a2dp.Vol` | Views / ActionBar | **renders** — ActionBar + buttons |
 | `barilyuk.batterytemperature` | Views (XML layout) | **renders** — full UI (adaptive icon, CheckBox, RadioButtons) |
 | `app.fedilab.castlab` | React Native | RN native libs load via the bionic bridge; stops in Expo (below) |
-| `S.N.A.K.E` | SurfaceView game | presents, but **black** — draws into a SurfaceView, not the View tree (below) |
+| `S.N.A.K.E` | custom View game | presents, but **black** — draws 5-7 ops/frame yet nothing shows (below) |
 | `app.fedilab.openmaps` | WebView | can't inflate `android.webkit.WebView` — no browser engine (below) |
 
 Also tried, outside the F-Droid corpus (not redistributable, run locally only):
@@ -90,14 +90,23 @@ plus a retargetable software Canvas + BitmapShader (the adaptive icon composites
 
 ## Not yet
 
-- **`S.N.A.K.E`** — presents a frame, but it is **all black**. It draws its game into a
-  `SurfaceView`, whose content lives in its own graphics buffer (a `wl_subsurface`/dma-buf), NOT in
-  the Activity's View-tree draw that acl captures and presents. So the View tree (empty here) is
-  what gets shown; the game's actual pixels never reach the screen. This is a whole class of apps —
-  games, video players, camera, GL/Vulkan renderers — that bypass the View draw via SurfaceView.
-  Supporting them needs acl to give a SurfaceView its own presentable surface and composite it with
-  the View tree (`SurfaceView` → `wl_subsurface`, per the wm/ plan), a distinct presentation path
-  from the View-tree Skia draw.
+- **`S.N.A.K.E`** — presents a frame that is **all black** (0 non-black pixels), yet acl IS drawing:
+  `PresentDriver.nTraverse` reports 5-7 draw ops and 8 RenderNodes replaying each frame. So its
+  custom view (superclass `android.view.View`, drawn via `onDraw`/`invalidate` — **not** a
+  SurfaceView, verified by dexdump) runs through the normal View-tree draw acl captures, but the
+  result is empty. Most likely its own initial state (a black board that starts on a tap/swipe, i.e.
+  it needs input delivered to a custom-View game) or an app-content draw acl mishandles; not yet
+  pinned. Note: this is NOT the SurfaceView case — see the wall note below — an earlier version of
+  this doc mislabeled it.
+
+**SurfaceView (a real, unimplemented gap — no corpus app exercises it yet).** Games, video players,
+camera and GL/Vulkan apps draw into a `SurfaceView`, whose pixels live in a separate graphics buffer
+rather than the Activity's View-tree draw. acl does not back this: `SurfaceControl`/`SurfaceSession`
+natives are stubbed and `android.view.Surface.nativeLockCanvas` is absent, so such an app's draws go
+nowhere and its SurfaceView region shows through as a hole. The design is a `SurfaceView` →
+`wl_subsurface` presentation path composited with the View tree (planned in `src/wm/meson.build` /
+`plan.md` A02, not built). Implementing it needs a real SurfaceView test app, which the current
+corpus does not include.
 - **`app.fedilab.openmaps`** — fails inflating `android.webkit.WebView`:
   `InflateException ... Error inflating class android.webkit.WebView`. The app is a WebView shell
   (OpenStreetMap in a web view), and acl has no `WebView` implementation — that is an embedded
