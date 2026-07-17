@@ -57,6 +57,8 @@ which exists only on acl's Bitmap **shim** — so it cannot show a real app's fr
 | `a2dp.Vol` | Views / ActionBar | **renders** — ActionBar + buttons |
 | `barilyuk.batterytemperature` | Views (XML layout) | **renders** — full UI (adaptive icon, CheckBox, RadioButtons) |
 | `app.fedilab.castlab` | React Native | RN native libs load via the bionic bridge; stops in Expo (below) |
+| `S.N.A.K.E` | SurfaceView game | presents, but **black** — draws into a SurfaceView, not the View tree (below) |
+| `app.fedilab.openmaps` | WebView | can't inflate `android.webkit.WebView` — no browser engine (below) |
 
 Also tried, outside the F-Droid corpus (not redistributable, run locally only):
 
@@ -88,21 +90,29 @@ plus a retargetable software Canvas + BitmapShader (the adaptive icon composites
 
 ## Not yet
 
-- **`barilyuk.batterytemperature`** — layout inflation and `onCreate` now work (was: CheckBox
-  inflation failed because `PathData.nCanMorph` was a stub returning false, so every animated
-  button drawable threw "Can't morph"; fixed by comparing SkPath verb sequences, plus the
-  `NativeInterpolatorFactory` stubs RadioButton needs). It now stops in `draw`:
-  `UnsatisfiedLinkError: android.graphics.Canvas.nSetBitmap`, from `AdaptiveIconDrawable.draw`
-  compositing an icon offscreen. `setBitmap` retargets a Canvas to a new Bitmap, which acl cannot do
-  because its Canvas handle is a raw `SkCanvas*` (SkCanvas can't rebind its target) — supporting it
-  needs a Canvas wrapper that owns a swappable SkCanvas. Distinct from the inflation gap.
-- **`app.fedilab.castlab`** (React Native / Expo) — `tools/run-apk.sh` now enables the bionic
-  bridge, and the RN engine's native libs load through it: `libreactnative.so`, `libfbjni.so`,
-  `libappmodules.so` (plus `libjsi`/`libhermesvm`/`libc++_shared`/`libz`). It then stops in Expo's
-  `ReactActivityDelegateWrapper.onCreate` on a `NullPointerException: Bundle.containsKey` — an
-  Activity-lifecycle/Bundle issue, framework/app rather than NDK. (`libimagepipeline`/
-  `libstatic-webp` still want `libjnigraphics.so`, which acl does not provide yet, but those are not
-  on the RN startup path.)
+- **`S.N.A.K.E`** — presents a frame, but it is **all black**. It draws its game into a
+  `SurfaceView`, whose content lives in its own graphics buffer (a `wl_subsurface`/dma-buf), NOT in
+  the Activity's View-tree draw that acl captures and presents. So the View tree (empty here) is
+  what gets shown; the game's actual pixels never reach the screen. This is a whole class of apps —
+  games, video players, camera, GL/Vulkan renderers — that bypass the View draw via SurfaceView.
+  Supporting them needs acl to give a SurfaceView its own presentable surface and composite it with
+  the View tree (`SurfaceView` → `wl_subsurface`, per the wm/ plan), a distinct presentation path
+  from the View-tree Skia draw.
+- **`app.fedilab.openmaps`** — fails inflating `android.webkit.WebView`:
+  `InflateException ... Error inflating class android.webkit.WebView`. The app is a WebView shell
+  (OpenStreetMap in a web view), and acl has no `WebView` implementation — that is an embedded
+  browser engine (Chromium/`android_webview`), a large separate component, not a native shim. Any
+  WebView-based app hits this. Out of scope for the foreseeable corpus work; noted so it is not
+  mistaken for a small gap.
+- **`app.fedilab.castlab`** (React Native / Expo) — `tools/run-apk.sh` enables the bionic bridge, so
+  the RN engine's native libs load through it: `libreactnative.so`, `libfbjni.so`, `libappmodules.so`
+  (plus `libjsi`/`libhermesvm`/`libc++_shared`/`libz`). It cleared the Expo Updates config read once
+  `ApplicationInfo.metaData` was populated from the manifest `<meta-data>` (17 entries), and now
+  reaches `MainActivity.onCreate`, where it stops on `getPackageName()` on a **null base Context** —
+  the RN/Expo `ReactActivity` path reads the Context before acl attaches the base, unlike the
+  View-tree apps. That is Activity/Context-attach framework work. (`libimagepipeline`/`libstatic-webp`
+  still want `libjnigraphics.so`, which acl does not provide yet, but those are off the RN startup
+  path.)
 
 - **`com.uptodown`** — resolves its launcher, extracts its 4 x86_64 natives, then:
   `Application com.uptodown.UptodownApp construct failed`, and onCreate throws
