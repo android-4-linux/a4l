@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: Apache-2.0
+// Provenance: acl GLSurfaceView Stage 2b. Bundles AOSP's glgen android_opengl_GLES20.cpp /
+// GLES30.cpp (frameworks/base/core/jni, Apache-2.0, copied verbatim — pure passthrough to
+// host libGLESv2) with three tiny acl shims (AndroidRuntime::registerNativeMethods, NELEM,
+// register_acl_gles). Mirrors libacl_graphics_jni: acl dlopens it and calls register_acl_gles.
+// Host-only. No GPL-3.0 sources.
+
+cc_library_shared {
+    name: "libacl_gles_jni",
+    host_supported: true,
+    device_supported: false,
+    compile_multilib: "64",  // ART host runs 64-bit
+    srcs: [
+        "android_opengl_GLES20.cpp",  // verbatim AOSP glgen
+        "android_opengl_GLES30.cpp",  // verbatim AOSP glgen
+        "gles_shim.cpp",              // acl: registerNativeMethods shim + register_acl_gles
+    ],
+    local_include_dirs: [
+        "shim",  // acl minimal android_runtime/AndroidRuntime.h + utils/misc.h stand-ins
+    ],
+    header_libs: [
+        "jni_headers",
+        "libnativehelper_header_only",  // nativehelper/JNIPlatformHelp.h (jniGetNioBuffer*)
+        "gl_headers",                   // GLES2/gl2.h, GLES3/gl3.h (Khronos, in AOSP)
+    ],
+    shared_libs: [
+        "libnativehelper",  // jniGetNioBufferFields / BaseArray / BaseArrayOffset, jniThrowException
+    ],
+    // The gl* symbols the passthrough calls are left UNDEFINED here (the AOSP host sysroot
+    // has no Mesa libGLESv2) and bind at dlopen time to the system libGLESv2 that acl's own
+    // process already loads RTLD_GLOBAL (via gfx/gl_egl's egl/glesv2 deps) — the same GL
+    // context EGLImpl makes current, so the passthrough hits the right driver.
+    allow_undefined_symbols: true,
+    cflags: [
+        "-Wno-unused-parameter",
+        "-Wno-unused-variable",
+        "-Wno-unused-function",
+    ],
+}

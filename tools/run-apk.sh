@@ -125,6 +125,8 @@ fi
 RGFONT=$(first "$ROOT"/external/roboto-fonts/Roboto-Regular.ttf)
 [ -n "${RGFONT:-}" ] && RUNNER+=(ACL_GRAPHICS_FONT="$RGFONT")
 [ -f "$HOME_DIR/lib64/libacl_graphics_jni.so" ] && RUNNER+=(ACL_ART_GRAPHICS_LIB="$HOME_DIR/lib64/libacl_graphics_jni.so")
+# android.opengl.GLES20/GLES30 natives (GLSurfaceView path); binds to host Mesa libGLESv2.
+[ -f "$HOME_DIR/lib64/libacl_gles_jni.so" ] && RUNNER+=(ACL_ART_GLES_LIB="$HOME_DIR/lib64/libacl_gles_jni.so")
 [ "$TIMEOUT" != "0" ] && RUNNER+=(timeout "$TIMEOUT")
 
 "${RUNNER[@]}" "$ACL_BIN" run "$APK" --vm=art "$@" 2>&1

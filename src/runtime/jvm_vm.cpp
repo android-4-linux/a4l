@@ -2536,6 +2536,7 @@ class ArtVm final : public JniVm {
     register_systemproperties_override(env);  // neutralize the device-only fast-property abort
     bootstrap_host_env(env);
     load_acl_graphics(env);
+    load_acl_gles(env);  // android.opengl.GLES20/GLES30 natives (GLSurfaceView path)
     // Seed default typefaces now that the graphics Font/Typeface natives are registered
     // (the system font map isn't pushed to a standalone run).
     if (jclass boot = find_class_optional(env, "org/acl/internal/HostBootstrap"); boot != nullptr) {
@@ -2799,6 +2800,41 @@ class ArtVm final : public JniVm {
     graphics_ops_check(env);
     graphics_present_demo(env);
     graphics_view_demo(env);
+  }
+
+  // GLSurfaceView Stage 2b: load acl's android.opengl.GLES20/GLES30 natives (libacl_gles_jni,
+  // AOSP's glgen passthrough built by Soong) and register them onto the framework classes. The
+  // gl* calls bind to the host Mesa libGLESv2 acl already loads (RTLD_GLOBAL via gfx/gl_egl) —
+  // the same GL context the EGLImpl JNI makes current. Opt-in via ACL_ART_GLES_LIB (path to
+  // libacl_gles_jni.so); best-effort. A GLSurfaceView app's GLThread issues these once it has
+  // an EGL context+surface (com.google.android.gles_jni.EGLImpl, Stage 2a) current.
+  void load_acl_gles(JNIEnv* env) {
+    const char* lib = std::getenv("ACL_ART_GLES_LIB");
+    if (lib == nullptr || *lib == '\0') return;
+    // The vendor lib leaves its gl*/egl* calls undefined (the AOSP host sysroot has no Mesa),
+    // so bring the system Mesa GLESv2/EGL into the process' GLOBAL scope FIRST — the vendor
+    // lib's undefined gl* then bind to them, and they're the same GL that gfx/gl_egl (the
+    // EGLImpl context) uses. Best-effort: if absent, the vendor dlopen below fails loudly.
+    ::dlopen("libEGL.so.1", RTLD_NOW | RTLD_GLOBAL);
+    ::dlopen("libGLESv2.so.2", RTLD_NOW | RTLD_GLOBAL);
+    void* h = ::dlopen(lib, RTLD_NOW | RTLD_GLOBAL);
+    if (h == nullptr) {
+      const char* e = ::dlerror();
+      log::w(kTag, "acl gles: dlopen({}) failed: {}", lib, e ? e : "?");
+      return;
+    }
+    auto reg = reinterpret_cast<jint (*)(JNIEnv*)>(::dlsym(h, "register_acl_gles"));
+    if (reg == nullptr) {
+      log::w(kTag, "acl gles: register_acl_gles not found in {}", lib);
+      return;
+    }
+    const jint rc = reg(env);
+    if (env->ExceptionCheck() || rc != JNI_OK) {
+      env->ExceptionClear();
+      log::w(kTag, "acl gles: registration failed (rc={})", rc);
+      return;
+    }
+    log::i(kTag, "acl gles: android.opengl.GLES20/GLES30 natives registered on host Mesa libGLESv2");
   }
 
   // App path (GPU): host a REAL android.view.View and present it GPU-native. The app
