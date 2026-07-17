@@ -521,7 +521,25 @@ void Canvas_nDrawPath(JNIEnv*, jclass, jlong canvas, jlong path, jlong paint) {
   auto* c = canvas_sk(canvas);
   auto* sp = reinterpret_cast<SkPath*>(path);
   auto* ap = reinterpret_cast<AclPaint*>(paint);
-  if (c != nullptr && sp != nullptr) c->drawPath(*sp, ap != nullptr ? ap->paint : SkPaint());
+  if (c != nullptr && sp != nullptr) {
+    // ACL_DRAWPATH_DIAG: for a "presents but black" app (a custom View that draws its content as a
+    // path — S.N.A.K.E's snake, many games), log each drawPath's path bounds (local + device),
+    // verb count, and the paint's color/style/stroke, plus whether the clip is empty. Absence of
+    // ANY line means the app's draw code never ran (content not produced — game not started / no
+    // input), which is a different problem from an off-screen or wrong-colored draw.
+    if (getenv("ACL_DRAWPATH_DIAG") != nullptr) {
+      const SkRect bb = sp->getBounds();
+      const SkPaint& p = ap != nullptr ? ap->paint : SkPaint();
+      const SkRect dev = c->getLocalToDeviceAs3x3().mapRect(bb);
+      __android_log_print(4, "acl.drawpath",
+                          "path bounds [%.1f,%.1f %.1fx%.1f] dev [%.1f,%.1f %.1fx%.1f] verbs=%d "
+                          "color=%08x style=%d strokeW=%.1f clipEmpty=%d",
+                          bb.fLeft, bb.fTop, bb.width(), bb.height(), dev.fLeft, dev.fTop,
+                          dev.width(), dev.height(), sp->countVerbs(), p.getColor(),
+                          static_cast<int>(p.getStyle()), p.getStrokeWidth(), c->isClipEmpty());
+    }
+    c->drawPath(*sp, ap != nullptr ? ap->paint : SkPaint());
+  }
 }
 
 // ── Path (android.graphics.Path over SkPath) ────────────────────────────────────
