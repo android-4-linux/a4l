@@ -314,6 +314,7 @@ public final class HostBootstrap {
     }
 
     static final class AppContext extends ContextWrapper {
+        private static AclSensorManager sSensorManager;  // one per app (native events dispatch to it)
         private final Resources res;
         private final String pkg;
         private final String apkPath;   // the app's APK (ApplicationInfo.sourceDir); may be null
@@ -481,6 +482,12 @@ public final class HostBootstrap {
             if (resId != 0) { appThemeResId = resId; theme = null; }  // re-resolve on next getTheme
         }
         @Override public Object getSystemService(String name) {
+            if ("sensor".equals(name)) {
+                // android.hardware.SensorManager over acl's native sensor hub (Linux IIO /
+                // synthetic). Cached: one instance per app (native events dispatch to it).
+                if (sSensorManager == null) sSensorManager = new AclSensorManager(this);
+                return sSensorManager;
+            }
             if ("layout_inflater".equals(name)) {
                 try {
                     return Class.forName("com.android.internal.policy.PhoneLayoutInflater")
@@ -666,6 +673,7 @@ public final class HostBootstrap {
             if ("android.net.ConnectivityManager".equals(serviceClass.getName())) return "connectivity";
             if ("android.bluetooth.BluetoothManager".equals(serviceClass.getName())) return "bluetooth";
             if (serviceClass == android.os.storage.StorageManager.class) return "storage";
+            if (serviceClass == android.hardware.SensorManager.class) return "sensor";
             // ViewRootImpl.<init> reads getSystemService(AudioManager.class) (navigation sound
             // effects); map it so the Dialog/PopupWindow add path gets a real AudioManager.
             if (serviceClass == android.media.AudioManager.class) return "audio";

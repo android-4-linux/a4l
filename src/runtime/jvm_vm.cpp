@@ -32,6 +32,7 @@
 #include "svc/bluetooth/bt_jni.h"
 #include "svc/net/connectivity_jni.h"
 #include "svc/notify/notify_jni.h"
+#include "svc/sensor/sensor_jni.h"
 #include "svc/storage/storage_jni.h"
 #endif
 #if ACL_HAVE_PIPEWIRE
@@ -2671,6 +2672,9 @@ class ArtVm final : public JniVm {
     // svc/storage host UDisks2 backend (removable media).
     acl::storage::register_storage_natives(env);
 #endif
+    // Bind org.acl.internal.AclSensorManager to the svc/sensor hub (Linux IIO / synthetic). No
+    // D-Bus dependency, so this is outside the sdbus block.
+    acl::svc::sensor::register_sensor_natives(env);
 #if ACL_HAVE_PIPEWIRE
     // Bind org.acl.internal.AudioBridge (AudioManager master volume) to the host PipeWire
     // default sink.

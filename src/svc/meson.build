@@ -15,6 +15,13 @@ if have_sdbus
   subdir('storage')
 endif
 
+# svc/sensor: android.hardware.SensorManager over Linux IIO (sysfs) / synthetic. No D-Bus
+# needed (an optional iio-sensor-proxy source would add sdbus later); needs JNI for the
+# AclSensorManager seam.
+if have_jni
+  subdir('sensor')
+endif
+
 # Automotive vehicle services (svc/car) compile in ONLY under the automotive
 # profile, so an OFF build emits zero automotive symbols (CI nm-diff gate, A01.1).
 if profile_automotive
