@@ -25,7 +25,7 @@ endif
 # so this is compiled independently of have_vulkan.
 if have_gl
   gfx_sources += files('gl_egl.cpp')
-  gfx_deps += [egl_dep, glesv2_dep, gbm_dep, gl_libdrm_dep]
+  gfx_deps += [egl_dep, glesv2_dep, gbm_dep, gl_libdrm_dep, wl_egl_dep]
   # GLSurfaceView Stage 2a: the com.google.android.gles_jni.EGLImpl natives (EGL10 on host
   # libEGL). Needs JNI headers; compiled only when the JVM/JNI is present.
   if have_jni

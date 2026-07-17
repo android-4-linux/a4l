@@ -11,9 +11,10 @@ cc_library_shared {
     device_supported: false,
     compile_multilib: "64",  // ART host runs 64-bit
     srcs: [
-        "android_opengl_GLES20.cpp",  // verbatim AOSP glgen
-        "android_opengl_GLES30.cpp",  // verbatim AOSP glgen
-        "gles_shim.cpp",              // acl: registerNativeMethods shim + register_acl_gles
+        "android_opengl_GLES20.cpp",             // verbatim AOSP glgen
+        "android_opengl_GLES30.cpp",             // verbatim AOSP glgen
+        "com_google_android_gles_jni_GLImpl.cpp", // verbatim AOSP glgen (GL10/GL11, GLES1)
+        "gles_shim.cpp",                          // acl: registerNativeMethods shim + register_acl_gles
     ],
     local_include_dirs: [
         "shim",  // acl minimal android_runtime/AndroidRuntime.h + utils/misc.h stand-ins
@@ -31,7 +32,15 @@ cc_library_shared {
     // process already loads RTLD_GLOBAL (via gfx/gl_egl's egl/glesv2 deps) — the same GL
     // context EGLImpl makes current, so the passthrough hits the right driver.
     allow_undefined_symbols: true,
+    // Soong links host libs with -z now (eager) which would force EVERY gl* to resolve at
+    // dlopen — including the GLES1 OES surface (glDrawTexfOES, glColorPointerBounds, …) that
+    // desktop Mesa lacks. Force lazy binding so those unused GL10 calls stay unresolved unless
+    // actually invoked (a GL20 app never does); acl dlopens with RTLD_LAZY to match.
+    ldflags: [
+        "-Wl,-z,lazy",
+    ],
     cflags: [
+        "-DGL_GLEXT_PROTOTYPES",  // declare the GLES1 OES prototypes GLImpl.cpp calls (AOSP does)
         "-Wno-unused-parameter",
         "-Wno-unused-variable",
         "-Wno-unused-function",

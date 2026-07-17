@@ -38,6 +38,10 @@
 #if ACL_HAVE_VULKAN
 #include "gfx/gfx_vk.h"  // S3b: VkRenderTarget import_pixels_to_dmabuf
 #endif
+#if ACL_HAVE_GL
+#include "gfx/gl_egl.h"     // GLSurfaceView: host GL device (EGLImpl get_display)
+#include "gfx/egl10_jni.h"  // GLSurfaceView: com.google.android.gles_jni.EGLImpl natives
+#endif
 #include "log/log.h"
 #include "ndk/bionic_runtime.h"
 #include "ndk/native_bind.h"
@@ -2536,7 +2540,8 @@ class ArtVm final : public JniVm {
     register_systemproperties_override(env);  // neutralize the device-only fast-property abort
     bootstrap_host_env(env);
     load_acl_graphics(env);
-    load_acl_gles(env);  // android.opengl.GLES20/GLES30 natives (GLSurfaceView path)
+    load_acl_gles(env);   // android.opengl.GLES20/GLES30 natives (GLSurfaceView path)
+    load_acl_egl10(env);  // com.google.android.gles_jni.EGLImpl natives (GLSurfaceView path)
     // Seed default typefaces now that the graphics Font/Typeface natives are registered
     // (the system font map isn't pushed to a standalone run).
     if (jclass boot = find_class_optional(env, "org/acl/internal/HostBootstrap"); boot != nullptr) {
@@ -2817,7 +2822,11 @@ class ArtVm final : public JniVm {
     // EGLImpl context) uses. Best-effort: if absent, the vendor dlopen below fails loudly.
     ::dlopen("libEGL.so.1", RTLD_NOW | RTLD_GLOBAL);
     ::dlopen("libGLESv2.so.2", RTLD_NOW | RTLD_GLOBAL);
-    void* h = ::dlopen(lib, RTLD_NOW | RTLD_GLOBAL);
+    ::dlopen("libGLESv1_CM.so.1", RTLD_NOW | RTLD_GLOBAL);  // GLImpl's GLES1 (GL10) symbols
+    // RTLD_LAZY (not NOW): GLImpl's glgen table references the full GLES1 OES surface
+    // (glDrawTexfOES, glColorPointerBounds, …) that desktop Mesa doesn't export, but a GL20 app
+    // never calls them — lazy binding leaves them unresolved harmlessly instead of failing load.
+    void* h = ::dlopen(lib, RTLD_LAZY | RTLD_GLOBAL);
     if (h == nullptr) {
       const char* e = ::dlerror();
       log::w(kTag, "acl gles: dlopen({}) failed: {}", lib, e ? e : "?");
@@ -2835,6 +2844,36 @@ class ArtVm final : public JniVm {
       return;
     }
     log::i(kTag, "acl gles: android.opengl.GLES20/GLES30 natives registered on host Mesa libGLESv2");
+  }
+
+  // GLSurfaceView Stage 2a: register com.google.android.gles_jni.EGLImpl on host Mesa libEGL,
+  // over gfx::GlDevice. The EGL10 the app's GLThread drives (eglGetDisplay/Initialize/Choose
+  // Config/CreateContext/MakeCurrent/SwapBuffers) now runs. Two seams via hooks: get_display
+  // returns the device's EGLDisplay (lazily created); create_window_surface (Surface ->
+  // wl_surface) is Stage 3, so it reports the gap for now. GL apps only — the device is created
+  // lazily on the first eglGetDisplay, so non-GL apps pay nothing.
+  void load_acl_egl10([[maybe_unused]] JNIEnv* env) {
+#if ACL_HAVE_GL
+    gfx::AclEgl10Hooks hooks;
+    hooks.get_display = [](void*) -> EGLDisplay {
+      // No standing wl_display yet (present_gl_loop owns that connection — Stage 3/4), so a gbm
+      // device gives a real EGLDisplay on which the app's context path works. Wayland
+      // unification (window surface on acl's wl_surface) lands with Stage 3.
+      static std::unique_ptr<gfx::GlDevice> dev = [] {
+        std::string err;
+        auto d = gfx::GlDevice::CreateGbm(&err);
+        if (!d) log::w(kTag, "egl10: GL device unavailable: {}", err);
+        return d;
+      }();
+      return dev ? static_cast<EGLDisplay>(dev->egl_display()) : EGL_NO_DISPLAY;
+    };
+    hooks.create_window_surface = [](JNIEnv*, jobject, EGLConfig, const EGLint*, void*) -> EGLSurface {
+      log::w(kTag, "egl10: eglCreateWindowSurface needs Surface -> wl_surface (Stage 3)");
+      return EGL_NO_SURFACE;
+    };
+    if (gfx::register_egl10(env, hooks) == JNI_OK)
+      log::i(kTag, "egl10: EGLImpl registered (GLThread context path live; window surface = Stage 3)");
+#endif
   }
 
   // App path (GPU): host a REAL android.view.View and present it GPU-native. The app

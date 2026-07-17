@@ -8,9 +8,11 @@
 
 #include "android_runtime/AndroidRuntime.h"
 
-// Defined in the copied glgen files (android_opengl_GLES20.cpp / GLES30.cpp).
+// Defined in the copied glgen files (android_opengl_GLES20.cpp / GLES30.cpp) and the GLES1
+// GL10/GL11 bindings (com_google_android_gles_jni_GLImpl.cpp — libGDX's checkGL20 inits GLImpl).
 extern int register_android_opengl_jni_GLES20(JNIEnv* env);
 extern int register_android_opengl_jni_GLES30(JNIEnv* env);
+extern int register_com_google_android_gles_jni_GLImpl(JNIEnv* env);
 
 namespace android {
 int AndroidRuntime::registerNativeMethods(JNIEnv* env, const char* className,
@@ -28,5 +30,6 @@ int AndroidRuntime::registerNativeMethods(JNIEnv* env, const char* className,
 extern "C" int register_acl_gles(JNIEnv* env) {
   if (register_android_opengl_jni_GLES20(env) != 0) return JNI_ERR;
   if (register_android_opengl_jni_GLES30(env) != 0) return JNI_ERR;
+  if (register_com_google_android_gles_jni_GLImpl(env) != 0) return JNI_ERR;
   return 0;
 }

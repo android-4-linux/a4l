@@ -14,6 +14,11 @@ if have_jni
   runtime_sources += files('jvm_vm.cpp', 'framework_natives.cpp')
   runtime_deps += jni_dep
   runtime_deps += meson.get_compiler('cpp').find_library('dl', required : false)
+  # GLSurfaceView: jvm_vm.cpp registers the EGLImpl natives (gfx/egl10_jni.h) + drives
+  # gfx::GlDevice, so it needs the EGL headers (the symbols come from gfx_lib at final link).
+  if have_gl
+    runtime_deps += egl_dep
+  endif
 endif
 
 # Under the automotive profile the runtime drives the media bridge (Gate G1.5a),
