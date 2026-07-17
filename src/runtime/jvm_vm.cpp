@@ -2885,6 +2885,16 @@ class ArtVm final : public JniVm {
     log::i(kTag,
            "acl graphics: android.graphics natives registered on Android host Skia "
            "(Bitmap/Canvas/Paint)");
+    // AssetManager.openFd: the host/layoutlib libandroid_runtime stubs nativeOpenAssetFd/
+    // nativeOpenNonAssetFd ("Implement me"). Override them with acl's real impl (same libandroidfw
+    // this lib links) so openFd returns a real fd — libGDX Pixmap length()/AssetFileDescriptor,
+    // SoundPool/MediaPlayer AssetFileDescriptor sources, etc.
+    if (auto reg_fd = reinterpret_cast<jint (*)(JNIEnv*)>(::dlsym(h, "register_acl_asset_fd"))) {
+      if (reg_fd(env) == JNI_OK && !env->ExceptionCheck())
+        log::i(kTag, "acl asset: AssetManager.openFd natives registered (host layoutlib stub replaced)");
+      else
+        env->ExceptionClear();
+    }
     // Font seam: bind org.acl.internal.HostBootstrap.nTypefaceFromPath to the graphics lib's
     // acl_typeface_from_path (SkTypeface::MakeFromFile), so seedTypefaces can load distinct
     // system families (sans/serif/monospace) from real font files without the framework's
