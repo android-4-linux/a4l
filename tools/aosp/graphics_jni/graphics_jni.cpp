@@ -1566,11 +1566,56 @@ jlong ColorSpaceRgb_nativeGetNativeFinalizer(JNIEnv*, jclass) {
 // ── PathParser (android.util.PathParser$PathData) ───────────────────────────────
 // A PathData is just an SkPath parsed from an SVG-style path string. VectorDrawable
 // holds one per <path> (for morphing/animation); the render path is set separately
-// via VectorDrawable.nSetPathString. Morph interpolation isn't supported (returns
-// false → no path animation), which static drawables don't use.
+// via VectorDrawable.nSetPathString.
 struct AclPathData {
   SkPath path;
 };
+
+// Two paths can morph iff their verb sequences are identical — same verbs in the same order.
+// AOSP compares the parsed PathData verbs + point counts; for an SkPath the point count is fixed
+// by the verb, so matching verbs is the same test. AnimatorInflater.canMorph() gates inflation of
+// every animated button drawable (btn_check_material_anim etc.), so a wrong `false` here means no
+// CheckBox / Switch / RadioButton can inflate at all.
+bool skpath_can_morph(const SkPath& a, const SkPath& b) {
+  SkPath::Iter ia(a, /*forceClose=*/false), ib(b, /*forceClose=*/false);
+  SkPoint pa[4], pb[4];
+  for (;;) {
+    const SkPath::Verb va = ia.next(pa);
+    const SkPath::Verb vb = ib.next(pb);
+    if (va != vb) return false;
+    if (va == SkPath::kDone_Verb) return true;
+  }
+}
+
+// out = lerp(from, to, t), point by point. from/to must have matching verb structure (the caller
+// checked canMorph); if they somehow don't, bail so the animation freezes rather than draws garbage.
+bool skpath_interpolate(SkPath* out, const SkPath& from, const SkPath& to, float t) {
+  const auto lerp = [t](SkPoint a, SkPoint b) {
+    return SkPoint::Make(a.fX + (b.fX - a.fX) * t, a.fY + (b.fY - a.fY) * t);
+  };
+  SkPath::Iter fi(from, false), ti(to, false);
+  SkPoint fp[4], tp[4];
+  SkPath r;
+  for (;;) {
+    const SkPath::Verb fv = fi.next(fp);
+    const SkPath::Verb tv = ti.next(tp);
+    if (fv != tv) return false;
+    switch (fv) {
+      case SkPath::kMove_Verb: r.moveTo(lerp(fp[0], tp[0])); break;
+      case SkPath::kLine_Verb: r.lineTo(lerp(fp[1], tp[1])); break;
+      case SkPath::kQuad_Verb: r.quadTo(lerp(fp[1], tp[1]), lerp(fp[2], tp[2])); break;
+      case SkPath::kConic_Verb:
+        r.conicTo(lerp(fp[1], tp[1]), lerp(fp[2], tp[2]),
+                  fi.conicWeight() + (ti.conicWeight() - fi.conicWeight()) * t);
+        break;
+      case SkPath::kCubic_Verb:
+        r.cubicTo(lerp(fp[1], tp[1]), lerp(fp[2], tp[2]), lerp(fp[3], tp[3]));
+        break;
+      case SkPath::kClose_Verb: r.close(); break;
+      case SkPath::kDone_Verb: *out = r; return true;
+    }
+  }
+}
 jlong PathData_nCreateEmpty(JNIEnv*, jclass) {
   return reinterpret_cast<jlong>(new AclPathData());
 }
@@ -1602,8 +1647,20 @@ void PathData_nCreatePathFromData(JNIEnv*, jclass, jlong outPath, jlong pd) {
   auto* d = reinterpret_cast<AclPathData*>(pd);
   if (p != nullptr && d != nullptr) *p = d->path;
 }
-jboolean PathData_nInterpolate(JNIEnv*, jclass, jlong, jlong, jlong, jfloat) { return JNI_FALSE; }
-jboolean PathData_nCanMorph(JNIEnv*, jclass, jlong, jlong) { return JNI_FALSE; }
+// nInterpolatePathData(out, from, to, fraction): out = from*(1-fraction) + to*fraction.
+jboolean PathData_nInterpolate(JNIEnv*, jclass, jlong out, jlong from, jlong to, jfloat fraction) {
+  auto* o = reinterpret_cast<AclPathData*>(out);
+  auto* f = reinterpret_cast<AclPathData*>(from);
+  auto* t = reinterpret_cast<AclPathData*>(to);
+  if (o == nullptr || f == nullptr || t == nullptr) return JNI_FALSE;
+  return skpath_interpolate(&o->path, f->path, t->path, fraction) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean PathData_nCanMorph(JNIEnv*, jclass, jlong from, jlong to) {
+  auto* f = reinterpret_cast<AclPathData*>(from);
+  auto* t = reinterpret_cast<AclPathData*>(to);
+  if (f == nullptr || t == nullptr) return JNI_FALSE;
+  return skpath_can_morph(f->path, t->path) ? JNI_TRUE : JNI_FALSE;
+}
 void PathData_nFinalize(JNIEnv*, jclass, jlong pd) { delete reinterpret_cast<AclPathData*>(pd); }
 // nParseStringForPath(long skPath, String, int): parse an SVG string into an SkPath.
 void PathParser_nParseStringForPath(JNIEnv* env, jclass, jlong skPath, jstring str, jint /*len*/) {
@@ -2687,6 +2744,43 @@ const JNINativeMethod kAnimatedVectorDrawable[] = {
        return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
     {"nEnd", "(J)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) {})},
     {"nReset", "(J)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) {})},
+};
+
+// android.graphics.animation.NativeInterpolatorFactory: each returns a native Interpolator handle
+// used by the RenderThread AVD animator (VectorDrawableAnimatorRT). That animator is hwui-only and
+// acl stubs its whole native chain to no-ops (kAnimatedVectorDrawable above), so the handle is
+// handed to nAddAnimator and never dereferenced — it only has to be non-zero. Without these an AVD
+// with a path/animated interpolator (btn_radio_material_anim → RadioButton/Switch) throws
+// UnsatisfiedLinkError at inflation. One shared non-null address, so no per-call allocation or leak
+// (and it is a plain byte, never a VirtualRefBase, so a stray inc/decStrong can't delete it).
+jlong stub_interpolator() {
+  static const char sink = 0;
+  return reinterpret_cast<jlong>(&sink);
+}
+const JNINativeMethod kNativeInterpolatorFactory[] = {
+    {"createAccelerateDecelerateInterpolator", "()J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jlong { return stub_interpolator(); })},
+    {"createAccelerateInterpolator", "(F)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jfloat) -> jlong { return stub_interpolator(); })},
+    {"createAnticipateInterpolator", "(F)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jfloat) -> jlong { return stub_interpolator(); })},
+    {"createAnticipateOvershootInterpolator", "(F)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jfloat) -> jlong { return stub_interpolator(); })},
+    {"createBounceInterpolator", "()J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jlong { return stub_interpolator(); })},
+    {"createCycleInterpolator", "(F)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jfloat) -> jlong { return stub_interpolator(); })},
+    {"createDecelerateInterpolator", "(F)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jfloat) -> jlong { return stub_interpolator(); })},
+    {"createLinearInterpolator", "()J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jlong { return stub_interpolator(); })},
+    {"createOvershootInterpolator", "(F)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jfloat) -> jlong { return stub_interpolator(); })},
+    {"createPathInterpolator", "([F[F)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jfloatArray, jfloatArray) -> jlong {
+       return stub_interpolator(); })},
+    {"createLutInterpolator", "([F)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jfloatArray) -> jlong { return stub_interpolator(); })},
 };
 
 const JNINativeMethod kColorFilter[] = {
@@ -3855,6 +3949,8 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   // drawable/icon tinting (e.g. opendrummer's toolbar + vector drawables) goes through it.
   ok = reg(env, "android/graphics/PorterDuffColorFilter", kBlendModeColorFilter,
            n(kBlendModeColorFilter)) && ok;
+  ok = reg(env, "android/graphics/animation/NativeInterpolatorFactory",
+           kNativeInterpolatorFactory, n(kNativeInterpolatorFactory)) && ok;
   ok = reg(env, "android/graphics/drawable/AnimatedVectorDrawable", kAnimatedVectorDrawable,
            n(kAnimatedVectorDrawable)) && ok;
   ok = reg(env, "android/graphics/Matrix", kMatrix, n(kMatrix)) && ok;
