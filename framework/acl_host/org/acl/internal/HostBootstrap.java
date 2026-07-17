@@ -374,7 +374,72 @@ public final class HostBootstrap {
             ai.dataDir = ensure(dataRoot()).getAbsolutePath();
             ai.nativeLibraryDir = new java.io.File(cacheRoot(), "lib").getAbsolutePath();
             ai.flags = android.content.pm.ApplicationInfo.FLAG_HAS_CODE;
+            // The manifest's <application> <meta-data> as a Bundle (PackageManager.GET_META_DATA).
+            // Libraries read config from here — Expo Updates, Firebase, WorkManager — and call
+            // metaData.containsKey/getBoolean on it, so a NULL metaData is an NPE before the app's
+            // own code runs. Populate from AndroidManifest.xml; never leave it null.
+            ai.metaData = parseManifestMetaData();
             return ai;
+        }
+
+        // Parse the <application> <meta-data name=.. value|resource=..> entries into a Bundle. A
+        // meta-data value is typed (string/bool/int/float) or a resource id; put each under its
+        // real type so getBoolean/getInt/getString return what the app expects. Best-effort: on any
+        // parse failure return an empty (non-null) Bundle rather than null.
+        private android.os.Bundle parseManifestMetaData() {
+            android.os.Bundle b = new android.os.Bundle();
+            android.content.res.XmlResourceParser xml = null;
+            try {
+                xml = getResources().getAssets().openXmlResourceParser("AndroidManifest.xml");
+                boolean inApp = false;
+                for (int ev = xml.getEventType();
+                     ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
+                    if (ev == android.content.res.XmlResourceParser.START_TAG) {
+                        String tag = xml.getName();
+                        if ("application".equals(tag)) {
+                            inApp = true;
+                        } else if (inApp && "meta-data".equals(tag)) {
+                            putMetaData(b, xml);
+                        }
+                    } else if (ev == android.content.res.XmlResourceParser.END_TAG
+                            && "application".equals(xml.getName())) {
+                        inApp = false;
+                    }
+                }
+            } catch (Throwable t) {
+                System.err.println("acl HostBootstrap: meta-data parse failed (" + t + "); "
+                        + "using empty metaData");
+            } finally {
+                if (xml != null) xml.close();
+            }
+            return b;
+        }
+
+        private static void putMetaData(android.os.Bundle b, android.content.res.XmlResourceParser x) {
+            final String NS = "http://schemas.android.com/apk/res/android";
+            String name = x.getAttributeValue(NS, "name");
+            if (name == null) return;
+            // android:resource wins over android:value (the framework treats it as an int res id).
+            int resIdx = x.getAttributeResourceValue(NS, "resource", 0);
+            if (resIdx != 0) { b.putInt(name, resIdx); return; }
+            // android:value — the binary-XML type tells us how to read it. TypedValue types:
+            // INT_BOOLEAN=18, INT_DEC=16/INT_HEX=17, FLOAT=4; anything else -> string.
+            int vi = -1;
+            for (int i = 0; i < x.getAttributeCount(); i++) {
+                if ("value".equals(x.getAttributeName(i))) { vi = i; break; }
+            }
+            if (vi < 0) return;
+            int type = x.getAttributeValueType(vi);
+            if (type == android.util.TypedValue.TYPE_INT_BOOLEAN) {
+                b.putBoolean(name, x.getAttributeBooleanValue(vi, false));
+            } else if (type >= android.util.TypedValue.TYPE_FIRST_INT
+                    && type <= android.util.TypedValue.TYPE_LAST_INT) {
+                b.putInt(name, x.getAttributeIntValue(vi, 0));
+            } else if (type == android.util.TypedValue.TYPE_FLOAT) {
+                b.putFloat(name, x.getAttributeFloatValue(vi, 0f));
+            } else {
+                b.putString(name, x.getAttributeValue(vi));
+            }
         }
         // AppContext has a null base (super(null)), so Context methods not overridden here
         // would NPE. Device-protected (direct-boot) storage isn't modeled → plain storage.
