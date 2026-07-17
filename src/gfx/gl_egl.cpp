@@ -5,6 +5,10 @@
 // EGL/GLES2 headers, libdrm drm_fourcc.h. The wl_egl_window→EGLSurface and the
 // gbm→EGLSurface→gbm_bo→dma-buf shapes are the standard Mesa idioms (Weston/kmscube, MIT).
 // No GPL-3.0 sources.
+//
+// GlDevice/GlWindow are the abstract seam (gl_egl.h); this file holds the two self-contained
+// backend implementations. A new backend is a new pair of classes here + a branch in
+// GlDevice::Create — nothing else in the tree changes.
 
 #include "gfx/gl_egl.h"
 
@@ -32,8 +36,8 @@ namespace acl::gfx {
 namespace {
 constexpr const char* kTag = "acl.gfx.gl";
 
-// The gbm-backend buffer format. XRGB8888 (opaque) matches the presenter's default and
-// the compositor's advertised XRGB8888 modifiers; a fullscreen GL app is opaque.
+// The gbm-backend buffer format. XRGB8888 (opaque) matches the presenter's default and the
+// compositor's advertised XRGB8888 modifiers; a fullscreen GL app is opaque.
 constexpr std::uint32_t kGbmFormat = GBM_FORMAT_XRGB8888;
 
 std::string egl_err_str(EGLint e) {
@@ -54,50 +58,26 @@ std::string egl_err_str(EGLint e) {
   }
 }
 std::string with_egl(const std::string& what) { return what + " (" + egl_err_str(eglGetError()) + ")"; }
-}  // namespace
 
-// ── Device ──────────────────────────────────────────────────────────────────
-struct GlDevice::Impl {
-  GlBackend backend = GlBackend::Wayland;
-  // gbm backend only:
-  int drm_fd = -1;
-  gbm_device* gbm = nullptr;
-  // wayland backend only (borrowed, not owned):
-  struct wl_display* wl_dpy = nullptr;
-  // both:
-  EGLDisplay dpy = EGL_NO_DISPLAY;
-  EGLContext ctx = EGL_NO_CONTEXT;
-  EGLConfig cfg = nullptr;
-
-  ~Impl() {
-    if (dpy != EGL_NO_DISPLAY) {
-      eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-      if (ctx != EGL_NO_CONTEXT) eglDestroyContext(dpy, ctx);
-      eglTerminate(dpy);
-    }
-    if (gbm != nullptr) gbm_device_destroy(gbm);
-    if (drm_fd >= 0) ::close(drm_fd);
-  }
-};
-
-GlDevice::GlDevice(GlBackend backend) : impl_(std::make_unique<Impl>()), backend_(backend) {
-  impl_->backend = backend;
+EGLDisplay platform_display(EGLenum platform, void* native, std::string* err) {
+  auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+      eglGetProcAddress("eglGetPlatformDisplayEXT"));
+  EGLDisplay dpy = getPlatformDisplay != nullptr
+                       ? getPlatformDisplay(platform, native, nullptr)
+                       : eglGetDisplay(reinterpret_cast<EGLNativeDisplayType>(native));
+  if (dpy == EGL_NO_DISPLAY && err) *err = "eglGetPlatformDisplay returned EGL_NO_DISPLAY";
+  return dpy;
 }
-GlDevice::~GlDevice() = default;
-void* GlDevice::egl_display() const { return impl_->dpy; }
-void* GlDevice::egl_context() const { return impl_->ctx; }
-void* GlDevice::egl_config() const { return impl_->cfg; }
 
-namespace {
-// The EGL bring-up shared by both backends: choose a GLES window config, create a shared
-// context, and record GL_RENDERER. impl_->dpy must already be a valid, initialized
-// EGLDisplay. Returns "" on success, else the error string.
-std::string init_egl_context(GlDevice::Impl& d, std::string* renderer_out) {
+// Choose a GLES window config + create a shared context on an already-initialized display.
+// Shared by both backends. Returns "" on success (filling *ctx/*cfg/*renderer), else the error.
+std::string bring_up_context(EGLDisplay dpy, GlBackend backend, EGLContext* ctx_out,
+                             EGLConfig* cfg_out, std::string* renderer_out) {
   if (eglBindAPI(EGL_OPENGL_ES_API) != EGL_TRUE) return with_egl("eglBindAPI(ES) failed");
 
   // gbm requires ALPHA_SIZE 0 (opaque XRGB) and a native-visual match; wayland allows an
   // alpha channel (a subsurface may blend) and matches by attributes only.
-  const bool gbm = d.backend == GlBackend::Gbm;
+  const bool gbm = backend == GlBackend::Gbm;
   const EGLint cfg_attr[] = {
       EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
       EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
@@ -107,51 +87,306 @@ std::string init_egl_context(GlDevice::Impl& d, std::string* renderer_out) {
       EGL_NONE};
   EGLConfig configs[64];
   EGLint n = 0;
-  if (eglChooseConfig(d.dpy, cfg_attr, configs, 64, &n) != EGL_TRUE || n == 0)
+  if (eglChooseConfig(dpy, cfg_attr, configs, 64, &n) != EGL_TRUE || n == 0)
     return with_egl("eglChooseConfig found no GLES2 window config");
-  d.cfg = configs[0];
+  EGLConfig cfg = configs[0];
   if (gbm) {  // pick the config whose native visual id is our gbm/DRM fourcc
     for (EGLint i = 0; i < n; ++i) {
       EGLint vid = 0;
-      if (eglGetConfigAttrib(d.dpy, configs[i], EGL_NATIVE_VISUAL_ID, &vid) == EGL_TRUE &&
+      if (eglGetConfigAttrib(dpy, configs[i], EGL_NATIVE_VISUAL_ID, &vid) == EGL_TRUE &&
           static_cast<std::uint32_t>(vid) == kGbmFormat) {
-        d.cfg = configs[i];
+        cfg = configs[i];
         break;
       }
     }
   }
 
   // Prefer a GLES3 context (libGDX GL30; backward-compatible with GLES2), fall back to 2.
+  EGLContext ctx = EGL_NO_CONTEXT;
   for (EGLint ver : {3, 2}) {
     const EGLint ctx_attr[] = {EGL_CONTEXT_CLIENT_VERSION, ver, EGL_NONE};
-    d.ctx = eglCreateContext(d.dpy, d.cfg, EGL_NO_CONTEXT, ctx_attr);
-    if (d.ctx != EGL_NO_CONTEXT) break;
+    ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctx_attr);
+    if (ctx != EGL_NO_CONTEXT) break;
   }
-  if (d.ctx == EGL_NO_CONTEXT) return with_egl("eglCreateContext failed");
+  if (ctx == EGL_NO_CONTEXT) return with_egl("eglCreateContext failed");
 
-  // GL_RENDERER needs a current context; EGL_KHR_surfaceless_context lets us do it with
-  // no surface.
-  if (eglMakeCurrent(d.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, d.ctx) == EGL_TRUE) {
+  // GL_RENDERER needs a current context; EGL_KHR_surfaceless_context lets us do it surfaceless.
+  if (eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx) == EGL_TRUE) {
     const char* r = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
     if (renderer_out) *renderer_out = (r != nullptr) ? r : "(unknown)";
-    eglMakeCurrent(d.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
   }
+  *ctx_out = ctx;
+  *cfg_out = cfg;
   return "";
 }
-
-EGLDisplay platform_display(EGLenum platform, void* native, std::string* err) {
-  auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
-      eglGetProcAddress("eglGetPlatformDisplayEXT"));
-  EGLDisplay dpy = EGL_NO_DISPLAY;
-  if (getPlatformDisplay != nullptr) {
-    dpy = getPlatformDisplay(platform, native, nullptr);
-  } else {
-    dpy = eglGetDisplay(reinterpret_cast<EGLNativeDisplayType>(native));
-  }
-  if (dpy == EGL_NO_DISPLAY && err) *err = "eglGetPlatformDisplay returned EGL_NO_DISPLAY";
-  return dpy;
-}
 }  // namespace
+
+// ── GlWindow base ────────────────────────────────────────────────────────────
+bool GlWindow::make_current(std::string* error) {
+  if (eglMakeCurrent(static_cast<EGLDisplay>(dpy_), static_cast<EGLSurface>(egl_),
+                     static_cast<EGLSurface>(egl_), static_cast<EGLContext>(ctx_)) != EGL_TRUE) {
+    if (error) *error = with_egl("eglMakeCurrent(window) failed");
+    return false;
+  }
+  return true;
+}
+
+// ── Wayland backend ───────────────────────────────────────────────────────────
+namespace {
+class WaylandGlWindow final : public GlWindow {
+ public:
+  WaylandGlWindow(void* dpy, void* ctx, void* cfg)
+      : GlWindow(GlBackend::Wayland, dpy, ctx, cfg) {}
+  ~WaylandGlWindow() override {
+    if (egl_ != nullptr) eglDestroySurface(static_cast<EGLDisplay>(dpy_), static_cast<EGLSurface>(egl_));
+    if (egl_win_ != nullptr) wl_egl_window_destroy(egl_win_);
+  }
+
+  bool init(void* wl_surface, int w, int h, std::string* error) {
+    if (wl_surface == nullptr) { if (error) *error = "make_window(wayland): null wl_surface"; return false; }
+    wl_surf_ = static_cast<struct wl_surface*>(wl_surface);
+    egl_win_ = wl_egl_window_create(wl_surf_, w, h);
+    if (egl_win_ == nullptr) { if (error) *error = "wl_egl_window_create failed"; return false; }
+    EGLSurface s = eglCreateWindowSurface(static_cast<EGLDisplay>(dpy_), static_cast<EGLConfig>(cfg_),
+                                          reinterpret_cast<EGLNativeWindowType>(egl_win_), nullptr);
+    if (s == EGL_NO_SURFACE) { if (error) *error = with_egl("eglCreateWindowSurface(wl_egl_window) failed"); return false; }
+    egl_ = s;
+    width_ = w;
+    height_ = h;
+    return true;
+  }
+
+  bool swap(DmabufFrame* /*out*/, std::string* error) override {
+    // Mesa's Wayland WSI attaches/commits/throttles the wl_surface here — this IS the present.
+    if (eglSwapBuffers(static_cast<EGLDisplay>(dpy_), static_cast<EGLSurface>(egl_)) != EGL_TRUE) {
+      if (error) *error = with_egl("eglSwapBuffers failed");
+      return false;
+    }
+    return true;
+  }
+
+  bool resize(int w, int h, std::string* /*error*/) override {
+    if (w == width_ && h == height_) return true;
+    wl_egl_window_resize(egl_win_, w, h, 0, 0);  // Mesa reallocates on the next swap
+    width_ = w;
+    height_ = h;
+    return true;
+  }
+
+ private:
+  struct wl_egl_window* egl_win_ = nullptr;
+  struct wl_surface* wl_surf_ = nullptr;  // borrowed
+};
+
+class WaylandGlDevice final : public GlDevice {
+ public:
+  WaylandGlDevice() : GlDevice(GlBackend::Wayland) {}
+  ~WaylandGlDevice() override {
+    if (dpy_ != EGL_NO_DISPLAY && dpy_ != nullptr) {
+      eglMakeCurrent(static_cast<EGLDisplay>(dpy_), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+      if (ctx_ != nullptr) eglDestroyContext(static_cast<EGLDisplay>(dpy_), static_cast<EGLContext>(ctx_));
+      eglTerminate(static_cast<EGLDisplay>(dpy_));  // wl_display is borrowed — not disconnected
+    }
+  }
+
+  bool init(void* wl_display, std::string* error) {
+    if (wl_display == nullptr) { if (error) *error = "CreateWayland: null wl_display"; return false; }
+    std::string e;
+    EGLDisplay dpy = platform_display(EGL_PLATFORM_WAYLAND_KHR, wl_display, &e);
+    if (dpy == EGL_NO_DISPLAY) { if (error) *error = "wayland: " + e; return false; }
+    EGLint major = 0, minor = 0;
+    if (eglInitialize(dpy, &major, &minor) != EGL_TRUE) { if (error) *error = with_egl("eglInitialize(wayland) failed"); return false; }
+    dpy_ = dpy;
+    EGLContext ctx = EGL_NO_CONTEXT;
+    EGLConfig cfg = nullptr;
+    if (std::string ce = bring_up_context(dpy, GlBackend::Wayland, &ctx, &cfg, &renderer_); !ce.empty()) {
+      if (error) *error = ce;
+      return false;
+    }
+    ctx_ = ctx;
+    cfg_ = cfg;
+    log::i(kTag, "host GL device: {} (Wayland platform, EGL {}.{})", renderer_, major, minor);
+    return true;
+  }
+
+  std::unique_ptr<GlWindow> make_window(int width, int height, void* native_surface,
+                                        const std::vector<std::uint64_t>& /*modifiers*/,
+                                        std::string* error) override {
+    auto win = std::make_unique<WaylandGlWindow>(dpy_, ctx_, cfg_);
+    if (!win->init(native_surface, width, height, error)) return nullptr;
+    return win;
+  }
+};
+}  // namespace
+
+// ── Gbm backend ──────────────────────────────────────────────────────────────
+namespace {
+class GbmGlWindow final : public GlWindow {
+ public:
+  GbmGlWindow(void* dpy, void* ctx, void* cfg, gbm_device* gbm)
+      : GlWindow(GlBackend::Gbm, dpy, ctx, cfg), gbm_(gbm) {}
+  ~GbmGlWindow() override {
+    release_front();
+    if (egl_ != nullptr) eglDestroySurface(static_cast<EGLDisplay>(dpy_), static_cast<EGLSurface>(egl_));
+    if (surf_ != nullptr) gbm_surface_destroy(surf_);
+  }
+
+  bool init(int w, int h, const std::vector<std::uint64_t>& modifiers, std::string* error) {
+    if (!make_gbm_surface(w, h, modifiers)) { if (error) *error = "gbm_surface_create failed"; return false; }
+    EGLSurface s = eglCreateWindowSurface(static_cast<EGLDisplay>(dpy_), static_cast<EGLConfig>(cfg_),
+                                          reinterpret_cast<EGLNativeWindowType>(surf_), nullptr);
+    if (s == EGL_NO_SURFACE) { if (error) *error = with_egl("eglCreateWindowSurface(gbm) failed"); return false; }
+    egl_ = s;
+    width_ = w;
+    height_ = h;
+    return true;
+  }
+
+  bool swap(DmabufFrame* out, std::string* error) override {
+    auto set = [&](const std::string& m) { if (error) *error = m; return false; };
+    if (eglSwapBuffers(static_cast<EGLDisplay>(dpy_), static_cast<EGLSurface>(egl_)) != EGL_TRUE)
+      return set(with_egl("eglSwapBuffers failed"));
+
+    release_front();
+    gbm_bo* bo = gbm_surface_lock_front_buffer(surf_);
+    if (bo == nullptr) return set("gbm_surface_lock_front_buffer returned null");
+    locked_ = bo;
+    const int fd = gbm_bo_get_fd(bo);  // a fresh dup we own; closed on next swap/destroy
+    if (fd < 0) return set("gbm_bo_get_fd failed");
+    exported_fd_ = fd;
+
+    if (out != nullptr) {
+      *out = DmabufFrame{};
+      out->fd = fd;
+      out->width = gbm_bo_get_width(bo);
+      out->height = gbm_bo_get_height(bo);
+      out->drm_format = gbm_bo_get_format(bo);
+      out->modifier = gbm_bo_get_modifier(bo);
+      const int planes = gbm_bo_get_plane_count(bo);
+      out->plane_count = planes > 0 ? static_cast<std::uint32_t>(planes) : 1u;
+      if (out->plane_count > DmabufFrame::kMaxPlanes) out->plane_count = DmabufFrame::kMaxPlanes;
+      std::uint64_t total = 0;
+      for (std::uint32_t i = 0; i < out->plane_count; ++i) {
+        out->planes[i].stride = gbm_bo_get_stride_for_plane(bo, static_cast<int>(i));
+        out->planes[i].offset = gbm_bo_get_offset(bo, static_cast<int>(i));
+        const std::uint64_t end = out->planes[i].offset +
+                                  static_cast<std::uint64_t>(out->planes[i].stride) * out->height;
+        if (end > total) total = end;
+      }
+      out->mem_size = total;
+      out->modifier_tiled = out->modifier != DRM_FORMAT_MOD_LINEAR &&
+                            out->modifier != DRM_FORMAT_MOD_INVALID;
+      out->host_mapped = false;
+    }
+    return true;
+  }
+
+  bool resize(int w, int h, std::string* error) override {
+    if (w == width_ && h == height_) return true;
+    release_front();
+    if (egl_ != nullptr) { eglDestroySurface(static_cast<EGLDisplay>(dpy_), static_cast<EGLSurface>(egl_)); egl_ = nullptr; }
+    if (surf_ != nullptr) { gbm_surface_destroy(surf_); surf_ = nullptr; }
+    if (!make_gbm_surface(w, h, {})) { if (error) *error = "gbm_surface_create (resize) failed"; return false; }
+    EGLSurface s = eglCreateWindowSurface(static_cast<EGLDisplay>(dpy_), static_cast<EGLConfig>(cfg_),
+                                          reinterpret_cast<EGLNativeWindowType>(surf_), nullptr);
+    if (s == EGL_NO_SURFACE) { if (error) *error = with_egl("eglCreateWindowSurface(gbm resize) failed"); return false; }
+    egl_ = s;
+    width_ = w;
+    height_ = h;
+    return true;
+  }
+
+ private:
+  bool make_gbm_surface(int w, int h, const std::vector<std::uint64_t>& modifiers) {
+    const std::uint32_t flags = GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT;
+    if (!modifiers.empty()) {
+      surf_ = gbm_surface_create_with_modifiers2(gbm_, static_cast<std::uint32_t>(w),
+                                                 static_cast<std::uint32_t>(h), kGbmFormat,
+                                                 modifiers.data(), modifiers.size(), flags);
+    }
+    if (surf_ == nullptr) {  // no modifiers given, or none supported by the driver
+      surf_ = gbm_surface_create(gbm_, static_cast<std::uint32_t>(w),
+                                 static_cast<std::uint32_t>(h), kGbmFormat, flags);
+    }
+    return surf_ != nullptr;
+  }
+  void release_front() {
+    if (exported_fd_ >= 0) { ::close(exported_fd_); exported_fd_ = -1; }
+    if (locked_ != nullptr && surf_ != nullptr) { gbm_surface_release_buffer(surf_, locked_); locked_ = nullptr; }
+  }
+
+  gbm_device* gbm_ = nullptr;  // borrowed from the device
+  gbm_surface* surf_ = nullptr;
+  gbm_bo* locked_ = nullptr;   // front buffer currently held for the presenter
+  int exported_fd_ = -1;       // dup'd fd handed out in the last DmabufFrame (we own it)
+};
+
+class GbmGlDevice final : public GlDevice {
+ public:
+  GbmGlDevice() : GlDevice(GlBackend::Gbm) {}
+  ~GbmGlDevice() override {
+    if (dpy_ != EGL_NO_DISPLAY && dpy_ != nullptr) {
+      eglMakeCurrent(static_cast<EGLDisplay>(dpy_), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+      if (ctx_ != nullptr) eglDestroyContext(static_cast<EGLDisplay>(dpy_), static_cast<EGLContext>(ctx_));
+      eglTerminate(static_cast<EGLDisplay>(dpy_));
+    }
+    if (gbm_ != nullptr) gbm_device_destroy(gbm_);
+    if (drm_fd_ >= 0) ::close(drm_fd_);
+  }
+
+  bool init(std::string* error) {
+    const char* node = std::getenv("ACL_GL_RENDER_NODE");
+    if (node == nullptr || *node == '\0') node = "/dev/dri/renderD128";
+    drm_fd_ = ::open(node, O_RDWR | O_CLOEXEC);
+    if (drm_fd_ < 0) { if (error) *error = std::string("open ") + node + " failed: " + std::strerror(errno); return false; }
+    gbm_ = gbm_create_device(drm_fd_);
+    if (gbm_ == nullptr) { if (error) *error = "gbm_create_device failed on " + std::string(node); return false; }
+
+    std::string e;
+    EGLDisplay dpy = platform_display(EGL_PLATFORM_GBM_KHR, gbm_, &e);
+    if (dpy == EGL_NO_DISPLAY) { if (error) *error = "gbm: " + e; return false; }
+    EGLint major = 0, minor = 0;
+    if (eglInitialize(dpy, &major, &minor) != EGL_TRUE) { if (error) *error = with_egl("eglInitialize(gbm) failed"); return false; }
+    dpy_ = dpy;
+    EGLContext ctx = EGL_NO_CONTEXT;
+    EGLConfig cfg = nullptr;
+    if (std::string ce = bring_up_context(dpy, GlBackend::Gbm, &ctx, &cfg, &renderer_); !ce.empty()) {
+      if (error) *error = ce;
+      return false;
+    }
+    ctx_ = ctx;
+    cfg_ = cfg;
+    log::i(kTag, "host GL device: {} (gbm platform, EGL {}.{}, node {})", renderer_, major, minor, node);
+    return true;
+  }
+
+  std::unique_ptr<GlWindow> make_window(int width, int height, void* /*native_surface*/,
+                                        const std::vector<std::uint64_t>& modifiers,
+                                        std::string* error) override {
+    auto win = std::make_unique<GbmGlWindow>(dpy_, ctx_, cfg_, gbm_);
+    if (!win->init(width, height, modifiers, error)) return nullptr;
+    return win;
+  }
+
+ private:
+  int drm_fd_ = -1;
+  gbm_device* gbm_ = nullptr;
+};
+}  // namespace
+
+// ── Factories (the single backend-selection point) ──────────────────────────
+std::unique_ptr<GlDevice> GlDevice::CreateWayland(void* wl_display, std::string* error) {
+  auto dev = std::make_unique<WaylandGlDevice>();
+  if (!dev->init(wl_display, error)) return nullptr;
+  return dev;
+}
+
+std::unique_ptr<GlDevice> GlDevice::CreateGbm(std::string* error) {
+  auto dev = std::make_unique<GbmGlDevice>();
+  if (!dev->init(error)) return nullptr;
+  return dev;
+}
 
 std::unique_ptr<GlDevice> GlDevice::Create(void* wl_display, std::string* error) {
   // ACL_GL_BACKEND overrides the wl_display-based default (e.g. force gbm/KMS under a
@@ -160,210 +395,7 @@ std::unique_ptr<GlDevice> GlDevice::Create(void* wl_display, std::string* error)
   const bool want_gbm = (forced != nullptr && std::strcmp(forced, "gbm") == 0) ||
                         (wl_display == nullptr &&
                          !(forced != nullptr && std::strcmp(forced, "wayland") == 0));
-  if (want_gbm) return CreateGbm(error);
-  return CreateWayland(wl_display, error);
-}
-
-std::unique_ptr<GlDevice> GlDevice::CreateWayland(void* wl_display, std::string* error) {
-  auto set = [&](const std::string& m) { if (error) *error = m; return nullptr; };
-  if (wl_display == nullptr) return set("CreateWayland: null wl_display");
-
-  auto dev = std::unique_ptr<GlDevice>(new GlDevice(GlBackend::Wayland));
-  Impl& d = *dev->impl_;
-  d.wl_dpy = static_cast<struct wl_display*>(wl_display);
-
-  std::string e;
-  d.dpy = platform_display(EGL_PLATFORM_WAYLAND_KHR, wl_display, &e);
-  if (d.dpy == EGL_NO_DISPLAY) return set("wayland: " + e);
-  EGLint major = 0, minor = 0;
-  if (eglInitialize(d.dpy, &major, &minor) != EGL_TRUE) return set(with_egl("eglInitialize(wayland) failed"));
-  if (std::string ce = init_egl_context(d, &dev->renderer_); !ce.empty()) return set(ce);
-  log::i(kTag, "host GL device: {} (Wayland platform, EGL {}.{})", dev->renderer_, major, minor);
-  return dev;
-}
-
-std::unique_ptr<GlDevice> GlDevice::CreateGbm(std::string* error) {
-  auto set = [&](const std::string& m) { if (error) *error = m; return nullptr; };
-
-  const char* node = std::getenv("ACL_GL_RENDER_NODE");
-  if (node == nullptr || *node == '\0') node = "/dev/dri/renderD128";
-
-  auto dev = std::unique_ptr<GlDevice>(new GlDevice(GlBackend::Gbm));
-  Impl& d = *dev->impl_;
-
-  d.drm_fd = ::open(node, O_RDWR | O_CLOEXEC);
-  if (d.drm_fd < 0) return set(std::string("open ") + node + " failed: " + std::strerror(errno));
-  d.gbm = gbm_create_device(d.drm_fd);
-  if (d.gbm == nullptr) return set("gbm_create_device failed on " + std::string(node));
-
-  std::string e;
-  d.dpy = platform_display(EGL_PLATFORM_GBM_KHR, d.gbm, &e);
-  if (d.dpy == EGL_NO_DISPLAY) return set("gbm: " + e);
-  EGLint major = 0, minor = 0;
-  if (eglInitialize(d.dpy, &major, &minor) != EGL_TRUE) return set(with_egl("eglInitialize(gbm) failed"));
-  if (std::string ce = init_egl_context(d, &dev->renderer_); !ce.empty()) return set(ce);
-  log::i(kTag, "host GL device: {} (gbm platform, EGL {}.{}, node {})", dev->renderer_, major, minor, node);
-  return dev;
-}
-
-// ── Window ──────────────────────────────────────────────────────────────────
-struct GlWindow::Impl {
-  GlBackend backend = GlBackend::Wayland;
-  // Handles cached from the owning device at make_window time, so the window never
-  // touches GlDevice's private state (and can outlive nothing it doesn't own).
-  EGLDisplay dpy = EGL_NO_DISPLAY;
-  EGLContext ctx = EGL_NO_CONTEXT;
-  EGLConfig cfg = nullptr;
-  gbm_device* gbm = nullptr;   // gbm backend only
-  EGLSurface egl = EGL_NO_SURFACE;
-  // wayland backend:
-  struct wl_egl_window* egl_win = nullptr;
-  struct wl_surface* wl_surf = nullptr;  // borrowed
-  // gbm backend:
-  gbm_surface* surf = nullptr;
-  gbm_bo* locked = nullptr;   // front buffer currently held for the presenter
-  int exported_fd = -1;       // dup'd fd handed out in the last DmabufFrame (we own it)
-
-  void release_front() {  // gbm only
-    if (exported_fd >= 0) { ::close(exported_fd); exported_fd = -1; }
-    if (locked != nullptr && surf != nullptr) { gbm_surface_release_buffer(surf, locked); locked = nullptr; }
-  }
-  ~Impl() {
-    release_front();
-    if (egl != EGL_NO_SURFACE && dpy != EGL_NO_DISPLAY) eglDestroySurface(dpy, egl);
-    if (egl_win != nullptr) wl_egl_window_destroy(egl_win);
-    if (surf != nullptr) gbm_surface_destroy(surf);
-  }
-};
-
-GlWindow::GlWindow(GlBackend backend, GlDevice* /*dev*/)
-    : impl_(std::make_unique<Impl>()), backend_(backend) {
-  impl_->backend = backend;
-}
-GlWindow::~GlWindow() = default;
-void* GlWindow::egl_surface() const { return impl_->egl; }
-
-std::unique_ptr<GlWindow> GlDevice::make_window(int width, int height, void* native_surface,
-                                                const std::vector<std::uint64_t>& modifiers,
-                                                std::string* error) {
-  auto set = [&](const std::string& m) { if (error) *error = m; return nullptr; };
-  Impl& d = *impl_;
-
-  auto win = std::unique_ptr<GlWindow>(new GlWindow(backend_, this));
-  win->width_ = width;
-  win->height_ = height;
-  GlWindow::Impl& w = *win->impl_;
-  w.dpy = d.dpy;
-  w.ctx = d.ctx;
-  w.cfg = d.cfg;
-  w.gbm = d.gbm;
-
-  if (backend_ == GlBackend::Wayland) {
-    if (native_surface == nullptr) return set("make_window(wayland): null wl_surface");
-    w.wl_surf = static_cast<struct wl_surface*>(native_surface);
-    w.egl_win = wl_egl_window_create(w.wl_surf, width, height);
-    if (w.egl_win == nullptr) return set("wl_egl_window_create failed");
-    w.egl = eglCreateWindowSurface(d.dpy, d.cfg, reinterpret_cast<EGLNativeWindowType>(w.egl_win), nullptr);
-    if (w.egl == EGL_NO_SURFACE) return set(with_egl("eglCreateWindowSurface(wl_egl_window) failed"));
-    return win;
-  }
-
-  // gbm backend
-  const std::uint32_t flags = GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT;
-  gbm_surface* s = nullptr;
-  if (!modifiers.empty()) {
-    s = gbm_surface_create_with_modifiers2(d.gbm, static_cast<std::uint32_t>(width),
-                                           static_cast<std::uint32_t>(height), kGbmFormat,
-                                           modifiers.data(), modifiers.size(), flags);
-  }
-  if (s == nullptr) {  // no modifiers given, or none supported by the driver
-    s = gbm_surface_create(d.gbm, static_cast<std::uint32_t>(width),
-                           static_cast<std::uint32_t>(height), kGbmFormat, flags);
-  }
-  if (s == nullptr) return set("gbm_surface_create failed");
-  w.surf = s;
-  w.egl = eglCreateWindowSurface(d.dpy, d.cfg, reinterpret_cast<EGLNativeWindowType>(s), nullptr);
-  if (w.egl == EGL_NO_SURFACE) return set(with_egl("eglCreateWindowSurface(gbm) failed"));
-  return win;
-}
-
-bool GlWindow::make_current(std::string* error) {
-  Impl& w = *impl_;
-  if (eglMakeCurrent(w.dpy, w.egl, w.egl, w.ctx) != EGL_TRUE) {
-    if (error) *error = with_egl("eglMakeCurrent(window) failed");
-    return false;
-  }
-  return true;
-}
-
-bool GlWindow::resize(int width, int height, std::string* error) {
-  if (width == width_ && height == height_) return true;
-  Impl& w = *impl_;
-  if (backend_ == GlBackend::Wayland) {
-    // wl_egl_window_resize is cheap; Mesa reallocates buffers on the next swap.
-    wl_egl_window_resize(w.egl_win, width, height, 0, 0);
-    width_ = width;
-    height_ = height;
-    return true;
-  }
-  // gbm: tear down the EGLSurface + gbm_surface and recreate at the new size.
-  w.release_front();
-  if (w.egl != EGL_NO_SURFACE) { eglDestroySurface(w.dpy, w.egl); w.egl = EGL_NO_SURFACE; }
-  if (w.surf != nullptr) { gbm_surface_destroy(w.surf); w.surf = nullptr; }
-  gbm_surface* s = gbm_surface_create(w.gbm, static_cast<std::uint32_t>(width),
-                                      static_cast<std::uint32_t>(height), kGbmFormat,
-                                      GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT);
-  if (s == nullptr) { if (error) *error = "gbm_surface_create (resize) failed"; return false; }
-  w.surf = s;
-  w.egl = eglCreateWindowSurface(w.dpy, w.cfg, reinterpret_cast<EGLNativeWindowType>(s), nullptr);
-  if (w.egl == EGL_NO_SURFACE) { if (error) *error = with_egl("eglCreateWindowSurface(gbm resize) failed"); return false; }
-  width_ = width;
-  height_ = height;
-  return true;
-}
-
-bool GlWindow::swap(DmabufFrame* out, std::string* error) {
-  Impl& w = *impl_;
-  auto set = [&](const std::string& m) { if (error) *error = m; return false; };
-
-  if (eglSwapBuffers(w.dpy, w.egl) != EGL_TRUE) return set(with_egl("eglSwapBuffers failed"));
-
-  if (backend_ == GlBackend::Wayland) return true;  // Mesa committed the (sub)surface
-
-  // gbm: lock the newly-swapped front buffer and describe its dma-buf for acl's presenter.
-  impl_->release_front();
-  gbm_bo* bo = gbm_surface_lock_front_buffer(impl_->surf);
-  if (bo == nullptr) return set("gbm_surface_lock_front_buffer returned null");
-  impl_->locked = bo;
-
-  const int fd = gbm_bo_get_fd(bo);  // a fresh dup we own; closed on next swap/destroy
-  if (fd < 0) return set("gbm_bo_get_fd failed");
-  impl_->exported_fd = fd;
-
-  if (out != nullptr) {
-    *out = DmabufFrame{};
-    out->fd = fd;
-    out->width = gbm_bo_get_width(bo);
-    out->height = gbm_bo_get_height(bo);
-    out->drm_format = gbm_bo_get_format(bo);
-    out->modifier = gbm_bo_get_modifier(bo);
-    const int planes = gbm_bo_get_plane_count(bo);
-    out->plane_count = planes > 0 ? static_cast<std::uint32_t>(planes) : 1u;
-    if (out->plane_count > DmabufFrame::kMaxPlanes) out->plane_count = DmabufFrame::kMaxPlanes;
-    std::uint64_t total = 0;
-    for (std::uint32_t i = 0; i < out->plane_count; ++i) {
-      out->planes[i].stride = gbm_bo_get_stride_for_plane(bo, static_cast<int>(i));
-      out->planes[i].offset = gbm_bo_get_offset(bo, static_cast<int>(i));
-      const std::uint64_t end = out->planes[i].offset +
-                                static_cast<std::uint64_t>(out->planes[i].stride) * out->height;
-      if (end > total) total = end;
-    }
-    out->mem_size = total;
-    out->modifier_tiled = out->modifier != DRM_FORMAT_MOD_LINEAR &&
-                          out->modifier != DRM_FORMAT_MOD_INVALID;
-    out->host_mapped = false;
-  }
-  return true;
+  return want_gbm ? CreateGbm(error) : CreateWayland(wl_display, error);
 }
 
 }  // namespace acl::gfx
