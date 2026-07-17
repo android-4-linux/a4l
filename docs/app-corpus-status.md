@@ -105,8 +105,11 @@ rather than the Activity's View-tree draw. acl does not back this: `SurfaceContr
 natives are stubbed and `android.view.Surface.nativeLockCanvas` is absent, so such an app's draws go
 nowhere and its SurfaceView region shows through as a hole. The design is a `SurfaceView` →
 `wl_subsurface` presentation path composited with the View tree (planned in `src/wm/meson.build` /
-`plan.md` A02, not built). Implementing it needs a real SurfaceView test app, which the current
-corpus does not include.
+`plan.md` A02, not built). The corpus now **does** exercise it: the two libGDX games (`app.halma`,
+`ardash.doodledudette`, once past the `libstdc++.so` wall) drive a `GLSurfaceView` and die
+initializing the legacy `com.google.android.gles_jni.EGLImpl` bindings — so the concrete first
+target is a GL-backed SurfaceView (an EGL/GLES context rendering into the subsurface), which is more
+than the plain-canvas SurfaceView path.
 - **`app.fedilab.openmaps`** — fails inflating `android.webkit.WebView`:
   `InflateException ... Error inflating class android.webkit.WebView`. The app is a WebView shell
   (OpenStreetMap in a web view), and acl has no `WebView` implementation — that is an embedded
@@ -151,16 +154,25 @@ classified by whether the presented frame has non-black content). Roughly half r
   has not drawn yet).
 - **Present a black frame** (custom-View content not showing, as with S.N.A.K.E): `app.flicky`.
 - **No frame, with a specific cause**:
-  - `app.halma`, `ardash.doodledudette` — `dlopen failed: library "libstdc++.so" not found`. That is
-    the **legacy NDK C++ runtime** (gnustl-era), which AOSP no longer builds here (modern apps link
-    `libc++_shared.so`, which acl stages). Staging a `libstdc++.so` would need one from an old NDK.
+  - `app.halma`, `ardash.doodledudette` — both **libGDX** games. The old `libstdc++.so` DT_NEEDED
+    wall is **gone**: `tools/stage-bionic-runtime.sh` now stages a real bionic `libstdc++.so`
+    (best-effort from an NDK sysroot — the gnustl-era C++ ABI stub that AOSP no longer builds; set
+    `ACL_NDK`/`ACL_NDK_LIBSTDCXX` if it is not auto-found), and `libgdx.so` loads through the bionic
+    bridge. They now hit the **next** wall, which is the real one: libGDX renders through
+    `GLSurfaceView` and initializes the legacy `com.google.android.gles_jni.EGLImpl` (EGL10) Java
+    bindings, whose `_nativeClassInit()` native acl does not provide —
+    `UnsatisfiedLinkError` in `AndroidGraphics.createGLSurfaceView` → `onCreate` fails. That is the
+    **SurfaceView + GLES** path (below), not a single missing native: it needs a GL-backed
+    `SurfaceView` and the `gles_jni` EGL/GLES JNI, a large component.
   - `at.manuelbichler.octalsuntime` — NPE (a null String in the Clock activity's setup).
   - `app.smarzaro.foss4g2024.schedule` — `Resources$NotFoundException` for a layout resource id.
   - `app.crossword.yourealwaysbe.forkyzscanner` — launcher activity construction failed.
 
-Recurring, actionable gaps this surfaced: **`libstdc++.so`** (two apps) and single missing natives
-like **`Bitmap.nativeHasMipMap`** (fixed) — the latter is the cheap kind, one function unblocks an
-app. The black-frame apps share the S.N.A.K.E question (custom-View content not reaching the screen).
+Recurring, actionable gaps this surfaced: **`libstdc++.so`** (two apps — now staged, see above) and
+single missing natives like **`Bitmap.nativeHasMipMap`** (fixed) — the latter is the cheap kind, one
+function unblocks an app. With `libstdc++.so` staged, the two libGDX apps fold into the larger
+**GLSurfaceView / `gles_jni.EGLImpl`** gap (the SurfaceView + GLES path). The black-frame apps share
+the S.N.A.K.E question (custom-View content not reaching the screen).
 
 ## Notes
 

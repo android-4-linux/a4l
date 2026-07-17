@@ -50,6 +50,23 @@ BLIBZ="$INT/external/zlib/libz/android_x86_64_shared/libz.so"
 CRTBEGIN="$INT/bionic/libc/crtbegin_dynamic/android_x86_64/crtbegin_dynamic.o"
 CRTEND="$INT/bionic/libc/crtend_android/android_x86_64/obj/bionic/libc/arch-common/bionic/crtend.o"
 
+# libstdc++.so is NOT in the AOSP tree (AOSP builds libc++_shared.so; the legacy gnustl-era
+# libstdc++.so lives only in the NDK sysroot). A few old-toolchain apps (libGDX games) still
+# DT_NEEDED it purely for the 5 C++ ABI symbols (__cxa_guard_*/__cxa_pure_virtual/std::nothrow).
+# Best-effort: take the real bionic libstdc++.so from an NDK if one is present, else skip.
+# ACL_NDK_LIBSTDCXX overrides the path outright; ACL_NDK points at an NDK root to search.
+BLIBSTDCXX="${ACL_NDK_LIBSTDCXX:-}"
+if [ -z "$BLIBSTDCXX" ]; then
+  for ndk in "${ACL_NDK:-}" "$HOME"/Android/Sdk/ndk/* /opt/android-ndk-*; do
+    [ -n "$ndk" ] && [ -d "$ndk" ] || continue
+    libdir="$ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android"
+    [ -d "$libdir" ] || continue
+    # any api level ships the same 5 C++ ABI symbols; take the lowest (widest compat)
+    cand="$(ls -1v "$libdir"/*/libstdc++.so 2>/dev/null | head -1)"
+    [ -n "$cand" ] && { BLIBSTDCXX="$cand"; break; }
+  done
+fi
+
 for f in "$CLANG" "$LINKER" "$BLIBC" "$BLIBM" "$BLIBDL" "$BLIBLOG" "$LDANDROID" "$BLIBCXX" \
          "$BLIBZ" "$CRTBEGIN" "$CRTEND"; do
   [ -e "$f" ] || { echo "MISSING: $f  (build bionic in \$AOSP, or set AOSP=)" >&2; exit 1; }
@@ -70,6 +87,12 @@ cp -f "$BLIBLOG" "$SYS/liblog.so"
 cp -f "$LDANDROID" "$SYS/ld-android.so"
 cp -f "$BLIBCXX" "$SYS/libc++.so"
 cp -f "$BLIBZ" "$SYS/libz.so"    # real bionic zlib; app libs (crashlytics/webp) NEED it
+if [ -n "$BLIBSTDCXX" ] && [ -e "$BLIBSTDCXX" ]; then
+  cp -f "$BLIBSTDCXX" "$SYS/libstdc++.so"   # NDK gnustl-era C++ ABI stub; old libGDX games NEED it
+  say "   libstdc++.so <- $BLIBSTDCXX"
+else
+  say "   libstdc++.so: no NDK found (set ACL_NDK or ACL_NDK_LIBSTDCXX) — libGDX apps stay blocked"
+fi
 
 # 2b. acl's libandroid.so. AOSP's is a device library (Binder, SurfaceFlinger, logd); on a host the
 # NDK API belongs to acl, so this one is ours — compiled for bionic here rather than by meson,
