@@ -7,7 +7,7 @@
 # Stage the bionic runtime `acl` needs to load an app's bionic-ABI lib/<abi>/*.so in-process:
 #
 #   <outdir>/linker64        the bionic dynamic linker (bootstrapped by src/ndk/bionic_runtime)
-#   <outdir>/bionic/*.so     soname-named bionic libs (libc/libm/libdl/liblog/libc++/ld-android)
+#   <outdir>/bionic/*.so     soname-named bionic libs (libc/libm/libdl/liblog/libc++/libz/ld-android)
 #                            — the linker resolves an app lib's NEEDED from here
 #   <outdir>/stub            a minimal bionic PIE exe handed to the linker as the "main
 #                            executable" so linker_main() completes (its entry never runs)
@@ -46,11 +46,12 @@ BLIBDL="$INT/bionic/libdl/libdl/android_x86_64_shared/libdl.so"
 BLIBLOG="$INT/system/logging/liblog/liblog/android_x86_64_shared/liblog.so"
 LDANDROID="$INT/bionic/linker/ld-android/android_x86_64_shared/ld-android.so"
 BLIBCXX="$INT/external/libcxx/libc++/android_x86_64_shared/libc++.so"
+BLIBZ="$INT/external/zlib/libz/android_x86_64_shared/libz.so"
 CRTBEGIN="$INT/bionic/libc/crtbegin_dynamic/android_x86_64/crtbegin_dynamic.o"
 CRTEND="$INT/bionic/libc/crtend_android/android_x86_64/obj/bionic/libc/arch-common/bionic/crtend.o"
 
 for f in "$CLANG" "$LINKER" "$BLIBC" "$BLIBM" "$BLIBDL" "$BLIBLOG" "$LDANDROID" "$BLIBCXX" \
-         "$CRTBEGIN" "$CRTEND"; do
+         "$BLIBZ" "$CRTBEGIN" "$CRTEND"; do
   [ -e "$f" ] || { echo "MISSING: $f  (build bionic in \$AOSP, or set AOSP=)" >&2; exit 1; }
 done
 
@@ -68,6 +69,7 @@ cp -f "$BLIBDL" "$SYS/libdl.so"
 cp -f "$BLIBLOG" "$SYS/liblog.so"
 cp -f "$LDANDROID" "$SYS/ld-android.so"
 cp -f "$BLIBCXX" "$SYS/libc++.so"
+cp -f "$BLIBZ" "$SYS/libz.so"    # real bionic zlib; app libs (crashlytics/webp) NEED it
 
 # 2b. acl's libandroid.so. AOSP's is a device library (Binder, SurfaceFlinger, logd); on a host the
 # NDK API belongs to acl, so this one is ours — compiled for bionic here rather than by meson,

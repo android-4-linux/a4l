@@ -127,6 +127,24 @@ jclass find_class_optional(JNIEnv* env, const char* name) {
 #if ACL_HAVE_JNI
 acl::ndk::BionicRuntime* g_ndk_rt = nullptr;
 JavaVM* g_ndk_vm = nullptr;
+acl::ndk::BionicConfig g_ndk_cfg;   // validated at boot; the linker bootstraps lazily from it
+bool g_ndk_have_cfg = false;
+
+// Bootstrap the bionic linker on FIRST use, not at ART boot. Bootstrapping has process-global side
+// effects — it briefly maps bionic libc and touches signal state — and doing it eagerly during the
+// native-floor setup, before load_system_resources, made the real libandroidfw fail to open
+// framework-res.apk (every app then lost its resources). Deferring to the first actual bionic .so
+// runs it after the framework is up, on the app thread that needs it. Returns g_ndk_rt or nullptr.
+acl::ndk::BionicRuntime* ensure_ndk_rt() {
+  if (g_ndk_rt != nullptr) return g_ndk_rt;
+  if (!g_ndk_have_cfg) return nullptr;
+  std::string why;
+  acl::ndk::BionicRuntime* rt = acl::ndk::BionicRuntime::instance(g_ndk_cfg, &why);
+  if (rt == nullptr) { log::w(kTag, "NDK bionic loader: bootstrap failed: {}", why); return nullptr; }
+  g_ndk_rt = rt;
+  log::i(kTag, "NDK bionic linker bootstrapped (first native lib)");
+  return rt;
+}
 
 // Override of java.lang.Runtime.nativeLoad(String absPath, ClassLoader, Class caller): returns null
 // on success, an error String otherwise (the libcore contract). `caller` is the class whose
@@ -140,8 +158,10 @@ jstring JNICALL ndk_native_load(JNIEnv* env, jclass, jstring jpath, jobject load
   if (path.empty()) return err("acl: empty library path");
 
   if (acl::ndk::is_bionic_elf(path.c_str())) {
+    acl::ndk::BionicRuntime* rt = ensure_ndk_rt();  // lazy bootstrap (see ensure_ndk_rt)
+    if (rt == nullptr) return err("acl-bionic: loader unavailable (bootstrap failed)");
     std::string why;
-    void* h = g_ndk_rt->load_library(path.c_str(), g_ndk_vm, env, &why);
+    void* h = rt->load_library(path.c_str(), g_ndk_vm, env, &why);
     if (h == nullptr) return err("acl-bionic: " + why);
     log::i(kTag, "loaded bionic native lib {}", path);
     // JNI_OnLoad's RegisterNatives (driven by load_library) binds what the lib chose to register.
@@ -149,14 +169,26 @@ jstring JNICALL ndk_native_load(JNIEnv* env, jclass, jstring jpath, jobject load
     // the lib lives in the bionic linker's namespace, so ART has no handle for it — so bind them
     // here, eagerly, for the class that asked for the library. See ndk/native_bind.h.
     if (jclass k = acl::ndk::loading_class(env, caller, loader)) {
-      const int n = acl::ndk::bind_class_natives(*g_ndk_rt, h, env, k);
+      const int n = acl::ndk::bind_class_natives(*rt, h, env, k);
       if (n > 0) log::i(kTag, "bound {} native(s) by name for the loading class", n);
       env->DeleteLocalRef(k);
     }
     return nullptr;
   }
-  // glibc supplemental lib: dlopen + JNI_OnLoad (acl's use RegisterNatives, so no name-based lookup).
+  // Not a bionic app lib: a glibc/system lib (acl's own soundpool, or an ART system lib like
+  // conscrypt's libjavacrypto that a boot class loads). ART resolves a bare library NAME within its
+  // own namespaces' search paths; our override replaced that, so a plain dlopen of the bare name
+  // fails ("cannot open shared object file"), which silently broke conscrypt — and thus APK
+  // signature verification and framework-res — for every real app. Replicate the one search we
+  // need: if the bare name isn't on the glibc path, look in ART's own lib dir ($ACL_ART_HOME/lib64),
+  // where those system libs live (their $ORIGIN-relative NEEDED then resolve from the same dir).
   void* h = ::dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+  if (h == nullptr && path.find('/') == std::string::npos) {
+    if (const char* home = std::getenv("ACL_ART_HOME"); home != nullptr && *home != '\0') {
+      const std::string full = std::string(home) + "/lib64/" + path;
+      h = ::dlopen(full.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    }
+  }
   if (h == nullptr) { const char* e = ::dlerror(); return err(e ? e : "dlopen failed"); }
   if (void* onload = ::dlsym(h, "JNI_OnLoad"))
     reinterpret_cast<jint (*)(JavaVM*, void*)>(onload)(g_ndk_vm, nullptr);
@@ -2599,12 +2631,14 @@ class ArtVm final : public JniVm {
 #if ACL_HAVE_JNI
     const char* linker = std::getenv("ACL_BIONIC_LINKER");
     if (linker == nullptr || *linker == '\0') return;
-    // from_env() picks up ACL_BIONIC_APP_LIBS (the app lib dir main.cpp exports) too.
+    // Validate the config now (report a bad env at boot), but DON'T bootstrap the bionic linker
+    // yet — bootstrapping is deferred to the first bionic .so (ensure_ndk_rt), so it happens after
+    // load_system_resources rather than corrupting it. from_env() picks up ACL_BIONIC_APP_LIBS too.
     acl::ndk::BionicConfig cfg = acl::ndk::BionicConfig::from_env();
     std::string why;
-    acl::ndk::BionicRuntime* rt = acl::ndk::BionicRuntime::instance(cfg, &why);
-    if (rt == nullptr) { log::w(kTag, "NDK bionic loader unavailable: {}", why); return; }
-    g_ndk_rt = rt;
+    if (!cfg.valid(&why)) { log::w(kTag, "NDK bionic loader unavailable: {}", why); return; }
+    g_ndk_cfg = cfg;
+    g_ndk_have_cfg = true;
     env->GetJavaVM(&g_ndk_vm);
     if (jclass c = env->FindClass("java/lang/Runtime")) {
       JNINativeMethod m[] = {
@@ -2614,7 +2648,7 @@ class ArtVm final : public JniVm {
            reinterpret_cast<void*>(&ndk_native_load)},
       };
       if (env->RegisterNatives(c, m, 1) != JNI_OK) env->ExceptionClear();
-      else log::i(kTag, "NDK bionic loader active (Runtime.nativeLoad routed)");
+      else log::i(kTag, "NDK bionic loader armed (Runtime.nativeLoad routed; linker bootstraps lazily)");
       env->DeleteLocalRef(c);
     } else {
       env->ExceptionClear();

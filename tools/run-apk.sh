@@ -93,10 +93,26 @@ $D8 --min-api 24 --output "$W/appdex"  $APPCLS  2>&1 | tail -1
 # aclshims.jar joins the BOOT classpath so framework-minus-apex resolves the android.* shims.
 BOOT="$BOOT:$W/aclshims.jar"
 
+# The bionic bridge (ADR-5): an app's lib/<abi>/*.so are bionic-ABI, so they load only through
+# acl's in-process bionic linker. Stage the runtime (linker + sysroot incl. acl's libandroid.so +
+# libz + the PIE stub) and point ACL_BIONIC_* at it. acl's Runtime.nativeLoad hook is gated on
+# ACL_BIONIC_LINKER, so without this a native app (React Native, Flutter, …) fails on the first
+# System.loadLibrary. Best-effort: if a bionic runtime can't be staged (no built bionic in $AOSP),
+# skip it — Java-only apps still run. See tools/stage-bionic-runtime.sh + docs/ndk-scope.md.
+BIONIC_ARGS=()
+if "$ACLROOT/tools/stage-bionic-runtime.sh" "$W/bionic-runtime" >/dev/null 2>&1; then
+  BIONIC_ARGS=(ACL_BIONIC_LINKER="$W/bionic-runtime/linker64"
+               ACL_BIONIC_SYSROOT="$W/bionic-runtime/bionic"
+               ACL_BIONIC_STUB="$W/bionic-runtime/stub")
+else
+  printf 'run-apk: no bionic runtime staged (no built bionic in $AOSP?); native libs will not load\n' >&2
+fi
+
 TIMEOUT="${ACL_RUN_TIMEOUT:-60}"
 RUNNER=(env
   ACL_ART_BOOTCLASSPATH="$BOOT"
   ACL_ART_NATIVE=1
+  "${BIONIC_ARGS[@]}"
   ACL_ART_HOST_BOOTSTRAP="$W/hostboot.jar")
 # Where System.loadLibrary finds acl's supplemental native libs (libsoundpool.so etc.). ART's
 # boot-classloader loader resolves via both java.library.path (ACL_ART_LIBPATH) and the dynamic

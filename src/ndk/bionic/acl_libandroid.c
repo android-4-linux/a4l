@@ -349,6 +349,11 @@ ACL_EXPORT AAsset* AAssetManager_open(AAssetManager* mgr, const char* filename, 
   return NULL;
 }
 ACL_EXPORT void AAsset_close(AAsset* a) { (void)a; ACL_TODO("AAsset_close"); }
+ACL_EXPORT int AAsset_read(AAsset* a, void* buf, size_t count) {
+  (void)a; (void)buf; (void)count;
+  ACL_TODO("AAsset_read");
+  return -1;
+}
 ACL_EXPORT const void* AAsset_getBuffer(AAsset* a) {
   (void)a;
   ACL_TODO("AAsset_getBuffer");

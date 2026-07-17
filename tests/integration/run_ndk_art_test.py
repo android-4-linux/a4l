@@ -55,7 +55,7 @@ WORKER_MUST_NOT = [
 ]
 
 CHECKS = [
-    "NDK bionic loader active",   # the gated nativeLoad hook installed
+    "NDK bionic loader armed",   # the gated nativeLoad hook installed (bootstraps lazily)
     "loaded bionic native lib",   # routed as bionic (not glibc dlopen)
     # bind-by-name resolved the exported symbol ART could never have dlsym'd itself
     "bind-by-name: com.acl.ndktest.Main.nativeAnswer()I",
