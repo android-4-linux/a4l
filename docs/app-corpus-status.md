@@ -16,18 +16,18 @@ license hygiene; note the CI license gate scans source, not images, so this is a
 a gate). Regenerate them locally instead:
 
 ```sh
-# a compositor DEDICATED to this run, sized to acl's 1024x768 surface (any wlroots one; grim needs
-# wlr-screencopy, so NOT mutter/GNOME):
-weston --backend=headless-backend.so --renderer=pixman --socket=acl-wl \
-       --width=1024 --height=768 --idle-time=0 &   # or a tinywl/sway on its own WAYLAND_DISPLAY
-ACL_ART_HOME=<aosp>/out/host/linux-x86 tools/shot-app.sh <app.apk> /tmp/<app>.png acl-wl
+# any compositor on its own WAYLAND_DISPLAY — sway, tinywl, weston headless, ...:
+ACL_ART_HOME=<aosp>/out/host/linux-x86 tools/shot-app.sh <app.apk> /tmp/<app>.png wayland-1
 ```
 
 `shot-app.sh <apk> <out.png> <wayland-display>` runs the app the canonical way (`tools/run-apk.sh`)
-on the GPU present path **against that one compositor**, waits for its first presented frame, and
-`grim`s that compositor's whole output — which, for a compositor dedicated to the run, is exactly
-the app. The `<wayland-display>` is explicit so one invocation targets one compositor; it does not
-read the ambient session. To simply watch it on your desktop:
+on the GPU present path **against that one compositor**, waits for its first presented frame
+(`dmabuf present(A)`), and saves the frame **acl itself rendered** — via `ACL_GPU_DUMP`, which
+`readPixels` the just-flushed Skia surface (gpu_dmabuf.cpp). The capture does NOT come from the
+compositor, so it needs no screencopy/screenshot protocol and works on a bare tinywl; the image is
+the app's surface exactly, no desktop chrome, at the size acl presents. The `<wayland-display>` is
+explicit so one invocation targets one compositor; it does not read the ambient session. To simply
+watch it on your desktop:
 
 ```sh
 ACL_ART_HOME=<aosp>/out/host/linux-x86 ACL_PRESENT_GPU=1 \
@@ -111,10 +111,10 @@ LOAD DEVICES / START SERVICE) and the "Car Dock" entry — measured, laid out an
 ## Notes
 
 - The window is 1024x768 because that is the display acl seeds from the compositor's `wl_output`.
-  `tools/shot-app.sh` therefore expects a compositor **dedicated** to the run (its whole output is
-  the app) rather than a shared desktop — pointing it at a normal desktop grabs the whole desktop.
-  `grim` needs `wlr-screencopy`, so the compositor must be wlroots-based (sway, tinywl, weston);
-  mutter/GNOME has no such protocol and `shot-app.sh` says so instead of producing a blank grab.
+  `tools/shot-app.sh` captures from acl's own Skia surface (`ACL_GPU_DUMP`), not the compositor, so
+  the image is the app at acl's present size regardless of the compositor and needs no screencopy
+  protocol — a bare tinywl works. (An earlier version used `grim`, which needs `wlr-screencopy` and
+  so failed on mutter/GNOME; the readPixels dump has neither limitation.)
 - `--present` still defaults to the shm path, which by construction cannot serve a real app (it
   needs acl's Bitmap shim). Every real app therefore needs `ACL_PRESENT_GPU=1` today; making the
   GPU path the default is a separate change.
