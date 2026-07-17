@@ -153,6 +153,17 @@ EGLDisplay platform_display(EGLenum platform, void* native, std::string* err) {
 }
 }  // namespace
 
+std::unique_ptr<GlDevice> GlDevice::Create(void* wl_display, std::string* error) {
+  // ACL_GL_BACKEND overrides the wl_display-based default (e.g. force gbm/KMS under a
+  // compositor). Unknown values fall through to the default policy.
+  const char* forced = std::getenv("ACL_GL_BACKEND");
+  const bool want_gbm = (forced != nullptr && std::strcmp(forced, "gbm") == 0) ||
+                        (wl_display == nullptr &&
+                         !(forced != nullptr && std::strcmp(forced, "wayland") == 0));
+  if (want_gbm) return CreateGbm(error);
+  return CreateWayland(wl_display, error);
+}
+
 std::unique_ptr<GlDevice> GlDevice::CreateWayland(void* wl_display, std::string* error) {
   auto set = [&](const std::string& m) { if (error) *error = m; return nullptr; };
   if (wl_display == nullptr) return set("CreateWayland: null wl_display");

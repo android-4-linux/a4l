@@ -49,6 +49,14 @@ class GlDevice {
   GlDevice(const GlDevice&) = delete;
   GlDevice& operator=(const GlDevice&) = delete;
 
+  // The single backend-selection entry — the ONLY place the backend is chosen, so every
+  // layer above (the EGLImpl JNI, the present path) stays backend-agnostic through the
+  // GlWindow seam. Policy: a non-null `wl_display` selects the Wayland platform (Mesa's WSI
+  // presents; the compositor path); null selects gbm (a DRM render node; the no-compositor/
+  // KMS path). ACL_GL_BACKEND=wayland|gbm forces one (gbm even when a wl_display is given —
+  // e.g. to exercise the KMS path under a compositor). nullptr + *error on failure.
+  static std::unique_ptr<GlDevice> Create(void* wl_display, std::string* error);
+
   // Wayland-platform device on acl's existing wl_display (borrowed; Mesa's WSI presents).
   // The default compositor path. `wl_display` is a struct wl_display* (opaque here).
   static std::unique_ptr<GlDevice> CreateWayland(void* wl_display, std::string* error);

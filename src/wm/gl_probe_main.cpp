@@ -33,9 +33,10 @@ int main(int argc, char** argv) {
   acl::wm::GlPresentHooks hooks;
   hooks.configure = [&](void* wl_display, void* wl_surface, int w, int h) -> bool {
     std::string err;
-    dev = acl::gfx::GlDevice::CreateWayland(wl_display, &err);
-    if (!dev) { std::fprintf(stderr, "gl_probe: CreateWayland failed: %s\n", err.c_str()); return false; }
-    std::fprintf(stderr, "gl_probe: GL device = %s\n", dev->renderer().c_str());
+    dev = acl::gfx::GlDevice::Create(wl_display, &err);  // pluggable: wl_display -> Wayland, else gbm
+    if (!dev) { std::fprintf(stderr, "gl_probe: GlDevice::Create failed: %s\n", err.c_str()); return false; }
+    const bool wl = dev->backend() == acl::gfx::GlBackend::Wayland;
+    std::fprintf(stderr, "gl_probe: GL device = %s [%s backend]\n", dev->renderer().c_str(), wl ? "wayland" : "gbm");
     win = dev->make_window(w, h, wl_surface, {}, &err);
     if (!win) { std::fprintf(stderr, "gl_probe: make_window failed: %s\n", err.c_str()); return false; }
     return true;
