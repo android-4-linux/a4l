@@ -7,7 +7,15 @@
 #include "ndk/native_bind.h"
 
 #if ACL_HAVE_JNI
+#include <elf.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <cstdio>
+#include <cstring>
+#include <set>
 #include <string>
 #include <string_view>
 
@@ -221,6 +229,108 @@ int bind_class_natives(BionicRuntime& rt, void* handle, JNIEnv* env, jclass klas
   }
   env->DeleteLocalRef(methods);
   return bound;
+}
+
+namespace {
+
+// Recover the binary class name from a demangled Java_* symbol tail (everything after "Java_").
+// The class/method boundary is the LAST bare '_' (a method's own '_' is escaped as "_1", so a '_'
+// followed by 0-3 is an escape, never the boundary); the overload arg suffix "__…" is dropped.
+// Returns "" when the shape isn't a plain class native (skip it).
+std::string class_binary_name(const char* tail) {
+  std::string s = tail;
+  if (const auto p = s.find("__"); p != std::string::npos) s = s.substr(0, p);  // drop __argsig
+  std::size_t boundary = std::string::npos;
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    if (s[i] != '_') continue;
+    const char nx = i + 1 < s.size() ? s[i + 1] : '\0';
+    if (nx < '0' || nx > '3') boundary = i;  // bare separator (package or class/method)
+  }
+  if (boundary == std::string::npos) return "";  // no method component
+  const std::string cls = s.substr(0, boundary);
+  std::string out;
+  for (std::size_t i = 0; i < cls.size(); ++i) {
+    if (cls[i] != '_') { out += cls[i]; continue; }
+    const char nx = i + 1 < cls.size() ? cls[i + 1] : '\0';
+    if (nx == '1') { out += '_'; ++i; }             // escaped underscore
+    else if (nx >= '0' && nx <= '3') return "";     // ';'/'['/unicode in a class name: not ours
+    else out += '.';                                // package separator
+  }
+  return out;
+}
+
+// Walk a .so's ELF .dynsym for exported (defined) Java_* FUNC symbols and collect the distinct
+// classes they belong to (binary names). The .so is trusted (acl's own bionic linker just loaded
+// it); still bounds-check the section table so a truncated file can't fault us.
+std::set<std::string> java_native_classes(const char* so_path) {
+  std::set<std::string> classes;
+  const int fd = ::open(so_path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return classes;
+  struct stat st{};
+  if (::fstat(fd, &st) != 0 || st.st_size < static_cast<off_t>(sizeof(Elf64_Ehdr))) { ::close(fd); return classes; }
+  const std::size_t size = static_cast<std::size_t>(st.st_size);
+  void* map = ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+  ::close(fd);
+  if (map == MAP_FAILED) return classes;
+  const char* base = static_cast<const char*>(map);
+  const auto& eh = *reinterpret_cast<const Elf64_Ehdr*>(base);
+  if (std::memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 || eh.e_ident[EI_CLASS] != ELFCLASS64 ||
+      eh.e_shoff == 0 ||
+      eh.e_shoff + static_cast<std::uint64_t>(eh.e_shnum) * sizeof(Elf64_Shdr) > size) {
+    ::munmap(map, size);
+    return classes;
+  }
+  const auto* sh = reinterpret_cast<const Elf64_Shdr*>(base + eh.e_shoff);
+  for (int i = 0; i < eh.e_shnum; ++i) {
+    if (sh[i].sh_type != SHT_DYNSYM || sh[i].sh_entsize == 0 || sh[i].sh_link >= eh.e_shnum) continue;
+    if (sh[i].sh_offset + sh[i].sh_size > size) continue;
+    const Elf64_Shdr& str = sh[sh[i].sh_link];
+    if (str.sh_offset >= size) continue;
+    const auto* syms = reinterpret_cast<const Elf64_Sym*>(base + sh[i].sh_offset);
+    const std::size_t n = sh[i].sh_size / sh[i].sh_entsize;
+    const char* strtab = base + str.sh_offset;
+    const std::size_t strmax = size - str.sh_offset;
+    for (std::size_t k = 0; k < n; ++k) {
+      if (syms[k].st_shndx == SHN_UNDEF) continue;                      // must be defined here
+      if (ELF64_ST_TYPE(syms[k].st_info) != STT_FUNC) continue;
+      if (syms[k].st_name >= strmax) continue;
+      const char* name = strtab + syms[k].st_name;
+      if (std::strncmp(name, "Java_", 5) != 0) continue;
+      if (std::string cls = class_binary_name(name + 5); !cls.empty()) classes.insert(std::move(cls));
+    }
+  }
+  ::munmap(map, size);
+  return classes;
+}
+
+}  // namespace
+
+int bind_lib_natives(BionicRuntime& rt, void* handle, JNIEnv* env, jobject loader,
+                     const char* so_path) {
+  if (handle == nullptr || loader == nullptr || so_path == nullptr) return 0;
+  const std::set<std::string> classes = java_native_classes(so_path);
+  if (classes.empty()) return 0;
+
+  // ClassLoader.loadClass(name): loads (+links) WITHOUT running <clinit> — RegisterNatives needs
+  // the class defined, not initialized, so this can't trigger app side effects.
+  jclass loader_cls = env->GetObjectClass(loader);
+  jmethodID load_class = loader_cls != nullptr
+      ? env->GetMethodID(loader_cls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;")
+      : nullptr;
+  if (load_class == nullptr) { if (loader_cls) env->DeleteLocalRef(loader_cls); return 0; }
+
+  int total = 0;
+  for (const std::string& name : classes) {
+    jstring jn = env->NewStringUTF(name.c_str());
+    auto klass = reinterpret_cast<jclass>(env->CallObjectMethod(loader, load_class, jn));
+    env->DeleteLocalRef(jn);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); klass = nullptr; }  // not this loader's class
+    if (klass == nullptr) continue;
+    if (const int n = bind_class_natives(rt, handle, env, klass); n > 0) total += n;
+    env->DeleteLocalRef(klass);
+  }
+  env->DeleteLocalRef(loader_cls);
+  return total;
 }
 
 }  // namespace acl::ndk

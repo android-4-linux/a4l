@@ -41,5 +41,16 @@ jclass loading_class(JNIEnv* env, jobject caller, jobject loader);
 // already RegisterNatives'd are left alone.
 int bind_class_natives(BionicRuntime& rt, void* handle, JNIEnv* env, jclass klass);
 
+// Bind, by NAME, the natives for EVERY class the just-loaded lib `so_path` exports Java_* symbols
+// for — not just the loading class. Generalizes bind_class_natives to the real contract a JNI .so
+// expresses through its exports: it walks the .so's ELF .dynsym, recovers each distinct class from
+// the exported Java_<class>_<method> symbols (the last bare '_' is the class/method boundary — a
+// method's own '_' is escaped '_1'), loads each via `loader` (ClassLoader.loadClass, no init), and
+// binds its natives against `handle`. This is what libGDX-style libs need: one .so loaded from a
+// central class, but natives declared across many (Gdx2DPixmap, BufferUtils, …). Returns total
+// methods bound (0 if none / the ELF has no by-name natives / loader is null).
+int bind_lib_natives(BionicRuntime& rt, void* handle, JNIEnv* env, jobject loader,
+                     const char* so_path);
+
 }  // namespace acl::ndk
 #endif  // ACL_HAVE_JNI

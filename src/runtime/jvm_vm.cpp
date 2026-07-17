@@ -202,12 +202,19 @@ jstring JNICALL ndk_native_load(JNIEnv* env, jclass, jstring jpath, jobject load
     // JNI_OnLoad's RegisterNatives (driven by load_library) binds what the lib chose to register.
     // Natives ART would otherwise bind by dlsym'ing Java_pkg_Class_method can't resolve at all —
     // the lib lives in the bionic linker's namespace, so ART has no handle for it — so bind them
-    // here, eagerly, for the class that asked for the library. See ndk/native_bind.h.
-    if (jclass k = acl::ndk::loading_class(env, caller, loader)) {
-      const int n = acl::ndk::bind_class_natives(*rt, h, env, k);
-      if (n > 0) log::i(kTag, "bound {} native(s) by name for the loading class", n);
-      env->DeleteLocalRef(k);
+    // here, eagerly. bind_lib_natives walks the .so's exported Java_* symbols and binds EVERY class
+    // it provides natives for (libGDX-style: one .so, natives across Gdx2DPixmap/BufferUtils/…),
+    // not just the loading class. See ndk/native_bind.h.
+    int bound = acl::ndk::bind_lib_natives(*rt, h, env, loader, path.c_str());
+    if (bound == 0) {
+      // A boot-classpath lib (null loader) or a .so with no by-name exports — fall back to binding
+      // just the class that asked for the library.
+      if (jclass k = acl::ndk::loading_class(env, caller, loader)) {
+        bound = acl::ndk::bind_class_natives(*rt, h, env, k);
+        env->DeleteLocalRef(k);
+      }
     }
+    if (bound > 0) log::i(kTag, "bound {} native(s) by name across the lib's classes", bound);
     return nullptr;
   }
   // Not a bionic app lib: a glibc/system lib (acl's own soundpool, or an ART system lib like
