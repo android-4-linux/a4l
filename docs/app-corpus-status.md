@@ -48,6 +48,43 @@ The default `--present` path instead blits from a `gfx::Surface` it gets via `Bi
 which exists only on acl's Bitmap **shim** — so it cannot show a real app's frame and says so.
 (That default should probably change; see the note at the end.)
 
+## Corpus re-run — 2026-07-18
+
+18 F-Droid apps re-fetched (latest F-Droid version) and run headless (`run-apk.sh … --present-frames=0`),
+classified by log: did the app reach a `ViewRoot performTraversals` (layout) without failing
+`onCreate`. **15 of 18 reach layout; 3 fail.** "Reached layout" means booted + no onCreate crash + the
+decor measured/laid out — it is NOT a pixel check (a few reach layout with a secondary non-fatal issue
+that can leave content incomplete; those are flagged). Verified-on-screen this session: `forkyz`,
+`octalsuntime`.
+
+| App | Result |
+| --- | --- |
+| `app.crossword.yourealwaysbe.forkyz` | reached layout — **fixed this session** (was ContentProvider crash) |
+| `at.manuelbichler.octalsuntime` | **renders** (screenshot) — fixed this session (getComponentName + nDrawArc) |
+| `app.fedilab.castlab` (RN) | reached layout — improved (was "stops in Expo"); RN coroutine warnings remain |
+| `allen.town.focus.podcast` | reached layout |
+| `alt.nainapps.aer` | reached layout |
+| `a2dp.Vol` | reached layout |
+| `app.areada` | reached layout |
+| `app.floatdeck` | reached layout |
+| `app.weatheroverview` | reached layout — but TLS cert validation fails (Conscrypt `SSLHandshakeException`), so no network data |
+| `app.sterna` | reached layout |
+| `app.flicky` | reached layout — but a Koin `InstanceCreationException` fires, so content likely incomplete (was a black frame) |
+| `agrigolo.opendrummer` | reached layout |
+| `barilyuk.batterytemperature` | reached layout |
+| `app.halma` (libGDX GL) | reached layout (decor); GL content via the `gles_jni` path |
+| `ardash.doodledudette` (libGDX GL) | reached layout (decor); GL content via the `gles_jni` path |
+| `app.smarzaro.foss4g2024.schedule` | **FAIL** — `Resources$NotFoundException: 0x7f0c004b` (a layout); a real acl resource-resolution gap |
+| `app.fedilab.openmaps` | **FAIL** — `InflateException` on `android.webkit.WebView` (no browser engine; out of scope) |
+| `app.crossword.yourealwaysbe.forkyzscanner` | **FAIL** — `NoClassDefFoundError w0.e` (app-side R8/protobuf `dynamicColors_`; fails on stock ART too) |
+
+The only genuine acl gap left in this set is **`foss4g.schedule`** (a layout resource id not resolving —
+config-qualified layout / resource-table selection). The other two failures are out-of-scope (WebView)
+and app-side (protobuf). Caveat: this is a batch/log classification, not per-app screenshots; several
+"reached layout" apps were already rendering before this session — the session's contribution is
+eliminating the `onCreate` crashes (ContentProviders, Hilt `getApplicationContext`, `getComponentName`,
+`nDrawArc`).
+
 ## Status
 
 | App | Toolkit | Result |
