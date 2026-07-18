@@ -2738,6 +2738,19 @@ class ArtVm final : public JniVm {
            "ART native floor: {} framework native group(s) from libandroid_runtime "
            "({} unavailable)",
            ok, unavailable);
+    // Override InputEventReceiver.nativeDispose. The real one (just registered above) destructs
+    // NativeInputEventReceiver, whose destructor calls AndroidRuntime::getJNIEnv() — null on acl (we
+    // run the JNI Invocation API directly, never AndroidRuntime::startVm, so its mJavaVM is null) →
+    // SIGSEGV on any window/overlay teardown (dismissing a Dialog/Popup/menu). No-op it: the small
+    // native receiver + its InputChannel leak per torn-down window instead of crashing the process.
+    if (jclass ier = env->FindClass("android/view/InputEventReceiver")) {
+      const JNINativeMethod m = {"nativeDispose", "(J)V",
+                                 reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) {})};
+      if (env->RegisterNatives(ier, &m, 1) == JNI_OK)
+        log::i(kTag, "InputEventReceiver.nativeDispose -> acl no-op (avoids AndroidRuntime::getJNIEnv)");
+      env->DeleteLocalRef(ier);
+    }
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
     populate_system_properties(env);
     load_system_resources(env);
     register_no_binder(env);
