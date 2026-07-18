@@ -839,6 +839,14 @@ jint Canvas_nSave(jlong canvas, jint /*saveFlags*/) {
   auto* c = canvas_sk(canvas);
   return c != nullptr ? c->save() : 0;
 }
+// Canvas.saveLayerAlpha — an offscreen layer composited back at `alpha` (fades/cross-fades,
+// Compose graphicsLayer alpha). @CriticalNative (handle-only, no env). Returns the save count.
+jint Canvas_nSaveLayerAlpha(jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b, jint alpha) {
+  auto* c = canvas_sk(canvas);
+  if (c == nullptr) return 0;
+  const SkRect bounds = SkRect::MakeLTRB(l, t, r, b);
+  return c->saveLayerAlpha(&bounds, static_cast<U8CPU>(alpha & 0xff));
+}
 jboolean Canvas_nRestore(jlong canvas) {
   auto* c = canvas_sk(canvas);
   if (c == nullptr || c->getSaveCount() <= 1) return JNI_FALSE;
@@ -1703,6 +1711,34 @@ jfloat Paint_nGetTextAdvances(JNIEnv* env, jclass, jlong paintPtr, jstring text,
     }
   }
   env->ReleaseStringUTFChars(text, utf8);
+  return total;
+}
+// Paint.getTextRunAdvances / measureText(char[]): the char[] overload of nGetTextAdvances. Fills
+// `advances` with the per-UTF-16-code-unit advance and returns the total. Same per-unit measure as
+// the String version (adequate for layout width without full cluster shaping). Text is UTF-16.
+jfloat Paint_nGetTextAdvancesChars(JNIEnv* env, jclass, jlong paintPtr, jcharArray chars,
+                                   jint index, jint count, jint /*ctxIndex*/, jint /*ctxCount*/,
+                                   jint /*flags*/, jfloatArray advances, jint advIdx) {
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap == nullptr || chars == nullptr || count <= 0) return 0.0f;
+  jchar* buf = env->GetCharArrayElements(chars, nullptr);
+  if (buf == nullptr) return 0.0f;
+  const int arlen = env->GetArrayLength(chars);
+  const int s = index < 0 ? 0 : index;
+  const int e = (index + count) > arlen ? arlen : (index + count);
+  float total = 0.0f;
+  if (e > s) {
+    total = ap->font.measureText(buf + s, static_cast<std::size_t>(e - s) * sizeof(jchar),
+                                 SkTextEncoding::kUTF16, nullptr, &ap->paint);
+    if (advances != nullptr) {
+      std::vector<jfloat> adv(static_cast<std::size_t>(e - s), 0.0f);
+      for (int i = 0; i < e - s; ++i)
+        adv[i] = ap->font.measureText(buf + s + i, sizeof(jchar), SkTextEncoding::kUTF16, nullptr,
+                                      &ap->paint);
+      env->SetFloatArrayRegion(advances, advIdx, e - s, adv.data());
+    }
+  }
+  env->ReleaseCharArrayElements(chars, buf, JNI_ABORT);
   return total;
 }
 // Backs Paint.getTextBounds(String): fill the Rect with the text's tight bounds (relative to
@@ -3551,6 +3587,7 @@ const JNINativeMethod kCanvas[] = {
     {"nGetHeight", "(J)I", reinterpret_cast<void*>(Canvas_nGetHeight)},  // @CriticalNative
     // @CriticalNative transform/clip (handle-only).
     {"nSave", "(JI)I", reinterpret_cast<void*>(Canvas_nSave)},
+    {"nSaveLayerAlpha", "(JFFFFI)I", reinterpret_cast<void*>(Canvas_nSaveLayerAlpha)},
     {"nRestore", "(J)Z", reinterpret_cast<void*>(Canvas_nRestore)},
     {"nRestoreToCount", "(JI)V", reinterpret_cast<void*>(Canvas_nRestoreToCount)},
     {"nGetSaveCount", "(J)I", reinterpret_cast<void*>(Canvas_nGetSaveCount)},
@@ -3815,6 +3852,8 @@ const JNINativeMethod kPaint[] = {
      reinterpret_cast<void*>(Paint_nGetFontMetricsInt)},
     {"nGetTextAdvances", "(JLjava/lang/String;IIIII[FI)F",
      reinterpret_cast<void*>(Paint_nGetTextAdvances)},
+    {"nGetTextAdvances", "(J[CIIIII[FI)F",
+     reinterpret_cast<void*>(Paint_nGetTextAdvancesChars)},
     {"nGetStringBounds", "(JLjava/lang/String;IIILandroid/graphics/Rect;)V",
      reinterpret_cast<void*>(Paint_nGetStringBounds)},
 };
