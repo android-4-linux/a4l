@@ -55,6 +55,8 @@
 #include "SkFontMgr.h"
 #include "SkFontTypes.h"
 #include "SkGradientShader.h"
+#include "SkPathEffect.h"
+#include "SkDashPathEffect.h"
 #include "SkRuntimeEffect.h"
 #include "SkImage.h"
 #include "SkImageInfo.h"
@@ -1383,7 +1385,14 @@ jlong BlendModeColorFilter_native_Create(JNIEnv*, jclass, jint color, jint blend
   sk_sp<SkColorFilter> cf = SkColorFilters::Blend(static_cast<SkColor>(color), mode);
   return reinterpret_cast<jlong>(cf.release());  // may be null (no-op blend); Java tolerates it
 }
-jlong Paint_nSetPathEffect(jlong /*p*/, jlong e) { return e; }
+jlong Paint_nSetPathEffect(jlong p, jlong e) {
+  // Apply the SkPathEffect (e.g. DashPathEffect) to the paint so dashed strokes actually render;
+  // e==0 clears it. The effect is a ref-counted SkPathEffect* (see DashPathEffect_nativeCreate).
+  ACLP(p);
+  if (ap != nullptr)
+    ap->paint.setPathEffect(sk_ref_sp(reinterpret_cast<SkPathEffect*>(e)));
+  return e;
+}
 jlong Paint_nSetMaskFilter(jlong /*p*/, jlong f) { return f; }
 void Paint_nSetShadowLayer(jlong, jfloat, jfloat, jfloat, jlong, jlong) {}
 void Paint_nSetDither(jlong p, jboolean d) { ACLP(p); if (ap) ap->paint.setDither(d); }
@@ -3169,6 +3178,63 @@ const JNINativeMethod kCanvasProperty[] = {
        return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
 };
 
+// android.graphics.animation.RenderNodeAnimator — the RenderThread-driven property animator behind
+// Material ripples, circular reveals, and property (alpha/translation/scale) animations. acl re-owns
+// the render stack (hwui dropped), and there is no display-list animator on the RenderThread, so the
+// animated value is never read: the paired CanvasProperty/RecordingCanvas draws (nDrawRipple/
+// nDrawCircleProp) are no-ops. Stub the whole seam so an app that starts one does not hit an
+// UnsatisfiedLinkError mid-draw (which threw every frame and froze the screen on the transition —
+// e.g. tapping a list item's ripple). The native ptr is wrapped in a VirtualRefBasePtr (inc/decStrong
+// on finalize), so each creator returns a real ref-counted VirtualLightRefBase; control calls are
+// no-ops. The animation never fires callOnFinished, so it stays "running" and draws nothing —
+// harmless (a ripple/reveal simply shows its end state). nGetDuration returns the AOSP default.
+const JNINativeMethod kRenderNodeAnimator[] = {
+    {"nCreateAnimator", "(IF)J", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jint, jfloat) -> jlong {
+       return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
+    {"nCreateCanvasPropertyFloatAnimator", "(JF)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jfloat) -> jlong {
+       return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
+    {"nCreateCanvasPropertyPaintAnimator", "(JIF)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jint, jfloat) -> jlong {
+       return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
+    {"nCreateRevealAnimator", "(IIFF)J",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jint, jint, jfloat, jfloat) -> jlong {
+       return reinterpret_cast<jlong>(new VirtualLightRefBase()); })},
+    {"nSetStartValue", "(JF)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jfloat) {})},
+    {"nSetDuration", "(JJ)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jlong) {})},
+    {"nGetDuration", "(J)J", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) -> jlong {
+       return 300; })},
+    {"nSetStartDelay", "(JJ)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jlong) {})},
+    {"nSetInterpolator", "(JJ)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jlong) {})},
+    {"nSetAllowRunningAsync", "(JZ)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jboolean) {})},
+    {"nSetListener", "(JLandroid/graphics/animation/RenderNodeAnimator;)V",
+     reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jobject) {})},
+    {"nStart", "(J)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) {})},
+    {"nEnd", "(J)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) {})},
+};
+
+// android.graphics.DashPathEffect -> SkDashPathEffect; the android.graphics.PathEffect base owns the
+// native SkPathEffect* and frees it on finalize. Applied to a Paint by Paint.nSetPathEffect, so a
+// dashed stroke (e.g. a grid separator) renders instead of throwing UnsatisfiedLinkError mid-draw.
+jlong DashPathEffect_nativeCreate(JNIEnv* env, jclass, jfloatArray intervals, jfloat phase) {
+  if (intervals == nullptr) return 0;
+  const jsize count = env->GetArrayLength(intervals);
+  if (count < 2 || (count & 1)) return 0;  // Skia requires an even interval count >= 2
+  std::vector<SkScalar> iv(static_cast<size_t>(count));
+  env->GetFloatArrayRegion(intervals, 0, count, iv.data());
+  sk_sp<SkPathEffect> e = SkDashPathEffect::Make(iv.data(), count, phase);
+  return reinterpret_cast<jlong>(e.release());  // may be null (Java tolerates 0)
+}
+void PathEffect_nativeDestructor(JNIEnv*, jclass, jlong ptr) {
+  SkSafeUnref(reinterpret_cast<SkPathEffect*>(ptr));
+}
+const JNINativeMethod kDashPathEffect[] = {
+    {"nativeCreate", "([FF)J", reinterpret_cast<void*>(DashPathEffect_nativeCreate)},
+};
+const JNINativeMethod kPathEffect[] = {
+    {"nativeDestructor", "(J)V", reinterpret_cast<void*>(PathEffect_nativeDestructor)},
+};
+
 const JNINativeMethod kRecordingCanvas[] = {
     {"nCreateDisplayListCanvas", "(JII)J", reinterpret_cast<void*>(RecordingCanvas_nCreate)},
     {"nResetDisplayListCanvas", "(JJII)V", reinterpret_cast<void*>(RecordingCanvas_nReset)},
@@ -4206,6 +4272,9 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   reg(env, "android/graphics/BaseRecordingCanvas", kBaseRecordingExtra, n(kBaseRecordingExtra));
   reg(env, "android/graphics/RecordingCanvas", kRecordingCanvas, n(kRecordingCanvas));
   reg(env, "android/graphics/CanvasProperty", kCanvasProperty, n(kCanvasProperty));
+  reg(env, "android/graphics/animation/RenderNodeAnimator", kRenderNodeAnimator, n(kRenderNodeAnimator));
+  reg(env, "android/graphics/DashPathEffect", kDashPathEffect, n(kDashPathEffect));
+  reg(env, "android/graphics/PathEffect", kPathEffect, n(kPathEffect));
   // Text measurement + line breaking (Compose's text layout). Best-effort: without these,
   // LineBreaker/MeasuredText fail to link and Compose text throws mid-measure (blank content).
   reg(env, "android/graphics/text/MeasuredText$Builder", kMeasuredTextBuilder, n(kMeasuredTextBuilder));
