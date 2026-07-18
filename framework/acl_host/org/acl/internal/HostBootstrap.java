@@ -313,6 +313,10 @@ public final class HostBootstrap {
         }
     }
 
+    // The process Application, set once createApplication builds it. AppContext.getApplicationContext()
+    // falls back to this when its own instance wasn't wired (the Activity's separate AppContext).
+    static volatile android.app.Application sApplication;
+
     static final class AppContext extends ContextWrapper {
         private static AclSensorManager sSensorManager;  // one per app (native events dispatch to it)
         private final Resources res;
@@ -346,9 +350,15 @@ public final class HostBootstrap {
         }
         // Return the Application (not the base) per Android semantics: framework code keys off
         // it — e.g. WorkManager's on-demand init does getApplicationContext() instanceof
-        // Configuration.Provider, which only holds if the Application flows back here.
+        // Configuration.Provider, which only holds if the Application flows back here. The Activity
+        // gets a SEPARATE AppContext (jvm_vm's second newAppContext) that never had setApplication,
+        // so fall back to the process Application (Hilt's EntryPointAccessors calls
+        // getApplicationContext() then walks the result for an Application — a bare AppContext throws
+        // "Could not find an Application in the given context").
         @Override public android.content.Context getApplicationContext() {
-            return application != null ? application : this;
+            if (application != null) return application;
+            if (sApplication != null) return sApplication;
+            return this;
         }
         public int getDisplayId() { return 0; }
         // A null-base ContextWrapper NPEs on getDisplay()/getDisplayNoVerify() (mBase == null);
@@ -1037,6 +1047,7 @@ public final class HostBootstrap {
             }
         }
         if (app == null) app = new android.app.Application();
+        sApplication = app;  // process Application — the fallback for any unwired AppContext
         setField(ContextWrapper.class, app, "mBase", base);
         if (base instanceof AppContext) ((AppContext) base).setApplication(app);
         seedActivityThread(pkg);
