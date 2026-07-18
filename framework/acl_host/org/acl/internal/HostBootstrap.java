@@ -1696,6 +1696,28 @@ public final class HostBootstrap {
                 wa.type = android.view.WindowManager.LayoutParams.TYPE_APPLICATION;
                 setField(vriCls, vri, "mWindowAttributes", wa);
             } catch (Throwable ignored) {}
+            // A Popup/DropdownMenu positions itself against the parent window's visible frame:
+            // ViewRootImpl.getWindowVisibleDisplayFrame reads mTmpFrames.displayFrame. The hollow
+            // ViewRootImpl has a null mTmpFrames (ctor-initialized, skipped by Unsafe) → NPE in
+            // presentOverlays, so overflow menus / dropdowns / spinners never open. Seed a
+            // ClientWindowFrames covering the display so the frame reads resolve.
+            try {
+                Class<?> cwf = Class.forName("android.window.ClientWindowFrames");
+                Object frames = cwf.getConstructor().newInstance();
+                for (String fld : new String[]{"frame", "displayFrame", "parentFrame"}) {
+                    try {
+                        Object r = cwf.getField(fld).get(frames);
+                        if (r instanceof android.graphics.Rect)
+                            ((android.graphics.Rect) r).set(0, 0, DISPLAY_W, DISPLAY_H);
+                    } catch (Throwable ignored) {}
+                }
+                setField(vriCls, vri, "mTmpFrames", frames);
+            } catch (Throwable ignored) {}
+            // The visible-insets/frame Rects some paths read directly off the ViewRootImpl.
+            for (String rf : new String[]{"mWinFrame"}) {
+                try { setField(vriCls, vri, rf, new android.graphics.Rect(0, 0, DISPLAY_W, DISPLAY_H)); }
+                catch (Throwable ignored) {}
+            }
             try {
                 setField(vriCls, vri, "mHandler",
                         innerInstance("android.view.ViewRootImpl$ViewRootHandler", vriCls, vri));
