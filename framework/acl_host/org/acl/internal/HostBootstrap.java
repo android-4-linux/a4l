@@ -308,6 +308,19 @@ public final class HostBootstrap {
         if (densityDpi > 0) DISPLAY_DPI = densityDpi;
     }
 
+    // Configuration.uiMode night bits, from the desktop's color-scheme preference (jvm_vm pushes the
+    // XDG Settings-portal value via setColorScheme before any Resources is built). 0 = leave unset
+    // (portal unavailable → keep the light default); AppCompat FOLLOW_SYSTEM / apps read this to pick
+    // the day/night theme.
+    static volatile int sNightMode = 0;  // 0 unset, else UI_MODE_NIGHT_YES / _NO
+    public static void setColorScheme(int scheme) {
+        // XDG color-scheme: 1 = prefer dark, 2 = prefer light. Only an explicit desktop preference
+        // overrides uiMode; 0 (no preference) / -1 (portal unavailable) leave it unset so the app's
+        // own theme default applies (which is light, as before).
+        if (scheme == 1) sNightMode = android.content.res.Configuration.UI_MODE_NIGHT_YES;
+        else if (scheme == 2) sNightMode = android.content.res.Configuration.UI_MODE_NIGHT_NO;
+    }
+
     private static Resources appResources(String apkPath, String frameworkResPath) {
         try {
             android.content.res.AssetManager am =
@@ -358,6 +371,10 @@ public final class HostBootstrap {
                  : android.content.res.Configuration.SCREENLAYOUT_SIZE_SMALL;
         cfg.screenLayout = (cfg.screenLayout & ~android.content.res.Configuration.SCREENLAYOUT_SIZE_MASK)
                 | size | android.content.res.Configuration.SCREENLAYOUT_LONG_NO;
+        // Day/night from the desktop color-scheme (setColorScheme); left unset → light default.
+        if (sNightMode != 0) {
+            cfg.uiMode = (cfg.uiMode & ~android.content.res.Configuration.UI_MODE_NIGHT_MASK) | sNightMode;
+        }
         return cfg;
     }
 

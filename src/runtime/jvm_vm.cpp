@@ -28,6 +28,7 @@
 
 #include "acl_config.h"
 #if ACL_HAVE_SDBUS
+#include "svc/appearance/appearance.h"
 #include "svc/battery/battery_jni.h"
 #include "svc/bluetooth/bt_jni.h"
 #include "svc/net/connectivity_jni.h"
@@ -986,6 +987,17 @@ class JniVm : public Vm {
                                  static_cast<jint>(svc::window().density_dpi()));
     }
     clear_exception();
+
+#if ACL_HAVE_SDBUS
+    // Day/night: the desktop's color-scheme preference (XDG Settings portal) → Configuration.uiMode,
+    // so AppCompat FOLLOW_SYSTEM and apps pick the right theme instead of always light. Best-effort;
+    // -1 (no portal) leaves the light default. Must run before the Resources Configuration is built.
+    if (jmethodID set_cs = env_->GetStaticMethodID(boot, "setColorScheme", "(I)V")) {
+      env_->CallStaticVoidMethod(boot, set_cs,
+                                 static_cast<jint>(acl::appearance::query_color_scheme()));
+    }
+    clear_exception();
+#endif
 
     // The app's Application, created once (its onCreate sets the app's singleton).
     if (app_application_ == nullptr) {

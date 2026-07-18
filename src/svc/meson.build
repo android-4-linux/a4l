@@ -13,6 +13,7 @@ if have_sdbus
   subdir('battery')
   subdir('bluetooth')
   subdir('storage')
+  subdir('appearance')
 endif
 
 # svc/sensor: android.hardware.SensorManager over Linux IIO (sysfs) / synthetic. No D-Bus
