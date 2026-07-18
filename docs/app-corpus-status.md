@@ -219,10 +219,18 @@ classified by whether the presented frame has non-black content). Roughly half r
     falls back to the process Application, so `dagger.hilt.android.internal.Contexts.getApplication`
     finds it — the Activity's own `AppContext` was unwired and returned itself). It now advances to
     an **app-side** blocker, not an acl gap: a protobuf-lite/R8 field-reflection mismatch
-    (`RuntimeException: Field dynamicColors_ for w0.b not found. Known fields are [i, j, k, …]`) — the
-    message field was obfuscated to `i` but the embedded protobuf schema string still names
-    `dynamicColors_`, i.e. the F-Droid build's R8/protobuf keep rules are inconsistent. Fails the
-    same way on stock ART; nothing for acl to do.
+    (`RuntimeException: Field dynamicColors_ for w0.b not found. Known fields are [i, j, k, …]`).
+    **Confirmed from the shipped DEX** (not inferred): Hilt DI in `Application.onCreate`
+    (`r0.j$f`/`g1.b` component providers) triggers a protobuf message's schema init
+    (`w0.i.<clinit>`), which calls the bundled protobuf-lite `MessageSchema.field()` helper
+    (`W0.K.d0`, the "Samsung workaround" that rethrows with "Known fields are …") →
+    `getDeclaredField("dynamicColors_")` on `w0.b`. A `dexdump` of `classes.dex` shows `w0.b`'s
+    fields are `i`(boolean)/`j`(String)/`k`(String)/`l`/`m` — no `dynamicColors_` — while
+    `dynamicColors_` survives as exactly **one** baked-in string literal (the `buildMessageInfo`
+    schema string R8 left un-rewritten). So R8 renamed the field to `i` but not the schema string:
+    the classic R8-full-mode + protobuf-lite-without-keep-rules bug. Both the protobuf runtime and
+    the message class are in the app's DEX, which acl runs unmodified, so this throws identically on
+    stock ART. Nothing for acl to do; the app must rebuild with correct protobuf R8 rules.
 
 Recurring, actionable gaps this surfaced: **`libstdc++.so`** (two apps — now staged, see above) and
 single missing natives like **`Bitmap.nativeHasMipMap`** (fixed) — the latter is the cheap kind, one
