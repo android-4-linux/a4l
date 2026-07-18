@@ -2560,8 +2560,30 @@ class JvmVm final : public JniVm {
     args.options = options.data();
     args.ignoreUnrecognized = JNI_FALSE;
 
-    const jint rc =
-        JNI_CreateJavaVM(&jvm_, reinterpret_cast<void**>(&env), &args);
+    // dlopen the host libjvm.so with RTLD_LOCAL rather than link it (DT_NEEDED). A direct
+    // link loads HotSpot into the global symbol scope on EVERY run, so a subsequent --vm=art
+    // run's AOSP libopenjdk.so binds JVM_* (e.g. Runtime.maxMemory -> JVM_MaxMemory) to the
+    // host HotSpot instead of AOSP's libopenjdkjvm.so and crashes. RTLD_LOCAL keeps HotSpot's
+    // symbols private to this backend, which only runs when --vm=jvm is explicitly selected.
+    using CreateVmFn = jint (*)(JavaVM**, void**, void*);
+    const char* libjvm = ACL_JVM_LIBJVM;
+    if (libjvm[0] == '\0') {
+      return Error::of(Status::InvalidConfig,
+                       "no host libjvm.so detected at build time (--vm=jvm unavailable)");
+    }
+    void* handle = ::dlopen(libjvm, RTLD_NOW | RTLD_LOCAL);
+    if (handle == nullptr) {
+      const char* e = ::dlerror();
+      return Error::of(Status::RuntimeError,
+                       std::string("dlopen(") + libjvm + ") failed: " + (e ? e : "?"));
+    }
+    auto create = reinterpret_cast<CreateVmFn>(::dlsym(handle, "JNI_CreateJavaVM"));
+    if (create == nullptr) {
+      return Error::of(Status::RuntimeError,
+                       std::string("JNI_CreateJavaVM not found in ") + libjvm);
+    }
+
+    const jint rc = create(&jvm_, reinterpret_cast<void**>(&env), &args);
     if (rc != JNI_OK || jvm_ == nullptr) {
       jvm_ = nullptr;
       return Error::of(Status::RuntimeError,

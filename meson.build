@@ -27,7 +27,8 @@ build_tests        = get_option('tests')
 # unreliable across distros, so probe java.home directly. When no JDK is present
 # the Jvm backend compiles out and create_vm(Jvm) reports Unavailable.
 have_jni = false
-jni_dep = declare_dependency()   # empty no-op placeholder
+jni_dep = declare_dependency()       # jni.h headers only (no libjvm link)
+jvm_link_dep = declare_dependency()  # actual -ljvm link, for standalone JVM tools only
 java_home = ''
 java_prog = find_program('java', required : false)
 if java_prog.found()
@@ -38,16 +39,27 @@ if java_prog.found()
     java_home = parts[1].split('\n')[0].strip()
   endif
 endif
+jvm_libjvm_path = ''
 if java_home != '' and import('fs').exists(java_home / 'include' / 'jni.h')
   jvm_so_dir = java_home / 'lib' / 'server'
-  jvm_lib = cxx.find_library('jvm', dirs : [jvm_so_dir], required : false)
-  if jvm_lib.found()
+  if import('fs').exists(jvm_so_dir / 'libjvm.so')
+    # Headers only — do NOT link libjvm into the binary. The JVM fallback backend
+    # (--vm=jvm) dlopen()s libjvm.so at runtime with RTLD_LOCAL, so the host HotSpot's
+    # JVM_* symbols never enter the global scope. Linking it here (DT_NEEDED) loaded it
+    # into every run, including --vm=art, where AOSP's libopenjdk.so then bound JVM_*
+    # (e.g. Runtime.maxMemory -> JVM_MaxMemory) to the host HotSpot instead of AOSP's
+    # libopenjdkjvm.so and crashed calling into an uninitialized HotSpot.
     jni_dep = declare_dependency(
       compile_args : ['-I' + java_home / 'include',
                       '-I' + java_home / 'include' / 'linux'],
-      dependencies : jvm_lib,
+    )
+    # The direct -ljvm link is reserved for standalone JVM-only tools (e.g. acl-ndk-probe
+    # --realvm). The acl binary must NOT use this — see the RTLD_LOCAL comment above.
+    jvm_link_dep = declare_dependency(
+      dependencies : cxx.find_library('jvm', dirs : [jvm_so_dir], required : false),
       link_args : ['-Wl,-rpath,' + jvm_so_dir],
     )
+    jvm_libjvm_path = jvm_so_dir / 'libjvm.so'
     have_jni = true
     message('JVM runtime backend enabled: OpenJDK at ' + java_home)
   endif
@@ -256,6 +268,10 @@ conf.set10('ACL_NET_CONNMAN', have_sdbus and (net_backend == 'auto' or net_backe
 # converter. Empty when no JDK; the converter then needs an explicit path.
 conf.set('ACL_JAVAC',
          have_jni ? '"' + java_home / 'bin' / 'javac' + '"' : '""')
+# Path to the host libjvm.so, dlopen()ed with RTLD_LOCAL by the --vm=jvm backend so its
+# HotSpot symbols stay out of the global scope. Empty when no JDK.
+conf.set('ACL_JVM_LIBJVM',
+         jvm_libjvm_path != '' ? '"' + jvm_libjvm_path + '"' : '""')
 
 # Public config header consumed across modules.
 configure_file(

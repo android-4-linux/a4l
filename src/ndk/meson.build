@@ -40,11 +40,13 @@ module_libs += acl_ndk
 # --thread self-tests), to verify the loader end to end. Needs a staged bionic runtime at run time
 # (ACL_BIONIC_LINKER/_SYSROOT/_STUB); build always. tests/integration/run_ndk_attach_test.py drives
 # --thread.
+# The probe's --realvm self-test calls JNI_CreateJavaVM directly, so this standalone tool
+# links libjvm (jvm_link_dep). The acl binary never does — it dlopens libjvm with RTLD_LOCAL.
 ndk_probe_exe = executable(
   'acl-ndk-probe',
   files('ndk_probe_main.cpp'),
   include_directories : [config_inc, core_inc],
   link_with : [acl_ndk, acl_log],
-  dependencies : ndk_deps,
+  dependencies : ndk_deps + (have_jni ? [jvm_link_dep] : []),
   install : false,
 )
