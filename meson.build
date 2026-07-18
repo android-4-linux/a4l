@@ -87,6 +87,7 @@ have_wcs = false
 wcs_scanner = disabler()
 wcs_dep = declare_dependency()   # empty no-op placeholder (wl/ header include added below)
 wayland_dep = dependency('wayland-client', required : false)
+wayland_cursor_dep = dependency('wayland-cursor', required : false)  # wl::CursorManager (set_cursor)
 wayland_server_dep = dependency('wayland-server', required : false)  # test compositor only
 xkbcommon_dep = dependency('xkbcommon', required : false)  # wcs KeyboardHandler (keymap + keysyms)
 wl_scanner_dep = dependency('wayland-scanner', required : false)

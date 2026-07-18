@@ -43,6 +43,7 @@
 #include <wl/ime/backend.hpp>            // wl::ime::SelectedTextInput (text-input-v3)
 #include <wl/ime/text_input_receiver.hpp>
 #include <wl/scale_policy.hpp>           // wl::ScalePolicy (buffer-at-physical math)
+#include <wl/cursor.hpp>                 // wl::CursorManager (wl_pointer.set_cursor)
 #include <wl/display.hpp>
 #include <wl/keyboard.hpp>
 #include <wl/pointer.hpp>
@@ -245,6 +246,11 @@ class Presenter : public wl::ime::TextInputListener {
       seat_.Get()->app_ = this;
       seat_.Get()->pointer_slot_ = &pointer_;    // wl_pointer created on the capabilities event
       seat_.Get()->keyboard_slot_ = &keyboard_;  // wl_keyboard created likewise
+      // A cursor theme + surface for wl_pointer.set_cursor (SeatManager owns the pointer but not
+      // the cursor). Needs wl_shm + wl_compositor, both bound above. Best-effort: a failed Init
+      // leaves Set() a no-op (no cursor, as before) rather than failing the present.
+      cursor_ready_ = cursor_.Init(shm_.Get()->GetProxy(), comp_.Get()->GetProxy());
+      if (!cursor_ready_) log::w(kTag, "present: cursor theme unavailable (pointer will have no cursor)");
     }
     // text-input-v3 (IME): bind the manager + per-seat text_input via the wcs facade.
     if (want_ime_ && ti_name_ != 0 && !seat_.IsNull()) {
@@ -375,8 +381,17 @@ class Presenter : public wl::ime::TextInputListener {
 
   // wl_pointer -> app input (the native side of a MotionEvent). A left-button
   // press/release maps to a touch Down/Up; motion while pressed maps to Move.
-  void OnPointerEnter(const wl::PointerEvent& e) { px_ = e.x; py_ = e.y; }
-  void OnPointerLeave() {}
+  // A Wayland client owns its cursor: on pointer.enter it must wl_pointer.set_cursor, else the
+  // compositor leaves the cursor undefined (whatever it was, or nothing). Point it at the theme's
+  // "default" arrow, carrying the enter serial the protocol requires.
+  void OnPointerEnter(const wl::PointerEvent& e) {
+    px_ = e.x; py_ = e.y;
+    pointer_enter_serial_ = e.serial;
+    if (cursor_ready_ && pointer_.Get() != nullptr)
+      cursor_.Set(pointer_.Get()->GetProxy(), pointer_enter_serial_, "default");
+  }
+  // The compositor resets the cursor on the next enter, so forget the shape to force a re-apply.
+  void OnPointerLeave() { cursor_.Reset(); }
   void OnPointerMotion(const wl::PointerEvent& e) {
     px_ = e.x; py_ = e.y;
     if (pointer_down_) deliver(PointerInput::Action::Move);
@@ -622,6 +637,9 @@ class Presenter : public wl::ime::TextInputListener {
   const GlPresentHooks* gl_hooks_ = nullptr;  // non-null -> externally-rendered (Mesa GL) present
   double px_ = 0.0, py_ = 0.0;
   bool pointer_down_ = false;
+  wl::CursorManager cursor_;            // owns the cursor theme + surface (set_cursor on enter)
+  bool cursor_ready_ = false;           // Init() succeeded (shm + compositor bound, theme loaded)
+  uint32_t pointer_enter_serial_ = 0;   // last wl_pointer.enter serial (set_cursor must carry it)
 
   uint32_t comp_name_ = 0, comp_ver_ = 0, shm_name_ = 0, shm_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
   uint32_t seat_name_ = 0, seat_ver_ = 0, ti_name_ = 0, ti_ver_ = 0;

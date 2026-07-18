@@ -71,7 +71,7 @@ if have_wcs
   # include_directories('.') resolves to BOTH src/wm (source) and build/src/wm
   # (where the generated headers land); wcs_dep supplies the wl/ framework headers.
   wm_inc += include_directories('.')
-  wm_deps += [wayland_dep, wcs_dep, xkbcommon_dep]
+  wm_deps += [wayland_dep, wayland_cursor_dep, wcs_dep, xkbcommon_dep]
   wm_cpp_args = ['-DWL_IME_BACKEND_TEXT_INPUT_V3']  # select the wcs IME facade backend
 
   # P2.4/V2b: the Ganesh-Vulkan dma-buf presenter (zwp_linux_dmabuf_v1). Built only when
