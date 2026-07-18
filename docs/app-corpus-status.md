@@ -167,16 +167,16 @@ classified by whether the presented frame has non-black content). Roughly half r
     `SurfaceView` and the `gles_jni` EGL/GLES JNI, a large component.
   - `at.manuelbichler.octalsuntime` — NPE (a null String in the Clock activity's setup).
   - `app.smarzaro.foss4g2024.schedule` — `Resources$NotFoundException` for a layout resource id.
-  - `app.crossword.yourealwaysbe.forkyzscanner` — now installs its `<provider>`s (FileProvider +
-    `androidx.startup.InitializationProvider`, see the ContentProvider note below) and reaches
-    `ForkyzScannerActivity.onCreate`, but stops there: a Compose/androidx ViewModel helper walks the
-    `getBaseContext()` chain of `LocalContext.current` looking for an `Application`
-    (`instanceof Application`, else follow `getBaseContext`) and is handed the bare `AppContext`
-    (base = null), so it throws `IllegalStateException: Could not find an Application in the given
-    context`. Distinct from ContentProvider: it's about which Context Compose's `LocalContext` is
-    seeded with (it should reach the Application/Activity, not the null-base `AppContext`). A
-    `getBaseContext()`→Application override is NOT the fix — it would cycle `AppContext ↔ Application`
-    and hang Compose's `findActivity`-style walks.
+  - `app.crossword.yourealwaysbe.forkyzscanner` — installs its `<provider>`s (FileProvider +
+    `androidx.startup.InitializationProvider`, see the ContentProvider note below) and clears the
+    Hilt `EntryPointAccessors` gap in `onCreate` (fixed: `AppContext.getApplicationContext()` now
+    falls back to the process Application, so `dagger.hilt.android.internal.Contexts.getApplication`
+    finds it — the Activity's own `AppContext` was unwired and returned itself). It now advances to
+    an **app-side** blocker, not an acl gap: a protobuf-lite/R8 field-reflection mismatch
+    (`RuntimeException: Field dynamicColors_ for w0.b not found. Known fields are [i, j, k, …]`) — the
+    message field was obfuscated to `i` but the embedded protobuf schema string still names
+    `dynamicColors_`, i.e. the F-Droid build's R8/protobuf keep rules are inconsistent. Fails the
+    same way on stock ART; nothing for acl to do.
 
 Recurring, actionable gaps this surfaced: **`libstdc++.so`** (two apps — now staged, see above) and
 single missing natives like **`Bitmap.nativeHasMipMap`** (fixed) — the latter is the cheap kind, one
@@ -201,8 +201,10 @@ live provider's in-process `Transport` instead of the stub. Two adjacent gaps fi
 
 **Verified:** `app.crossword.yourealwaysbe.forkyz` went from crashing in `Application.onCreate` to
 installing all four providers and booting through to a real `ViewRoot` layout (measured 1280x1440).
-`forkyzscanner` also installs its providers now but is blocked one step later on a Compose
-`LocalContext`/ViewModel `Application`-lookup (see the "Wider survey" entry above).
+`forkyzscanner` also installs its providers now; a follow-on fix (`AppContext.
+getApplicationContext()` → process Application) cleared its Hilt `EntryPointAccessors` gap in
+`onCreate`, and it now stops on an app-side protobuf/R8 issue, not an acl gap (see the "Wider
+survey" entry above).
 
 ## Notes
 
