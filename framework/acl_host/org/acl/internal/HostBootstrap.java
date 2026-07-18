@@ -1436,6 +1436,13 @@ public final class HostBootstrap {
     // the LifecycleRegistry there directly. Reflection-only (no compile-time androidx dep). Best effort.
     public static void ensureResumed(Object activity) {
         if (activity == null) return;
+        // Robust path first: run the Activity's registered ActivityLifecycleCallbacks via the
+        // framework's own dispatch methods. androidx ComponentActivity registers a ReportFragment/
+        // LifecycleCallbacks there that advances its Lifecycle to RESUMED. acl calls onCreate/onStart/
+        // onResume directly but never the dispatch, so the Lifecycle stays CREATED and Compose's
+        // WindowRecomposer never activates → blank content. Unlike the androidx-name reflection below,
+        // this works even when the app obfuscates androidx.lifecycle (forkyz renames all of it).
+        dispatchLifecycleCallbacks(activity);
         try {
             java.lang.reflect.Method getLifecycle = activity.getClass().getMethod("getLifecycle");
             Object lifecycle = getLifecycle.invoke(activity);
@@ -1461,7 +1468,38 @@ public final class HostBootstrap {
             try { now = lifecycle.getClass().getMethod("getCurrentState").invoke(lifecycle); } catch (Throwable ignored) {}
             System.out.println("acl HostBootstrap: lifecycle " + cur + " -> " + now);
         } catch (Throwable t) {
-            System.err.println("acl HostBootstrap: ensureResumed skipped: " + t);
+            System.err.println("acl HostBootstrap: ensureResumed (androidx path) skipped: " + t);
+        }
+    }
+
+    // Run the Activity's registered ActivityLifecycleCallbacks in lifecycle order, via the
+    // framework Activity's own (private) dispatch methods. Those method names are the framework's,
+    // never renamed, and they invoke the app's OWN callbacks (androidx ReportFragment, obfuscated
+    // but self-consistent) — so ComponentActivity's Lifecycle advances INITIALIZED→…→RESUMED without
+    // acl referencing any androidx name. Best-effort per step.
+    private static void dispatchLifecycleCallbacks(Object activity) {
+        final String[] noArg = {
+            "dispatchActivityStarted", "dispatchActivityPostStarted",
+            "dispatchActivityResumed", "dispatchActivityPostResumed",
+        };
+        try {
+            for (String name : new String[]{"dispatchActivityCreated", "dispatchActivityPostCreated"}) {
+                try {
+                    java.lang.reflect.Method m = android.app.Activity.class
+                            .getDeclaredMethod(name, android.os.Bundle.class);
+                    m.setAccessible(true);
+                    m.invoke(activity, (android.os.Bundle) null);
+                } catch (Throwable ignored) {}
+            }
+            for (String name : noArg) {
+                try {
+                    java.lang.reflect.Method m = android.app.Activity.class.getDeclaredMethod(name);
+                    m.setAccessible(true);
+                    m.invoke(activity);
+                } catch (Throwable ignored) {}
+            }
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: lifecycle-callback dispatch skipped: " + t);
         }
     }
 
