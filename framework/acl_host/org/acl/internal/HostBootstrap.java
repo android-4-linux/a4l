@@ -1697,6 +1697,25 @@ public final class HostBootstrap {
                 setField(vriCls, vri, "mChoreographer",
                         android.view.Choreographer.getInstance());
             } catch (Throwable ignored) {}
+            // The ViewRootImpl ctor creates mImeFocusController (final); the hollow one skips it, so
+            // a focus change during dispatchAttachedToWindow — View.onFocusChanged reaches
+            // mViewRootImpl.getImeFocusController().onViewFocusChanged (View.java) — NPEs on the null
+            // controller. A fullscreen GLSurfaceView decor (halma, doodledudette) takes focus on
+            // attach, so it hits this. Seed a real one: onViewFocusChanged's getImmDelegate() resolves
+            // (acl maps getSystemService(InputMethodManager.class)) and isCurrentRootView() is false
+            // (acl never setCurrentRootView), so it early-returns without touching IME/Binder.
+            try {
+                Class<?> imefcCls = Class.forName("android.view.ImeFocusController");
+                java.lang.reflect.Constructor<?> imefcCtor = imefcCls.getDeclaredConstructor(vriCls);
+                imefcCtor.setAccessible(true);
+                setField(vriCls, vri, "mImeFocusController", imefcCtor.newInstance(vri));
+            } catch (Throwable ignored) {}
+            // SurfaceView.onAttachedToWindow calls getViewRootImpl().addSurfaceChangedCallback ->
+            // mSurfaceChangedCallbacks.add, a final ArrayList the hollow ViewRootImpl leaves null.
+            // Seed it so GLSurfaceView apps (halma, doodledudette) attach their decor.
+            try {
+                setField(vriCls, vri, "mSurfaceChangedCallbacks", new java.util.ArrayList<>());
+            } catch (Throwable ignored) {}
             // A classic (XML-inflated / fragment) View hierarchy drives the real ViewRootImpl during
             // attach + traversal, unlike Compose (which draws through its own layers). These fields are
             // field-initialized in the ViewRootImpl ctor acl skips, so a null one NPEs the traversal:
