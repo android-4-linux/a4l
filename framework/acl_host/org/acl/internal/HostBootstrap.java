@@ -987,9 +987,28 @@ public final class HostBootstrap {
     static final class AppPackageManager extends StubPackageManager {
         private final String pkg;
         AppPackageManager(String pkg) { this.pkg = pkg; }
+        // An app can always query its OWN package (it is installed); other packages resolve as
+        // not-installed. Returning null/throwing for the own package broke callers that read their
+        // own version/appInfo on a worker (forkyz) — including the API 33 PackageInfoFlags overload,
+        // which StubPackageManager leaves throwing UnsupportedOperationException ("not implemented in
+        // subclass"), an uncaught crash rather than the NameNotFoundException apps guard against.
         @Override public android.content.pm.PackageInfo getPackageInfo(String p, int flags)
                 throws android.content.pm.PackageManager.NameNotFoundException {
+            if (p != null && p.equals(pkg)) return ownPackageInfo();
             throw new android.content.pm.PackageManager.NameNotFoundException(p);
+        }
+        @Override public android.content.pm.PackageInfo getPackageInfo(String p,
+                android.content.pm.PackageManager.PackageInfoFlags flags)
+                throws android.content.pm.PackageManager.NameNotFoundException {
+            return getPackageInfo(p, 0);
+        }
+        private android.content.pm.PackageInfo ownPackageInfo() {
+            android.content.pm.PackageInfo pi = new android.content.pm.PackageInfo();
+            pi.packageName = pkg;
+            pi.applicationInfo = getApplicationInfo(pkg, 0);
+            pi.versionName = "1.0";
+            try { pi.setLongVersionCode(1L); } catch (Throwable ignored) { pi.versionCode = 1; }
+            return pi;
         }
         // A non-null ProviderInfo carrying the provider's <meta-data> (installContentProviders parsed
         // it). androidx.startup calls this on its own InitializationProvider to discover Initializers;
