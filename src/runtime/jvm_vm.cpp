@@ -680,15 +680,8 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   static auto recstats0 = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_recstats"));
   const std::uint64_t ops_pre_overlay = ov_diag && drawops ? drawops() : 0;
   const std::uint64_t rep_pre_overlay = ov_diag && recstats0 ? (recstats0() & 0xfffff) : 0;
-  // Force the overlay's Compose layers to re-record each frame (their settled cache replays empty on
-  // acl's per-frame redraw). Scoped to the overlay pass so the main content keeps fast caching.
-  static auto force_record = reinterpret_cast<void (*)(int)>(
-      ::dlsym(RTLD_DEFAULT, "acl_graphics_set_force_record"));
-  if (overlay_present != nullptr && s->canvas != nullptr) {
-    if (force_record != nullptr) force_record(1);
+  if (overlay_present != nullptr && s->canvas != nullptr)
     env->CallStaticVoidMethod(overlay_cls, overlay_present, s->canvas, s->w, s->h);
-    if (force_record != nullptr) force_record(0);
-  }
   if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
   if (ov_diag) {
     const std::uint64_t d = drawops ? drawops() - ops_pre_overlay : 0;

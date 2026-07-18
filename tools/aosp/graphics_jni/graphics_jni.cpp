@@ -31,6 +31,7 @@
 
 #include "SkBitmap.h"
 #include "SkCanvas.h"
+#include "SkDrawable.h"
 #include "SkPicture.h"
 #include "SkPictureRecorder.h"
 #include "SkClipOp.h"
@@ -99,7 +100,7 @@ struct AclPaint {
 // recording is bypassed either way. So this only tracks the geometry/transform state the
 // View reads back; recording/animation are no-ops. Lets the real android.view.View
 // construct + measure/layout on host ART; the real present is the Vulkan Canvas (begin_frame).
-struct AclRenderNode {
+struct AclRenderNode : public SkRefCnt {
   int left = 0, top = 0, right = 0, bottom = 0;
   float alpha = 1.0f, cameraDistance = 0.0f;
   float translationX = 0, translationY = 0, translationZ = 0, elevation = 0;
@@ -198,7 +199,9 @@ void free_canvas(void* p) {
 void free_path(void* p) { delete reinterpret_cast<SkPath*>(p); }
 void free_matrix(void* p) { delete reinterpret_cast<SkMatrix*>(p); }
 void free_shader(void* p) { SkSafeUnref(reinterpret_cast<SkShader*>(p)); }
-void free_rendernode(void* p) { delete reinterpret_cast<AclRenderNode*>(p); }
+// Release Compose's ownership ref. The node survives past this if a parent's recorded picture still
+// references it via an AclRenderNodeDrawable (resolve-at-replay), and is freed when the last ref drops.
+void free_rendernode(void* p) { SkSafeUnref(reinterpret_cast<AclRenderNode*>(p)); }
 void free_colorspace(void* p) { SkSafeUnref(reinterpret_cast<SkColorSpace*>(p)); }
 
 // android.graphics.Bitmap.Config.nativeInt -> SkColorType (ARGB_8888 == 5).
@@ -1187,20 +1190,9 @@ void RenderNode_nDiscardDisplayList(jlong node) {
 // only records when hasDisplayList() is false, so a blanket TRUE makes Compose/Views never record
 // (drawRenderNode then replays an empty node -> blank). present-root is always "valid" (it draws
 // immediately onto the GPU canvas and is never recorded into a picture).
-// When set, non-root nodes report "no display list" so View.updateDisplayListIfDirty() re-records
-// them every frame instead of replaying a cached picture. jvm_vm sets this ONLY around the overlay
-// pass: a Dialog/Popup that acl re-draws each frame onto a fresh present canvas needs its Compose
-// layers re-recorded (their settled cache otherwise replays empty — the menu opens then vanishes),
-// while the main content keeps its fast per-frame caching (flag off during its draw).
-std::atomic<int> g_force_record{0};
-extern "C" void acl_graphics_set_force_record(int on) {
-  g_force_record.store(on, std::memory_order_relaxed);
-}
 jboolean RenderNode_nIsValid(jlong node) {
   auto* n = reinterpret_cast<AclRenderNode*>(node);
-  if (n == nullptr) return JNI_FALSE;
-  if (g_force_record.load(std::memory_order_relaxed) && !n->is_present_root) return JNI_FALSE;
-  return (n->is_present_root || n->picture != nullptr) ? JNI_TRUE : JNI_FALSE;
+  return (n != nullptr && (n->is_present_root || n->picture != nullptr)) ? JNI_TRUE : JNI_FALSE;
 }
 void RenderNode_nGetTransformMatrix(jlong, jlong m) {
   if (auto* mat = reinterpret_cast<SkMatrix*>(m)) mat->reset();
@@ -3018,9 +3010,10 @@ bool is_recording_canvas(void* p) {
   return g_recorders.find(reinterpret_cast<SkCanvas*>(p)) != g_recorders.end();
 }
 
-// Replay a RenderNode's recorded picture onto `c`, applying the node's position + transform + clip
-// + alpha (the properties the View/Compose set via the RenderNode setters).
-void draw_rendernode(SkCanvas* c, AclRenderNode* n) {
+// Draw a RenderNode's recorded picture onto `c` NOW, applying the node's position + transform + clip
+// + alpha (the properties the View/Compose set via the RenderNode setters). Reads the node's CURRENT
+// picture + transform, so at replay time it reflects the layer's latest state.
+void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
   if (c == nullptr || n == nullptr || n->picture == nullptr) return;
   const float w = static_cast<float>(n->right - n->left);
   const float h = static_cast<float>(n->bottom - n->top);
@@ -3042,6 +3035,39 @@ void draw_rendernode(SkCanvas* c, AclRenderNode* n) {
     c->saveLayer(nullptr, &lp);
   }
   c->drawPicture(n->picture);
+}
+
+// A deferred reference to a child RenderNode, recorded into a PARENT's picture. Its onDraw runs at
+// REPLAY time and resolves the child's CURRENT picture — so an independently-updated Compose layer
+// shows its latest content, instead of the stale copy that flattening (drawPicture at parent-record
+// time) would cache (the "settled layers replay empty" blank). Holds a ref so the node outlives the
+// parent picture that references it.
+class AclRenderNodeDrawable : public SkDrawable {
+ public:
+  explicit AclRenderNodeDrawable(AclRenderNode* n) : node_(sk_ref_sp(n)) {}
+
+ protected:
+  SkRect onGetBounds() override {
+    return SkRect::MakeLTRB(static_cast<float>(node_->left), static_cast<float>(node_->top),
+                            static_cast<float>(node_->right), static_cast<float>(node_->bottom));
+  }
+  void onDraw(SkCanvas* c) override { draw_rendernode_immediate(c, node_.get()); }
+
+ private:
+  sk_sp<AclRenderNode> node_;
+};
+
+// Replay a child RenderNode onto `c`. If `c` is a parent's recording canvas (an SkPictureRecorder),
+// record a deferred drawable so the child resolves at replay time; onto the GPU/immediate canvas,
+// draw it now.
+void draw_rendernode(SkCanvas* c, AclRenderNode* n) {
+  if (c == nullptr || n == nullptr) return;
+  if (is_recording_canvas(c)) {
+    auto d = sk_make_sp<AclRenderNodeDrawable>(n);
+    c->drawDrawable(d.get());
+  } else {
+    draw_rendernode_immediate(c, n);
+  }
 }
 
 // NOTE: every RecordingCanvas native is @CriticalNative — the JVM calls it with the raw C ABI and
