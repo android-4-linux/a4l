@@ -165,7 +165,11 @@ classified by whether the presented frame has non-black content). Roughly half r
     `UnsatisfiedLinkError` in `AndroidGraphics.createGLSurfaceView` → `onCreate` fails. That is the
     **SurfaceView + GLES** path (below), not a single missing native: it needs a GL-backed
     `SurfaceView` and the `gles_jni` EGL/GLES JNI, a large component.
-  - `at.manuelbichler.octalsuntime` — NPE (a null String in the Clock activity's setup).
+  - `at.manuelbichler.octalsuntime` — **now renders its full octal clock UI** (dial digits 0–7, tick
+    marks, the yellow daylight arc, hand, octal time, "Greenwich"). Two fixes: (1) `ClockActivity.
+    onCreate` called `getComponentName().getClassName()` and acl never set `Activity.mComponent` →
+    now wired in attachActivity (also fixes androidx `NavUtils.getParentActivityName`); (2) the arc
+    needed `BaseCanvas.nDrawArc`, added to graphics_jni (`SkCanvas::drawArc`). Verified by screenshot.
   - `app.smarzaro.foss4g2024.schedule` — `Resources$NotFoundException` for a layout resource id.
   - `app.crossword.yourealwaysbe.forkyzscanner` — installs its `<provider>`s (FileProvider +
     `androidx.startup.InitializationProvider`, see the ContentProvider note below) and clears the
