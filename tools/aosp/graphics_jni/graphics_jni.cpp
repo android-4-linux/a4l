@@ -438,6 +438,17 @@ void Canvas_nDrawCircle(JNIEnv*, jclass, jlong canvas, jfloat cx, jfloat cy, jfl
   if (c != nullptr) c->drawCircle(cx, cy, radius, p ? *p : SkPaint());
 }
 
+void Canvas_nDrawArc(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b,
+                     jfloat startAngle, jfloat sweepAngle, jboolean useCenter, jlong paint) {
+  tick_draw();
+  auto* c = canvas_sk(canvas);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
+  if (c != nullptr) {
+    c->drawArc(SkRect::MakeLTRB(l, t, r, b), startAngle, sweepAngle, useCenter, p ? *p : SkPaint());
+  }
+}
+
 void Canvas_nDrawRoundRect(JNIEnv*, jclass, jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b,
                            jfloat rx, jfloat ry, jlong paint) {
   tick_draw();
@@ -3474,6 +3485,7 @@ const JNINativeMethod kBaseCanvas[] = {
     {"nDrawLine", "(JFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawLine)},
     {"nDrawOval", "(JFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawOval)},
     {"nDrawCircle", "(JFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawCircle)},
+    {"nDrawArc", "(JFFFFFFZJ)V", reinterpret_cast<void*>(Canvas_nDrawArc)},
     {"nDrawRoundRect", "(JFFFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawRoundRect)},
     {"nDrawText", "(JLjava/lang/String;IIFFIJ)V", reinterpret_cast<void*>(Canvas_nDrawText)},
     {"nDrawText", "(J[CIIFFIJ)V", reinterpret_cast<void*>(Canvas_nDrawTextChars)},
