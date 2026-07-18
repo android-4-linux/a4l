@@ -619,6 +619,33 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("keyguard".equals(name)) {
+                // KeyguardManager(Context) (package-private, throws ServiceNotFoundException). Its
+                // ctor resolves window/activity/trust/notification binders — all seeded — so it
+                // builds; its queries (isKeyguardLocked/isDeviceLocked) route through the no-op
+                // proxies and return false, which is correct (no lockscreen on the host).
+                try {
+                    java.lang.reflect.Constructor<?> c = android.app.KeyguardManager.class
+                            .getDeclaredConstructor(android.content.Context.class);
+                    c.setAccessible(true);
+                    return c.newInstance(this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
+            if ("alarm".equals(name)) {
+                // AlarmManager(IAlarmManager, Context); a no-op IAlarmManager is enough (set/cancel
+                // no-op — no alarm host). EventFahrplan's AlarmServices grabs it in Fragment.onAttach.
+                try {
+                    Class<?> iam = Class.forName("android.app.IAlarmManager");
+                    java.lang.reflect.Constructor<?> c = android.app.AlarmManager.class
+                            .getDeclaredConstructor(iam, android.content.Context.class);
+                    c.setAccessible(true);
+                    return c.newInstance(noop(iam), this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("clipboard".equals(name)) {
                 // ClipboardManager(Context, Handler) → ServiceManager("clipboard") IClipboard
                 // (seeded no-op). Compose's AndroidComposeView reads it.
@@ -758,6 +785,14 @@ public final class HostBootstrap {
             // ImeFocusController.getImmDelegate() does getSystemService(InputMethodManager.class)
             // .getDelegate(); a Dialog add/remove NPEs here if it returns null. Map it.
             if (serviceClass == android.view.inputmethod.InputMethodManager.class) return "input_method";
+            // These are reached as getSystemService(SomeManager::class.java)!! (Kotlin non-null), so a
+            // null name NPEs — EventFahrplan hits all three (onCreate/onAttach/onViewCreated). acl backs
+            // each by string name below. (The real SystemServiceRegistry.getSystemServiceName is not a
+            // usable fallback here — its class init is unreliable on acl's headless image and returns
+            // null for these — so map them explicitly.)
+            if (serviceClass == android.app.KeyguardManager.class) return "keyguard";
+            if (serviceClass == android.app.AlarmManager.class) return "alarm";
+            if (serviceClass == android.view.LayoutInflater.class) return "layout_inflater";
             return null;
         }
 
@@ -2224,6 +2259,9 @@ public final class HostBootstrap {
         // ("mount") → IStorageManager; acl translates getVolumeList to the app's primary emulated
         // volume + host UDisks2 removable media (svc/storage) instead of leaving it null (NPE).
         svc.put("mount", "android.os.storage.IStorageManager");
+        // KeyguardManager's ctor does ServiceManager.getServiceOrThrow("trust") (throws without it);
+        // a no-op ITrustManager proxy is enough (isDeviceLocked/isKeyguardLocked → false).
+        svc.put("trust", "android.app.trust.ITrustManager");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},
