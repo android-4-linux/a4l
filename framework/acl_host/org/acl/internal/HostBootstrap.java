@@ -1600,11 +1600,26 @@ public final class HostBootstrap {
         return sTopOverlayModal;
     }
 
-    // Stop a Dialog's real ViewRootImpl from ever scheduling its own traversal (acl drives render).
+    // Stop a Dialog/Popup's real ViewRootImpl from scheduling its own traversal (acl drives render).
+    // Setting mTraversalScheduled=TRUE makes scheduleTraversals() early-return — but on window removal
+    // ViewRootImpl.doDie -> unscheduleTraversals() calls removeSyncBarrier(mTraversalBarrier). With no
+    // barrier posted that token is 0 and removeSyncBarrier throws "token not posted", the removeView
+    // fails, and the overlay is left half-removed (the app hangs). Post a REAL sync barrier once and
+    // record its token so the removal removes a valid barrier. Async messages (Choreographer/Compose/
+    // acl's present loop) bypass the barrier, so it only briefly holds the overlay's sync messages.
     private static void neuterViewRoot(Object vri) {
         if (vri == null) return;
-        try { setField(Class.forName("android.view.ViewRootImpl"), vri, "mTraversalScheduled", Boolean.TRUE); }
-        catch (Throwable ignored) {}
+        try {
+            Class<?> vriCls = Class.forName("android.view.ViewRootImpl");
+            if (Boolean.TRUE.equals(getField(vriCls, vri, "mTraversalScheduled"))) return;  // already neutered
+            try {
+                android.os.MessageQueue mq = android.os.Looper.getMainLooper().getQueue();
+                java.lang.reflect.Method post = android.os.MessageQueue.class.getDeclaredMethod("postSyncBarrier");
+                post.setAccessible(true);
+                setField(vriCls, vri, "mTraversalBarrier", ((Integer) post.invoke(mq)).intValue());
+            } catch (Throwable ignored) {}
+            setField(vriCls, vri, "mTraversalScheduled", Boolean.TRUE);
+        } catch (Throwable ignored) {}
     }
 
     // Measure/layout the overlay decor per its LayoutParams (MATCH/WRAP/exact + gravity) and draw it.
