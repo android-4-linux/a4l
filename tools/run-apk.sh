@@ -108,6 +108,12 @@ else
   printf 'run-apk: no bionic runtime staged (no built bionic in $AOSP?); native libs will not load\n' >&2
 fi
 
+# Provision a CA trust store so app HTTPS works: acl points ANDROID_ROOT at $HOME_DIR, and AOSP
+# conscrypt reads system CAs from $ANDROID_ROOT/etc/security/cacerts. Without it every TLS
+# handshake fails ("Trust anchor for certification path not found"). Idempotent + best-effort.
+"$ACLROOT/tools/gen-cacerts.sh" "$HOME_DIR/etc/security/cacerts" || \
+  printf 'run-apk: CA trust store not provisioned; app HTTPS may fail\n' >&2
+
 TIMEOUT="${ACL_RUN_TIMEOUT:-60}"
 RUNNER=(env
   ACL_ART_BOOTCLASSPATH="$BOOT"
