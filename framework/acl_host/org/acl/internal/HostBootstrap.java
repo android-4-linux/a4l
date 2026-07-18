@@ -297,6 +297,10 @@ public final class HostBootstrap {
         }
     }
 
+    // acl's advertised display (must track buildDisplayInfo()): apps query this via getDefaultDisplay/
+    // DisplayMetrics, so the app Resources' Configuration is built to match it.
+    static final int DISPLAY_W = 1920, DISPLAY_H = 1080, DISPLAY_DPI = 160;
+
     private static Resources appResources(String apkPath, String frameworkResPath) {
         try {
             android.content.res.AssetManager am =
@@ -305,12 +309,49 @@ public final class HostBootstrap {
                     android.content.res.AssetManager.class.getMethod("addAssetPath", String.class);
             if (frameworkResPath != null) add.invoke(am, frameworkResPath);  // android.R.*
             if (apkPath != null) add.invoke(am, apkPath);                    // the app's arsc
-            return new Resources(am, Resources.getSystem().getDisplayMetrics(),
-                                 Resources.getSystem().getConfiguration());
+            // A Configuration consistent with the advertised display, NOT the bare
+            // Resources.getSystem() one (orientation=UNDEFINED, screen dims 0). A config-qualified
+            // resource with no default variant — e.g. a layout that exists only as -port/-land/-sw600dp
+            // (foss4g2024.schedule's main_layout) — matches nothing under an undefined config, so
+            // getLayout() throws Resources$NotFoundException. A real orientation + screen size + density
+            // lets the selector pick a variant.
+            return new Resources(am, appMetrics(), appConfiguration());
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: app resources failed: " + t);
             return Resources.getSystem();
         }
+    }
+
+    private static android.util.DisplayMetrics appMetrics() {
+        android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+        dm.setToDefaults();
+        dm.widthPixels = DISPLAY_W;   dm.heightPixels = DISPLAY_H;
+        dm.densityDpi = DISPLAY_DPI;  dm.density = DISPLAY_DPI / 160f;
+        dm.scaledDensity = dm.density;
+        dm.xdpi = DISPLAY_DPI;        dm.ydpi = DISPLAY_DPI;
+        return dm;
+    }
+
+    private static android.content.res.Configuration appConfiguration() {
+        android.content.res.Configuration cfg = new android.content.res.Configuration();
+        cfg.setToDefaults();
+        cfg.densityDpi = DISPLAY_DPI;
+        float density = DISPLAY_DPI / 160f;
+        int wdp = Math.round(DISPLAY_W / density), hdp = Math.round(DISPLAY_H / density);
+        cfg.screenWidthDp = wdp;
+        cfg.screenHeightDp = hdp;
+        cfg.smallestScreenWidthDp = Math.min(wdp, hdp);
+        cfg.orientation = DISPLAY_W >= DISPLAY_H
+                ? android.content.res.Configuration.ORIENTATION_LANDSCAPE
+                : android.content.res.Configuration.ORIENTATION_PORTRAIT;
+        int sw = cfg.smallestScreenWidthDp;
+        int size = sw >= 720 ? android.content.res.Configuration.SCREENLAYOUT_SIZE_XLARGE
+                 : sw >= 480 ? android.content.res.Configuration.SCREENLAYOUT_SIZE_LARGE
+                 : sw >= 320 ? android.content.res.Configuration.SCREENLAYOUT_SIZE_NORMAL
+                 : android.content.res.Configuration.SCREENLAYOUT_SIZE_SMALL;
+        cfg.screenLayout = (cfg.screenLayout & ~android.content.res.Configuration.SCREENLAYOUT_SIZE_MASK)
+                | size | android.content.res.Configuration.SCREENLAYOUT_LONG_NO;
+        return cfg;
     }
 
     // The process Application, set once createApplication builds it. AppContext.getApplicationContext()
