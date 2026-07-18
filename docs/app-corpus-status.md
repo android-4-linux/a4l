@@ -64,7 +64,7 @@ Also tried, outside the F-Droid corpus (not redistributable, run locally only):
 
 | App | Result |
 | --- | --- |
-| `com.uptodown` (the Uptodown store app) | launcher + natives fine; dies because acl runs no ContentProviders (below) |
+| `com.uptodown` (the Uptodown store app) | launcher + natives fine; historically died in `Application.onCreate` (Firebase from a `<provider>`) — ContentProviders now run (below), not re-verified on this APK |
 | `com.spotify.music` (apkmirror base APK) | not launchable by anything: the APK declares no launcher (below) |
 
 ### SVS.pdfinspector — Jetpack Compose (MIT)
@@ -126,13 +126,14 @@ than the plain-canvas SurfaceView path.
   still want `libjnigraphics.so`, which acl does not provide yet, but those are off the RN startup
   path.)
 
-- **`com.uptodown`** — resolves its launcher, extracts its 4 x86_64 natives, then:
+- **`com.uptodown`** — resolves its launcher, extracts its 4 x86_64 natives, then (historically):
   `Application com.uptodown.UptodownApp construct failed`, and onCreate throws
   `IllegalStateException: Default FirebaseApp is not initialized in this process`. Nothing is wrong
   with the app: Firebase initializes itself from a `<provider>` (`FirebaseInitProvider`) that
-  Android runs before `Application.onCreate`, and **acl runs no ContentProviders at all**. The same
-  mechanism backs `androidx.startup` and WorkManager, so this gates a whole class of real apps —
-  arguably the next framework item after the Activity/Window layer.
+  Android runs before `Application.onCreate`. **This is now built** — see the ContentProvider note
+  below; the same `installContentProviders` path that unblocked `forkyz` runs `FirebaseInitProvider`
+  before `Application.onCreate`. (Not re-verified against this specific APK in the session that
+  landed it.)
 - **`com.spotify.music`** (apkmirror, x86_64 among its ABIs) — acl says "no launcher activity in the
   manifest and no --main given", and that is correct: `aapt2 dump badging` reports no
   `launchable-activity`, and the manifest contains **zero** `android.intent.action.MAIN` /
@@ -166,13 +167,42 @@ classified by whether the presented frame has non-black content). Roughly half r
     `SurfaceView` and the `gles_jni` EGL/GLES JNI, a large component.
   - `at.manuelbichler.octalsuntime` — NPE (a null String in the Clock activity's setup).
   - `app.smarzaro.foss4g2024.schedule` — `Resources$NotFoundException` for a layout resource id.
-  - `app.crossword.yourealwaysbe.forkyzscanner` — launcher activity construction failed.
+  - `app.crossword.yourealwaysbe.forkyzscanner` — now installs its `<provider>`s (FileProvider +
+    `androidx.startup.InitializationProvider`, see the ContentProvider note below) and reaches
+    `ForkyzScannerActivity.onCreate`, but stops there: a Compose/androidx ViewModel helper walks the
+    `getBaseContext()` chain of `LocalContext.current` looking for an `Application`
+    (`instanceof Application`, else follow `getBaseContext`) and is handed the bare `AppContext`
+    (base = null), so it throws `IllegalStateException: Could not find an Application in the given
+    context`. Distinct from ContentProvider: it's about which Context Compose's `LocalContext` is
+    seeded with (it should reach the Application/Activity, not the null-base `AppContext`). A
+    `getBaseContext()`→Application override is NOT the fix — it would cycle `AppContext ↔ Application`
+    and hang Compose's `findActivity`-style walks.
 
 Recurring, actionable gaps this surfaced: **`libstdc++.so`** (two apps — now staged, see above) and
 single missing natives like **`Bitmap.nativeHasMipMap`** (fixed) — the latter is the cheap kind, one
 function unblocks an app. With `libstdc++.so` staged, the two libGDX apps fold into the larger
 **GLSurfaceView / `gles_jni.EGLImpl`** gap (the SurfaceView + GLES path). The black-frame apps share
 the S.N.A.K.E question (custom-View content not reaching the screen).
+
+### ContentProviders (built)
+
+`ActivityThread` runs every declared `<provider>`'s `onCreate` **before** `Application.onCreate`;
+acl previously ran none (the `ContentResolver` was a no-op stub), so any app that bootstraps from a
+provider — `androidx.startup.InitializationProvider` (WorkManager / Compose resources / Koin),
+Firebase's `FirebaseInitProvider` — crashed in `Application.onCreate`. `HostBootstrap.
+installContentProviders` now parses `<provider>` straight from the manifest (no PMS/Binder, ADR-3),
+instantiates each via the app classloader, and `attachInfo()`s it (which runs `onCreate`), stashing
+the per-provider `<meta-data>` so `getProviderInfo(cn, GET_META_DATA)` can re-serve it — the exact
+call `androidx.startup` makes to rediscover its `Initializer`s. `exported` / `grantUriPermissions`
+are parsed (FileProvider requires `exported=false` + `grantUriPermissions=true`), and installed
+providers are registered by authority so `resolver.query/openFile` on a `content://` URI reach the
+live provider's in-process `Transport` instead of the stub. Two adjacent gaps fixed alongside:
+`AppContext.getUser()` (WorkManager's `PendingIntent.getBroadcast` path NPE'd on the null base).
+
+**Verified:** `app.crossword.yourealwaysbe.forkyz` went from crashing in `Application.onCreate` to
+installing all four providers and booting through to a real `ViewRoot` layout (measured 1280x1440).
+`forkyzscanner` also installs its providers now but is blocked one step later on a Compose
+`LocalContext`/ViewModel `Application`-lookup (see the "Wider survey" entry above).
 
 ## Notes
 
