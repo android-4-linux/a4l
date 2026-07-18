@@ -1220,7 +1220,19 @@ public final class HostBootstrap {
             ai.applicationInfo = appInfo;
             ai.packageName = appInfo.packageName;
         } catch (Throwable ignored) {}
+        // ComponentInfo.name is the activity's own class; getComponentName()/ActivityInfo readers use it.
+        String actClass = a.getClass().getName();
+        ai.name = actClass;
         setField(android.app.Activity.class, a, "mActivityInfo", ai);
+        // Activity.getComponentName() reads mComponent; real attach() sets it. Left null, any
+        // getComponentName().getClassName() NPEs — androidx NavUtils.getParentActivityName does exactly
+        // this, and so does e.g. octalsuntime's ClockActivity.onCreate.
+        android.content.ComponentName cn = null;
+        try {
+            cn = new android.content.ComponentName(
+                    ai.packageName != null ? ai.packageName : ctx.getPackageName(), actClass);
+            setField(android.app.Activity.class, a, "mComponent", cn);
+        } catch (Throwable ignored) {}
         // Set the theme on the Activity's ContextThemeWrapper (mBase is already attached), forcing
         // a re-resolve, then log what actually landed on the theme stack.
         try {
@@ -1233,10 +1245,13 @@ public final class HostBootstrap {
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: activity theme apply failed: " + t);
         }
-        // The launch Intent — getIntent() is read in onCreate (a null mIntent NPEs).
+        // The launch Intent — getIntent() is read in onCreate (a null mIntent NPEs). Give it the
+        // launcher component so getIntent().getComponent() also resolves (not just getComponentName()).
         try {
-            setField(android.app.Activity.class, a, "mIntent",
-                     new android.content.Intent(android.content.Intent.ACTION_MAIN));
+            android.content.Intent launch = new android.content.Intent(android.content.Intent.ACTION_MAIN)
+                    .addCategory(android.content.Intent.CATEGORY_LAUNCHER);
+            if (cn != null) launch.setComponent(cn);
+            setField(android.app.Activity.class, a, "mIntent", launch);
         } catch (Throwable ignored) {
         }
         try {
