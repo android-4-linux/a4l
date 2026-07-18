@@ -457,6 +457,9 @@ public final class HostBootstrap {
         @Override public boolean isDeviceProtectedStorage() { return false; }
         @Override public boolean isRestricted() { return false; }  // TextView.readTextAppearance
         @Override public boolean canLoadUnsafeResources() { return true; }  // same, @hide
+        // The single acl user (ADR-3). WorkManager's PendingIntent.getBroadcast path calls
+        // Context.getUser() on a background thread; without this it delegates to the null base.
+        @Override public android.os.UserHandle getUser() { return android.os.Process.myUserHandle(); }
         // Grant everything — a single-app host with no permission enforcement (ADR-3).
         @Override public int checkPermission(String perm, int pid, int uid) { return 0; }  // GRANTED
         @Override public int checkSelfPermission(String perm) { return 0; }
@@ -911,12 +914,30 @@ public final class HostBootstrap {
         }
     }
 
+    // <provider> meta-data keyed by fully-qualified class name, parsed once in
+    // installContentProviders and re-served via AppPackageManager.getProviderInfo — androidx.startup's
+    // InitializationProvider re-reads its declared Initializers from getProviderInfo(cn, GET_META_DATA).
+    static final java.util.Map<String, android.os.Bundle> sProviderMeta =
+            new java.util.HashMap<String, android.os.Bundle>();
+
     static final class AppPackageManager extends StubPackageManager {
         private final String pkg;
         AppPackageManager(String pkg) { this.pkg = pkg; }
         @Override public android.content.pm.PackageInfo getPackageInfo(String p, int flags)
                 throws android.content.pm.PackageManager.NameNotFoundException {
             throw new android.content.pm.PackageManager.NameNotFoundException(p);
+        }
+        // A non-null ProviderInfo carrying the provider's <meta-data> (installContentProviders parsed
+        // it). androidx.startup calls this on its own InitializationProvider to discover Initializers;
+        // a null return (StubPackageManager default) would NPE it before any app code runs.
+        @Override public android.content.pm.ProviderInfo getProviderInfo(
+                android.content.ComponentName component, int flags) {
+            android.content.pm.ProviderInfo pi = new android.content.pm.ProviderInfo();
+            pi.packageName = component != null ? component.getPackageName() : pkg;
+            pi.name = component != null ? component.getClassName() : null;
+            pi.applicationInfo = getApplicationInfo(pkg, 0);
+            if (pi.name != null) pi.metaData = sProviderMeta.get(pi.name);
+            return pi;
         }
         // Non-null ActivityInfo (no parent activity) so androidx NavUtils.getParentActivityName
         // and similar reads don't NPE on a null result.
@@ -1009,6 +1030,10 @@ public final class HostBootstrap {
             if (cur != null) setField(at, cur, "mInitialApplication", app);
         } catch (Throwable ignored) {
         }
+        // ActivityThread.installContentProviders runs every <provider>'s onCreate BEFORE
+        // Application.onCreate — androidx.startup's InitializationProvider bootstraps WorkManager/
+        // Firebase from there, so it must run first.
+        installContentProviders(base, pkg);
         // Run the app's own init (sets its singleton). A failure here (unsupported API, missing
         // native lib — e.g. React Native's SoLoader) must NOT discard the Application: the
         // Activity still needs a non-null getApplication(). Log and continue with the object.
@@ -1020,6 +1045,76 @@ public final class HostBootstrap {
                     + " (" + t + "); continuing with the Application attached");
         }
         return app;  // never null → Activity.getApplication() works even if app init failed
+    }
+
+    // Parse <provider> entries straight from AndroidManifest.xml (no PMS/Binder, ADR-3),
+    // instantiate each via the app classloader, and attachInfo() — which runs ContentProvider.
+    // onCreate(). ActivityThread does this before Application.onCreate. The per-provider
+    // <meta-data> is stashed in sProviderMeta so getProviderInfo() can re-serve it (the whole
+    // reason androidx.startup's InitializationProvider works). Best-effort per provider: a
+    // failing onCreate is logged and skipped so one bad provider doesn't sink app startup.
+    static void installContentProviders(android.content.Context base, String pkg) {
+        // {className, authorities, exported, grantUriPermissions} — the last two decide whether
+        // FileProvider (exported=false + grantUriPermissions=true, else it throws in attachInfo).
+        java.util.List<String[]> providers = new java.util.ArrayList<String[]>();
+        android.content.res.XmlResourceParser xml = null;
+        try {
+            xml = base.getResources().getAssets().openXmlResourceParser("AndroidManifest.xml");
+            final String NS = "http://schemas.android.com/apk/res/android";
+            String cur = null;
+            android.os.Bundle curMeta = null;
+            for (int ev = xml.getEventType();
+                 ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
+                if (ev == android.content.res.XmlResourceParser.START_TAG) {
+                    String tag = xml.getName();
+                    if ("provider".equals(tag)) {
+                        String name = xml.getAttributeValue(NS, "name");
+                        if (name != null) {
+                            if (name.startsWith(".")) name = pkg + name;
+                            else if (name.indexOf('.') < 0) name = pkg + "." + name;
+                            cur = name;
+                            curMeta = new android.os.Bundle();
+                            providers.add(new String[]{name, xml.getAttributeValue(NS, "authorities"),
+                                    Boolean.toString(xml.getAttributeBooleanValue(NS, "exported", false)),
+                                    Boolean.toString(xml.getAttributeBooleanValue(NS, "grantUriPermissions", false))});
+                        }
+                    } else if (cur != null && "meta-data".equals(tag)) {
+                        AppContext.putMetaData(curMeta, xml);
+                    }
+                } else if (ev == android.content.res.XmlResourceParser.END_TAG
+                        && "provider".equals(xml.getName())) {
+                    if (cur != null) { sProviderMeta.put(cur, curMeta); cur = null; curMeta = null; }
+                }
+            }
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: <provider> parse failed (" + t + "); "
+                    + "no ContentProviders installed");
+            return;
+        } finally {
+            if (xml != null) xml.close();
+        }
+        for (String[] p : providers) {
+            String cls = p[0], auth = p[1];
+            try {
+                Class<?> c = Class.forName(cls, false, base.getClassLoader());
+                android.content.ContentProvider cp =
+                        (android.content.ContentProvider) c.getConstructor().newInstance();
+                android.content.pm.ProviderInfo info = new android.content.pm.ProviderInfo();
+                info.name = cls;
+                info.authority = auth;
+                info.packageName = pkg;
+                info.applicationInfo = base.getApplicationInfo();
+                info.metaData = sProviderMeta.get(cls);
+                info.exported = Boolean.parseBoolean(p[2]);
+                info.grantUriPermissions = Boolean.parseBoolean(p[3]);
+                cp.attachInfo(base, info);  // → ContentProvider.onCreate()
+                System.out.println("acl HostBootstrap: ContentProvider installed: " + cls
+                        + (auth != null ? " (authorities=" + auth + ")" : ""));
+            } catch (Throwable t) {
+                System.err.println("acl HostBootstrap: ContentProvider " + cls
+                        + " install failed (" + t + "); continuing");
+            }
+        }
     }
 
     // Allocate an instance without running its constructor (no side effects) — for seeding
