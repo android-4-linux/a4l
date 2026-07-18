@@ -250,6 +250,70 @@ std::uintptr_t get_fs() {
 }
 void set_fs(std::uintptr_t v) { syscall(SYS_arch_prctl, ARCH_SET_FS, v); }
 
+// ── Signal %fs shim ──────────────────────────────────────────────────────────────────────────
+// A thread running a bionic .so's native code holds the bionic %fs. If a signal lands then — ART's
+// own thread-management signals (suspend/checkpoint), or a genuine fault — the glibc signal handler
+// ART installs (libsigchain) runs with the WRONG %fs and crashes on its first glibc TLS access
+// (pthread_getspecific). Interpose the KERNEL handler (raw rt_sigaction, below libsigchain's own
+// sigaction interposition): restore this thread's glibc %fs via the pairing BEFORE delegating to
+// ART's handler, then restore bionic on return. If ART's handler services the signal it returns and
+// the thread resumes native code; if it's a real crash, ART now produces its proper report instead
+// of the pthread_getspecific double-fault. Signals under glibc %fs (the normal case) pass straight
+// through (glibc_fs_for returns 0). All of this is TLS-free until the swap, which the whole TU's
+// -fno-stack-protector allows.
+struct KSigaction {  // the KERNEL's layout (differs from glibc's: field order + 8-byte mask)
+  void* handler = nullptr;            // sa_handler / sa_sigaction
+  unsigned long flags = 0;            // sa_flags (SA_RESTORER, SA_SIGINFO, …)
+  void (*restorer)(void) = nullptr;   // sa_restorer — required on x86_64
+  unsigned long mask = 0;             // sa_mask (first 64 signals)
+};
+int raw_rt_sigaction(int sig, const KSigaction* act, KSigaction* old) {
+  return static_cast<int>(syscall(SYS_rt_sigaction, sig, act, old, sizeof(unsigned long)));
+}
+struct SavedSig {
+  void* handler = nullptr;
+  unsigned long flags = 0;
+};
+SavedSig g_saved_sig[65];  // indexed by signo (1..64)
+std::atomic<bool> g_shims_installed{false};
+
+void acl_signal_trampoline(int sig, siginfo_t* info, void* uctx) {
+  const std::uintptr_t cur = get_fs();
+  const std::uintptr_t glibc = glibc_fs_for(cur);  // 0 unless cur is a tracked bionic %fs
+  const bool swap = glibc != 0 && glibc != cur;
+  if (swap) set_fs(glibc);
+  const SavedSig s = (sig > 0 && sig <= 64) ? g_saved_sig[sig] : SavedSig{};
+  if (s.handler != nullptr) {
+    if ((s.flags & SA_SIGINFO) != 0)
+      reinterpret_cast<void (*)(int, siginfo_t*, void*)>(s.handler)(sig, info, uctx);
+    else
+      reinterpret_cast<void (*)(int)>(s.handler)(sig);
+  }
+  if (swap) set_fs(cur);
+}
+
+// Wrap the kernel handlers ART/libsigchain installed for the fault + management signals. Idempotent;
+// runs once (on the first bionic lib load, when ART is fully up). SIG_DFL/SIG_IGN are left alone —
+// they touch no glibc TLS.
+void install_signal_shims() {
+  if (g_shims_installed.exchange(true)) return;
+  static const int sigs[] = {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGABRT, SIGQUIT, SIGSYS};
+  int wrapped = 0;
+  for (const int sig : sigs) {
+    KSigaction old{};
+    if (raw_rt_sigaction(sig, nullptr, &old) != 0) continue;
+    if (old.handler == nullptr || old.handler == reinterpret_cast<void*>(1)) continue;  // SIG_DFL/IGN
+    if (old.handler == reinterpret_cast<void*>(&acl_signal_trampoline)) continue;        // already
+    g_saved_sig[sig].handler = old.handler;
+    g_saved_sig[sig].flags = old.flags;
+    KSigaction neu = old;  // keep the kernel restorer + mask + flags
+    neu.handler = reinterpret_cast<void*>(&acl_signal_trampoline);
+    neu.flags |= SA_SIGINFO;  // our trampoline is a 3-arg sigaction
+    if (raw_rt_sigaction(sig, &neu, nullptr) == 0) ++wrapped;
+  }
+  log::i(kTag, "signal fs-shim installed over {} ART handler(s)", wrapped);
+}
+
 struct Mapped {
   std::uintptr_t base = 0, entry = 0, phdr = 0;
   std::uint16_t phnum = 0;
@@ -1149,6 +1213,10 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
     }
     log::i(kTag, "{}: JNI_OnLoad ok (requested JNI {:#x})", abs_path, ver);
   }
+  // ART + libsigchain are fully up by the time an app loads a bionic lib; wrap their signal
+  // handlers so a signal that lands while a thread runs this lib's native code (bionic %fs) is
+  // serviced with glibc %fs instead of crashing the handler. Idempotent (once per process).
+  install_signal_shims();
   return h;
 #else
   (void)abs_path; (void)real_vm; (void)real_env;
