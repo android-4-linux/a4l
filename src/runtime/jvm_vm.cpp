@@ -659,8 +659,21 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   // tree produced no paint (blank/white frame); high => content draws (issue is elsewhere).
   static auto drawops = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_drawops"));
   const std::uint64_t ops_before = drawops ? drawops() : 0;
+  // Force Compose layers to re-record each frame (main content AND overlays). The draw_rendernode
+  // drawable fix defers CHILD replay correctly, but a parent layer that Compose caches (never
+  // re-records) keeps a STALE display list across a navigation/content change — its drawables still
+  // reference the OLD children, so a navigated-to or settled screen (forkyz's Settings/Help, a
+  // Dialog/Popup) paints blank. Re-recording the whole tree every frame keeps it fresh. acl already
+  // re-draws every frame, so this trades CPU for correct rendering; the present-root is exempt.
+  static auto force_record = reinterpret_cast<void (*)(int)>(
+      ::dlsym(RTLD_DEFAULT, "acl_graphics_set_force_record"));
+  if (force_record != nullptr) force_record(1);
   if (s->m_draw != nullptr && s->canvas != nullptr) env->CallVoidMethod(s->view, s->m_draw, s->canvas);
-  if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); return; }
+  if (env->ExceptionCheck() == JNI_TRUE) {
+    env->ExceptionDescribe(); env->ExceptionClear();
+    if (force_record != nullptr) force_record(0);
+    return;
+  }
   // Overlay pass: composite any Dialog/PopupWindow decors (WindowManagerGlobal.mViews) over the
   // Activity in the same surface. HostBootstrap owns the enumeration/measure/layout/draw.
   static jclass overlay_cls = nullptr;
@@ -680,16 +693,9 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   static auto recstats0 = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_recstats"));
   const std::uint64_t ops_pre_overlay = ov_diag && drawops ? drawops() : 0;
   const std::uint64_t rep_pre_overlay = ov_diag && recstats0 ? (recstats0() & 0xfffff) : 0;
-  // Overlays (Dialog/Popup) are a separate composition whose recomposer acl doesn't drive, so their
-  // layers never re-record after the initial compose and replay blank. Force them fresh each frame,
-  // scoped to the overlay pass (the main content keeps its cache + the draw_rendernode drawable fix).
-  static auto force_record = reinterpret_cast<void (*)(int)>(
-      ::dlsym(RTLD_DEFAULT, "acl_graphics_set_force_record"));
-  if (overlay_present != nullptr && s->canvas != nullptr) {
-    if (force_record != nullptr) force_record(1);
+  if (overlay_present != nullptr && s->canvas != nullptr)
     env->CallStaticVoidMethod(overlay_cls, overlay_present, s->canvas, s->w, s->h);
-    if (force_record != nullptr) force_record(0);
-  }
+  if (force_record != nullptr) force_record(0);  // whole frame drawn; re-arm caching for the next
   if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
   if (ov_diag) {
     const std::uint64_t d = drawops ? drawops() - ops_pre_overlay : 0;
