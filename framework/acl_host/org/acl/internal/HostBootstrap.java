@@ -297,9 +297,16 @@ public final class HostBootstrap {
         }
     }
 
-    // acl's advertised display (must track buildDisplayInfo()): apps query this via getDefaultDisplay/
-    // DisplayMetrics, so the app Resources' Configuration is built to match it.
-    static final int DISPLAY_W = 1920, DISPLAY_H = 1080, DISPLAY_DPI = 160;
+    // acl's advertised display — the single source of truth. jvm_vm pushes it from svc::window()
+    // (the wl_output mode + density) via setDisplay() before any Context/Resources is built, so
+    // android.view.Display (buildDisplayInfo), the Resources Configuration (appConfiguration), and the
+    // content-view measure all agree on one size. Defaults cover headless/test runs (no compositor).
+    static volatile int DISPLAY_W = 1920, DISPLAY_H = 1080, DISPLAY_DPI = 160;
+    public static void setDisplay(int w, int h, int densityDpi) {
+        if (w > 0) DISPLAY_W = w;
+        if (h > 0) DISPLAY_H = h;
+        if (densityDpi > 0) DISPLAY_DPI = densityDpi;
+    }
 
     private static Resources appResources(String apkPath, String frameworkResPath) {
         try {
@@ -1956,7 +1963,7 @@ public final class HostBootstrap {
     // Display object (Compose's, RecyclerView's, …) is valid.
     static Object buildDisplayInfo() {
         try {
-            final int dw = 1920, dh = 1080, dpi = 160;
+            final int dw = DISPLAY_W, dh = DISPLAY_H, dpi = DISPLAY_DPI;  // the advertised display
             Class<?> diCls = Class.forName("android.view.DisplayInfo");
             Object di = diCls.getConstructor().newInstance();
             for (String[] f : new String[][]{

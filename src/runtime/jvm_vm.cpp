@@ -974,6 +974,19 @@ class JniVm : public Vm {
     }
     clear_exception();
 
+    // The advertised display (svc::window(): wl_output mode + density), pushed before any
+    // Context/Resources is built so android.view.Display, the Resources Configuration, and the
+    // content-view measure all agree on one size. Previously HostBootstrap hardcoded 1920x1080@160,
+    // which disagreed with the real present surface (e.g. a 1280x1440 portrait wl_output was told
+    // it was a 1920x1080 landscape display).
+    if (jmethodID set_disp = env_->GetStaticMethodID(boot, "setDisplay", "(III)V")) {
+      env_->CallStaticVoidMethod(boot, set_disp,
+                                 static_cast<jint>(svc::window().display_width()),
+                                 static_cast<jint>(svc::window().display_height()),
+                                 static_cast<jint>(svc::window().density_dpi()));
+    }
+    clear_exception();
+
     // The app's Application, created once (its onCreate sets the app's singleton).
     if (app_application_ == nullptr) {
       jstring j_app = env_->NewStringUTF(config_.application_name.c_str());
