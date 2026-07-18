@@ -3548,6 +3548,68 @@ const JNINativeMethod kBaseCanvas[] = {
     {"nDrawNinePatch", "(JJJFFFFJII)V", reinterpret_cast<void*>(Canvas_nDrawNinePatch)},
     {"nDrawPath", "(JJJ)V", reinterpret_cast<void*>(Canvas_nDrawPath)},
 };
+// android.graphics.PathMeasure — arc-length traversal of a Path (progress arcs, path-following
+// animations). Backed by SkPathMeasure. Plain JNI (normal env/jclass ABI; not @CriticalNative —
+// the by-name __JZ fallback in the UnsatisfiedLinkError confirms this).
+jlong PathMeasure_nCreate(JNIEnv*, jclass, jlong pathPtr, jboolean forceClosed) {
+  auto* path = reinterpret_cast<SkPath*>(pathPtr);
+  return reinterpret_cast<jlong>(path != nullptr ? new SkPathMeasure(*path, forceClosed)
+                                                  : new SkPathMeasure());
+}
+void PathMeasure_nSetPath(JNIEnv*, jclass, jlong ptr, jlong pathPtr, jboolean forceClosed) {
+  if (auto* m = reinterpret_cast<SkPathMeasure*>(ptr))
+    m->setPath(reinterpret_cast<SkPath*>(pathPtr), forceClosed);
+}
+jfloat PathMeasure_nGetLength(JNIEnv*, jclass, jlong ptr) {
+  auto* m = reinterpret_cast<SkPathMeasure*>(ptr);
+  return m != nullptr ? m->getLength() : 0.0f;
+}
+jboolean PathMeasure_nGetPosTan(JNIEnv* env, jclass, jlong ptr, jfloat distance, jfloatArray posA,
+                                jfloatArray tanA) {
+  auto* m = reinterpret_cast<SkPathMeasure*>(ptr);
+  if (m == nullptr) return JNI_FALSE;
+  SkPoint pos{}; SkVector tan{};
+  if (!m->getPosTan(distance, &pos, &tan)) return JNI_FALSE;
+  if (posA != nullptr) { jfloat v[2] = {pos.x(), pos.y()}; env->SetFloatArrayRegion(posA, 0, 2, v); }
+  if (tanA != nullptr) { jfloat v[2] = {tan.x(), tan.y()}; env->SetFloatArrayRegion(tanA, 0, 2, v); }
+  return JNI_TRUE;
+}
+jboolean PathMeasure_nGetMatrix(JNIEnv*, jclass, jlong ptr, jfloat distance, jlong matPtr, jint flags) {
+  auto* m = reinterpret_cast<SkPathMeasure*>(ptr);
+  auto* mat = reinterpret_cast<SkMatrix*>(matPtr);
+  if (m == nullptr || mat == nullptr) return JNI_FALSE;
+  return m->getMatrix(distance, mat, static_cast<SkPathMeasure::MatrixFlags>(flags)) ? JNI_TRUE
+                                                                                     : JNI_FALSE;
+}
+jboolean PathMeasure_nGetSegment(JNIEnv*, jclass, jlong ptr, jfloat startD, jfloat stopD,
+                                 jlong pathPtr, jboolean startWithMoveTo) {
+  auto* m = reinterpret_cast<SkPathMeasure*>(ptr);
+  auto* dst = reinterpret_cast<SkPath*>(pathPtr);
+  if (m == nullptr || dst == nullptr) return JNI_FALSE;
+  return m->getSegment(startD, stopD, dst, startWithMoveTo) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean PathMeasure_nIsClosed(JNIEnv*, jclass, jlong ptr) {
+  auto* m = reinterpret_cast<SkPathMeasure*>(ptr);
+  return (m != nullptr && m->isClosed()) ? JNI_TRUE : JNI_FALSE;
+}
+jboolean PathMeasure_nNextContour(JNIEnv*, jclass, jlong ptr) {
+  auto* m = reinterpret_cast<SkPathMeasure*>(ptr);
+  return (m != nullptr && m->nextContour()) ? JNI_TRUE : JNI_FALSE;
+}
+void PathMeasure_nDestroy(JNIEnv*, jclass, jlong ptr) {
+  delete reinterpret_cast<SkPathMeasure*>(ptr);
+}
+const JNINativeMethod kPathMeasure[] = {
+    {"native_create", "(JZ)J", reinterpret_cast<void*>(PathMeasure_nCreate)},
+    {"native_setPath", "(JJZ)V", reinterpret_cast<void*>(PathMeasure_nSetPath)},
+    {"native_getLength", "(J)F", reinterpret_cast<void*>(PathMeasure_nGetLength)},
+    {"native_getPosTan", "(JF[F[F)Z", reinterpret_cast<void*>(PathMeasure_nGetPosTan)},
+    {"native_getMatrix", "(JFJI)Z", reinterpret_cast<void*>(PathMeasure_nGetMatrix)},
+    {"native_getSegment", "(JFFJZ)Z", reinterpret_cast<void*>(PathMeasure_nGetSegment)},
+    {"native_isClosed", "(J)Z", reinterpret_cast<void*>(PathMeasure_nIsClosed)},
+    {"native_nextContour", "(J)Z", reinterpret_cast<void*>(PathMeasure_nNextContour)},
+    {"native_destroy", "(J)V", reinterpret_cast<void*>(PathMeasure_nDestroy)},
+};
 const JNINativeMethod kPath[] = {
     {"nInit", "()J", reinterpret_cast<void*>(Path_nInit)},
     {"nInit", "(J)J", reinterpret_cast<void*>(Path_nInitCopy)},  // Path(Path) copy ctor
@@ -4137,6 +4199,9 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   reg(env, "android/graphics/RuntimeShader", kRuntimeShader, n(kRuntimeShader));
   ok = reg(env, "android/graphics/BaseCanvas", kBaseCanvas, n(kBaseCanvas)) && ok;
   ok = reg(env, "android/graphics/Path", kPath, n(kPath)) && ok;
+  // PathMeasure (progress arcs / path-following animations) — a missing native_create blanks the
+  // composing screen (forkyz's add-puzzle sub-screen). Best-effort.
+  reg(env, "android/graphics/PathMeasure", kPathMeasure, n(kPathMeasure));
   ok = reg(env, "android/graphics/ImageDecoder", kImageDecoder, n(kImageDecoder)) && ok;
   ok = reg(env, "android/graphics/NinePatch", kNinePatch, n(kNinePatch)) && ok;
   ok = reg(env, "android/graphics/ColorFilter", kColorFilter, n(kColorFilter)) && ok;
