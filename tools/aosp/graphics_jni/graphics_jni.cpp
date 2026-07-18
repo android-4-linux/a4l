@@ -39,6 +39,10 @@
 #include "SkData.h"
 #include "SkSamplingOptions.h"
 #include "SkStream.h"
+#include "SkPixmap.h"
+#include "SkPngEncoder.h"    // Bitmap.compress -> PNG
+#include "SkJpegEncoder.h"   // Bitmap.compress -> JPEG
+#include "SkWebpEncoder.h"   // Bitmap.compress -> WEBP
 #include "SkPngChunkReader.h"
 #include "codec/SkAndroidCodec.h"
 #include "codec/SkCodec.h"
@@ -254,6 +258,55 @@ void Bitmap_nativeSetHasAlpha(JNIEnv*, jclass, jlong ptr, jboolean hasAlpha, jbo
 void Bitmap_nativeErase(JNIEnv*, jclass, jlong ptr, jint color) {
   auto* w = reinterpret_cast<AclBitmap*>(ptr);
   if (w != nullptr) w->bitmap.eraseColor(static_cast<SkColor>(color));
+}
+
+// Bitmap.compress(format, quality, OutputStream): encode the SkBitmap (PNG/JPEG/WEBP via the
+// linked Skia encoders) and write the bytes to the Java OutputStream. CompressFormat ordinals:
+// 0=JPEG, 1=PNG, 2=WEBP, 3=WEBP_LOSSY, 4=WEBP_LOSSLESS.
+jboolean Bitmap_nativeCompress(JNIEnv* env, jclass, jlong ptr, jint format, jint quality,
+                               jobject stream, jbyteArray /*tempStorage*/) {
+  auto* w = reinterpret_cast<AclBitmap*>(ptr);
+  if (w == nullptr || stream == nullptr) return JNI_FALSE;
+  SkPixmap pm;
+  if (!w->bitmap.peekPixels(&pm)) return JNI_FALSE;
+  SkDynamicMemoryWStream out;
+  bool ok = false;
+  switch (format) {
+    case 0: {  // JPEG
+      SkJpegEncoder::Options o;
+      o.fQuality = quality;
+      ok = SkJpegEncoder::Encode(&out, pm, o);
+      break;
+    }
+    case 2:
+    case 3:
+    case 4: {  // WEBP (lossy / lossless)
+      SkWebpEncoder::Options o;
+      o.fCompression = (format == 4) ? SkWebpEncoder::Compression::kLossless
+                                     : SkWebpEncoder::Compression::kLossy;
+      o.fQuality = static_cast<float>(quality);
+      ok = SkWebpEncoder::Encode(&out, pm, o);
+      break;
+    }
+    case 1:
+    default: {  // PNG (lossless; quality ignored)
+      SkPngEncoder::Options o;
+      ok = SkPngEncoder::Encode(&out, pm, o);
+      break;
+    }
+  }
+  if (!ok) return JNI_FALSE;
+  sk_sp<SkData> data = out.detachAsData();
+  const jsize n = static_cast<jsize>(data->size());
+  jbyteArray arr = env->NewByteArray(n);
+  if (arr == nullptr) return JNI_FALSE;
+  env->SetByteArrayRegion(arr, 0, n, reinterpret_cast<const jbyte*>(data->data()));
+  jclass os = env->FindClass("java/io/OutputStream");
+  jmethodID write = os != nullptr ? env->GetMethodID(os, "write", "([BII)V") : nullptr;
+  if (write != nullptr) env->CallVoidMethod(stream, write, arr, 0, n);
+  env->DeleteLocalRef(arr);
+  if (os != nullptr) env->DeleteLocalRef(os);
+  return env->ExceptionCheck() ? JNI_FALSE : JNI_TRUE;
 }
 
 jboolean Bitmap_nativeIsPremultiplied(JNIEnv*, jclass, jlong ptr) {
@@ -768,6 +821,14 @@ void Canvas_nRestoreToCount(jlong canvas, jint saveCount) {
 jint Canvas_nGetSaveCount(jlong canvas) {
   auto* c = canvas_sk(canvas);
   return c != nullptr ? c->getSaveCount() : 0;
+}
+jint Canvas_nGetWidth(jlong canvas) {  // @CriticalNative
+  auto* c = canvas_sk(canvas);
+  return c != nullptr ? c->getBaseLayerSize().width() : 0;
+}
+jint Canvas_nGetHeight(jlong canvas) {  // @CriticalNative
+  auto* c = canvas_sk(canvas);
+  return c != nullptr ? c->getBaseLayerSize().height() : 0;
 }
 void Canvas_nTranslate(jlong canvas, jfloat dx, jfloat dy) {
   auto* c = canvas_sk(canvas);
@@ -2894,6 +2955,7 @@ const JNINativeMethod kBitmap[] = {
      reinterpret_cast<void*>(Bitmap_nativeGetAllocationByteCount)},
     {"nativeSetHasAlpha", "(JZZ)V", reinterpret_cast<void*>(Bitmap_nativeSetHasAlpha)},
     {"nativeErase", "(JI)V", reinterpret_cast<void*>(Bitmap_nativeErase)},
+    {"nativeCompress", "(JIILjava/io/OutputStream;[B)Z", reinterpret_cast<void*>(Bitmap_nativeCompress)},
     {"nativeIsPremultiplied", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeIsPremultiplied)},
     {"nativeHasAlpha", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeHasAlpha)},
     {"nativeHasMipMap", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeHasMipMap)},
@@ -3343,6 +3405,8 @@ const JNINativeMethod kCanvas[] = {
     {"nInitRaster", "(J)J", reinterpret_cast<void*>(Canvas_nInitRaster)},
     {"nSetBitmap", "(JJ)V", reinterpret_cast<void*>(Canvas_nSetBitmap)},
     {"nGetNativeFinalizer", "()J", reinterpret_cast<void*>(Canvas_nGetNativeFinalizer)},
+    {"nGetWidth", "(J)I", reinterpret_cast<void*>(Canvas_nGetWidth)},    // @CriticalNative
+    {"nGetHeight", "(J)I", reinterpret_cast<void*>(Canvas_nGetHeight)},  // @CriticalNative
     // @CriticalNative transform/clip (handle-only).
     {"nSave", "(JI)I", reinterpret_cast<void*>(Canvas_nSave)},
     {"nRestore", "(J)Z", reinterpret_cast<void*>(Canvas_nRestore)},
