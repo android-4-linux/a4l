@@ -195,6 +195,14 @@ class IPresenter {
   // wl_buffer once, arm the next wl_surface.frame callback, attach + damage + commit + flush.
   virtual bool submit(const gfx::DmabufFrame& frame) noexcept = 0;
 
+  // Keep the vsync loop alive when a frame is DROPPED (the traversal threw, or the GPU could
+  // not begin/end a frame, so submit() didn't run). Re-arm the next wl_surface.frame callback
+  // and re-commit the last buffer without producing a new one — the last good frame stays on
+  // screen and the compositor keeps ticking. Forward progress is otherwise gated entirely on
+  // submit() arming frame-done, so a single dropped frame would stall the loop forever. Returns
+  // false if there is nothing to keep alive yet (no frame ever committed) or the toplevel closed.
+  virtual bool keepalive() noexcept = 0;
+
   // True once the compositor/user has closed the toplevel.
   virtual bool closed() const noexcept = 0;
 };

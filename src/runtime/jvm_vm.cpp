@@ -645,7 +645,11 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
       tap_state = 2;
     }
   }
-  if (s->gpu_begin(s->w, s->h) == 0) { log::w(kTag, "PresentDriver.nTraverse: gpu_begin=0"); return; }  // clear + re-arm
+  if (s->gpu_begin(s->w, s->h) == 0) {  // clear + re-arm
+    log::w(kTag, "PresentDriver.nTraverse: gpu_begin=0");
+    s->presenter->keepalive();  // no submit this frame — keep the vsync loop ticking
+    return;
+  }
   const bool diag = tdiag <= 4;
   if (s->m_measure != nullptr && s->m_layout != nullptr) {
     env->CallVoidMethod(s->view, s->m_measure, s->wspec, s->hspec);
@@ -654,7 +658,12 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     env->CallVoidMethod(s->view, s->m_layout, 0, 0, mw, mh);
     if (diag) log::i(kTag, "PresentDriver.nTraverse: measured {}x{}", mw, mh);
   }
-  if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); return; }
+  if (env->ExceptionCheck() == JNI_TRUE) {
+    env->ExceptionDescribe();
+    env->ExceptionClear();
+    s->presenter->keepalive();  // measure/layout threw — keep ticking, retry next frame
+    return;
+  }
   // DIAG (Compose draw-path): count draw ops issued during this frame's draw. ~0 => the view
   // tree produced no paint (blank/white frame); high => content draws (issue is elsewhere).
   static auto drawops = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_drawops"));
@@ -672,6 +681,7 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   if (env->ExceptionCheck() == JNI_TRUE) {
     env->ExceptionDescribe(); env->ExceptionClear();
     if (force_record != nullptr) force_record(0);
+    s->presenter->keepalive();  // View.draw threw — keep ticking, retry next frame
     return;
   }
   // Overlay pass: composite any Dialog/PopupWindow decors (WindowManagerGlobal.mViews) over the
@@ -716,9 +726,17 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
            (rs >> 40) & 0xfffff, (rs >> 20) & 0xfffff, rs & 0xfffff);
   }
   const int bufidx = s->presenter->next_buffer();
-  if (bufidx < 0) { if (diag) log::w(kTag, "PresentDriver.nTraverse: no free buffer"); return; }
+  if (bufidx < 0) {
+    if (diag) log::w(kTag, "PresentDriver.nTraverse: no free buffer");
+    s->presenter->keepalive();  // no free ping-pong buffer — keep ticking until one releases
+    return;
+  }
   PresentDmabuf f{};
-  if (!s->gpu_end(bufidx, &f) || f.fd < 0) { if (diag) log::w(kTag, "PresentDriver.nTraverse: gpu_end failed"); return; }
+  if (!s->gpu_end(bufidx, &f) || f.fd < 0) {
+    if (diag) log::w(kTag, "PresentDriver.nTraverse: gpu_end failed");
+    s->presenter->keepalive();  // GPU end-frame failed — keep ticking, retry next frame
+    return;
+  }
   gfx::DmabufFrame fr{};
   fr.fd = f.fd;
   fr.width = f.width;
@@ -736,6 +754,8 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
       log::i(kTag, "PresentDriver: frame {} presented ({}x{}) — looper-driven, Compose composed",
              s->frames, f.width, f.height);
     ++s->frames;
+  } else {
+    s->presenter->keepalive();  // submit failed (buffer build) — keep the vsync loop ticking
   }
 }
 void JNICALL PresentDriver_nClose(JNIEnv* env, jclass, jlong sp) {

@@ -309,7 +309,27 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     surface_.Get()->Attach(slots_[s].handler.GetProxy(), 0, 0);
     surface_.Get()->Damage(0, 0, w_, h_);
     surface_.Get()->Commit();
+    last_slot_ = s;
     ++frame_index_;
+    while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
+    return true;
+  }
+  // Keep the loop alive after a dropped frame (see IPresenter::keepalive). Re-arm the
+  // wl_surface.frame callback and re-present the LAST submitted buffer (re-attach + damage +
+  // commit) so the compositor schedules another frame-done tick — a bare commit with no attach
+  // does not make some compositors (weston) repaint, so the buffer must be re-attached.
+  // Otherwise a single traversal that fails to submit() strands the vsync loop forever. Only
+  // meaningful once a real frame has been shown.
+  bool keepalive() noexcept override {
+    if (closed_ || !configured_ || last_slot_ < 0 || !slots_[last_slot_].built) return false;
+    if (wl_proxy* raw = wl::construct<wl_callback_traits, wl_surface_traits::Op::Frame>(
+            *surface_.Get()))
+      frame_._SetProxy(raw);
+    need_frame_ = false;
+    slots_[last_slot_].busy = true;  // compositor reads it again; released on the next real submit
+    surface_.Get()->Attach(slots_[last_slot_].handler.GetProxy(), 0, 0);
+    surface_.Get()->Damage(0, 0, w_, h_);
+    surface_.Get()->Commit();
     while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
     return true;
   }
@@ -831,6 +851,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     bool built = false;
   };
   Slot slots_[kSlots];
+  int last_slot_ = -1;  // slot of the last submitted frame (re-attached by keepalive)
 
   std::string title_, app_id_;
   std::vector<std::uint64_t> mods_;           // compositor's advertised XRGB8888 modifiers
