@@ -1298,8 +1298,28 @@ class JniVm : public Vm {
   void present_glsurfaceview(jobject view, int w, int h) {
     jobject gview = env_->NewGlobalRef(view);
     const std::string pkg = config_.package_name.empty() ? "acl" : config_.package_name;
+
+    // Input seam (resolved once, used on the present-loop thread = this thread): a compositor
+    // pointer/key becomes a MotionEvent/KeyEvent dispatched to the decor, which routes to the
+    // GLSurfaceView — where libGDX's AndroidInput listens. Touch hit-testing needs laid-out views,
+    // so the configure hook measures/lays out the decor too.
+    jclass vcls = env_->GetObjectClass(gview);
+    jmethodID dispatch_touch = env_->GetMethodID(vcls, "dispatchTouchEvent", "(Landroid/view/MotionEvent;)Z");
+    jmethodID dispatch_key = env_->GetMethodID(vcls, "dispatchKeyEvent", "(Landroid/view/KeyEvent;)Z");
+    jmethodID measure = env_->GetMethodID(vcls, "measure", "(II)V");
+    jmethodID layoutm = env_->GetMethodID(vcls, "layout", "(IIII)V");
+    env_->DeleteLocalRef(vcls);
+    jclass mecls = static_cast<jclass>(env_->NewGlobalRef(env_->FindClass("android/view/MotionEvent")));
+    jmethodID me_obtain = env_->GetStaticMethodID(mecls, "obtain", "(JJIFFI)Landroid/view/MotionEvent;");
+    jmethodID me_recycle = env_->GetMethodID(mecls, "recycle", "()V");
+    jclass kecls = static_cast<jclass>(env_->NewGlobalRef(env_->FindClass("android/view/KeyEvent")));
+    jmethodID ke_obtain = env_->GetStaticMethodID(kecls, "obtain", "(II)Landroid/view/KeyEvent;");
+    clear_exception();
+    auto down_time = std::make_shared<std::uint64_t>(0);
+
     wm::GlPresentHooks hooks;
-    hooks.configure = [this, gview, w, h](void* wl_display, void* wl_surface, int cw, int ch) -> bool {
+    hooks.configure = [this, gview, w, h, measure, layoutm](void* wl_display, void* wl_surface,
+                                                            int cw, int ch) -> bool {
       std::string err;
       auto dev = gfx::GlDevice::CreateWayland(wl_display, &err);
       if (!dev) { log::w(kTag, "glsv: CreateWayland failed: {}", err); return false; }
@@ -1316,6 +1336,14 @@ class JniVm : public Vm {
       g_gl_session.cv.notify_all();
       log::i(kTag, "glsv: GL device on acl's wl_display ({}); injecting Surface", g_gl_session.device->renderer());
       inject_gl_surface(gview, g_gl_session.w, g_gl_session.h);  // -> surfaceCreated -> GLThread runs
+      // Lay out the decor so dispatchTouchEvent hit-tests down to the GLSurfaceView.
+      if (measure != nullptr && layoutm != nullptr) {
+        const jint mask = 0x3 << 30;  // MeasureSpec.EXACTLY(size)
+        env_->CallVoidMethod(gview, measure, (g_gl_session.w & ~mask) | (1 << 30),
+                             (g_gl_session.h & ~mask) | (1 << 30));
+        env_->CallVoidMethod(gview, layoutm, 0, 0, g_gl_session.w, g_gl_session.h);
+        clear_exception();
+      }
       return true;
     };
     // No render hook -> external mode: the app's GLThread renders + swaps; acl pumps events.
@@ -1326,8 +1354,40 @@ class JniVm : public Vm {
       g_gl_session.wl_surface = nullptr;
       g_gl_session.ready = false;
     };
-    wm::present_gl_loop(w, h, pkg, pkg, hooks, wm::InputCallback{}, config_.present_frames);
+
+    wm::InputCallback input = [this, gview, mecls, me_obtain, me_recycle, dispatch_touch, kecls,
+                               ke_obtain, dispatch_key, down_time](const wm::InputEvent& ev) {
+      if (const auto* p = std::get_if<wm::PointerInput>(&ev)) {
+        if (me_obtain == nullptr || dispatch_touch == nullptr) return;
+        const jint action = p->action == wm::PointerInput::Action::Down ? 0
+                          : p->action == wm::PointerInput::Action::Up   ? 1 : 2;
+        if (action == 0) *down_time = present_now_ns();
+        jobject me = env_->CallStaticObjectMethod(mecls, me_obtain, static_cast<jlong>(*down_time),
+            static_cast<jlong>(present_now_ns()), action, static_cast<jfloat>(p->x),
+            static_cast<jfloat>(p->y), 0);
+        if (me != nullptr) {
+          const jboolean handled = env_->CallBooleanMethod(gview, dispatch_touch, me);
+          static int idiag = 0;
+          if (idiag < 12) { log::i(kTag, "glsv input: pointer action={} ({},{}) handled={}",
+                                   action, p->x, p->y, handled == JNI_TRUE); ++idiag; }
+          if (me_recycle != nullptr) env_->CallVoidMethod(me, me_recycle);
+          env_->DeleteLocalRef(me);
+        }
+        clear_exception();
+      } else if (const auto* k = std::get_if<wm::KeyInput>(&ev)) {
+        if (ke_obtain == nullptr || dispatch_key == nullptr) return;
+        const jint action = k->action == wm::KeyInput::Action::Down ? 0 : 1;
+        jobject ke = env_->CallStaticObjectMethod(kecls, ke_obtain, action,
+                                                  acl_evdev_to_android_keycode(k->keycode));
+        if (ke != nullptr) { env_->CallBooleanMethod(gview, dispatch_key, ke); env_->DeleteLocalRef(ke); }
+        clear_exception();
+      }
+    };
+
+    wm::present_gl_loop(w, h, pkg, pkg, hooks, input, config_.present_frames);
     env_->DeleteGlobalRef(gview);
+    env_->DeleteGlobalRef(mecls);
+    env_->DeleteGlobalRef(kecls);
   }
 #endif
 
