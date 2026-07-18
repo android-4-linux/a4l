@@ -920,6 +920,12 @@ public final class HostBootstrap {
     static final java.util.Map<String, android.os.Bundle> sProviderMeta =
             new java.util.HashMap<String, android.os.Bundle>();
 
+    // Installed providers keyed by each declared authority — AppContentResolver.acquireProvider
+    // resolves content:// lookups here so query/insert/openFile reach the live provider instead of
+    // the no-op stub. Populated by installContentProviders after a successful attachInfo/onCreate.
+    static final java.util.Map<String, android.content.ContentProvider> sProviderByAuthority =
+            new java.util.HashMap<String, android.content.ContentProvider>();
+
     static final class AppPackageManager extends StubPackageManager {
         private final String pkg;
         AppPackageManager(String pkg) { this.pkg = pkg; }
@@ -969,10 +975,21 @@ public final class HostBootstrap {
         private static android.content.IContentProvider stubProvider() {
             return (android.content.IContentProvider) noop(android.content.IContentProvider.class);
         }
+        // Route to an installed provider (its in-process Transport IContentProvider) when the
+        // authority matches; otherwise the default no-op provider so unresolved lookups still
+        // return null/defaults rather than NPE.
+        private static android.content.IContentProvider resolve(String authority) {
+            android.content.ContentProvider cp =
+                    authority == null ? null : sProviderByAuthority.get(authority);
+            if (cp != null) {
+                try { return cp.getIContentProvider(); } catch (Throwable ignore) {}
+            }
+            return stubProvider();
+        }
         @Override protected android.content.IContentProvider acquireProvider(
-                android.content.Context c, String name) { return stubProvider(); }
+                android.content.Context c, String name) { return resolve(name); }
         @Override protected android.content.IContentProvider acquireUnstableProvider(
-                android.content.Context c, String name) { return stubProvider(); }
+                android.content.Context c, String name) { return resolve(name); }
         @Override public boolean releaseProvider(android.content.IContentProvider p) { return false; }
         @Override public boolean releaseUnstableProvider(android.content.IContentProvider p) { return false; }
         @Override public void unstableProviderDied(android.content.IContentProvider p) {}
@@ -1108,6 +1125,12 @@ public final class HostBootstrap {
                 info.exported = Boolean.parseBoolean(p[2]);
                 info.grantUriPermissions = Boolean.parseBoolean(p[3]);
                 cp.attachInfo(base, info);  // → ContentProvider.onCreate()
+                // android:authorities is a ';'-separated list; register each so the resolver routes.
+                if (auth != null) {
+                    for (String a : auth.split(";")) {
+                        if (!a.isEmpty()) sProviderByAuthority.put(a, cp);
+                    }
+                }
                 System.out.println("acl HostBootstrap: ContentProvider installed: " + cls
                         + (auth != null ? " (authorities=" + auth + ")" : ""));
             } catch (Throwable t) {
