@@ -244,6 +244,21 @@ jint Bitmap_nativeGetPixel(JNIEnv*, jclass, jlong ptr, jint x, jint y) {
   return static_cast<jint>(w->bitmap.getColor(x, y));
 }
 
+// Bitmap.getPixels: read a w×h region at (x,y) into the int[] as unpremultiplied ARGB Color ints,
+// at `offset` with `stride` ints per row. kN32 (BGRA on LE) unpremul packs as 0xAARRGGBB == the
+// Android Color int. Used e.g. to read a downloaded icon's pixels when building a notification.
+void Bitmap_nativeGetPixels(JNIEnv* env, jclass, jlong ptr, jintArray pixels, jint offset,
+                            jint stride, jint x, jint y, jint width, jint height) {
+  auto* w = reinterpret_cast<AclBitmap*>(ptr);
+  if (w == nullptr || pixels == nullptr || width <= 0 || height <= 0) return;
+  jint* dst = env->GetIntArrayElements(pixels, nullptr);
+  if (dst == nullptr) return;
+  const SkImageInfo info =
+      SkImageInfo::Make(width, height, kN32_SkColorType, kUnpremul_SkAlphaType);
+  w->bitmap.readPixels(info, dst + offset, static_cast<size_t>(stride) * sizeof(jint), x, y);
+  env->ReleaseIntArrayElements(pixels, dst, 0);  // copy back + release
+}
+
 jint Bitmap_nativeGetAllocationByteCount(JNIEnv*, jclass, jlong ptr) {
   auto* w = reinterpret_cast<AclBitmap*>(ptr);
   return static_cast<jint>(w->bitmap.computeByteSize());
@@ -2977,6 +2992,7 @@ const JNINativeMethod kBitmap[] = {
      reinterpret_cast<void*>(Bitmap_nativeCreate)},
     {"nativeGetNativeFinalizer", "()J", reinterpret_cast<void*>(Bitmap_nativeGetNativeFinalizer)},
     {"nativeGetPixel", "(JII)I", reinterpret_cast<void*>(Bitmap_nativeGetPixel)},
+    {"nativeGetPixels", "(J[IIIIIII)V", reinterpret_cast<void*>(Bitmap_nativeGetPixels)},
     {"nativeGetAllocationByteCount", "(J)I",
      reinterpret_cast<void*>(Bitmap_nativeGetAllocationByteCount)},
     {"nativeSetHasAlpha", "(JZZ)V", reinterpret_cast<void*>(Bitmap_nativeSetHasAlpha)},
