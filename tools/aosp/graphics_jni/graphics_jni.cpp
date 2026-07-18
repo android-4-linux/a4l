@@ -1187,9 +1187,20 @@ void RenderNode_nDiscardDisplayList(jlong node) {
 // only records when hasDisplayList() is false, so a blanket TRUE makes Compose/Views never record
 // (drawRenderNode then replays an empty node -> blank). present-root is always "valid" (it draws
 // immediately onto the GPU canvas and is never recorded into a picture).
+// When set, non-root nodes report "no display list" so View.updateDisplayListIfDirty() re-records
+// them every frame instead of replaying a cached picture. jvm_vm sets this ONLY around the overlay
+// pass: a Dialog/Popup that acl re-draws each frame onto a fresh present canvas needs its Compose
+// layers re-recorded (their settled cache otherwise replays empty — the menu opens then vanishes),
+// while the main content keeps its fast per-frame caching (flag off during its draw).
+std::atomic<int> g_force_record{0};
+extern "C" void acl_graphics_set_force_record(int on) {
+  g_force_record.store(on, std::memory_order_relaxed);
+}
 jboolean RenderNode_nIsValid(jlong node) {
   auto* n = reinterpret_cast<AclRenderNode*>(node);
-  return (n != nullptr && (n->is_present_root || n->picture != nullptr)) ? JNI_TRUE : JNI_FALSE;
+  if (n == nullptr) return JNI_FALSE;
+  if (g_force_record.load(std::memory_order_relaxed) && !n->is_present_root) return JNI_FALSE;
+  return (n->is_present_root || n->picture != nullptr) ? JNI_TRUE : JNI_FALSE;
 }
 void RenderNode_nGetTransformMatrix(jlong, jlong m) {
   if (auto* mat = reinterpret_cast<SkMatrix*>(m)) mat->reset();
