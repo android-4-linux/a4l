@@ -1236,6 +1236,15 @@ public final class HostBootstrap {
                 Class<?> rm = Class.forName("android.content.res.ResourcesManager");
                 setField(at, atInst, "mResourcesManager", rm.getMethod("getInstance").invoke(null));
             } catch (Throwable ignored) {}
+            // Activity.recreate() (AppCompat applyDayNight, etc.) checks
+            // Looper.myLooper() == mMainThread.getLooper(), then calls mMainThread.
+            // scheduleRelaunchActivity(mToken), which does mActivities.get(token). Seed the main
+            // Looper (getLooper() was null → "Must be called from main thread") and an EMPTY
+            // mActivities so the relaunch is a clean no-op (get(null) == null). acl can't relaunch an
+            // Activity, but recreate() must not throw and abort the app — forkyz's theme flow calls
+            // it on the main thread and was left with a blank screen.
+            try { setField(at, atInst, "mLooper", android.os.Looper.getMainLooper()); } catch (Throwable ignored) {}
+            try { setField(at, atInst, "mActivities", new android.util.ArrayMap<Object, Object>()); } catch (Throwable ignored) {}
             java.lang.reflect.Field s = at.getDeclaredField("sCurrentActivityThread");
             s.setAccessible(true);
             s.set(null, atInst);
