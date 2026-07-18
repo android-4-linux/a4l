@@ -1972,6 +1972,12 @@ public final class HostBootstrap {
                     {"logicalDensityDpi", Integer.toString(dpi)}, {"rotation", "0"}, {"state", "2"}}) {
                 try { setField(diCls, di, f[0], Integer.parseInt(f[1])); } catch (Throwable ignored) {}
             }
+            // physical DPI (float): Display.getMetrics() fills DisplayMetrics.xdpi/ydpi from these.
+            // Left 0, any app sizing from the physical DPI gets 0 — libGDX's getPpiX()/getDensity()
+            // path does exactly this, and doodledudette sizes an SVG-icon Bitmap by (int)xdpi, so a
+            // 0 xdpi meant createBitmap(0,0) → IllegalArgumentException in its GLThread.
+            try { setField(diCls, di, "physicalXDpi", Float.valueOf((float) dpi)); } catch (Throwable ignored) {}
+            try { setField(diCls, di, "physicalYDpi", Float.valueOf((float) dpi)); } catch (Throwable ignored) {}
             try {
                 Class<?> modeCls = Class.forName("android.view.Display$Mode");
                 Object mode = modeCls.getConstructor(int.class, int.class, int.class, float.class)
