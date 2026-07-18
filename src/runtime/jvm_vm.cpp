@@ -933,6 +933,10 @@ class JniVm : public Vm {
       }
     }
 
+    // Run the Application BEFORE instantiating the launcher Activity (Android order): the Activity's
+    // constructor / field initializers may read app state the Application sets (Telegram's
+    // LaunchActivity ctor reads ApplicationLoader.applicationContext).
+    ensure_application();
     Error result = Error::ok();
     jmethodID ctor = env_->GetMethodID(cls, "<init>", "()V");
     jobject activity = ctor != nullptr ? env_->NewObject(cls, ctor) : nullptr;
@@ -967,6 +971,60 @@ class JniVm : public Vm {
     env_->DeleteLocalRef(activity_cls);
     env_->DeleteLocalRef(cls);
     return result;
+  }
+
+  // Run the app's Application (its onCreate) once, BEFORE the launcher Activity is instantiated —
+  // the documented Android order. An Activity constructor / field initializer can read state the
+  // Application sets, e.g. Telegram's LaunchActivity ctor builds a PiP controller that reads
+  // ApplicationLoader.applicationContext (set by ApplicationLoaderImpl.onCreate) via
+  // getSharedPreferences — a null context there NPEs the instantiation. Also pushes the theme +
+  // display + color-scheme the app Resources need. Idempotent (createApplication runs once).
+  void ensure_application() {
+    jclass boot = env_->FindClass("org/acl/internal/HostBootstrap");
+    if (boot == nullptr) { clear_exception(); return; }
+    if (jmethodID m = env_->GetStaticMethodID(boot, "setAppTheme", "(I)V"))
+      env_->CallStaticVoidMethod(boot, m, static_cast<jint>(config_.application_theme));
+    clear_exception();
+    if (jmethodID m = env_->GetStaticMethodID(boot, "setDisplay", "(III)V"))
+      env_->CallStaticVoidMethod(boot, m, static_cast<jint>(svc::window().display_width()),
+                                 static_cast<jint>(svc::window().display_height()),
+                                 static_cast<jint>(svc::window().density_dpi()));
+    clear_exception();
+#if ACL_HAVE_SDBUS
+    if (jmethodID m = env_->GetStaticMethodID(boot, "setColorScheme", "(I)V"))
+      env_->CallStaticVoidMethod(boot, m, static_cast<jint>(acl::appearance::query_color_scheme()));
+    clear_exception();
+#endif
+    if (app_application_ == nullptr) {
+      const std::string apk = config_.classpath.empty() ? std::string() : config_.classpath.front();
+      const char* fwres = std::getenv("ACL_ART_FRAMEWORK_RES");
+      jstring j_apk = env_->NewStringUTF(apk.c_str());
+      jstring j_fw = env_->NewStringUTF(fwres != nullptr ? fwres : "");
+      jstring j_pkg = env_->NewStringUTF(config_.package_name.c_str());
+      jstring j_app = env_->NewStringUTF(config_.application_name.c_str());
+      jobject app = env_->CallStaticObjectMethod(
+          boot,
+          env_->GetStaticMethodID(boot, "createApplication",
+                                  "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
+                                  "Ljava/lang/String;)Landroid/app/Application;"),
+          j_app, j_apk, j_fw, j_pkg);
+      if (env_->ExceptionCheck() == JNI_TRUE) {
+        env_->ExceptionDescribe();
+        env_->ExceptionClear();
+        log::w(kTag, "app Application {} onCreate hit a wall (continuing without singleton)",
+               config_.application_name);
+      } else if (app != nullptr) {
+        app_application_ = env_->NewGlobalRef(app);
+        log::i(kTag, "app Application ready: {}",
+               config_.application_name.empty() ? "(default)" : config_.application_name);
+      }
+      if (app != nullptr) env_->DeleteLocalRef(app);
+      env_->DeleteLocalRef(j_app);
+      env_->DeleteLocalRef(j_apk);
+      env_->DeleteLocalRef(j_fw);
+      env_->DeleteLocalRef(j_pkg);
+    }
+    env_->DeleteLocalRef(boot);
   }
 
   // Host ART: give the Activity a real app Context (its package + resources.arsc) and attach
