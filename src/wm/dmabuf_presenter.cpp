@@ -47,6 +47,7 @@
 #include <wl/keyboard.hpp>              // wl::KeyboardHandler (xkb keymap/repeat)
 #include <wl/linux_dmabuf.hpp>     // must follow linux_dmabuf_client.hpp
 #include <wl/pointer.hpp>              // wl::PointerHandler
+#include <wl/cursor.hpp>               // wl::CursorManager (wl_pointer.set_cursor)
 #include <wl/present_feedback.hpp>
 #include <wl/presentation.hpp>     // wl::PresentationManager<App>, wl::PresentFeedback
 #include <wl/proxy_impl.hpp>
@@ -75,6 +76,12 @@ constexpr int kTickMs = 33;
 
 // Event-less globals use WlPtr::Attach; interfaces with events use handler subclasses.
 class CompositorH : public CWlCompositor<CompositorH> {};
+// wl_shm — not used for buffers on the dma-buf path, only to load the cursor theme
+// (wl_cursor_theme_load needs a wl_shm). Formats are ignored.
+class ShmH : public CWlShm<ShmH> {
+ public:
+  void OnFormat(std::uint32_t) override {}
+};
 class SurfaceH : public CWlSurface<SurfaceH> {};
 // The wl_buffer's release event clears the busy flag (compositor done reading the frame).
 class BufferH : public CWlBuffer<BufferH> {
@@ -330,6 +337,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     registry_.OnGlobal([this](wl::CRegistry&, std::uint32_t name, std::string_view iface,
                               std::uint32_t ver) {
       if (iface == wl_compositor_traits::interface_name) { comp_name_ = name; comp_ver_ = ver; }
+      else if (iface == wl_shm_traits::interface_name) { shm_name_ = name; shm_ver_ = ver; }
       else if (iface == xdg_wm_base_traits::interface_name) { xdg_name_ = name; xdg_ver_ = ver; }
       else if (iface == dmabuf::zwp_linux_dmabuf_v1_traits::interface_name) {
         feedback_.Record(name, ver);
@@ -398,6 +406,11 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       seat_.Get()->app_ = this;
       seat_.Get()->pointer_slot_ = &pointer_;
       seat_.Get()->keyboard_slot_ = &keyboard_;
+      // wl_shm (only for the cursor theme) + the cursor manager, so the pointer gets a cursor on
+      // enter (this presenter owns no wl_shm otherwise). Best-effort: no shm/theme -> no cursor.
+      if (shm_name_ != 0 && wl::BindHandler<wl_shm_traits>(registry_, shm_, shm_name_, shm_ver_))
+        cursor_ready_ = cursor_.Init(shm_.Get()->GetProxy(), comp_.Get()->GetProxy());
+      if (!cursor_ready_) log::w(kTag, "dmabuf present: no cursor (wl_shm/theme unavailable)");
     }
     if (want_ime_ && ti_name_ != 0 && !seat_.IsNull()) {
       ti_.Record(ti_name_, ti_ver_);
@@ -572,8 +585,14 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
 
   // wl_pointer → app input (native side of a MotionEvent): left button = touch Down/Up,
   // motion while pressed = Move.
-  void OnPointerEnter(const wl::PointerEvent& e) { px_ = e.x; py_ = e.y; }
-  void OnPointerLeave() {}
+  // Own the cursor: set it on enter (else the compositor leaves it undefined over the window).
+  void OnPointerEnter(const wl::PointerEvent& e) {
+    px_ = e.x; py_ = e.y;
+    pointer_enter_serial_ = e.serial;
+    if (cursor_ready_ && pointer_.Get() != nullptr)
+      cursor_.Set(pointer_.Get()->GetProxy(), pointer_enter_serial_, "default");
+  }
+  void OnPointerLeave() { cursor_.Reset(); }
   void OnPointerMotion(const wl::PointerEvent& e) {
     px_ = e.x; py_ = e.y;
     if (pointer_down_) deliver(PointerInput::Action::Move);
@@ -784,6 +803,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   wl::WlPtr<wl::KeyboardHandler<Presenter>> keyboard_;  // created on wl_seat capabilities
   wl::ime::SelectedTextInput ti_;                       // text-input-v3 (IME)
   wl::WlPtr<CompositorH> comp_;
+  wl::WlPtr<ShmH> shm_;                 // bound only for the cursor theme
+  wl::CursorManager cursor_;            // wl_pointer.set_cursor on enter
+  bool cursor_ready_ = false;
+  std::uint32_t pointer_enter_serial_ = 0;
   wl::WlPtr<wl::XdgWmBaseHandler> xdg_wm_base_;
   wl::WlPtr<SurfaceH> surface_;
   wl::WlPtr<wl::XdgSurfaceHandler<Presenter>> xdg_surface_;
@@ -815,6 +838,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   const InputCallback* input_ = nullptr;      // pointer/key/IME sink (loop borrows; A owns below)
   InputCallback owned_input_;                 // owned input sink for the Looper-driven path (A)
   std::uint32_t comp_name_ = 0, comp_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
+  std::uint32_t shm_name_ = 0, shm_ver_ = 0;  // wl_shm (cursor theme only)
   std::uint32_t seat_name_ = 0, seat_ver_ = 0, ti_name_ = 0, ti_ver_ = 0;
   std::uint32_t agl_name_ = 0, agl_ver_ = 0, ivi_name_ = 0, ivi_ver_ = 0;
   std::uint32_t fsh_name_ = 0, fsh_ver_ = 0, output_name_ = 0, output_ver_ = 0;
