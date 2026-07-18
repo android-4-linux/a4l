@@ -151,6 +151,10 @@ struct FsPair {
 };
 constexpr int kMaxAttached = 256;
 FsPair g_fs_pairs[kMaxAttached];
+// The down-call trampoline's epilogue scans g_fs_pairs in hand-written asm (16-byte stride,
+// glibc_fs at +8) to recover the caller's glibc %fs — keep the layout it assumes.
+static_assert(sizeof(FsPair) == 16, "trampoline scan assumes a 16-byte FsPair");
+static_assert(offsetof(FsPair, glibc_fs) == 8, "trampoline scan assumes glibc_fs at +8");
 std::atomic<int> g_fs_pair_count{0};
 
 void register_fs_pair(std::uintptr_t bionic_fs, std::uintptr_t glibc_fs) {
@@ -998,15 +1002,21 @@ void* make_downcall(void* real_native) {
   auto emit = [&](std::initializer_list<unsigned char> b) { for (unsigned char x : b) p[o++] = x; };
   auto imm64 = [&](std::uint64_t v) { std::memcpy(p + o, &v, 8); o += 8; };
   auto imm32 = [&](std::int32_t v) { std::memcpy(p + o, &v, 4); o += 4; };
-  // Entry: %rsp ≡ 8 (mod 16). The push below realigns to 0, so each call sees the ABI's ≡ 8.
-  emit({0xF3, 0x49, 0x0F, 0xAE, 0xC2});                 // rdfsbase %r10   (caller's glibc %fs)
-  emit({0x41, 0x52});                                   // push %r10
+  // Frame-pointer trampoline that FORWARDS up to 8 stack arguments: a JNI native with >6 args
+  // (env + class/this + >4 user args) passes the extras on the stack — e.g. libGDX's
+  // Matrix4.prj(float[], float[], int offset, int numVecs, int stride) has `stride` on the stack.
+  // The trampoline's own return address sits between the native's frame and those args, so we
+  // rebuild the args below a fresh call. Entry: %rsp ≡ 8 (mod 16), [rsp]=ret, stack args at
+  // [rsp+8+8k]. Copying 8 slots covers up to 14 total args (every real JNI native); natives with
+  // fewer just copy unused slots (harmless reads of the caller's own stack).
+  emit({0x55});                                         // push %rbp        (save ART's rbp; rsp ≡ 0)
+  emit({0x48, 0x89, 0xE5});                             // mov %rsp,%rbp    ([rbp+8]=ret, [rbp+16+8k]=args)
   emit({0x64, 0x4C, 0x8B, 0x1C, 0x25});                 // mov %fs:disp32,%r11  (this thread's
   imm32(static_cast<std::int32_t>(g_tls_disp));         //   bionic TCB, or 0 = unattached)
   emit({0x4D, 0x85, 0xDB});                             // test %r11,%r11
   emit({0x75, 0x10});                                   // jnz +16 (over the attach call)
   emit({0x49, 0xBB}); imm64(reinterpret_cast<std::uintptr_t>(&acl_ndk_attach_thunk));
-  emit({0x41, 0xFF, 0xD3});                             // call *%r11 (preserves the arg regs)
+  emit({0x41, 0xFF, 0xD3});                             // call *%r11 (preserves the arg regs; rsp ≡ 0)
   emit({0x49, 0x89, 0xC3});                             // mov %rax,%r11  (this thread's TCB)
   // Still on glibc %fs: point this thread's wrapped env at the real JNIEnv in %rdi, and pass it.
   emit({0xF3, 0x48, 0x0F, 0xAE, 0xC0});                 // rdfsbase %rax   (glibc thread pointer)
@@ -1015,11 +1025,30 @@ void* make_downcall(void* real_native) {
   emit({0x4C, 0x89, 0x10});                             // mov %r10,0(%rax)  wrap.functions
   emit({0x48, 0x89, 0x78, 0x08});                       // mov %rdi,8(%rax)  wrap.real = ART's env
   emit({0x48, 0x89, 0xC7});                             // mov %rax,%rdi     arg0 = &t_wrap_env
+  // Copy 8 stack slots in reverse (slot7..slot0) so the native sees them just above its return
+  // address. rbp-relative; plain memory, %fs-agnostic. rsp stays ≡ 0 (8 pushes = 64 bytes).
+  for (int k = 7; k >= 0; --k) {
+    emit({0x48, 0x8B, 0x45, static_cast<unsigned char>(0x10 + 8 * k)});  // mov 0x10+8k(%rbp),%rax
+    emit({0x50});                                       // push %rax
+  }
   emit({0xF3, 0x49, 0x0F, 0xAE, 0xD3});                 // wrfsbase %r11  (-> this thread's bionic)
   emit({0x49, 0xBB}); imm64(reinterpret_cast<std::uintptr_t>(real_native));  // mov $real,%r11
-  emit({0x41, 0xFF, 0xD3});                             // call *%r11
-  emit({0x41, 0x5A});                                   // pop %r10
-  emit({0xF3, 0x49, 0x0F, 0xAE, 0xD2});                 // wrfsbase %r10  (caller's OWN glibc %fs)
+  emit({0x41, 0xFF, 0xD3});                             // call *%r11     (native: stack args at [rsp+8+8k])
+  // Epilogue: drop the copied args, recover THIS thread's glibc %fs from the pairing (not a stack
+  // save — that would have shifted the args), restore ART's rbp, return. Clobbers only r10/r11/rbp,
+  // never the native's return in rax/rdx/xmm0-1.
+  emit({0x48, 0x89, 0xEC});                             // mov %rbp,%rsp
+  emit({0xF3, 0x49, 0x0F, 0xAE, 0xC2});                 // rdfsbase %r10  (current bionic %fs)
+  emit({0x49, 0xBB}); imm64(reinterpret_cast<std::uintptr_t>(g_fs_pairs));  // mov $g_fs_pairs,%r11
+  const std::size_t scan = o;
+  emit({0x4D, 0x39, 0x13});                             // .scan: cmp %r10,(%r11)  (bionic_fs match?)
+  emit({0x74, 0x06});                                   // je .found (+6, over add+jmp)
+  emit({0x49, 0x83, 0xC3, 0x10});                       // add $0x10,%r11  (sizeof FsPair)
+  const int back = static_cast<int>(scan) - static_cast<int>(o + 2);
+  emit({0xEB, static_cast<unsigned char>(back)});       // jmp .scan  (thread is attached: match sure)
+  emit({0x4D, 0x8B, 0x5B, 0x08});                       // .found: mov 0x8(%r11),%r11  (glibc_fs)
+  emit({0xF3, 0x49, 0x0F, 0xAE, 0xD3});                 // wrfsbase %r11  (-> caller's glibc %fs)
+  emit({0x5D});                                         // pop %rbp
   emit({0xC3});                                         // ret
   __builtin___clear_cache(reinterpret_cast<char*>(p), reinterpret_cast<char*>(p + o));
   return p;
