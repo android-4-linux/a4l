@@ -74,13 +74,18 @@ that can leave content incomplete; those are flagged). Verified-on-screen this s
 | `barilyuk.batterytemperature` | reached layout |
 | `app.halma` (libGDX GL) | reached layout (decor); GL content via the `gles_jni` path |
 | `ardash.doodledudette` (libGDX GL) | reached layout (decor); GL content via the `gles_jni` path |
-| `app.smarzaro.foss4g2024.schedule` | **FAIL** — `Resources$NotFoundException: 0x7f0c004b` (a layout); a real acl resource-resolution gap |
+| `app.smarzaro.foss4g2024.schedule` | resource gap **fixed** (see below) — now inflates its layout; advances to a separate app-side NPE in `MainActivity.onCreate` |
 | `app.fedilab.openmaps` | **FAIL** — `InflateException` on `android.webkit.WebView` (no browser engine; out of scope) |
 | `app.crossword.yourealwaysbe.forkyzscanner` | **FAIL** — `NoClassDefFoundError w0.e` (app-side R8/protobuf `dynamicColors_`; fails on stock ART too) |
 
-The only genuine acl gap left in this set is **`foss4g.schedule`** (a layout resource id not resolving —
-config-qualified layout / resource-table selection). The other two failures are out-of-scope (WebView)
-and app-side (protobuf). Caveat: this is a batch/log classification, not per-app screenshots; several
+**`foss4g.schedule` — now fixed.** The layout id `0x7f0c004b` (`main_layout`) exists only as
+config-qualified variants (`(port)`/`(land)`/`(xlarge)`/`(sw600dp)`) with **no default**, and acl built
+the app `Resources` with `Resources.getSystem().getConfiguration()` — orientation `UNDEFINED`, screen
+dims 0 — so nothing matched and `getLayout()` threw. `appResources` now builds a `Configuration` +
+`DisplayMetrics` consistent with acl's advertised display (real orientation / screen dp / density /
+`smallestScreenWidthDp` / screenLayout size). The `NotFoundException` is gone; foss4g inflates its layout
+and advances to a separate app-side NPE in `MainActivity.onCreate`. The remaining two re-run failures are
+out-of-scope (WebView) and app-side (protobuf). Caveat: this is a batch/log classification, not per-app screenshots; several
 "reached layout" apps were already rendering before this session — the session's contribution is
 eliminating the `onCreate` crashes (ContentProviders, Hilt `getApplicationContext`, `getComponentName`,
 `nDrawArc`).
