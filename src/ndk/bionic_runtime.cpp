@@ -382,7 +382,7 @@ void* gl_jit_wrap(void* mesa) {
   auto it = g_gl_jit_cache.find(mesa);
   if (it != g_gl_jit_cache.end()) return it->second;
 
-  static constexpr size_t kStub = 64;
+  static constexpr size_t kStub = 176;  // frame + 8-slot arg copy + swap/call/restore
   if (g_gl_jit_page == nullptr || g_gl_jit_used + kStub > g_gl_jit_cap) {
     g_gl_jit_cap = 64 * 1024;
     g_gl_jit_page = static_cast<uint8_t*>(mmap(nullptr, g_gl_jit_cap, PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -394,15 +394,28 @@ void* gl_jit_wrap(void* mesa) {
   size_t n = 0;
   auto b = [&](std::initializer_list<uint8_t> bytes) { for (uint8_t x : bytes) p[n++] = x; };
   auto imm64 = [&](std::uintptr_t v) { for (int i = 0; i < 8; ++i) p[n++] = uint8_t(v >> (8 * i)); };
-  b({0x49, 0xBB}); imm64(reinterpret_cast<std::uintptr_t>(g_gl_pick_donor));  // movabs pick_donor, %r11
+  auto imm32 = [&](int32_t v) { for (int i = 0; i < 4; ++i) p[n++] = uint8_t(uint32_t(v) >> (8 * i)); };
+  // Same frame + stack-arg copy as the static forwarders (see gen-gl-forwarders.py): a bare push
+  // would shift a GL entry's stack-passed args and make Mesa read the saved %fs as an arg pointer.
+  b({0x55});                                  // push %rbp
+  b({0x48, 0x89, 0xE5});                      // mov %rsp,%rbp   ([rbp+16+8k] = app stack args)
+  b({0x49, 0xBB}); imm64(reinterpret_cast<std::uintptr_t>(g_gl_pick_donor));  // movabs pick_donor,%r11
   b({0x41, 0xFF, 0xD3});                      // call *%r11      (rax = this thread's donor; args live)
-  b({0xF3, 0x49, 0x0F, 0xAE, 0xC2});          // rdfsbase %r10   (caller bionic %fs)
-  b({0x41, 0x52});                            // push %r10       (rsp 16-aligned)
-  b({0xF3, 0x48, 0x0F, 0xAE, 0xD0});          // wrfsbase %rax   (%fs = this thread's donor)
+  b({0xF3, 0x49, 0x0F, 0xAE, 0xC3});          // rdfsbase %r11   (caller bionic %fs)
+  b({0x49, 0x89, 0xC2});                      // mov %rax,%r10   (donor)
+  b({0x41, 0x53});                            // push %r11       ([rbp-8]  = bionic %fs)
+  b({0x41, 0x52});                            // push %r10       ([rbp-16] = donor)
+  for (int k = 7; k >= 0; --k) {              // copy 8 stack slots (slot7..slot0)
+    b({0x48, 0x8B, 0x85}); imm32(16 + 8 * k); // mov 0x10+8k(%rbp),%rax
+    b({0x50});                                // push %rax
+  }
+  b({0xF3, 0x49, 0x0F, 0xAE, 0xD2});          // wrfsbase %r10   (%fs = donor)
   b({0x49, 0xBA}); imm64(reinterpret_cast<std::uintptr_t>(mesa));  // movabs mesa, %r10
-  b({0x41, 0xFF, 0xD2});                      // call *%r10
-  b({0x41, 0x5A});                            // pop %r10        (saved bionic %fs)
-  b({0xF3, 0x49, 0x0F, 0xAE, 0xD2});          // wrfsbase %r10   (%fs = bionic)
+  b({0x41, 0xFF, 0xD2});                      // call *%r10      (Mesa; copied stack args in place)
+  b({0x4C, 0x8B, 0x5D, 0xF8});                // mov -8(%rbp),%r11  (caller bionic %fs)
+  b({0xF3, 0x49, 0x0F, 0xAE, 0xD3});          // wrfsbase %r11   (%fs = bionic)
+  b({0x48, 0x89, 0xEC});                      // mov %rbp,%rsp
+  b({0x5D});                                  // pop %rbp
   b({0xC3});                                  // ret
   g_gl_jit_used += kStub;
   g_gl_jit_cache.emplace(mesa, p);

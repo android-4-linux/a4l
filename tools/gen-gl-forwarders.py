@@ -133,23 +133,38 @@ def forwarders(syms, bridge, soname, with_support):
     ]
     if with_support:
         out.append(DONOR_SUPPORT.rstrip("\n"))
+    # A forwarder cannot just push the saved %fs and call Mesa: a GL entry with >6 integer args (e.g.
+    # glGetActiveUniform's `name` out-buffer, glTexImage2D's `data`) passes the extras ON THE STACK,
+    # and any push shifts them — Mesa would read the saved %fs as an arg pointer and scribble a uniform
+    # name over the bionic TCB. So build a frame and COPY the stack args below a fresh call, exactly as
+    # make_downcall does. Copy 8 slots (covers 6+8=14 args; every GLES entry). The caller's bionic %fs
+    # and this thread's donor are stashed at [rbp-8]/[rbp-16], below the frame, out of the args' way.
+    copy = []
+    for k in range(7, -1, -1):  # push slot7..slot0 so slot0 lands just above Mesa's return address
+        copy.append(f'    "  mov {16 + 8 * k}(%rbp), %rax\\n  push %rax\\n"')  # app arg at [rbp+16+8k]
     out += ["", 'asm(', '    ".text\\n"']
     for i, s in enumerate(syms):
         off = 8 + 8 * i  # bridge->fns[i]; donor_fs occupies offset 0 (unused now)
         out += [
             f'    ".globl {s}\\n"',
             f'    "{s}:\\n"',
+            '    "  push %rbp\\n"',
+            '    "  mov %rsp, %rbp\\n"',                   # [rbp+8]=ret, [rbp+16+8k]=app stack args
             '    "  call acl_gl_pick_donor@PLT\\n"',       # rax = this thread's donor (args stay live)
-            '    "  mov %rax, %r11\\n"',                   # r11 = donor %fs
-            '    "  rdfsbase %r10\\n"',                    # r10 = caller's bionic %fs
-            '    "  push %r10\\n"',                        # save it (rsp now 16-aligned)
-            '    "  wrfsbase %r11\\n"',                    # %fs = donor glibc (Mesa TLS)
-            f'    "  mov {bridge}@GOTPCREL(%rip), %r10\\n"',  # r10 = &bridge (exported => via GOT)
-            '    "  mov (%r10), %r10\\n"',                 # r10 = bridge*
-            f'    "  mov {off}(%r10), %r10\\n"',           # r10 = bridge->fns[i] (host Mesa {s})
-            '    "  call *%r10\\n"',                       # call Mesa (args in rdi..r9/xmm intact)
-            '    "  pop %r10\\n"',                         # r10 = saved bionic %fs
-            '    "  wrfsbase %r10\\n"',                    # %fs = bionic
+            '    "  rdfsbase %r11\\n"',                    # r11 = caller bionic %fs
+            '    "  mov %rax, %r10\\n"',                   # r10 = donor
+            '    "  push %r11\\n"',                        # [rbp-8]  = bionic %fs
+            '    "  push %r10\\n"',                        # [rbp-16] = donor
+        ] + copy + [
+            '    "  wrfsbase %r10\\n"',                    # %fs = donor (r10 still holds it)
+            f'    "  mov {bridge}@GOTPCREL(%rip), %r10\\n"',
+            '    "  mov (%r10), %r10\\n"',                 # bridge*
+            f'    "  mov {off}(%r10), %r10\\n"',           # bridge->fns[i] (host Mesa {s})
+            '    "  call *%r10\\n"',                       # Mesa (rsp 16-aligned; copied stack args in place)
+            '    "  mov -8(%rbp), %r11\\n"',               # caller bionic %fs
+            '    "  wrfsbase %r11\\n"',                    # %fs = bionic
+            '    "  mov %rbp, %rsp\\n"',
+            '    "  pop %rbp\\n"',
             '    "  ret\\n"',
         ]
     out.append(");")
