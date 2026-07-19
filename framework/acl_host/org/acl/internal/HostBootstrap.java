@@ -394,6 +394,13 @@ public final class HostBootstrap {
         }
         void setApplication(android.app.Application a) { this.application = a; }
         @Override public Resources getResources() { return res; }
+        // A null-base ContextWrapper's getAutofillClient() delegates to mBase -> NPE. acl has no
+        // autofill; AutofillManager.getClient() tolerates a null client (tryAddServiceClientIfNeeded
+        // returns false). A Compose focus-exit (AutofillManager.notifyViewExited) hits this and, with
+        // the composition aborted, blanks the content — seen as app.sterna's white screen.
+        @Override public android.view.autofill.AutofillManager.AutofillClient getAutofillClient() {
+            return null;
+        }
         // A null-base ContextWrapper throws from register/unregisterComponentCallbacks. Compose's OWN
         // obtainImageVectorCache DisposableEffect calls registerComponentCallbacks during the initial
         // composition (via the activity's ContextThemeWrapper, which delegates here) — that throw
