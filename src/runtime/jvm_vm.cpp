@@ -3578,6 +3578,10 @@ class ArtVm final : public JniVm {
         log::w(kTag, "egl10: eglCreateWindowSurface with no active GL present session");
         return EGL_NO_SURFACE;
       }
+      // One wl_egl_window per toplevel wl_surface: drop any prior window before backing a new
+      // surface, so a surface recreation never leaves two wl_egl_windows on the wl_surface (which
+      // makes the new surface EGL_BAD_SURFACE at eglMakeCurrent). See the native-egl hook below.
+      g_gl_session.window.reset();
       std::string err;
       auto win = g_gl_session.device->make_window(
           g_gl_session.w, g_gl_session.h, g_gl_session.wl_surface, {}, &err, config);
@@ -3609,6 +3613,13 @@ class ArtVm final : public JniVm {
         log::w(kTag, "native egl: eglCreateWindowSurface with no active GL session");
         return nullptr;
       }
+      // Impeller recreates its onscreen surface on each SurfaceHolder callback (surfaceCreated then
+      // surfaceChanged), destroying the prior EGLSurface (eglDestroySurface -> Mesa) in between. acl
+      // has a SINGLE toplevel wl_surface, and a wl_surface can back only one wl_egl_window at a time:
+      // creating the new window while the old one still wraps the toplevel yields a surface Mesa then
+      // rejects (eglMakeCurrent -> EGL_BAD_SURFACE). Tear the old window down FIRST so the new
+      // wl_egl_window is the sole occupant of the wl_surface.
+      g_gl_session.window.reset();
       std::string err;
       auto win = g_gl_session.device->make_window(g_gl_session.w, g_gl_session.h,
                                                   g_gl_session.wl_surface, {}, &err,
