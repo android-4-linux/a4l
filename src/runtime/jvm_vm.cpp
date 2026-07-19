@@ -303,6 +303,44 @@ void JNICALL acl_jvmti_exception(jvmtiEnv* jvmti, JNIEnv* jni, jthread, jmethodI
   jni->DeleteLocalRef(exc_cls);
 }
 
+// ACL_JVMTI_TRACE: breakpoint-log key Flutter-embedding startup methods to see how far the engine
+// gets (does executeDartEntrypoint run?). Breakpoints only fire for the named methods, so this is
+// cheap (unlike global MethodEntry). Set from a ClassPrepare hook as the classes load.
+void JNICALL acl_jvmti_breakpoint(jvmtiEnv* jvmti, JNIEnv*, jthread, jmethodID method, jlocation) {
+  char* mname = nullptr; char* dsig = nullptr; jclass decl = nullptr;
+  jvmti->GetMethodName(method, &mname, nullptr, nullptr);
+  if (jvmti->GetMethodDeclaringClass(method, &decl) == JVMTI_ERROR_NONE && decl != nullptr)
+    jvmti->GetClassSignature(decl, &dsig, nullptr);
+  log::i(kTag, "JVMTI-TRACE: entered {}.{}", dsig ? dsig : "?", mname ? mname : "?");
+  if (mname) jvmti->Deallocate(reinterpret_cast<unsigned char*>(mname));
+  if (dsig) jvmti->Deallocate(reinterpret_cast<unsigned char*>(dsig));
+}
+void JNICALL acl_jvmti_class_prepare(jvmtiEnv* jvmti, JNIEnv*, jthread, jclass klass) {
+  char* sig = nullptr;
+  if (jvmti->GetClassSignature(klass, &sig, nullptr) != JVMTI_ERROR_NONE || sig == nullptr) return;
+  const bool interesting = std::strstr(sig, "engine/FlutterJNI") != nullptr;
+  if (interesting) {
+    int set = 0;
+    jint n = 0; jmethodID* ms = nullptr;
+    if (jvmti->GetClassMethods(klass, &n, &ms) == JVMTI_ERROR_NONE) {
+      for (jint i = 0; i < n; ++i) {
+        char* mn = nullptr;
+        if (jvmti->GetMethodName(ms[i], &mn, nullptr, nullptr) == JVMTI_ERROR_NONE && mn != nullptr) {
+          if (std::strstr(mn, "runBundle") || std::strstr(mn, "PlatformMessage") ||
+              std::strstr(mn, "ViewportMetrics") || std::strstr(mn, "spawn") ||
+              std::strstr(mn, "onFirstFrame") || std::strstr(mn, "Vsync"))
+            if (jvmti->SetBreakpoint(ms[i], 0) == JVMTI_ERROR_NONE) { ++set;
+              log::i(kTag, "JVMTI-TRACE:   bp on {}", mn); }
+          jvmti->Deallocate(reinterpret_cast<unsigned char*>(mn));
+        }
+      }
+      jvmti->Deallocate(reinterpret_cast<unsigned char*>(ms));
+    }
+    log::i(kTag, "JVMTI-TRACE: prepared {} ({} breakpoints)", sig, set);
+  }
+  jvmti->Deallocate(reinterpret_cast<unsigned char*>(sig));
+}
+
 // Attach a JVMTI env to the running VM and enable the Exception event. Best-effort; needs the
 // JVMTI plugin loaded (-Xplugin) — GetEnv(JVMTI_VERSION) returns JNI_EVERSION otherwise.
 void install_jvmti_diag(JavaVM* vm) {
@@ -311,13 +349,21 @@ void install_jvmti_diag(JavaVM* vm) {
     log::w(kTag, "JVMTI: plugin not loaded (GetEnv failed) — no exception naming");
     return;
   }
+  const bool trace = [] { const char* v = std::getenv("ACL_JVMTI_TRACE"); return v != nullptr && *v != '\0'; }();
   jvmtiCapabilities caps{};
   caps.can_generate_exception_events = 1;
+  if (trace) { caps.can_generate_breakpoint_events = 1; }
   jvmti->AddCapabilities(&caps);
   jvmtiEventCallbacks cbs{};
   cbs.Exception = &acl_jvmti_exception;
+  if (trace) { cbs.Breakpoint = &acl_jvmti_breakpoint; cbs.ClassPrepare = &acl_jvmti_class_prepare; }
   jvmti->SetEventCallbacks(&cbs, sizeof(cbs));
   jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_EXCEPTION, nullptr);
+  if (trace) {
+    jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_CLASS_PREPARE, nullptr);
+    jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_BREAKPOINT, nullptr);
+    log::i(kTag, "JVMTI: Flutter startup tracing enabled (ACL_JVMTI_TRACE)");
+  }
   log::i(kTag, "JVMTI: exception naming enabled (ACL_JVMTI_DIAG)");
 }
 
@@ -3129,6 +3175,41 @@ class ArtVm final : public JniVm {
       if (env->RegisterNatives(as_cls, m, 3) == JNI_OK)
         log::i(kTag, "android.media.AudioSystem <clinit> getters bound (channel/sample-rate maxima)");
       env->DeleteLocalRef(as_cls);
+    }
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+    // android.media.AudioPortEventHandler.native_setup — audio_service (com.ryanheise.audioservice)
+    // registers an AudioDeviceCallback during Flutter plugin registration, which inits an
+    // AudioPortEventHandler whose native_setup the host libandroid_runtime (no audio HAL) doesn't
+    // provide. The UnsatisfiedLinkError makes the WHOLE GeneratedPluginRegistrant throw (Flutter
+    // catches it), so audio_service never registers its method channel — and the app's Dart main()
+    // then awaits AudioService.init() forever, never reaching runApp(), so no frame is ever scheduled
+    // (measured: FlutterJNI.asyncWaitForVsync is never called). No-op it so registration completes.
+    if (jclass ape = find_class_optional(env, "android/media/AudioPortEventHandler")) {
+      const JNINativeMethod m = {const_cast<char*>("native_setup"),
+                                 const_cast<char*>("(Ljava/lang/Object;)V"),
+                                 reinterpret_cast<void*>(+[](JNIEnv*, jobject, jobject) {})};
+      if (env->RegisterNatives(ape, &m, 1) == JNI_OK)
+        log::i(kTag, "android.media.AudioPortEventHandler.native_setup -> acl no-op (audio_service)");
+      env->DeleteLocalRef(ape);
+    }
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+    // AudioManager.registerAudioDeviceCallback (next in the same audio_service chain) enumerates
+    // audio ports via AudioSystem.listAudioPorts/listAudioPatches — device-only natives. Report "no
+    // ports" success with matching port/patch generations so updateAudioPortCache's retry loop exits.
+    if (jclass as = find_class_optional(env, "android/media/AudioSystem")) {
+      const auto empty_ports = +[](JNIEnv* e, jclass, jobject, jintArray gen) -> jint {
+        if (gen != nullptr && e->GetArrayLength(gen) >= 1) { jint one = 1; e->SetIntArrayRegion(gen, 0, 1, &one); }
+        return 0;  // AudioManager.SUCCESS
+      };
+      const JNINativeMethod m[] = {
+          {const_cast<char*>("listAudioPorts"), const_cast<char*>("(Ljava/util/ArrayList;[I)I"),
+           reinterpret_cast<void*>(empty_ports)},
+          {const_cast<char*>("listAudioPatches"), const_cast<char*>("(Ljava/util/ArrayList;[I)I"),
+           reinterpret_cast<void*>(empty_ports)},
+      };
+      if (env->RegisterNatives(as, m, 2) == JNI_OK)
+        log::i(kTag, "android.media.AudioSystem.listAudioPorts/Patches -> acl no-op success");
+      env->DeleteLocalRef(as);
     }
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
     populate_system_properties(env);
