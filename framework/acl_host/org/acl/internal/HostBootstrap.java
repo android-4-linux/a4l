@@ -401,6 +401,12 @@ public final class HostBootstrap {
         @Override public android.view.autofill.AutofillManager.AutofillClient getAutofillClient() {
             return null;
         }
+        // Another null-base ContextWrapper delegate: createPackageContext NPEs on mBase. acl runs one
+        // app in-process; return self (own-package resources/classloader) as a best effort — enough for
+        // e.g. audio_service (agersant.polaris) building a context for its notification/PendingIntent.
+        @Override public android.content.Context createPackageContext(String packageName, int flags) {
+            return this;
+        }
         // A null-base ContextWrapper throws from register/unregisterComponentCallbacks. Compose's OWN
         // obtainImageVectorCache DisposableEffect calls registerComponentCallbacks during the initial
         // composition (via the activity's ContextThemeWrapper, which delegates here) — that throw

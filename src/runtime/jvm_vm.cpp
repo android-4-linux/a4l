@@ -2857,6 +2857,25 @@ class ArtVm final : public JniVm {
         log::i(kTag, "InputEventReceiver.nativeDispose -> acl no-op (avoids AndroidRuntime::getJNIEnv)");
       env->DeleteLocalRef(ier);
     }
+    // android.media.AudioSystem.<clinit> seeds OUT_CHANNEL_COUNT_MAX / SAMPLE_RATE_HZ_{MAX,MIN}
+    // from three native getters. The host libandroid_runtime (no audio HAL) does not register
+    // AudioSystem, so its class init fails with UnsatisfiedLinkError and takes AudioFormat/AudioTrack
+    // down with it (agrigolo.chubbyclick's metronome). Bind the three getters to the AOSP constants
+    // (FCC_LIMIT + the sample-rate bounds). ART's FindClass loads without running <clinit>, so this
+    // binds before the app first touches the class.
+    if (jclass as_cls = env->FindClass("android/media/AudioSystem")) {
+      const JNINativeMethod m[] = {
+          {const_cast<char*>("native_getMaxChannelCount"), const_cast<char*>("()I"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jint { return 24; })},
+          {const_cast<char*>("native_getMaxSampleRate"), const_cast<char*>("()I"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jint { return 192000; })},
+          {const_cast<char*>("native_getMinSampleRate"), const_cast<char*>("()I"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jint { return 4000; })},
+      };
+      if (env->RegisterNatives(as_cls, m, 3) == JNI_OK)
+        log::i(kTag, "android.media.AudioSystem <clinit> getters bound (channel/sample-rate maxima)");
+      env->DeleteLocalRef(as_cls);
+    }
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
     populate_system_properties(env);
     load_system_resources(env);
