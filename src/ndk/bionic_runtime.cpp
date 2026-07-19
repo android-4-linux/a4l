@@ -1320,13 +1320,17 @@ void* make_downcall(void* real_native) {
   // Frame-pointer trampoline that FORWARDS up to kStackSlots stack arguments: a JNI native with >6
   // integer args (env + class/this + >4 user args) passes the extras on the stack — e.g. libGDX's
   // Matrix4.prj(float[], float[], int offset, int numVecs, int stride) has `stride` on the stack, and
-  // Flutter's FlutterJNI.nativeSetViewportMetrics has 22 C args, so its three trailing int[] pointers
-  // sit at stack slots 12-14. The trampoline's own return address sits between the native's frame and
-  // those args, so we rebuild the args below a fresh call. Entry: %rsp ≡ 8 (mod 16), [rsp]=ret, stack
-  // args at [rsp+8+8k]. Copying kStackSlots (even, so the call stays 16-aligned) covers up to
-  // 6+kStackSlots integer args; natives with fewer just copy unused slots (harmless reads of the
-  // caller's own stack, always mapped — it is ART's frame).
-  constexpr int kStackSlots = 20;
+  // Flutter's FlutterJNI.nativeSetViewportMetrics (sig (JFIIIIIIIIIIIIIII[I[I[IIIIIIIII)V) has 29
+  // params: after env+class+long+float and the first 3 ints in registers, 12 ints + 3 int[] pointers
+  // + 9 trailing ints = 24 integer args sit on the stack — the last of which are the four
+  // displayCornerRadius* values. Copying too few leaves those reading uninitialized stack (Flutter's
+  // dart:ui then rejects the garbage corner radii as "not all set or all unset"). The trampoline's
+  // own return address sits between the native's frame and those args, so we rebuild the args below a
+  // fresh call. Entry: %rsp ≡ 8 (mod 16), [rsp]=ret, stack args at [rsp+8+8k]. Copying kStackSlots
+  // (even, so the call stays 16-aligned) covers up to 6+kStackSlots integer args; natives with fewer
+  // just copy unused slots (harmless reads of the caller's own stack, always mapped — it is ART's
+  // frame). 32 covers the 24-stack-arg worst case above with margin.
+  constexpr int kStackSlots = 32;
   emit({0x55});                                         // push %rbp        (save ART's rbp; rsp ≡ 0)
   emit({0x48, 0x89, 0xE5});                             // mov %rsp,%rbp    ([rbp+8]=ret, [rbp+16+8k]=args)
   emit({0x64, 0x4C, 0x8B, 0x1C, 0x25});                 // mov %fs:disp32,%r11  (this thread's
