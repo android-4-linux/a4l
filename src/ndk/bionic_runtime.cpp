@@ -360,6 +360,56 @@ void ensure_gl_donor_pool() {
     usleep(100);  // wait for every donor to publish its %fs before any GL call can need one
 }
 
+// Attach-donor pool: parked glibc threads whose %fs a bionic-spawned thread borrows to host its ART
+// Thread when it calls AttachCurrentThread (the reverse of attach_current_thread, which gives a glibc
+// thread a bionic TCB). ART keeps per-thread state -- Thread::Current, the JNIEnv -- in this %fs's
+// glibc TLS, so a real AttachCurrentThreadInternal can run instead of SEGV'ing under bionic %fs. One
+// donor per attaching thread (never shared: two threads sharing one %fs would overwrite each other's
+// Thread), assigned once and kept for the thread's life. Same parked-forever pattern as the GL
+// donors. Known limitation: ART reads this thread's stack bounds from the DONOR's pthread, not the
+// bionic thread's -- fine for short JNI up-calls; a GC that scans the stack mid-call could miss roots.
+constexpr int kAttachDonorPool = 16;
+std::atomic<std::uintptr_t> g_attach_donor_pool[kAttachDonorPool];
+std::atomic<int> g_attach_donor_published{0};
+std::atomic<int> g_attach_donor_next{0};
+void* attach_fs_donor(void* arg) {
+  const int i = static_cast<int>(reinterpret_cast<intptr_t>(arg));
+  g_attach_donor_pool[i].store(get_fs(), std::memory_order_release);
+  g_attach_donor_published.fetch_add(1, std::memory_order_release);
+  for (;;) pause();  // park forever: this %fs must outlive the process; the thread never runs ART
+  return nullptr;
+}
+void ensure_attach_donor_pool() {
+  static std::atomic<bool> done{false};
+  if (done.exchange(true)) return;
+  for (int i = 0; i < kAttachDonorPool; ++i) {
+    pthread_t t;
+    if (pthread_create(&t, nullptr, attach_fs_donor, reinterpret_cast<void*>(intptr_t(i))) == 0)
+      pthread_detach(t);
+  }
+  for (int k = 0; k < 20000 && g_attach_donor_published.load(std::memory_order_acquire) < kAttachDonorPool; ++k)
+    usleep(100);
+}
+// Claim a free donor %fs for an attaching thread, or 0 if the pool is exhausted.
+std::uintptr_t take_attach_donor() {
+  const int i = g_attach_donor_next.fetch_add(1, std::memory_order_acq_rel);
+  if (i >= g_attach_donor_published.load(std::memory_order_acquire)) return 0;
+  return g_attach_donor_pool[i].load(std::memory_order_acquire);
+}
+
+// The current thread's glibc %fs, pairing an unpaired bionic-spawned thread with an attach donor on
+// demand so it can cross into acl's glibc code (ART attach, or a pkg asset read). Once paired the
+// thread keeps its donor for the process's life. Returns 0 only when the donor pool is exhausted.
+std::uintptr_t ensure_paired_glibc_fs() {
+  const std::uintptr_t bionic_fs = get_fs();
+  const std::uintptr_t glibc_fs = glibc_fs_for(bionic_fs);
+  if (glibc_fs != 0) return glibc_fs;
+  const std::uintptr_t donor = take_attach_donor();
+  if (donor == 0) return 0;
+  register_fs_pair(bionic_fs, donor);
+  return donor;
+}
+
 // eglGetProcAddress is special: the pointers it returns are called DIRECTLY by the app (Impeller
 // resolves its whole GL proc table this way), bypassing the static forwarders — so they must be
 // %fs-swapping trampolines too, or Mesa's libGLdispatch reads _glapi_tls_Current under the app's
@@ -1491,12 +1541,55 @@ jint JNICALL w_GetEnv(JavaVM* vm, void** out, jint ver) {
   *out = wrapped;
   return JNI_OK;
 }
+
+// JavaVM AttachCurrentThread[AsDaemon]. A thread already paired to a glibc %fs (an ART thread that
+// borrowed a bionic TCB via a down-call) can attach for real. A bionic-spawned engine thread that
+// acl never paired CANNOT yet: ART's AttachCurrentThreadInternal would run under bionic %fs and
+// dereference a garbage Thread (SEGV). acl has no per-thread glibc %fs+TLS+stack for such a thread
+// to host an ART Thread on (the reverse of attach_current_thread; a real fix needs a glibc attach
+// donor whose pthread stack bounds match this thread, so ART's GC scans the right stack -- see
+// docs/ndk-scope.md). Fail the attach cleanly so the caller skips its JNI work on this thread,
+// rather than crashing. Before this, a real app whose engine attaches such a thread (e.g. the
+// flutter_gallery) SIGSEGV'd inside libart.
+jint JNICALL w_AttachCurrentThread(JavaVM* vm, void** p_env, void* args) {
+  WrapVM* w = reinterpret_cast<WrapVM*>(vm);
+  if (p_env != nullptr) *p_env = nullptr;
+  // Pair an unpaired bionic thread with a glibc attach-donor %fs, so ART's AttachCurrentThreadInternal
+  // has a glibc TLS to host the Thread on instead of SEGV'ing under bionic %fs. Pool exhaustion is the
+  // only failure (warned once via a raw write -- log/fmt/malloc would themselves fault under bionic
+  // %fs). After pairing, ToGlibc below finds the donor %fs.
+  if (ensure_paired_glibc_fs() == 0) {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true)) {
+      static const char m[] =
+          "acl.ndk: W AttachCurrentThread: attach-donor pool exhausted; failing the attach\n";
+      (void)syscall(SYS_write, 2, m, sizeof(m) - 1);
+    }
+    return JNI_ERR;
+  }
+  JNIEnv* wrapped = nullptr;
+  {
+    ToGlibc g;  // this thread's glibc %fs (its donor, or its real one if already an ART thread)
+    JNIEnv* tmp = nullptr;
+    const jint rc =
+        w->real->functions->AttachCurrentThread(w->real, reinterpret_cast<void**>(&tmp), args);
+    if (rc != JNI_OK) return rc;
+    t_wrap_env.functions = &g_env_tbl;
+    t_wrap_env.real = tmp;
+    wrapped = reinterpret_cast<JNIEnv*>(&t_wrap_env);
+  }
+  if (p_env != nullptr) *p_env = wrapped;
+  return JNI_OK;
+}
 }  // namespace
 #endif  // __x86_64__
 
 JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
 #if defined(__x86_64__)
   if (!real_vm || !real_env) return nullptr;
+  // Parked glibc %fs donors for bionic threads that AttachCurrentThread later. Spawned here, on the
+  // main (glibc) thread, so the donors are real glibc threads with glibc TLS.
+  ensure_attach_donor_pool();
   // This thread's wrapped env. JNI_OnLoad is driven directly by load_library rather than through a
   // down-call trampoline, so nothing else would have filled it in for this thread. The trampoline
   // addresses the slot off the thread pointer, so record its fixed displacement too — measured
@@ -1550,6 +1643,8 @@ JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
 
   g_vm_tbl = *real_vm->functions;
   g_vm_tbl.GetEnv = w_GetEnv;
+  g_vm_tbl.AttachCurrentThread = w_AttachCurrentThread;
+  g_vm_tbl.AttachCurrentThreadAsDaemon = w_AttachCurrentThread;
   g_wrap_vm.functions = &g_vm_tbl;
   g_wrap_vm.real = real_vm;
   g_wrap_vm.wrap_env = reinterpret_cast<JNIEnv*>(&t_wrap_env);
@@ -1580,15 +1675,11 @@ void* g_asset_provider_user = nullptr;
 int acl_asset_open_tramp(void* user, const char* name, void** out_buf, long* out_len) {
   if (g_asset_open_cb == nullptr) return 0;
   const std::uintptr_t bionic_fs = ndk_get_fs();
-  const std::uintptr_t glibc_fs = glibc_fs_for(bionic_fs);
-  if (glibc_fs == 0) {
-    // No glibc pairing for this thread (a bionic-spawned engine thread ART never owned). Report via
-    // a raw write (TLS-free) and miss rather than corrupt; if this fires, assets need a donor-%fs
-    // pool like the GL forwarders.
-    static const char m[] = "acl.ndk: E AAsset open on an unpaired bionic thread (needs donor %fs)\n";
-    (void)syscall(SYS_write, 2, m, sizeof(m) - 1);
-    return 0;
-  }
+  // A bionic-spawned engine thread reading an asset needs a glibc %fs for pkg + the allocator; pair
+  // it with an attach donor on demand (only fails if the donor pool is exhausted). The read is
+  // %fs-agnostic memory work under the donor -- no ART Thread / stack scanning involved.
+  const std::uintptr_t glibc_fs = ensure_paired_glibc_fs();
+  if (glibc_fs == 0) return 0;  // pool exhausted: miss rather than corrupt
   ndk_set_fs(glibc_fs);
   const int rc = g_asset_open_cb(user, name, out_buf, out_len);
   ndk_set_fs(bionic_fs);
@@ -1597,8 +1688,8 @@ int acl_asset_open_tramp(void* user, const char* name, void** out_buf, long* out
 void acl_asset_free_tramp(void* user, void* buf) {
   if (g_asset_free_cb == nullptr) return;
   const std::uintptr_t bionic_fs = ndk_get_fs();
-  const std::uintptr_t glibc_fs = glibc_fs_for(bionic_fs);
-  if (glibc_fs == 0) return;  // leak rather than corrupt; the open side already warned
+  const std::uintptr_t glibc_fs = ensure_paired_glibc_fs();
+  if (glibc_fs == 0) return;  // pool exhausted: leak rather than corrupt
   ndk_set_fs(glibc_fs);
   g_asset_free_cb(user, buf);
   ndk_set_fs(bionic_fs);
