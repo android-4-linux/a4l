@@ -330,22 +330,34 @@ struct GlBridge {
   void* fns[128];           // offset 8: host-Mesa function pointers, indexed to match the forwarders
 };
 
-// A parked glibc thread whose %fs the GL threads borrow so Mesa's TLS is a real, stable glibc TCB.
-// Created AFTER host Mesa is dlopen'd, so Mesa's initial-exec _glapi_tls_Current is in this thread's
-// static TLS layout. Single donor => assumes Flutter drives GL from one thread (the raster thread);
-// a second concurrent GL thread would collide on this TLS and needs a per-thread donor (TODO).
-std::atomic<std::uintptr_t> g_gl_donor_fs{0};
-void* gl_fs_donor(void*) {
-  g_gl_donor_fs.store(get_fs(), std::memory_order_release);
+// A POOL of parked glibc threads whose %fs the app's GL threads borrow (one donor per GL thread), so
+// host Mesa's per-thread state (current context, driver TLS) is never shared between two GL threads.
+// Flutter drives GL from a raster thread AND an IO thread; sharing one donor makes Mesa treat them as
+// one and write through stale per-thread pointers, corrupting memory. Each donor publishes its %fs
+// then parks forever. Created AFTER host Mesa is dlopen'd, so Mesa's initial-exec _glapi_tls_Current
+// lands in each donor's static TLS. The forwarders map caller-thread -> donor via acl_gl_pick_donor
+// (in libEGL.so); acl only fills the pool here.
+constexpr int kGlDonorPool = 8;
+std::atomic<std::uintptr_t> g_gl_donor_pool[kGlDonorPool];
+std::atomic<int> g_gl_donor_published{0};
+void* g_gl_pick_donor = nullptr;  // address of libEGL.so's acl_gl_pick_donor, for the JIT stubs
+void* gl_fs_donor(void* arg) {
+  const int i = static_cast<int>(reinterpret_cast<intptr_t>(arg));
+  g_gl_donor_pool[i].store(get_fs(), std::memory_order_release);
+  g_gl_donor_published.fetch_add(1, std::memory_order_release);
   for (;;) pause();  // park forever: this %fs must outlive the process; the thread never runs itself
   return nullptr;
 }
-void ensure_gl_donor_fs() {
-  if (g_gl_donor_fs.load(std::memory_order_acquire) != 0) return;
-  pthread_t t;
-  if (pthread_create(&t, nullptr, gl_fs_donor, nullptr) != 0) return;
-  pthread_detach(t);
-  for (int i = 0; i < 10000 && g_gl_donor_fs.load(std::memory_order_acquire) == 0; ++i) usleep(100);
+void ensure_gl_donor_pool() {
+  static std::atomic<bool> done{false};
+  if (done.exchange(true)) return;
+  for (int i = 0; i < kGlDonorPool; ++i) {
+    pthread_t t;
+    if (pthread_create(&t, nullptr, gl_fs_donor, reinterpret_cast<void*>(intptr_t(i))) == 0)
+      pthread_detach(t);
+  }
+  for (int k = 0; k < 20000 && g_gl_donor_published.load(std::memory_order_acquire) < kGlDonorPool; ++k)
+    usleep(100);  // wait for every donor to publish its %fs before any GL call can need one
 }
 
 // eglGetProcAddress is special: the pointers it returns are called DIRECTLY by the app (Impeller
@@ -361,17 +373,16 @@ std::unordered_map<void*, void*> g_gl_jit_cache;
 uint8_t* g_gl_jit_page = nullptr;
 size_t g_gl_jit_used = 0, g_gl_jit_cap = 0;
 
-// Emit a trampoline that saves the caller's bionic %fs, wrfsbase's to the GL donor's glibc %fs, calls
-// `mesa` (donor_fs + mesa baked as immediates), and restores the bionic %fs. Same shape as the
-// static forwarders and make_downcall — see those for the rd/wrfsbase encoding. Cached by `mesa`.
+// Emit a trampoline that resolves THIS thread's donor %fs (acl_gl_pick_donor, which clobbers only
+// rax/r10/r11 so the live args survive), wrfsbase's to it, calls `mesa`, and restores the bionic %fs.
+// Same per-thread-donor shape as the static forwarders; cached by `mesa`.
 void* gl_jit_wrap(void* mesa) {
-  if (mesa == nullptr) return nullptr;
+  if (mesa == nullptr || g_gl_pick_donor == nullptr) return nullptr;
   std::lock_guard<std::mutex> lk(g_gl_jit_mu);
   auto it = g_gl_jit_cache.find(mesa);
   if (it != g_gl_jit_cache.end()) return it->second;
 
-  const std::uintptr_t donor = g_gl_donor_fs.load(std::memory_order_acquire);
-  static constexpr size_t kStub = 48;  // 41 bytes of code, rounded up
+  static constexpr size_t kStub = 64;
   if (g_gl_jit_page == nullptr || g_gl_jit_used + kStub > g_gl_jit_cap) {
     g_gl_jit_cap = 64 * 1024;
     g_gl_jit_page = static_cast<uint8_t*>(mmap(nullptr, g_gl_jit_cap, PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -383,10 +394,11 @@ void* gl_jit_wrap(void* mesa) {
   size_t n = 0;
   auto b = [&](std::initializer_list<uint8_t> bytes) { for (uint8_t x : bytes) p[n++] = x; };
   auto imm64 = [&](std::uintptr_t v) { for (int i = 0; i < 8; ++i) p[n++] = uint8_t(v >> (8 * i)); };
+  b({0x49, 0xBB}); imm64(reinterpret_cast<std::uintptr_t>(g_gl_pick_donor));  // movabs pick_donor, %r11
+  b({0x41, 0xFF, 0xD3});                      // call *%r11      (rax = this thread's donor; args live)
   b({0xF3, 0x49, 0x0F, 0xAE, 0xC2});          // rdfsbase %r10   (caller bionic %fs)
   b({0x41, 0x52});                            // push %r10       (rsp 16-aligned)
-  b({0x49, 0xBB}); imm64(donor);              // movabs donor_fs, %r11
-  b({0xF3, 0x49, 0x0F, 0xAE, 0xD3});          // wrfsbase %r11   (%fs = donor glibc)
+  b({0xF3, 0x48, 0x0F, 0xAE, 0xD0});          // wrfsbase %rax   (%fs = this thread's donor)
   b({0x49, 0xBA}); imm64(reinterpret_cast<std::uintptr_t>(mesa));  // movabs mesa, %r10
   b({0x41, 0xFF, 0xD2});                      // call *%r10
   b({0x41, 0x5A});                            // pop %r10        (saved bionic %fs)
@@ -405,8 +417,7 @@ void* acl_egl_get_proc_address(const char* name) {
   void* mesa = g_mesa_egl_gpa(name);
   void* w = gl_jit_wrap(mesa);
   if (getenv("ACL_GL_DIAG") != nullptr)
-    log::i(kTag, "eglGetProcAddress({}) -> mesa={} wrap={} donor={:#x}", name, mesa, w,
-           g_gl_donor_fs.load(std::memory_order_acquire));
+    log::i(kTag, "eglGetProcAddress({}) -> mesa={} wrap={}", name, mesa, w);
   return w;
 }
 
@@ -448,12 +459,12 @@ void install_gl_forwarders(BionicRuntime* rt) {
            megl != nullptr, mgles != nullptr);
     return;
   }
-  ensure_gl_donor_fs();
-  const std::uintptr_t donor = g_gl_donor_fs.load(std::memory_order_acquire);
-  if (donor == 0) { log::w(kTag, "GL forward: no donor %fs"); return; }
+  ensure_gl_donor_pool();
+  const int npub = g_gl_donor_published.load(std::memory_order_acquire);
+  if (npub == 0) { log::w(kTag, "GL forward: no donor %fs"); return; }
 
   auto fill = [&](GlBridge& b, void* mh, const char* const* syms, int n) {
-    b.donor_fs = donor;
+    b.donor_fs = 0;  // unused: forwarders resolve a per-thread donor via acl_gl_pick_donor
     int missing = 0;
     for (int i = 0; i < n; ++i) {
       b.fns[i] = dlsym(mh, syms[i]);
@@ -464,6 +475,23 @@ void install_gl_forwarders(BionicRuntime* rt) {
   static GlBridge egl_b{}, gles_b{};
   const int em = fill(egl_b, megl, kEglForwardSyms, 20);
   const int gm = fill(gles_b, mgles, kGlesForwardSyms, 106);
+
+  // Publish the donor pool into libEGL.so (where acl_gl_pick_donor + the pool live) and grab
+  // pick_donor's address for the JIT stubs. Written before the bridge is wired, so it is ready before
+  // any GL call can reach a forwarder.
+  {
+    std::string err;
+    void* he = rt->load((std::string(sysroot) + "/libEGL.so").c_str(), &err);
+    if (he != nullptr) {
+      g_gl_pick_donor = rt->symbol(he, "acl_gl_pick_donor");
+      if (auto* pool = static_cast<std::uintptr_t*>(rt->symbol(he, "acl_gl_donor_pool"))) {
+        for (int i = 0; i < kGlDonorPool; ++i)
+          pool[i] = g_gl_donor_pool[i].load(std::memory_order_acquire);
+      }
+    }
+    if (g_gl_pick_donor == nullptr)
+      log::w(kTag, "GL forward: libEGL.so acl_gl_pick_donor not found ({})", err);
+  }
 
   // Redirect the eglGetProcAddress slot to acl_egl_get_proc_address, which wraps the pointers Mesa
   // returns so the app can call them directly (see above). Keep Mesa's real one for it to delegate to.
@@ -509,8 +537,8 @@ void install_gl_forwarders(BionicRuntime* rt) {
   };
   const bool e = wire("libEGL.so", "acl_gl_egl_bridge", &egl_b);
   const bool g = wire("libGLESv2.so", "acl_gl_gles_bridge", &gles_b);
-  log::i(kTag, "GL forwarders wired: EGL {}/{} GLES {}/{} donor_fs={:#x} (egl={} gles={})",
-         20 - em, 20, 106 - gm, 106, donor, e, g);
+  log::i(kTag, "GL forwarders wired: EGL {}/{} GLES {}/{} donor-pool={} pick={} (egl={} gles={})",
+         20 - em, 20, 106 - gm, 106, npub, g_gl_pick_donor != nullptr, e, g);
 #else
   (void)rt;
 #endif
