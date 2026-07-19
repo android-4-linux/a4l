@@ -327,6 +327,16 @@ ACL_EXPORT int32_t ANativeWindow_getFormat(ANativeWindow* w) {
   ACL_TODO("ANativeWindow_getFormat");
   return -EINVAL;
 }
+ACL_EXPORT int32_t ANativeWindow_getWidth(ANativeWindow* w) {
+  (void)w;
+  ACL_TODO("ANativeWindow_getWidth");
+  return -EINVAL;
+}
+ACL_EXPORT int32_t ANativeWindow_getHeight(ANativeWindow* w) {
+  (void)w;
+  ACL_TODO("ANativeWindow_getHeight");
+  return -EINVAL;
+}
 ACL_EXPORT int32_t ANativeWindow_lock(ANativeWindow* w, ANativeWindow_Buffer* b, ARect* dirty) {
   (void)w; (void)b; (void)dirty;
   ACL_TODO("ANativeWindow_lock");

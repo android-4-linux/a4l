@@ -281,11 +281,52 @@ struct SavedSig {
 SavedSig g_saved_sig[65];  // indexed by signo (1..64)
 std::atomic<bool> g_shims_installed{false};
 
+// True if `fs` is the glibc %fs of a thread acl attached (i.e. an ART thread). Scans the pairing
+// table's glibc side. Lets the signal shim tell an attached ART thread already on its glibc %fs
+// (leave it alone, so ART's own fault handler runs) from a bionic-spawned thread ART never owned.
+bool is_known_glibc_fs(std::uintptr_t fs) {
+  const int n = g_fs_pair_count.load(std::memory_order_acquire);
+  for (int i = 0; i < n && i < kMaxAttached; ++i) {
+    if (g_fs_pairs[i].bionic_fs.load(std::memory_order_acquire) == 0) continue;
+    if (g_fs_pairs[i].glibc_fs == fs) return true;
+  }
+  return false;
+}
+
+// A glibc %fs whose libart Thread::self_tls_ reads null, donated by a real glibc thread that parks
+// forever and never attaches to ART. A signal delivered to a bionic-spawned engine thread (one ART
+// does not own — Flutter/Skia/Dart spawn ~18) runs ART's chained fault handler; without a valid
+// glibc %fs it dereferences a garbage Thread and SEGV_ACCERRs, and ART's all-thread crash dump
+// (rt_tgsigqueueinfo) cascades the same fault onto every such thread. Under this %fs,
+// Thread::Current() is null, so ART's FaultManager::IsInGeneratedCode returns false and HandleFault
+// declines cleanly instead of crashing. See docs/ndk-scope.md.
+std::atomic<std::uintptr_t> g_null_art_fs{0};
+void* null_art_fs_donor(void*) {
+  g_null_art_fs.store(get_fs(), std::memory_order_release);  // this thread's glibc %fs; self_tls_ == null
+  for (;;) pause();  // park forever: the %fs must outlive the process, and the thread must never run ART
+  return nullptr;
+}
+void ensure_null_art_fs() {
+  if (g_null_art_fs.load(std::memory_order_acquire) != 0) return;
+  pthread_t t;
+  if (pthread_create(&t, nullptr, null_art_fs_donor, nullptr) != 0) return;
+  pthread_detach(t);
+  for (int i = 0; i < 10000 && g_null_art_fs.load(std::memory_order_acquire) == 0; ++i)
+    usleep(100);  // wait for the donor to publish its %fs before any signal can need it
+}
+
 void acl_signal_trampoline(int sig, siginfo_t* info, void* uctx) {
   const std::uintptr_t cur = get_fs();
-  const std::uintptr_t glibc = glibc_fs_for(cur);  // 0 unless cur is a tracked bionic %fs
-  const bool swap = glibc != 0 && glibc != cur;
-  if (swap) set_fs(glibc);
+  std::uintptr_t target = glibc_fs_for(cur);  // attached thread on its bionic %fs -> its glibc %fs
+  if (target == 0 && !is_known_glibc_fs(cur)) {
+    // Not a tracked bionic %fs, and not a known ART-glibc %fs => a bionic-spawned thread ART never
+    // owned. Give it the null-ART %fs so ART's fault handler sees Thread::Current()==null and
+    // declines. (A pure glibc non-ART thread also lands here; its self_tls_ is already null, so the
+    // swap is harmless.) When the donor isn't up yet, fall through to the old behavior.
+    target = g_null_art_fs.load(std::memory_order_acquire);
+  }
+  const bool swap = target != 0 && target != cur;
+  if (swap) set_fs(target);
   const SavedSig s = (sig > 0 && sig <= 64) ? g_saved_sig[sig] : SavedSig{};
   if (s.handler != nullptr) {
     if ((s.flags & SA_SIGINFO) != 0)
@@ -301,6 +342,7 @@ void acl_signal_trampoline(int sig, siginfo_t* info, void* uctx) {
 // they touch no glibc TLS.
 void install_signal_shims() {
   if (g_shims_installed.exchange(true)) return;
+  ensure_null_art_fs();  // the shim needs the null-ART %fs ready before any bionic-thread signal
   static const int sigs[] = {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGABRT, SIGQUIT, SIGSYS};
   int wrapped = 0;
   for (const int sig : sigs) {
@@ -1225,6 +1267,11 @@ JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
 void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv* real_env,
                                   std::string* error) {
 #if defined(__x86_64__)
+  // Wrap ART/libsigchain's signal handlers BEFORE running this lib's constructors: a lib like
+  // libflutter.so spawns engine threads in its .init_array, and a signal landing on one of those
+  // bionic-spawned threads (a real fault, or ART's all-thread crash dump) must be serviced with a
+  // glibc %fs — otherwise ART's handler crashes on it before the shim is even installed. Idempotent.
+  install_signal_shims();
   void* h = load(abs_path, error);
   if (!h) return nullptr;
   // Wrap unconditionally, not just for JNI_OnLoad: a lib whose natives are all bound by NAME has
@@ -1242,10 +1289,6 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
     }
     log::i(kTag, "{}: JNI_OnLoad ok (requested JNI {:#x})", abs_path, ver);
   }
-  // ART + libsigchain are fully up by the time an app loads a bionic lib; wrap their signal
-  // handlers so a signal that lands while a thread runs this lib's native code (bionic %fs) is
-  // serviced with glibc %fs instead of crashing the handler. Idempotent (once per process).
-  install_signal_shims();
   return h;
 #else
   (void)abs_path; (void)real_vm; (void)real_env;
