@@ -11,6 +11,7 @@
 // returns the Manager shim; the shim's natives reach the service singletons here.
 
 #include <array>
+#include <cstdlib>
 #include <map>
 #include <string>
 
@@ -54,6 +55,20 @@ class WindowService {
   int density_dpi() const { return 160 * scale_; }   // Android baseline 160 dpi * scale
   int rotation() const { return 0; }                 // Surface.ROTATION_0
   void set_display(int width, int height, int scale) {
+    // ACL_DISPLAY_SIZE="WxH" pins the logical display to a fixed size (e.g. an average tablet,
+    // 1280x800) instead of the compositor's wl_output. Everything downstream derives from here:
+    // DisplayMetrics/Configuration, the present toplevel/buffer size, and the window insets.
+    if (const char* env = std::getenv("ACL_DISPLAY_SIZE")) {
+      char* end = nullptr;
+      const long ew = std::strtol(env, &end, 10);
+      const long eh = (end != nullptr && (*end == 'x' || *end == 'X')) ? std::strtol(end + 1, nullptr, 10) : 0;
+      if (ew > 0 && eh > 0) {
+        width_ = static_cast<int>(ew);
+        height_ = static_cast<int>(eh);
+        if (scale > 0) scale_ = scale;
+        return;
+      }
+    }
     if (width > 0) width_ = width;
     if (height > 0) height_ = height;
     if (scale > 0) scale_ = scale;
