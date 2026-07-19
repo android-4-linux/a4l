@@ -335,6 +335,25 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   }
   bool closed() const noexcept override { return closed_; }
 
+  // ── GL mode: acl owns the Looper + vsync clock; Mesa owns the surface's buffers/commit ──
+  void* gl_display() noexcept override { return display_.Get(); }
+  void* gl_surface() noexcept override {
+    return surface_.IsNull() ? nullptr : static_cast<void*>(surface_.Get()->GetProxy());
+  }
+  // Ask the compositor for presentation feedback on the toplevel's NEXT commit (Mesa's
+  // eglSwapBuffers) so OnPresented updates last_present_ns_/refresh_ns_ -> frame_time_ns().
+  void arm_present() noexcept override {
+    if (!surface_.IsNull())
+      presentation_.Arm(surface_.Get()->GetProxy(), static_cast<std::uint32_t>(frame_index_++));
+  }
+  // Pump events until the first xdg configure arrives (the GL device is built on the configured
+  // toplevel surface). Bounded so a broken compositor can't hang the boot.
+  bool wait_configured(int timeout_ms) noexcept override {
+    for (int i = 0; i < timeout_ms / 10 && !configured_ && !closed_; ++i)
+      (void)wl::RoundtripWithTimeout(display_.Get());
+    return configured_;
+  }
+
   // Connect, bind (wl_compositor / xdg_wm_base / zwp_linux_dmabuf_v1), learn the advertised
   // modifiers, create the surface + xdg_toplevel, and commit-for-configure. Shared by the
   // static and animated present paths.

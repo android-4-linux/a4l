@@ -205,6 +205,18 @@ class IPresenter {
 
   // True once the compositor/user has closed the toplevel.
   virtual bool closed() const noexcept = 0;
+
+  // ── GL mode (Mesa owns buffers/commit) ──────────────────────────────────────────────
+  // For a native-GL app (Flutter), Mesa renders + commits the toplevel wl_surface itself (inside
+  // eglSwapBuffers), so acl allocates no dma-buf and never calls submit(). acl still owns the
+  // Looper (fd()/dispatch()) and the vsync clock: it hands out the raw wl_display + wl_surface to
+  // build the GL device on, arms wp_presentation feedback for Mesa's commits (so frame_time_ns()
+  // tracks them), and waits for the first xdg configure before the GL device is created. Defaults
+  // are the non-GL behavior.
+  virtual void* gl_display() noexcept { return nullptr; }  // raw wl_display* for the GlDevice
+  virtual void* gl_surface() noexcept { return nullptr; }  // toplevel wl_surface* Mesa renders into
+  virtual void arm_present() noexcept {}                   // request wp_presentation feedback for the next commit
+  virtual bool wait_configured(int timeout_ms) noexcept { return true; }  // pump until first configure
 };
 
 // Connect to the compositor and create a titled xdg_toplevel, returning a presenter ready for

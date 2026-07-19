@@ -23,6 +23,8 @@
 #include <ctime>
 
 #include <dlfcn.h>
+#include <sys/timerfd.h>
+#include <unistd.h>
 #include <jni.h>
 #include <jvmti.h>
 
@@ -393,6 +395,8 @@ struct PresentSession {
   jmethodID route_overlay_touch = nullptr;            // HostBootstrap.routeOverlayTouch(MotionEvent)Z
   std::uint64_t down_time = 0;
   std::uint64_t frames = 0;  // presented-frame count (progress evidence)
+  int vsync_fd = -1;         // GL mode: timerfd clocking Choreographer vsync (Mesa owns commit)
+  bool is_gl = false;        // GL mode: no Skia presenter / nTraverse; Mesa renders the toplevel
 };
 
 // The current thread's JNIEnv (input callbacks run on the main thread during nDispatch, but
@@ -824,10 +828,183 @@ void JNICALL PresentDriver_nClose(JNIEnv* env, jclass, jlong sp) {
 
 // Bind org.acl.internal.PresentDriver's native seam. RegisterNatives is atomic per class, so
 // every signature must match; a miss leaves PresentDriver.run to fail fast via nOpen=0.
+// ── GL present (Flutter / SurfaceView): Looper-driven, but Mesa renders + commits the toplevel ──
+// Same Looper model as nOpen (reuses nFd/nDispatch/nRepeatFd/nDispatchRepeat) but with NO Skia
+// presenter and NO nTraverse: acl builds the GL device on the toplevel wl_surface, injects the
+// SurfaceView's Surface (Flutter's raster thread renders + eglSwapBuffers there), and clocks the
+// real Choreographer's vsync from a timerfd — each tick armed with wp_presentation feedback so
+// frame_time_ns() tracks Mesa's commits (the wp_presentation clock, delivered via acl_deliver_vsync).
+jlong JNICALL PresentDriver_nGlOpen(JNIEnv* env, jclass, jobject view, jint w, jint h,
+                                    jstring title, jstring appId) {
+#if ACL_HAVE_GL
+  if (!wm::wayland_available()) { log::i(kTag, "nGlOpen: no Wayland compositor reachable"); return 0; }
+  auto* s = new PresentSession();
+  s->is_gl = true;
+  env->GetJavaVM(&s->vm);
+  s->w = w;
+  s->h = h;
+  s->deliver_vsync =
+      reinterpret_cast<void (*)(JNIEnv*, jlong)>(::dlsym(RTLD_DEFAULT, "acl_deliver_vsync"));
+  s->view = env->NewGlobalRef(view);
+  if (jclass vc = env->GetObjectClass(view)) {
+    s->m_measure = env->GetMethodID(vc, "measure", "(II)V");
+    s->m_layout = env->GetMethodID(vc, "layout", "(IIII)V");
+    s->dispatch_touch = env->GetMethodID(vc, "dispatchTouchEvent", "(Landroid/view/MotionEvent;)Z");
+    s->dispatch_key = env->GetMethodID(vc, "dispatchKeyEvent", "(Landroid/view/KeyEvent;)Z");
+    env->DeleteLocalRef(vc);
+  }
+  if (jclass hb = env->FindClass("org/acl/internal/HostBootstrap")) {
+    s->hostbootstrap_cls = static_cast<jclass>(env->NewGlobalRef(hb));
+    s->route_overlay_touch =
+        env->GetStaticMethodID(hb, "routeOverlayTouch", "(Landroid/view/MotionEvent;)Z");
+    env->DeleteLocalRef(hb);
+  }
+  if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  if (jclass mecls = env->FindClass("android/view/MotionEvent")) {
+    s->me_obtain = env->GetStaticMethodID(mecls, "obtain", "(JJIFFI)Landroid/view/MotionEvent;");
+    s->me_recycle = env->GetMethodID(mecls, "recycle", "()V");
+    s->motionevent_cls = static_cast<jclass>(env->NewGlobalRef(mecls));
+    env->DeleteLocalRef(mecls);
+  } else {
+    env->ExceptionClear();
+  }
+  if (jclass kecls = env->FindClass("android/view/KeyEvent")) {
+    s->ke_obtain = env->GetStaticMethodID(kecls, "obtain", "(II)Landroid/view/KeyEvent;");
+    s->keyevent_cls = static_cast<jclass>(env->NewGlobalRef(kecls));
+    env->DeleteLocalRef(kecls);
+  } else {
+    env->ExceptionClear();
+  }
+  if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+
+  auto to_utf8 = [&](jstring js) -> std::string {
+    if (js == nullptr) return {};
+    const char* c = env->GetStringUTFChars(js, nullptr);
+    std::string out(c != nullptr ? c : "");
+    if (c != nullptr) env->ReleaseStringUTFChars(js, c);
+    return out;
+  };
+  const std::string t = to_utf8(title), a = to_utf8(appId);
+  const wm::InputCallback input = [s](const wm::InputEvent& ev) { present_deliver_input(s, ev); };
+  s->presenter = wm::presenter_open(w, h, t.empty() ? "acl" : t, a.empty() ? "org.acl.app" : a,
+                                    input, /*want_ime=*/false);
+  if (!s->presenter) {
+    log::w(kTag, "nGlOpen: presenter_open failed");
+    if (s->view != nullptr) env->DeleteGlobalRef(s->view);
+    delete s;
+    return 0;
+  }
+  s->presenter->wait_configured(2000);  // GL device is built on the configured toplevel surface
+
+  std::string err;
+  auto dev = gfx::GlDevice::CreateWayland(s->presenter->gl_display(), &err);
+  if (!dev) {
+    log::w(kTag, "nGlOpen: CreateWayland failed: {}", err);
+    if (s->view != nullptr) env->DeleteGlobalRef(s->view);
+    s->presenter.reset();
+    delete s;
+    return 0;
+  }
+  {
+    std::lock_guard<std::mutex> lk(g_gl_session.mtx);
+    g_gl_session.device = std::move(dev);
+    g_gl_session.wl_surface = s->presenter->gl_surface();
+    g_gl_session.w = w;
+    g_gl_session.h = h;
+    g_gl_session.ready = true;
+  }
+  g_gl_session.cv.notify_all();
+  log::i(kTag, "nGlOpen: GL device on acl's toplevel wl_surface ({}); injecting Surface",
+         g_gl_session.device->renderer());
+
+  // Inject the Surface into the SurfaceView (HostBootstrap.injectGlSurface) so its holder's
+  // surfaceCreated fires and Flutter's engine binds its native EGL to it; lay out the decor so
+  // pointer events hit-test down to the SurfaceView.
+  if (jclass hb = env->FindClass("org/acl/internal/HostBootstrap")) {
+    if (jmethodID m = env->GetStaticMethodID(hb, "injectGlSurface", "(Landroid/view/View;II)V"))
+      env->CallStaticVoidMethod(hb, m, view, w, h);
+    env->DeleteLocalRef(hb);
+  }
+  if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  if (s->m_measure != nullptr && s->m_layout != nullptr) {
+    const jint mask = 0x3 << 30;  // MeasureSpec.EXACTLY(size)
+    env->CallVoidMethod(view, s->m_measure, (w & ~mask) | (1 << 30), (h & ~mask) | (1 << 30));
+    env->CallVoidMethod(view, s->m_layout, 0, 0, w, h);
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  }
+
+  // Switch vsync from self-clocked (immediate) to DELIVERED: scheduleVsync only marks a request
+  // pending, and our timerfd tick delivers it at the wp_presentation-aligned frame_time_ns.
+  if (auto set_imm = reinterpret_cast<void (*)(int)>(::dlsym(RTLD_DEFAULT, "acl_vsync_set_immediate")))
+    set_imm(0);
+
+  // Vsync clock: a ~60 Hz timerfd. Mesa's eglSwapBuffers throttles the actual rendering, so this
+  // only paces the Choreographer tick (Flutter renders only when it has a frame scheduled). The
+  // wp_presentation feedback armed each tick supplies the frame time; the timer guarantees liveness
+  // when Flutter is idle (no commit => no feedback), so input still wakes it.
+  s->vsync_fd = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+  if (s->vsync_fd >= 0) {
+    itimerspec its{};
+    its.it_value.tv_nsec = 16'666'666;
+    its.it_interval.tv_nsec = 16'666'666;  // 60 Hz
+    ::timerfd_settime(s->vsync_fd, 0, &its, nullptr);
+  }
+  log::i(kTag, "nGlOpen: {}x{} GL present ready (looper-driven, wp_presentation vsync)", w, h);
+  return reinterpret_cast<jlong>(s);
+#else
+  (void)env; (void)view; (void)w; (void)h; (void)title; (void)appId;
+  return 0;
+#endif
+}
+
+jint JNICALL PresentDriver_nGlVsyncFd(JNIEnv*, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  return s != nullptr ? s->vsync_fd : -1;
+}
+// Drain the timerfd, arm wp_presentation feedback for Mesa's next commit, and tick the Choreographer.
+void JNICALL PresentDriver_nGlVsync(JNIEnv* env, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s == nullptr || !s->presenter) return;
+  if (s->vsync_fd >= 0) {
+    std::uint64_t exp = 0;
+    while (::read(s->vsync_fd, &exp, sizeof(exp)) == static_cast<ssize_t>(sizeof(exp))) {}
+  }
+  s->presenter->arm_present();
+  if (s->deliver_vsync != nullptr)
+    s->deliver_vsync(env, static_cast<jlong>(s->presenter->frame_time_ns()));
+}
+void JNICALL PresentDriver_nGlClose(JNIEnv* env, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s == nullptr) return;
+  {
+    std::lock_guard<std::mutex> lk(g_gl_session.mtx);
+    g_gl_session.window.reset();
+    g_gl_session.device.reset();
+    g_gl_session.wl_surface = nullptr;
+    g_gl_session.ready = false;
+  }
+  if (s->vsync_fd >= 0) ::close(s->vsync_fd);
+  s->presenter.reset();
+  if (s->view != nullptr) env->DeleteGlobalRef(s->view);
+  if (s->motionevent_cls != nullptr) env->DeleteGlobalRef(s->motionevent_cls);
+  if (s->keyevent_cls != nullptr) env->DeleteGlobalRef(s->keyevent_cls);
+  if (s->hostbootstrap_cls != nullptr) env->DeleteGlobalRef(s->hostbootstrap_cls);
+  delete s;
+}
+
 void register_present_driver_natives(JNIEnv* env) {
   jclass c = env->FindClass("org/acl/internal/PresentDriver");
   if (c == nullptr) { env->ExceptionClear(); return; }
   const JNINativeMethod m[] = {
+      {const_cast<char*>("nGlOpen"),
+       const_cast<char*>("(Landroid/view/View;IILjava/lang/String;Ljava/lang/String;)J"),
+       reinterpret_cast<void*>(PresentDriver_nGlOpen)},
+      {const_cast<char*>("nGlVsyncFd"), const_cast<char*>("(J)I"),
+       reinterpret_cast<void*>(PresentDriver_nGlVsyncFd)},
+      {const_cast<char*>("nGlVsync"), const_cast<char*>("(J)V"),
+       reinterpret_cast<void*>(PresentDriver_nGlVsync)},
+      {const_cast<char*>("nGlClose"), const_cast<char*>("(J)V"),
+       reinterpret_cast<void*>(PresentDriver_nGlClose)},
       {const_cast<char*>("nOpen"),
        const_cast<char*>("(Landroid/view/View;IILjava/lang/String;Ljava/lang/String;)J"),
        reinterpret_cast<void*>(PresentDriver_nOpen)},
@@ -1449,6 +1626,29 @@ class JniVm : public Vm {
     return r;
   }
 
+  // Looper-driven GL present (Flutter): hand the decor to PresentDriver.runGl, which runs
+  // Looper.loop() so the real Choreographer dispatches Flutter's vsync callbacks (clocked by a
+  // wp_presentation-armed timerfd), while acl builds the GL device + injects the Surface natively.
+  // Returns false if runGl is unavailable (JVM backend / no PresentDriver) so the caller can fall
+  // back to the self-rendering external loop.
+  bool present_gl_looper(jobject view, int w, int h) {
+    jclass pd = env_->FindClass("org/acl/internal/PresentDriver");
+    if (pd == nullptr) { clear_exception(); return false; }
+    jmethodID run = env_->GetStaticMethodID(
+        pd, "runGl", "(Landroid/view/View;IILjava/lang/String;Ljava/lang/String;)V");
+    if (run == nullptr) { clear_exception(); env_->DeleteLocalRef(pd); return false; }
+    const std::string& pkg = config_.package_name;
+    jstring title = env_->NewStringUTF(pkg.empty() ? "acl" : pkg.c_str());
+    jstring appId = env_->NewStringUTF(pkg.empty() ? "org.acl.app" : pkg.c_str());
+    log::i(kTag, "--present(gl): handing off to PresentDriver.runGl (looper owns dispatch + vsync)");
+    env_->CallStaticVoidMethod(pd, run, view, w, h, title, appId);
+    if (env_->ExceptionCheck() == JNI_TRUE) fail_with_exception("PresentDriver.runGl");
+    if (title != nullptr) env_->DeleteLocalRef(title);
+    if (appId != nullptr) env_->DeleteLocalRef(appId);
+    env_->DeleteLocalRef(pd);
+    return true;
+  }
+
   // Inject a ready Surface into the SurfaceView (HostBootstrap reflection) so its holder's
   // surfaceCreated/Changed fire on the main thread and the app's GLThread unblocks.
   void inject_gl_surface(jobject view, int w, int h) {
@@ -1636,7 +1836,9 @@ class JniVm : public Vm {
         // GL to a wl_surface — route to the dedicated GL present (the toplevel IS the GL surface),
         // not the Skia View-tree present, which cannot show the GL content.
         if (has_surface_view(view)) {
-          present_glsurfaceview(view, w, h);
+          // Looper-driven GL present (Flutter needs the Choreographer ticked for vsync). Falls back
+          // to the self-rendering external loop if PresentDriver.runGl is unavailable.
+          if (!present_gl_looper(view, w, h)) present_glsurfaceview(view, w, h);
           env_->DeleteLocalRef(view);
           return;
         }

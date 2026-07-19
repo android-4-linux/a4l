@@ -42,6 +42,13 @@ public final class PresentDriver {
     private static native void nTraverse(long s);         // beginFrame -> measure/layout/draw -> submit
     private static native void nClose(long s);            // tear down presenter + release refs
 
+    // GL present (Flutter / SurfaceView): Mesa renders + commits the toplevel; acl owns the Looper
+    // and clocks the real Choreographer's vsync from a timerfd (armed with wp_presentation feedback).
+    private static native long nGlOpen(View decor, int w, int h, String title, String appId);
+    private static native int nGlVsyncFd(long s);         // vsync timerfd (~60Hz), or -1
+    private static native void nGlVsync(long s);          // drain timer, arm feedback, tick Choreographer
+    private static native void nGlClose(long s);          // tear down GL device + presenter + refs
+
     private static final int CALLBACK_TRAVERSAL = 3;  // Choreographer.CALLBACK_TRAVERSAL (@hide)
 
     /**
@@ -103,6 +110,62 @@ public final class PresentDriver {
             Looper.loop();
         } finally {
             nClose(s);
+        }
+    }
+
+    /**
+     * GL present (Flutter / SurfaceView): the app renders GL to the toplevel surface itself (Mesa
+     * commits), so there is no View-tree traversal here. acl still owns the main {@link Looper} —
+     * Wayland dispatch and the real {@link Choreographer} run on it — and clocks vsync from a
+     * timerfd (wp_presentation-aligned on the native side). Ticking the Choreographer is what makes
+     * Flutter's VsyncWaiter schedule a frame; Mesa's eglSwapBuffers throttles the actual rendering.
+     * Blocks in {@link Looper#loop()} until the compositor closes the toplevel.
+     */
+    public static void runGl(View decor, int w, int h, String title, String appId) {
+        final long s = nGlOpen(decor, w, h, title, appId);
+        if (s == 0L) {
+            android.util.Log.w("acl.present", "PresentDriver.runGl: nGlOpen failed (no compositor?)");
+            return;
+        }
+        final Looper looper = Looper.myLooper();
+        if (looper == null) { nGlClose(s); return; }
+        final MessageQueue mq = looper.getQueue();
+
+        // Wayland fd: drain input / xdg / wp_presentation events (false once the toplevel closes).
+        mq.addOnFileDescriptorEventListener(makeFd(nFd(s)), 0x1 /*EVENT_INPUT*/ | 0x4 /*EVENT_ERROR*/,
+            new MessageQueue.OnFileDescriptorEventListener() {
+                @Override public int onFileDescriptorEvents(FileDescriptor fd, int events) {
+                    if (!nDispatch(s)) { quitLooper(looper, s); return 0; }
+                    return EVENT_INPUT;
+                }
+            });
+
+        // Vsync timerfd: each tick delivers a vsync to the real Choreographer.
+        final int vfd = nGlVsyncFd(s);
+        if (vfd >= 0)
+            mq.addOnFileDescriptorEventListener(makeFd(vfd), 0x1 /*EVENT_INPUT*/,
+                new MessageQueue.OnFileDescriptorEventListener() {
+                    @Override public int onFileDescriptorEvents(FileDescriptor fd, int events) {
+                        nGlVsync(s);
+                        return EVENT_INPUT;
+                    }
+                });
+
+        // Held-key repeat (if a keyboard is present).
+        final int repeatFd = nRepeatFd(s);
+        if (repeatFd >= 0)
+            mq.addOnFileDescriptorEventListener(makeFd(repeatFd), 0x1 /*EVENT_INPUT*/,
+                new MessageQueue.OnFileDescriptorEventListener() {
+                    @Override public int onFileDescriptorEvents(FileDescriptor fd, int events) {
+                        nDispatchRepeat(s);
+                        return EVENT_INPUT;
+                    }
+                });
+
+        try {
+            Looper.loop();
+        } finally {
+            nGlClose(s);
         }
     }
 
