@@ -196,6 +196,11 @@ jstring JNICALL ndk_native_load(JNIEnv* env, jclass, jstring jpath, jobject load
   if (acl::ndk::is_bionic_elf(path.c_str())) {
     acl::ndk::BionicRuntime* rt = ensure_ndk_rt();  // lazy bootstrap (see ensure_ndk_rt)
     if (rt == nullptr) return err("acl-bionic: loader unavailable (bootstrap failed)");
+    // Give the wrapped FindClass the app's class loader so the lib's JNI_OnLoad can resolve app
+    // classes (e.g. io/flutter/embedding/engine/FlutterJNI) that live in the app loader, not the
+    // boot loader FindClass otherwise searches. ART's own LoadNativeLibrary does this via a
+    // class-loader override; here `loader` is Runtime.nativeLoad's ClassLoader arg.
+    rt->set_app_class_loader(env, loader);
     std::string why;
     void* h = rt->load_library(path.c_str(), g_ndk_vm, env, &why);
     if (h == nullptr) return err("acl-bionic: " + why);

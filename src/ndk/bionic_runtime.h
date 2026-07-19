@@ -115,6 +115,13 @@ class BionicRuntime {
   // Returns the bionic handle, or nullptr + sets `error`. `real_vm`/`real_env` are ART's.
   void* load_library(const char* abs_path, JavaVM* real_vm, JNIEnv* real_env, std::string* error);
 
+  // Set the class loader that the wrapped FindClass falls back to when the plain (system) lookup
+  // misses. A bionic lib's JNI_OnLoad does FindClass on app classes (e.g. FlutterJNI) that live in
+  // the app's class loader, not the boot loader FindClass searches; pass Runtime.nativeLoad's
+  // ClassLoader arg here (before load_library) so those resolve, the way ART's own
+  // LoadNativeLibrary installs a class-loader override around JNI_OnLoad. `real_env` is ART's.
+  void set_app_class_loader(JNIEnv* real_env, jobject loader);
+
   // dlsym `sym` in `handle` and wrap it in a down-call trampoline ART can invoke directly. The raw
   // symbol must never be called by ART: it is bionic code expecting bionic %fs + the wrapped
   // JNIEnv, which is exactly what the trampoline substitutes. Null if the symbol is absent (the

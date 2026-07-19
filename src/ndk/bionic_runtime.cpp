@@ -897,7 +897,38 @@ struct ToGlibc {
 
 T0(jint, GetVersion)
 T4(jclass, DefineClass, const char*, jobject, const jbyte*, jsize)
-T1(jclass, FindClass, const char*)
+// The class loader of the app that last loaded a bionic lib (set by the nativeLoad hook). A JNI
+// FindClass from that lib's JNI_OnLoad / native threads searches the system class loader, so app
+// classes (io/flutter/embedding/engine/FlutterJNI, ...) miss — on real Android ART sets a
+// class-loader override around JNI_OnLoad from Runtime.nativeLoad's ClassLoader arg. We do the
+// equivalent as a FindClass fallback via this loader. A global ref; one live at a time is enough.
+jobject g_app_class_loader = nullptr;
+
+jclass JNICALL w_FindClass(JNIEnv* e, const char* a1) {
+  R(); ToGlibc g;
+  jclass c = RF->FindClass(r, a1);
+  bool via_loader = false;
+  if (c == nullptr && g_app_class_loader != nullptr && a1 != nullptr) {
+    RF->ExceptionClear(r);  // FindClass left a pending ClassNotFound/NoClassDefFound; retry cleanly
+    std::string dotted(a1);
+    for (char& ch : dotted) if (ch == '/') ch = '.';  // JNI 'a/B' -> dotted 'a.B' for loadClass
+    jstring jn = RF->NewStringUTF(r, dotted.c_str());
+    jclass loaderCls = RF->GetObjectClass(r, g_app_class_loader);
+    jmethodID lc = loaderCls != nullptr
+        ? RF->GetMethodID(r, loaderCls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;")
+        : nullptr;
+    if (lc != nullptr) {
+      c = static_cast<jclass>(RF->CallObjectMethod(r, g_app_class_loader, lc, jn));
+      if (RF->ExceptionCheck(r)) { RF->ExceptionClear(r); c = nullptr; } else if (c != nullptr) via_loader = true;
+    }
+    if (jn != nullptr) RF->DeleteLocalRef(r, jn);
+    if (loaderCls != nullptr) RF->DeleteLocalRef(r, loaderCls);
+  }
+  static const bool diag = std::getenv("ACL_NDK_JNI_DIAG") != nullptr;
+  if (diag) log::i(kTag, "jni FindClass({}) -> {}{}", a1 ? a1 : "?", c ? "ok" : "NULL",
+                   via_loader ? " (via app loader)" : "");
+  return c;
+}
 T1(jmethodID, FromReflectedMethod, jobject)
 T1(jfieldID, FromReflectedField, jobject)
 T3(jobject, ToReflectedMethod, jclass, jmethodID, jboolean)
@@ -1110,6 +1141,17 @@ jint JNICALL w_RegisterNatives(JNIEnv* e, jclass c, const JNINativeMethod* m, ji
   std::vector<JNINativeMethod> wrapped(m, m + n);
   for (auto& wm : wrapped) wm.fnPtr = make_downcall(wm.fnPtr);  // ART calls the trampoline, not the raw native
   const jint rc = RF->RegisterNatives(r, c, wrapped.data(), n);
+  static const bool diag = std::getenv("ACL_NDK_JNI_DIAG") != nullptr;
+  if (diag) {
+    if (RF->ExceptionCheck != nullptr && RF->ExceptionCheck(r)) {
+      log::w(kTag, "jni RegisterNatives(n={}, first={}) -> rc={} + PENDING EXCEPTION",
+             n, (n > 0 && m[0].name) ? m[0].name : "?", rc);
+      RF->ExceptionDescribe(r);
+    } else {
+      log::i(kTag, "jni RegisterNatives(n={}, first={}) -> rc={}", n,
+             (n > 0 && m[0].name) ? m[0].name : "?", rc);
+    }
+  }
   // Record what the lib explicitly bound, so name resolution won't overwrite it (was_registered).
   // NewGlobalRef is always present on a real VM; tolerate a partial env (the probe's fake ART)
   // rather than crashing on a null slot — nothing name-binds against that env anyway.
@@ -1261,6 +1303,19 @@ JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
   (void)real_vm;
   (void)real_env;
   return nullptr;
+#endif
+}
+
+void BionicRuntime::set_app_class_loader(JNIEnv* real_env, jobject loader) {
+#if defined(__x86_64__)
+  if (real_env == nullptr) return;
+  if (g_app_class_loader != nullptr) {
+    real_env->DeleteGlobalRef(g_app_class_loader);
+    g_app_class_loader = nullptr;
+  }
+  if (loader != nullptr) g_app_class_loader = real_env->NewGlobalRef(loader);
+#else
+  (void)real_env; (void)loader;
 #endif
 }
 
