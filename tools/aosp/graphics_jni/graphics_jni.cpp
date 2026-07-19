@@ -3264,6 +3264,29 @@ jlong DashPathEffect_nativeCreate(JNIEnv* env, jclass, jfloatArray intervals, jf
 void PathEffect_nativeDestructor(JNIEnv*, jclass, jlong ptr) {
   SkSafeUnref(reinterpret_cast<SkPathEffect*>(ptr));
 }
+
+// android.graphics.Color HSV conversions. The host libandroid_runtime does not register the
+// graphics JNI, so Color.HSVToColor/RGBToHSV (e.g. an app picking a random stroke color) throws
+// UnsatisfiedLinkError mid-onTouchEvent — which propagates out of dispatchTouchEvent and looks like
+// dropped input. Back them with Skia's SkHSVToColor / SkRGBToHSV.
+jint Color_nativeHSVToColor(JNIEnv* env, jclass, jint alpha, jfloatArray hsvArray) {
+  if (hsvArray == nullptr || env->GetArrayLength(hsvArray) < 3) return 0;
+  jfloat buf[3];
+  env->GetFloatArrayRegion(hsvArray, 0, 3, buf);
+  const SkScalar hsv[3] = {buf[0], buf[1], buf[2]};
+  return static_cast<jint>(SkHSVToColor(static_cast<U8CPU>(alpha), hsv));
+}
+void Color_nativeRGBToHSV(JNIEnv* env, jclass, jint r, jint g, jint b, jfloatArray hsvArray) {
+  if (hsvArray == nullptr || env->GetArrayLength(hsvArray) < 3) return;
+  SkScalar hsv[3];
+  SkRGBToHSV(static_cast<U8CPU>(r), static_cast<U8CPU>(g), static_cast<U8CPU>(b), hsv);
+  const jfloat buf[3] = {hsv[0], hsv[1], hsv[2]};
+  env->SetFloatArrayRegion(hsvArray, 0, 3, buf);
+}
+const JNINativeMethod kColor[] = {
+    {"nativeHSVToColor", "(I[F)I", reinterpret_cast<void*>(Color_nativeHSVToColor)},
+    {"nativeRGBToHSV", "(III[F)V", reinterpret_cast<void*>(Color_nativeRGBToHSV)},
+};
 const JNINativeMethod kDashPathEffect[] = {
     {"nativeCreate", "([FF)J", reinterpret_cast<void*>(DashPathEffect_nativeCreate)},
 };
@@ -4314,6 +4337,7 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   reg(env, "android/graphics/animation/RenderNodeAnimator", kRenderNodeAnimator, n(kRenderNodeAnimator));
   reg(env, "android/graphics/DashPathEffect", kDashPathEffect, n(kDashPathEffect));
   reg(env, "android/graphics/PathEffect", kPathEffect, n(kPathEffect));
+  reg(env, "android/graphics/Color", kColor, n(kColor));
   // Text measurement + line breaking (Compose's text layout). Best-effort: without these,
   // LineBreaker/MeasuredText fail to link and Compose text throws mid-measure (blank content).
   reg(env, "android/graphics/text/MeasuredText$Builder", kMeasuredTextBuilder, n(kMeasuredTextBuilder));

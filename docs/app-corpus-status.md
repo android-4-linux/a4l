@@ -137,13 +137,17 @@ plus a retargetable software Canvas + BitmapShader (the adaptive icon composites
   `MainActivity.onCreate` does `setContentView(new a.c(this))`, a custom `View` whose `onTouchEvent`
   starts a stroke on DOWN, appends points on MOVE, and `invalidate()`s; `onDraw` builds a `Path` per
   stroke and each stroke **fades after 2000 ms**. With no input the stroke list is empty, so `onDraw`
-  draws nothing — the ~18 ops per frame are the (dark) decor. **The remaining acl gap is classic
-  (non-Compose) custom-View touch dispatch, not rendering.** A synthetic drag (`ACL_TEST_DRAG=
-  "x1,y1,x2,y2[,frame]"`, added to the present loop) reaches the decor with the right coordinates,
-  but `decor.dispatchTouchEvent` returns `handled=false` for every event, so `a.c.onTouchEvent` never
-  runs and no stroke is recorded. Compose input works (forkyz buttons/menus), so this is specific to
-  the classic View-tree dispatch path (DecorView/Window.Callback wiring for a `setContentView(View)`
-  app) — a separate subsystem to chase, not a per-app fix. `app.flicky` presents black the same way.
+  draws nothing — the ~18 ops per frame are the (dark) decor. **Fixed:** the touch *was* reaching
+  `a.c.onTouchEvent` all along — classic View-tree dispatch works fine (confirmed by probing
+  `decor.dispatchTouchEvent` vs. a direct dispatch to the content child, both handled) — but creating
+  a stroke calls `Color.HSVToColor` (a random stroke color), and `Color.nativeHSVToColor` was never
+  registered (the host libandroid_runtime does not carry the graphics JNI). It threw
+  `UnsatisfiedLinkError` *inside* `onTouchEvent`, which propagated out of `dispatchTouchEvent` and
+  acl's input path swallowed it — so it *looked* like dropped input. Registered `Color.nativeHSVToColor`
+  / `nativeRGBToHSV` (Skia `SkHSVToColor`/`SkRGBToHSV`); a synthetic drag (`ACL_TEST_DRAG=
+  "x1,y1,x2,y2[,frame]"`) now records and draws a stroke. NB S.N.A.K.E is a *static* app (redraws
+  only on input), so an occluded/unfocused window on wayland-0 stops receiving `wl_surface.frame`
+  callbacks and the loop idles at frame 0 — raise/focus the window to interact.
 
 **SurfaceView (a real, unimplemented gap — no corpus app exercises it yet).** Games, video players,
 camera and GL/Vulkan apps draw into a `SurfaceView`, whose pixels live in a separate graphics buffer

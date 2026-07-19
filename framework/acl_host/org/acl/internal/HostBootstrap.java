@@ -1888,6 +1888,27 @@ public final class HostBootstrap {
         }
     }
 
+    // DIAG (ACL_VIEWTREE_DIAG): dump the decor view tree — class, LTRB bounds, visibility,
+    // clickable/enabled — so an input-routing gap (a custom View never getting onTouchEvent) can
+    // be pinned to layout (0-size view => hit-test misses) vs. tree structure.
+    public static void dumpViewTree(android.view.View v, int depth) {
+        if (v == null) return;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < depth; i++) sb.append("  ");
+        sb.append(v.getClass().getName())
+          .append(" [").append(v.getLeft()).append(',').append(v.getTop()).append(',')
+          .append(v.getRight()).append(',').append(v.getBottom()).append(']')
+          .append(" vis=").append(v.getVisibility())
+          .append(" shown=").append(v.isShown())
+          .append(" click=").append(v.isClickable())
+          .append(" enabled=").append(v.isEnabled());
+        System.out.println("acl viewtree: " + sb);
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) dumpViewTree(g.getChildAt(i), depth + 1);
+        }
+    }
+
     private static Object getField(Class<?> c, Object obj, String name) throws Exception {
         java.lang.reflect.Field f = c.getDeclaredField(name);
         f.setAccessible(true);

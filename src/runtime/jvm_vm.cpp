@@ -692,6 +692,18 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     const jint mh = env->CallIntMethod(s->view, s->m_gmh);
     env->CallVoidMethod(s->view, s->m_layout, 0, 0, mw, mh);
     if (diag) log::i(kTag, "PresentDriver.nTraverse: measured {}x{}", mw, mh);
+    // DIAG (ACL_VIEWTREE_DIAG): one-shot decor-tree dump after the first layout, to pin an
+    // input-routing gap to view bounds vs. tree structure.
+    static bool vtree_dumped = false;
+    if (!vtree_dumped && std::getenv("ACL_VIEWTREE_DIAG") != nullptr) {
+      vtree_dumped = true;
+      if (jclass hb = env->FindClass("org/acl/internal/HostBootstrap")) {
+        if (jmethodID d = env->GetStaticMethodID(hb, "dumpViewTree", "(Landroid/view/View;I)V"))
+          env->CallStaticVoidMethod(hb, d, s->view, 0);
+        if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+        env->DeleteLocalRef(hb);
+      }
+    }
   }
   if (env->ExceptionCheck() == JNI_TRUE) {
     env->ExceptionDescribe();
