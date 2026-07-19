@@ -37,6 +37,14 @@ struct NativeGlHooks {
 // window-size callback into a loaded libandroid.so so ANativeWindow_getWidth/Height report real sizes.
 void set_native_gl_hooks(const NativeGlHooks& hooks);
 
+// Install the asset provider backing libandroid's NDK AAssetManager. `open_cb` inflates a whole
+// asset (named relative to the APK's assets/ dir) into a freshly-allocated buffer, returning 1 and
+// filling *out_buf/*out_len on hit or 0 on miss; `free_cb` releases such a buffer. Both run acl-side
+// (glibc) code — the runtime restores the caller's glibc %fs around them. Called once by the runtime
+// after the app APK is known, before the app's native code opens any asset.
+void set_asset_provider(int (*open_cb)(void* user, const char* name, void** out_buf, long* out_len),
+                        void (*free_cb)(void* user, void* buf), void* user);
+
 #if ACL_HAVE_JNI
 // The JNI function-table struct types, derived from the `functions` member so this is portable
 // across jni.h variants (OpenJDK names them JNINativeInterface_/JNIInvokeInterface_; Android drops

@@ -358,8 +358,8 @@ struct _jobject;
 // proceeds; the size getters report acl's live session size via a callback acl installs after load
 // (acl_anw_size_hook; captureless + TLS-free, so it is safe to call from here under bionic %fs).
 static int g_anw_token;  // a stable, non-null ANativeWindow handle (identity only)
-void* acl_anw_size_hook = 0;  // void (*)(void* user, int* w, int* h), set by acl
-void* acl_anw_size_user = 0;
+ACL_EXPORT void* acl_anw_size_hook = 0;  // void (*)(void* user, int* w, int* h), set by acl
+ACL_EXPORT void* acl_anw_size_user = 0;
 static void anw_size(int* w, int* h) {
   if (acl_anw_size_hook) {
     ((void (*)(void*, int*, int*))acl_anw_size_hook)(acl_anw_size_user, w, h);
@@ -400,34 +400,101 @@ ACL_EXPORT int32_t ANativeWindow_unlockAndPost(ANativeWindow* w) {
   return -EINVAL;
 }
 
+// ── AAssetManager (NDK) ──────────────────────────────────────────────────────────────────────
+// Flutter's engine reads its Dart kernel + snapshots + flutter_assets through the NDK
+// AAssetManager (AAssetManager_open + AAsset_getBuffer/getLength). Those live in the APK, and the
+// APK — with the zlib inflate needed for its DEFLATE'd asset entries — is acl's pkg, on the glibc
+// side of the %fs boundary. So the read crosses: acl_asset_open_hook reads+inflates a whole asset
+// into a buffer on acl's side (the hook does the glibc %fs swap itself), and libandroid then serves
+// getBuffer/getLength/read from that buffer with plain, %fs-agnostic memory access. acl_asset_free_
+// hook releases it (acl's allocator owns it). Both hooks are installed by acl right after this lib
+// loads (bionic_runtime.cpp), mirroring acl_anw_size_hook.
+//
+//   acl_asset_open_hook: int (*)(void* user, const char* name, void** out_buf, long* out_len)
+//                        -> 1 and fills *out_buf/*out_len on hit, 0 on miss. `name` is the asset
+//                        path Android passes (relative to the APK's assets/ dir).
+//   acl_asset_free_hook: void (*)(void* user, void* buf)  — frees a buffer from the open hook.
+// Default visibility: acl resolves these by name (bionic dlsym) to install the provider, and this
+// lib is built -fvisibility=hidden, so a plain global would be unreachable.
+ACL_EXPORT void* acl_asset_open_hook = 0;
+ACL_EXPORT void* acl_asset_free_hook = 0;
+ACL_EXPORT void* acl_asset_user = 0;
+static int g_am_token;  // a stable, non-null AAssetManager handle (identity only; one APK)
+
+struct AAsset {
+  char* data;    // acl-owned buffer holding the whole (decompressed) asset
+  off64_t len;
+  off64_t pos;
+};
+
 ACL_EXPORT AAssetManager* AAssetManager_fromJava(struct _JNIEnv* env, struct _jobject* am) {
+  // acl has a single app APK; the Java AssetManager identity is irrelevant. Hand back one stable
+  // non-null token so the engine's bookkeeping proceeds — open() routes to acl's pkg regardless.
   (void)env; (void)am;
-  ACL_TODO("AAssetManager_fromJava");
-  return NULL;
+  return (AAssetManager*)&g_am_token;
 }
 ACL_EXPORT AAsset* AAssetManager_open(AAssetManager* mgr, const char* filename, int mode) {
-  (void)mgr; (void)filename; (void)mode;
-  ACL_TODO("AAssetManager_open");
-  return NULL;
+  (void)mgr; (void)mode;
+  if (acl_asset_open_hook == 0 || filename == NULL) { ACL_TODO("AAssetManager_open"); return NULL; }
+  void* buf = NULL;
+  long len = 0;
+  const int ok = ((int (*)(void*, const char*, void**, long*))acl_asset_open_hook)(
+      acl_asset_user, filename, &buf, &len);
+  if (!ok || buf == NULL) return NULL;  // no such asset — a normal miss, not an error
+  AAsset* a = (AAsset*)malloc(sizeof(AAsset));
+  if (a == NULL) {
+    if (acl_asset_free_hook != 0) ((void (*)(void*, void*))acl_asset_free_hook)(acl_asset_user, buf);
+    return NULL;
+  }
+  a->data = (char*)buf;
+  a->len = (off64_t)len;
+  a->pos = 0;
+  return a;
 }
-ACL_EXPORT void AAsset_close(AAsset* a) { (void)a; ACL_TODO("AAsset_close"); }
+ACL_EXPORT void AAsset_close(AAsset* a) {
+  if (a == NULL) return;
+  if (a->data != NULL && acl_asset_free_hook != 0)
+    ((void (*)(void*, void*))acl_asset_free_hook)(acl_asset_user, a->data);
+  free(a);
+}
 ACL_EXPORT int AAsset_read(AAsset* a, void* buf, size_t count) {
-  (void)a; (void)buf; (void)count;
-  ACL_TODO("AAsset_read");
+  if (a == NULL || buf == NULL) return -1;
+  off64_t remaining = a->len - a->pos;
+  if (remaining <= 0) return 0;  // EOF
+  size_t n = count < (size_t)remaining ? count : (size_t)remaining;
+  memcpy(buf, a->data + a->pos, n);
+  a->pos += (off64_t)n;
+  return (int)n;
+}
+ACL_EXPORT off_t AAsset_seek(AAsset* a, off_t offset, int whence) {
+  if (a == NULL) return (off_t)-1;
+  off64_t base = whence == SEEK_CUR ? a->pos : (whence == SEEK_END ? a->len : 0);
+  off64_t np = base + offset;
+  if (np < 0 || np > a->len) return (off_t)-1;
+  a->pos = np;
+  return (off_t)a->pos;
+}
+ACL_EXPORT off64_t AAsset_seek64(AAsset* a, off64_t offset, int whence) {
+  if (a == NULL) return (off64_t)-1;
+  off64_t base = whence == SEEK_CUR ? a->pos : (whence == SEEK_END ? a->len : 0);
+  off64_t np = base + offset;
+  if (np < 0 || np > a->len) return (off64_t)-1;
+  a->pos = np;
+  return a->pos;
+}
+ACL_EXPORT const void* AAsset_getBuffer(AAsset* a) { return a != NULL ? a->data : NULL; }
+ACL_EXPORT off64_t AAsset_getLength(AAsset* a) { return a != NULL ? a->len : 0; }
+ACL_EXPORT off64_t AAsset_getLength64(AAsset* a) { return a != NULL ? a->len : 0; }
+ACL_EXPORT off64_t AAsset_getRemainingLength(AAsset* a) { return a != NULL ? a->len - a->pos : 0; }
+ACL_EXPORT off64_t AAsset_getRemainingLength64(AAsset* a) { return a != NULL ? a->len - a->pos : 0; }
+// The asset is decompressed into a heap buffer (getBuffer is that buffer), never an mmap of the
+// APK — so it is "allocated" and there is no backing file descriptor to hand out.
+ACL_EXPORT int AAsset_isAllocated(AAsset* a) { (void)a; return 1; }
+ACL_EXPORT int AAsset_openFileDescriptor(AAsset* a, off_t* outStart, off_t* outLength) {
+  (void)a; (void)outStart; (void)outLength;
+  return -1;  // DEFLATE'd assets have no contiguous file range; callers fall back to getBuffer
+}
+ACL_EXPORT int AAsset_openFileDescriptor64(AAsset* a, off64_t* outStart, off64_t* outLength) {
+  (void)a; (void)outStart; (void)outLength;
   return -1;
-}
-ACL_EXPORT const void* AAsset_getBuffer(AAsset* a) {
-  (void)a;
-  ACL_TODO("AAsset_getBuffer");
-  return NULL;
-}
-ACL_EXPORT off64_t AAsset_getLength(AAsset* a) {
-  (void)a;
-  ACL_TODO("AAsset_getLength");
-  return 0;
-}
-ACL_EXPORT int AAsset_isAllocated(AAsset* a) {
-  (void)a;
-  ACL_TODO("AAsset_isAllocated");
-  return 0;
 }

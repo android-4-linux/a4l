@@ -1558,6 +1558,54 @@ JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
 
 void set_native_gl_hooks(const NativeGlHooks& hooks) { g_native_gl_hooks = hooks; }
 
+// ── AAssetManager provider bridge (libandroid AAsset* -> acl's pkg) ───────────────────────────
+// libandroid's AAssetManager_open (bionic side) reads an app asset — Flutter's Dart kernel,
+// snapshots, and flutter_assets — through acl's pkg (glibc side), which owns the open APK and the
+// zlib inflate its DEFLATE'd entries need. The callback inflates the whole asset into a glibc-owned
+// buffer; libandroid serves getBuffer/getLength from it. libandroid invokes the callback on the
+// CALLER's bionic %fs, so restore this thread's glibc %fs across the call (the same bionic->glibc
+// hop ToGlibc does, but reachable from a raw C hook pointer and without aborting on a thread acl
+// never paired — a bionic-spawned engine thread — where running acl's allocator would corrupt TLS).
+namespace {
+int (*g_asset_open_cb)(void*, const char*, void**, long*) = nullptr;
+void (*g_asset_free_cb)(void*, void*) = nullptr;
+void* g_asset_provider_user = nullptr;
+
+int acl_asset_open_tramp(void* user, const char* name, void** out_buf, long* out_len) {
+  if (g_asset_open_cb == nullptr) return 0;
+  const std::uintptr_t bionic_fs = ndk_get_fs();
+  const std::uintptr_t glibc_fs = glibc_fs_for(bionic_fs);
+  if (glibc_fs == 0) {
+    // No glibc pairing for this thread (a bionic-spawned engine thread ART never owned). Report via
+    // a raw write (TLS-free) and miss rather than corrupt; if this fires, assets need a donor-%fs
+    // pool like the GL forwarders.
+    static const char m[] = "acl.ndk: E AAsset open on an unpaired bionic thread (needs donor %fs)\n";
+    (void)syscall(SYS_write, 2, m, sizeof(m) - 1);
+    return 0;
+  }
+  ndk_set_fs(glibc_fs);
+  const int rc = g_asset_open_cb(user, name, out_buf, out_len);
+  ndk_set_fs(bionic_fs);
+  return rc;
+}
+void acl_asset_free_tramp(void* user, void* buf) {
+  if (g_asset_free_cb == nullptr) return;
+  const std::uintptr_t bionic_fs = ndk_get_fs();
+  const std::uintptr_t glibc_fs = glibc_fs_for(bionic_fs);
+  if (glibc_fs == 0) return;  // leak rather than corrupt; the open side already warned
+  ndk_set_fs(glibc_fs);
+  g_asset_free_cb(user, buf);
+  ndk_set_fs(bionic_fs);
+}
+}  // namespace
+
+void set_asset_provider(int (*open_cb)(void*, const char*, void**, long*),
+                        void (*free_cb)(void*, void*), void* user) {
+  g_asset_open_cb = open_cb;
+  g_asset_free_cb = free_cb;
+  g_asset_provider_user = user;
+}
+
 void BionicRuntime::set_app_class_loader(JNIEnv* real_env, jobject loader) {
 #if defined(__x86_64__)
   if (real_env == nullptr) return;
@@ -1589,11 +1637,21 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
     if (!log_routed.exchange(true)) {
       if (const char* sysroot = getenv("ACL_BIONIC_SYSROOT")) {
         std::string lerr;
-        if (void* la = load((std::string(sysroot) + "/libandroid.so").c_str(), &lerr))
+        if (void* la = load((std::string(sysroot) + "/libandroid.so").c_str(), &lerr)) {
           if (void* init = symbol(la, "acl_ndk_log_init")) {
             RunScope scope(*this);
             reinterpret_cast<void (*)()>(init)();
           }
+          // Point libandroid's AAssetManager at acl's pkg-backed provider. Installed unconditionally
+          // (this runs once, at first lib load, possibly before set_asset_provider); the trampolines
+          // self-guard on g_asset_open_cb and miss until acl sets it. They restore glibc %fs before
+          // entering acl's asset reader — see set_asset_provider.
+          if (void** o = static_cast<void**>(symbol(la, "acl_asset_open_hook")))
+            *o = reinterpret_cast<void*>(&acl_asset_open_tramp);
+          if (void** f = static_cast<void**>(symbol(la, "acl_asset_free_hook")))
+            *f = reinterpret_cast<void*>(&acl_asset_free_tramp);
+          if (void** u = static_cast<void**>(symbol(la, "acl_asset_user"))) *u = g_asset_provider_user;
+        }
       }
     }
   }

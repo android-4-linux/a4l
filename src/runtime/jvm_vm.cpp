@@ -53,6 +53,7 @@
 #include "log/log.h"
 #include "ndk/bionic_runtime.h"
 #include "ndk/native_bind.h"
+#include "pkg/apk.h"  // AAssetManager provider: read+inflate app assets from the APK
 #include "runtime/framework_natives.h"
 #include "svc/svc.h"
 #include "wm/present.h"
@@ -65,6 +66,46 @@ namespace acl::runtime {
 namespace {
 
 constexpr std::string_view kTag = "acl.runtime.jvm";
+
+// ── AAssetManager provider (libandroid's NDK AAsset* -> the app APK) ──────────────────────────
+// Flutter's engine loads its Dart kernel, snapshots, and flutter_assets through the NDK
+// AAssetManager. Those live in the APK; back them with acl's pkg, which owns the inflate. The
+// ndk bridge (set_asset_provider) restores glibc %fs before calling in, so plain pkg/allocator use
+// is safe here. The APK is opened lazily on the first asset and cached (Flutter reads a handful).
+std::mutex g_asset_apk_mtx;
+std::string g_asset_apk_path;
+std::optional<acl::pkg::Apk> g_asset_apk;
+bool g_asset_apk_tried = false;
+
+int acl_pkg_asset_open(void* /*user*/, const char* name, void** out_buf, long* out_len) {
+  if (name == nullptr || out_buf == nullptr || out_len == nullptr) return 0;
+  std::lock_guard<std::mutex> lk(g_asset_apk_mtx);
+  if (!g_asset_apk && !g_asset_apk_tried) {
+    g_asset_apk_tried = true;
+    if (!g_asset_apk_path.empty()) {
+      acl::pkg::ZipError ze;
+      g_asset_apk = acl::pkg::Apk::open(g_asset_apk_path, ze);
+      if (!g_asset_apk)
+        log::w(kTag, "AAssetManager: cannot open APK {} ({})", g_asset_apk_path, ze.message);
+    }
+  }
+  if (!g_asset_apk) return 0;
+  // AAssetManager_open names are relative to the APK's assets/ directory.
+  std::string entry = "assets/";
+  entry += name;
+  acl::pkg::ZipError ze;
+  std::optional<std::vector<std::uint8_t>> bytes = g_asset_apk->read(entry, ze);
+  if (std::getenv("ACL_ASSET_DIAG") != nullptr)
+    log::i(kTag, "AAsset open '{}' -> {}", entry, bytes ? std::to_string(bytes->size()) : std::string("MISS"));
+  if (!bytes) return 0;  // no such asset — a normal miss (not every open hits)
+  void* buf = std::malloc(bytes->empty() ? 1 : bytes->size());
+  if (buf == nullptr) return 0;
+  if (!bytes->empty()) std::memcpy(buf, bytes->data(), bytes->size());
+  *out_buf = buf;
+  *out_len = static_cast<long>(bytes->size());
+  return 1;
+}
+void acl_pkg_asset_free(void* /*user*/, void* buf) { std::free(buf); }
 
 #if ACL_HAVE_GL
 // The single active GLSurfaceView present session (Stage 3): the wayland GL device on acl's
@@ -3071,6 +3112,13 @@ class ArtVm final : public JniVm {
   // are exported, so acl calls a curated set of the pure-framework ones directly (no
   // AndroidRuntime/gCurRuntime dependency).
   void register_natives(JNIEnv* env) override {
+    // Back libandroid's NDK AAssetManager with the app APK, so an app's native code (e.g. Flutter's
+    // engine loading its Dart kernel + flutter_assets) can read assets. The APK is the app classpath
+    // entry; the provider opens it lazily. Independent of the native floor below.
+    if (!config_.classpath.empty()) {
+      g_asset_apk_path = config_.classpath.front();
+      acl::ndk::set_asset_provider(&acl_pkg_asset_open, &acl_pkg_asset_free, nullptr);
+    }
     // The app's own bionic lib/<abi>/*.so loading (ADR-5) is orthogonal to the framework
     // native floor below — an app ships native code whether or not the real
     // libandroid_runtime is in play — so arm it first, ahead of the floor's early returns.
