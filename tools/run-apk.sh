@@ -135,4 +135,26 @@ RGFONT=$(first "$ROOT"/external/roboto-fonts/Roboto-Regular.ttf)
 [ -f "$HOME_DIR/lib64/libacl_gles_jni.so" ] && RUNNER+=(ACL_ART_GLES_LIB="$HOME_DIR/lib64/libacl_gles_jni.so")
 [ "$TIMEOUT" != "0" ] && RUNNER+=(timeout "$TIMEOUT")
 
-"${RUNNER[@]}" "$ACL_BIN" run "$APK" --vm=art "$@" 2>&1
+# System fonts for the NATIVE (Flutter/Skia) engine. Skia's SkFontMgr_Android reads a HARDCODED
+# /system/etc/fonts.xml and loads faces from $ANDROID_ROOT/fonts -- acl has neither, so a real
+# app's default (sans-serif/Roboto) text renders blank. Provide both by running acl in a
+# bubblewrap namespace that binds the AOSP target /system in place, plus the same fonts at
+# $ANDROID_ROOT/fonts (= $HOME_DIR/fonts). No privilege needed; opt out with ACL_NO_SYSTEM=1,
+# and it is skipped when bwrap or the font tree is absent (text then just falls back to missing).
+SANDBOX=()
+if [ -z "${ACL_NO_SYSTEM:-}" ] && command -v bwrap >/dev/null 2>&1; then
+  SYSXML=$(first "$ROOT"/out/target/product/*/system/etc/fonts.xml)
+  if [ -n "${SYSXML:-}" ]; then
+    SYSDIR=$(cd "$(dirname "$SYSXML")/.." && pwd)   # .../<product>/system
+    SANDBOX=(bwrap --dev-bind /dev /dev --proc /proc)
+    for d in /*; do
+      case "$d" in /proc|/dev|/system) continue ;; esac
+      if [ -L "$d" ]; then SANDBOX+=(--symlink "$(readlink "$d")" "$d")
+      elif [ -d "$d" ]; then SANDBOX+=(--bind "$d" "$d"); fi
+    done
+    SANDBOX+=(--ro-bind "$SYSDIR" /system --ro-bind "$SYSDIR/fonts" "$HOME_DIR/fonts")
+    printf 'run-apk: engine fonts via bwrap (/system/etc/fonts.xml + %s/fonts)\n' "$HOME_DIR" >&2
+  fi
+fi
+
+"${SANDBOX[@]}" "${RUNNER[@]}" "$ACL_BIN" run "$APK" --vm=art "$@" 2>&1
