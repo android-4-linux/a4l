@@ -45,6 +45,15 @@ void set_native_gl_hooks(const NativeGlHooks& hooks);
 void set_asset_provider(int (*open_cb)(void* user, const char* name, void** out_buf, long* out_len),
                         void (*free_cb)(void* user, void* buf), void* user);
 
+// Bridge the calling thread's NDK ALooper into a Java Looper. `main_looper_bridge_fd` returns an fd
+// (the ALooper's epoll set) that becomes readable whenever a task/timer registered on the ALooper is
+// ready; watch it from acl's Java MessageQueue and call `main_looper_bridge_pump` to dispatch. This
+// lets acl's main Looper.loop() service NDK-ALooper users on that thread — notably Flutter's merged
+// platform+UI task runner, whose warm-up-frame timer otherwise never fires. Call on the target
+// (main) thread, after that thread's ALooper exists. Returns -1 if unavailable.
+int main_looper_bridge_fd();
+void main_looper_bridge_pump();
+
 #if ACL_HAVE_JNI
 // The JNI function-table struct types, derived from the `functions` member so this is portable
 // across jni.h variants (OpenJDK names them JNINativeInterface_/JNIInvokeInterface_; Android drops

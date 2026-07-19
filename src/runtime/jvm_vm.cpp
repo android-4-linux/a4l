@@ -1079,6 +1079,15 @@ void JNICALL PresentDriver_nGlClose(JNIEnv* env, jclass, jlong sp) {
   delete s;
 }
 
+// Bridge the calling thread's NDK ALooper into acl's Java Looper (acl::ndk::main_looper_bridge_*).
+// Thread-scoped, no PresentSession: they act on the caller's looper, which in runGl is the app main
+// thread — where Flutter's merged platform+UI task runner registers its frame timer. nGlAloopFd
+// returns the ALooper's epoll fd for the Java MessageQueue to watch; nGlAloopPump drains it.
+jint JNICALL PresentDriver_nGlAloopFd(JNIEnv*, jclass) {
+  return static_cast<jint>(acl::ndk::main_looper_bridge_fd());
+}
+void JNICALL PresentDriver_nGlAloopPump(JNIEnv*, jclass) { acl::ndk::main_looper_bridge_pump(); }
+
 void register_present_driver_natives(JNIEnv* env) {
   jclass c = env->FindClass("org/acl/internal/PresentDriver");
   if (c == nullptr) { env->ExceptionClear(); return; }
@@ -1086,6 +1095,10 @@ void register_present_driver_natives(JNIEnv* env) {
       {const_cast<char*>("nGlOpen"),
        const_cast<char*>("(Landroid/view/View;IILjava/lang/String;Ljava/lang/String;)J"),
        reinterpret_cast<void*>(PresentDriver_nGlOpen)},
+      {const_cast<char*>("nGlAloopFd"), const_cast<char*>("()I"),
+       reinterpret_cast<void*>(PresentDriver_nGlAloopFd)},
+      {const_cast<char*>("nGlAloopPump"), const_cast<char*>("()V"),
+       reinterpret_cast<void*>(PresentDriver_nGlAloopPump)},
       {const_cast<char*>("nGlVsyncFd"), const_cast<char*>("(J)I"),
        reinterpret_cast<void*>(PresentDriver_nGlVsyncFd)},
       {const_cast<char*>("nGlVsync"), const_cast<char*>("(J)V"),

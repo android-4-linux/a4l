@@ -333,6 +333,34 @@ ACL_EXPORT int ALooper_pollAll(int timeoutMillis, int* outFd, int* outEvents, vo
   }
 }
 
+// ── ALooper <-> Java Looper bridge ────────────────────────────────────────────────────────────
+// On a real device the NDK ALooper and android.os.MessageQueue on a thread ARE the same native
+// Looper, so an app that adds an fd via ALooper_addFd is serviced by the same loop the Java
+// Handler runs on. acl reimplements the NDK ALooper here (epoll) separately from the Java
+// MessageQueue's native looper, so the two diverge: on acl's main thread, code that posts to the
+// NDK ALooper (notably Flutter's merged platform+UI task runner — its MessageLoopAndroid registers
+// a timerfd via ALooper_addFd) is NOT serviced by acl's main Java Looper.loop(). Bridge them: the
+// ALooper's epoll set is itself pollable via its epoll_fd (readable whenever any registered fd is
+// ready), so acl's main Java Looper watches that fd (PresentDriver) and drains the ALooper when it
+// signals. Without this, Dart's warm-up-frame timer never fires and no frame is ever drawn.
+ACL_EXPORT int acl_looper_bridge_fd(void) {
+  ALooper* l = ALooper_prepare(0);  // idempotent: returns this thread's existing looper if any
+  if (l == NULL) return -1;
+  return l->epoll_fd;
+}
+// Non-blocking drain of the current thread's ALooper: dispatch every currently-ready fd callback.
+// One ALooper_pollOnce(0) handles a whole epoll batch; loop so a callback that immediately re-arms
+// its fd (a zero-delay follow-up task) runs in this wake too, bounded so a busy animation can't
+// starve the Java Looper's other fds — the epoll_fd stays readable and re-wakes us if work remains.
+ACL_EXPORT void acl_looper_bridge_pump(void) {
+  if (ALooper_forThread() == NULL) return;
+  for (int i = 0; i < 64; ++i) {
+    int outFd = 0, outEvents = 0;
+    void* outData = NULL;
+    if (ALooper_pollOnce(0, &outFd, &outEvents, &outData) != ALOOPER_POLL_CALLBACK) return;
+  }
+}
+
 // ── Not implemented yet ──────────────────────────────────────────────────────────────────────
 // Declared so that a library linking them still loads (RTLD_NOW resolves every symbol), and so
 // that the gap announces itself by name when an app actually calls it, instead of surfacing as a

@@ -48,6 +48,12 @@ public final class PresentDriver {
     private static native int nGlVsyncFd(long s);         // vsync timerfd (~60Hz), or -1
     private static native void nGlVsync(long s);          // drain timer, arm feedback, tick Choreographer
     private static native void nGlClose(long s);          // tear down GL device + presenter + refs
+    // NDK ALooper <-> Java Looper bridge (this thread): Flutter's merged platform+UI task runner
+    // registers its frame/microtask timerfd on this thread's NDK ALooper, which acl's Java
+    // Looper.loop() does not otherwise service. nGlAloopFd returns that ALooper's epoll fd (readable
+    // when a UI task is due); nGlAloopPump drains it. -1 fd if unavailable.
+    private static native int nGlAloopFd();
+    private static native void nGlAloopPump();
 
     private static final int CALLBACK_TRAVERSAL = 3;  // Choreographer.CALLBACK_TRAVERSAL (@hide)
 
@@ -161,6 +167,26 @@ public final class PresentDriver {
                         return EVENT_INPUT;
                     }
                 });
+
+        // Bridge this thread's NDK ALooper into the Java Looper. Flutter's merged platform+UI task
+        // runner posts its frame/microtask timerfd onto this (app main) thread's NDK ALooper, which
+        // Looper.loop() below does not otherwise service — so Dart's warm-up frame never runs. Watch
+        // the ALooper's epoll fd and drain it when it signals, then pump once now to flush the tasks
+        // (warm-up frame, binding microtasks) already queued during engine startup before we park.
+        final int aloopFd = nGlAloopFd();
+        if (aloopFd >= 0) {
+            mq.addOnFileDescriptorEventListener(makeFd(aloopFd), 0x1 /*EVENT_INPUT*/ | 0x4 /*EVENT_ERROR*/,
+                new MessageQueue.OnFileDescriptorEventListener() {
+                    @Override public int onFileDescriptorEvents(FileDescriptor fd, int events) {
+                        nGlAloopPump();
+                        return EVENT_INPUT;
+                    }
+                });
+            nGlAloopPump();
+        } else {
+            android.util.Log.w("acl.present", "PresentDriver.runGl: NDK ALooper bridge unavailable "
+                    + "(fd=-1); Flutter UI tasks will not pump");
+        }
 
         try {
             Looper.loop();

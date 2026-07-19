@@ -1606,6 +1606,44 @@ void set_asset_provider(int (*open_cb)(void*, const char*, void**, long*),
   g_asset_provider_user = user;
 }
 
+// ── ALooper <-> Java Looper bridge ────────────────────────────────────────────────────────────
+// libandroid's acl_looper_bridge_{fd,pump} expose the current thread's NDK ALooper so acl's main
+// Java Looper can service it (see the libandroid side). These run the bionic exports as this
+// thread — the main thread, which is attached — under its bionic %fs.
+namespace {
+int (*g_bridge_fd_fn)() = nullptr;
+void (*g_bridge_pump_fn)() = nullptr;
+bool ensure_looper_bridge_syms() {
+  if (g_bridge_fd_fn != nullptr && g_bridge_pump_fn != nullptr) return true;
+  BionicRuntime* rt = BionicRuntime::get();
+  const char* sysroot = getenv("ACL_BIONIC_SYSROOT");
+  if (rt == nullptr || sysroot == nullptr) return false;
+  std::string err;
+  void* la = rt->load((std::string(sysroot) + "/libandroid.so").c_str(), &err);
+  if (la == nullptr) return false;
+  g_bridge_fd_fn = reinterpret_cast<int (*)()>(rt->symbol(la, "acl_looper_bridge_fd"));
+  g_bridge_pump_fn = reinterpret_cast<void (*)()>(rt->symbol(la, "acl_looper_bridge_pump"));
+  return g_bridge_fd_fn != nullptr && g_bridge_pump_fn != nullptr;
+}
+}  // namespace
+
+int main_looper_bridge_fd() {
+#if defined(__x86_64__)
+  if (!ensure_looper_bridge_syms()) return -1;
+  BionicRuntime::RunScope scope(*BionicRuntime::get());
+  return g_bridge_fd_fn();
+#else
+  return -1;
+#endif
+}
+void main_looper_bridge_pump() {
+#if defined(__x86_64__)
+  if (g_bridge_pump_fn == nullptr) return;  // fd side resolves the symbols first
+  BionicRuntime::RunScope scope(*BionicRuntime::get());
+  g_bridge_pump_fn();
+#endif
+}
+
 void BionicRuntime::set_app_class_loader(JNIEnv* real_env, jobject loader) {
 #if defined(__x86_64__)
   if (real_env == nullptr) return;
