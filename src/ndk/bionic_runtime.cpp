@@ -390,22 +390,73 @@ void ensure_attach_donor_pool() {
   for (int k = 0; k < 20000 && g_attach_donor_published.load(std::memory_order_acquire) < kAttachDonorPool; ++k)
     usleep(100);
 }
-// Claim a free donor %fs for an attaching thread, or 0 if the pool is exhausted.
-std::uintptr_t take_attach_donor() {
+// Claim the next free donor slot, or -1 if the pool is exhausted.
+int claim_attach_donor() {
   const int i = g_attach_donor_next.fetch_add(1, std::memory_order_acq_rel);
-  if (i >= g_attach_donor_published.load(std::memory_order_acquire)) return 0;
-  return g_attach_donor_pool[i].load(std::memory_order_acquire);
+  return i < g_attach_donor_published.load(std::memory_order_acquire) ? i : -1;
+}
+
+// A borrowing bionic thread's REAL stack, recorded per donor slot so the interposed
+// pthread_getattr_np (below) can report it to ART. Without this, ART reads the DONOR's (tiny, parked)
+// stack via pthread_getattr_np and its GC / stack-overflow logic scans the wrong range.
+struct BorrowerStack {
+  std::atomic<std::uintptr_t> donor_fs{0};  // published last; 0 = slot unused
+  std::uintptr_t low = 0;
+  std::uintptr_t size = 0;
+};
+BorrowerStack g_borrower_stacks[kAttachDonorPool];
+
+static bool is_hex(char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+static unsigned hexv(char c) { return c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10; }
+
+// TLS-free (raw syscalls, no malloc/stdio): find the /proc/self/maps region containing `sp` -- the
+// calling thread's stack. Runs under bionic %fs at pairing time, so it must touch no glibc TLS.
+bool stack_region_for(std::uintptr_t sp, std::uintptr_t* out_low, std::uintptr_t* out_high) {
+  const long fd = syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY | O_CLOEXEC, 0L);
+  if (fd < 0) return false;
+  char buf[8192];
+  char line[512];
+  std::size_t ll = 0;
+  bool found = false;
+  for (;;) {
+    const long n = syscall(SYS_read, fd, buf, sizeof buf);
+    if (n <= 0) break;
+    for (long i = 0; i < n; ++i) {
+      const char c = buf[i];
+      if (c != '\n') { if (ll < sizeof line - 1) line[ll++] = c; continue; }
+      line[ll] = '\0';
+      ll = 0;
+      const char* p = line;
+      std::uintptr_t a = 0, b = 0;
+      while (is_hex(*p)) a = a * 16 + hexv(*p++);
+      if (*p != '-') continue;
+      ++p;
+      while (is_hex(*p)) b = b * 16 + hexv(*p++);
+      if (a <= sp && sp < b) { *out_low = a; *out_high = b; found = true; break; }
+    }
+    if (found) break;
+  }
+  syscall(SYS_close, fd);
+  return found;
 }
 
 // The current thread's glibc %fs, pairing an unpaired bionic-spawned thread with an attach donor on
 // demand so it can cross into acl's glibc code (ART attach, or a pkg asset read). Once paired the
-// thread keeps its donor for the process's life. Returns 0 only when the donor pool is exhausted.
+// thread keeps its donor for the process's life. Records the thread's real stack against the donor
+// slot so pthread_getattr_np reports it. Returns 0 only when the donor pool is exhausted.
 std::uintptr_t ensure_paired_glibc_fs() {
   const std::uintptr_t bionic_fs = get_fs();
   const std::uintptr_t glibc_fs = glibc_fs_for(bionic_fs);
   if (glibc_fs != 0) return glibc_fs;
-  const std::uintptr_t donor = take_attach_donor();
-  if (donor == 0) return 0;
+  const int idx = claim_attach_donor();
+  if (idx < 0) return 0;
+  const std::uintptr_t donor = g_attach_donor_pool[idx].load(std::memory_order_acquire);
+  std::uintptr_t low = 0, high = 0;
+  if (stack_region_for(reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0)), &low, &high)) {
+    g_borrower_stacks[idx].low = low;
+    g_borrower_stacks[idx].size = high - low;
+    g_borrower_stacks[idx].donor_fs.store(donor, std::memory_order_release);  // publish last
+  }
   register_fs_pair(bionic_fs, donor);
   return donor;
 }
@@ -835,6 +886,39 @@ bool bootstrap_x86_64(const BionicConfig& cfg, std::uintptr_t* out_bionic_fs, vo
 
 void ndk_set_fs(std::uintptr_t v) { set_fs(v); }
 std::uintptr_t ndk_get_fs() { return get_fs(); }
+
+// Interpose pthread_getattr_np so ART sees a donor-attached bionic thread's REAL stack, not the
+// parked donor's. libart calls pthread_getattr_np(pthread_self(), &attr) inside
+// AttachCurrentThreadInternal, under the donor %fs acl swapped to; for a %fs recorded as an attach
+// donor we return the borrowing thread's stack (captured at pairing), otherwise delegate to glibc's
+// real implementation. The acl executable's definition interposes libart's undefined reference to
+// pthread_getattr_np@GLIBC_2.2.5 (an unversioned definition satisfies a versioned reference). Only
+// touches globals + the caller's (valid glibc) %fs; lives in this -fno-stack-protector TU.
+extern "C" __attribute__((visibility("default"))) int pthread_getattr_np(pthread_t thread,
+                                                                          pthread_attr_t* attr) {
+  const std::uintptr_t cur = get_fs();
+  if (cur != 0 && attr != nullptr) {
+    for (int i = 0; i < kAttachDonorPool; ++i) {
+      if (g_borrower_stacks[i].donor_fs.load(std::memory_order_acquire) != cur) continue;
+      const std::uintptr_t low = g_borrower_stacks[i].low;
+      const std::uintptr_t size = g_borrower_stacks[i].size;
+      if (low != 0 && size != 0) {
+        pthread_attr_init(attr);
+        pthread_attr_setstack(attr, reinterpret_cast<void*>(low), size);
+        pthread_attr_setguardsize(attr, 0);
+        return 0;
+      }
+      break;
+    }
+  }
+  static int (*real)(pthread_t, pthread_attr_t*) = nullptr;
+  if (real == nullptr) {
+    void* p = dlvsym(RTLD_NEXT, "pthread_getattr_np", "GLIBC_2.2.5");
+    if (p == nullptr) p = dlsym(RTLD_NEXT, "pthread_getattr_np");
+    real = reinterpret_cast<int (*)(pthread_t, pthread_attr_t*)>(p);
+  }
+  return real != nullptr ? real(thread, attr) : -1;
+}
 
 bool BionicRuntime_bootstrap(const BionicConfig& cfg, std::uintptr_t* fs, void** dlo, void** dls,
                              void** dle, void** sg) {
