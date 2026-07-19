@@ -645,6 +645,41 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
       tap_state = 2;
     }
   }
+  // DIAG: env-gated synthetic drag (ACL_TEST_DRAG="x1,y1,x2,y2[,frame]") — Down at (x1,y1) once the
+  // loop reaches frame N, interpolated Moves to (x2,y2) over the next frames, then Up. Touch-drawing
+  // apps (S.N.A.K.E's fading-stroke canvas) only produce content from a drag gesture, not a tap.
+  static float drg[4] = {-1.f, 0.f, 0.f, 0.f};
+  static long drag_frame = 120;
+  static int drag_step = -1;  // -1 = not started; 0..kSteps = in progress
+  static bool drag_parsed = false;
+  constexpr int kDragSteps = 12;
+  if (!drag_parsed) {
+    drag_parsed = true;
+    if (const char* d = std::getenv("ACL_TEST_DRAG")) {
+      float a = 0, b = 0, c = 0, e = 0;
+      long fr = 120;
+      if (std::sscanf(d, "%f,%f,%f,%f,%ld", &a, &b, &c, &e, &fr) >= 4) {
+        drg[0] = a; drg[1] = b; drg[2] = c; drg[3] = e; drag_frame = fr;
+      }
+    }
+  }
+  if (drg[0] >= 0.f) {
+    if (drag_step < 0 && s->frames >= static_cast<std::uint64_t>(drag_frame)) {
+      present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Down, drg[0], drg[1]});
+      log::i(kTag, "input: synthetic DRAG down at ({},{})", drg[0], drg[1]);
+      drag_step = 0;
+    } else if (drag_step >= 0 && drag_step < kDragSteps) {
+      ++drag_step;
+      const float t = static_cast<float>(drag_step) / static_cast<float>(kDragSteps);
+      const float x = drg[0] + (drg[2] - drg[0]) * t;
+      const float y = drg[1] + (drg[3] - drg[1]) * t;
+      present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Move, x, y});
+      if (drag_step == kDragSteps) {
+        present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Up, drg[2], drg[3]});
+        log::i(kTag, "input: synthetic DRAG up at ({},{})", drg[2], drg[3]);
+      }
+    }
+  }
   if (s->gpu_begin(s->w, s->h) == 0) {  // clear + re-arm
     log::w(kTag, "PresentDriver.nTraverse: gpu_begin=0");
     s->presenter->keepalive();  // no submit this frame — keep the vsync loop ticking

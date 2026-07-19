@@ -132,14 +132,18 @@ plus a retargetable software Canvas + BitmapShader (the adaptive icon composites
 
 ## Not yet
 
-- **`S.N.A.K.E`** — presents a frame that is **all black** (0 non-black pixels). Pinned with
-  `ACL_DRAWPATH_DIAG`: it draws its snake as a single stroked `Canvas.drawPath` (custom View,
-  superclass `android.view.View` — **not** a SurfaceView, verified by dexdump), and under the diag
-  it makes **zero** drawPath calls. So the game's own render never runs; the 5-7 ops acl logs each
-  frame are the framework decor, not the game. This is neither an acl drawing bug nor SurfaceView —
-  the app's content is simply not produced (the game does not initialize/start without input in a
-  headless run). `app.flicky` presents black the same way. Reaching game content would need input
-  delivered to the running app, not a rendering fix.
+- **`S.N.A.K.E`** — presents **all black**, but this is the app's *correct* empty state, not a
+  broken render. Dexdump shows it is a full-screen multi-touch **drawing canvas**, not a snake game:
+  `MainActivity.onCreate` does `setContentView(new a.c(this))`, a custom `View` whose `onTouchEvent`
+  starts a stroke on DOWN, appends points on MOVE, and `invalidate()`s; `onDraw` builds a `Path` per
+  stroke and each stroke **fades after 2000 ms**. With no input the stroke list is empty, so `onDraw`
+  draws nothing — the ~18 ops per frame are the (dark) decor. **The remaining acl gap is classic
+  (non-Compose) custom-View touch dispatch, not rendering.** A synthetic drag (`ACL_TEST_DRAG=
+  "x1,y1,x2,y2[,frame]"`, added to the present loop) reaches the decor with the right coordinates,
+  but `decor.dispatchTouchEvent` returns `handled=false` for every event, so `a.c.onTouchEvent` never
+  runs and no stroke is recorded. Compose input works (forkyz buttons/menus), so this is specific to
+  the classic View-tree dispatch path (DecorView/Window.Callback wiring for a `setContentView(View)`
+  app) — a separate subsystem to chase, not a per-app fix. `app.flicky` presents black the same way.
 
 **SurfaceView (a real, unimplemented gap — no corpus app exercises it yet).** Games, video players,
 camera and GL/Vulkan apps draw into a `SurfaceView`, whose pixels live in a separate graphics buffer
