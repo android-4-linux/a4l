@@ -1470,6 +1470,12 @@ jint JNICALL w_GetJavaVM(JNIEnv*, JavaVM** vm) { *vm = reinterpret_cast<JavaVM*>
 // JavaVM (invoke interface) GetEnv: hand the bionic caller ITS OWN wrapped env.
 jint JNICALL w_GetEnv(JavaVM* vm, void** out, jint ver) {
   WrapVM* w = reinterpret_cast<WrapVM*>(vm);
+  // A thread acl never paired to a glibc %fs is, by definition, not attached to the VM — real JNI
+  // returns JNI_EDETACHED here (the caller then AttachCurrentThread's or skips its JNI work). A
+  // bionic-spawned engine thread (e.g. a Flutter worker/raster thread that has not received an ART
+  // down-call) hits this. Check BEFORE ToGlibc, which would otherwise abort as unattached.
+  if (out != nullptr) *out = nullptr;
+  if (glibc_fs_for(ndk_get_fs()) == 0) return JNI_EDETACHED;
   JNIEnv* tmp = nullptr;
   JNIEnv* wrapped = nullptr;
   {
