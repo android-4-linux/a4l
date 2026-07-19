@@ -33,10 +33,45 @@
 #include <unistd.h>
 
 #include <android/log.h>
+#include <stdio.h>   // snprintf
+#include <string.h>  // strlen
+#include <sys/uio.h>  // writev
 
 #define LOG_TAG "acl.libandroid"
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
+
+// ── native log routing ────────────────────────────────────────────────────────────────────────
+// A native app's logs — libflutter's engine messages, Dart print(), the debug VM-service URL, any
+// liblog user — go through bionic liblog, whose default logd sink acl doesn't run, so they vanish.
+// Route them into acl's log stream (stderr, the same fd acl's own log writes to) in a recognizable
+// "<level>/<tag>: <message>" form. acl calls acl_ndk_log_init() explicitly when the first bionic app
+// lib loads (a .init_array constructor here would NOT run under acl's in-process bionic loader).
+static void acl_ndk_logger(const struct __android_log_message* m) {
+  if (m == NULL || m->message == NULL) return;
+  char lvl;
+  switch (m->priority) {
+    case ANDROID_LOG_VERBOSE: lvl = 'V'; break;
+    case ANDROID_LOG_DEBUG: lvl = 'D'; break;
+    case ANDROID_LOG_WARN: lvl = 'W'; break;
+    case ANDROID_LOG_ERROR: lvl = 'E'; break;
+    case ANDROID_LOG_FATAL: lvl = 'F'; break;
+    default: lvl = 'I'; break;
+  }
+  char hdr[128];
+  int hn = snprintf(hdr, sizeof hdr, "%c/%s: ", lvl, m->tag != NULL ? m->tag : "");
+  const size_t mlen = strlen(m->message);
+  const int nl = (mlen == 0 || m->message[mlen - 1] != '\n');
+  struct iovec iov[3] = {
+      {hdr, hn > 0 ? (size_t)hn : 0},
+      {(void*)m->message, mlen},
+      {(void*)"\n", (size_t)nl},
+  };
+  (void)!writev(2, iov, 3);
+}
+__attribute__((visibility("default"))) void acl_ndk_log_init(void) {
+  __android_log_set_logger(acl_ndk_logger);
+}
 
 // ── the public contract (android/looper.h) ───────────────────────────────────────────────────
 enum {

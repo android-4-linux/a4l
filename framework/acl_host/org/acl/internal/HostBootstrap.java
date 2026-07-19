@@ -407,6 +407,13 @@ public final class HostBootstrap {
         @Override public android.content.Context createPackageContext(String packageName, int flags) {
             return this;
         }
+        // A null-base ContextWrapper's getActivityToken() NPEs on mBase. Flutter's WindowManagerImpl.
+        // getMaximumWindowMetrics -> computeWindowInsets -> Context.getToken -> getActivityToken hits
+        // this in the FlutterEngine ctor. acl has no activity token (no WindowManagerService); the
+        // insets path tolerates a null token.
+        @Override public android.os.IBinder getActivityToken() {
+            return null;
+        }
         // A null-base ContextWrapper throws from register/unregisterComponentCallbacks. Compose's OWN
         // obtainImageVectorCache DisposableEffect calls registerComponentCallbacks during the initial
         // composition (via the activity's ContextThemeWrapper, which delegates here) — that throw
@@ -806,6 +813,11 @@ public final class HostBootstrap {
             if (serviceClass == android.app.KeyguardManager.class) return "keyguard";
             if (serviceClass == android.app.AlarmManager.class) return "alarm";
             if (serviceClass == android.view.LayoutInflater.class) return "layout_inflater";
+            // Flutter's FlutterEngine ctor reads getSystemService(WindowManager.class) via
+            // ViewUtils.calculateMaximumDisplayMetrics; an unmapped null WindowManager NPEs the ctor
+            // (half-built engine -> the raster thread then crashes). acl backs "window" (a real
+            // WindowManagerImpl, line ~735), so map the class too.
+            if (serviceClass == android.view.WindowManager.class) return "window";
             return null;
         }
 

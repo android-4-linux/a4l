@@ -1575,6 +1575,24 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
   // bionic-spawned threads (a real fault, or ART's all-thread crash dump) must be serviced with a
   // glibc %fs — otherwise ART's handler crashes on it before the shim is even installed. Idempotent.
   install_signal_shims();
+  // Route the app's native logs (libflutter engine, Dart print, the debug VM-service URL, any liblog
+  // user) into acl's stream: bionic liblog's default logd sink isn't running, so they otherwise
+  // vanish. Done via libandroid's acl_ndk_log_init BEFORE loading `abs_path`, so its load-time
+  // constructor logs are captured too. Once; best-effort. (A .init_array in libandroid would not run
+  // under this loader, so acl drives it explicitly.)
+  {
+    static std::atomic<bool> log_routed{false};
+    if (!log_routed.exchange(true)) {
+      if (const char* sysroot = getenv("ACL_BIONIC_SYSROOT")) {
+        std::string lerr;
+        if (void* la = load((std::string(sysroot) + "/libandroid.so").c_str(), &lerr))
+          if (void* init = symbol(la, "acl_ndk_log_init")) {
+            RunScope scope(*this);
+            reinterpret_cast<void (*)()>(init)();
+          }
+      }
+    }
+  }
   void* h = load(abs_path, error);
   if (!h) return nullptr;
   // If this lib pulled in the bionic libEGL.so/libGLESv2.so forwarders (they are its NEEDED deps,
