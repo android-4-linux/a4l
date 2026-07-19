@@ -120,6 +120,21 @@ BIONIC_INC=(
   "$INT/bionic/libc/crtend_so/android_x86_64/obj/bionic/libc/arch-common/bionic/crtend_so.o" \
   "$BLIBC" "$BLIBLOG" "$BLIBDL" -fuse-ld=lld
 
+# 2c. bionic GL: libEGL.so / libGLESv2.so are acl's generated host-Mesa forwarders (each entrypoint
+# %fs-swaps to a glibc %fs and calls host Mesa — see tools/gen-gl-forwarders.py and
+# src/ndk/bionic_runtime.cpp install_gl_forwarders). libjnigraphics.so is a minimal AndroidBitmap
+# shim so a lib that NEEDs it resolves. An app's native GL (libflutter.so) links these three.
+# -mfsgsbase: the forwarders use rd/wrfsbase (the same unprivileged path make_downcall uses).
+GLCRTB="$INT/bionic/libc/crtbegin_so/android_x86_64/crtbegin_so.o"
+GLCRTE="$INT/bionic/libc/crtend_so/android_x86_64/obj/bionic/libc/arch-common/bionic/crtend_so.o"
+for pair in "libEGL.so:acl_egl_fwd.c" "libGLESv2.so:acl_gles_fwd.c" "libjnigraphics.so:acl_libjnigraphics.c"; do
+  gso="${pair%%:*}"; gsrc="${pair##*:}"
+  "$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls -mfsgsbase \
+    -O2 -Wl,-soname,"$gso" "${BIONIC_INC[@]}" -o "$SYS/$gso" \
+    "$GLCRTB" "$HERE/../src/ndk/bionic/$gsrc" "$GLCRTE" "$BLIBC" -fuse-ld=lld
+done
+say "   libEGL.so / libGLESv2.so: host-Mesa forwarders; libjnigraphics.so: AndroidBitmap shim"
+
 # 3. the bionic PIE stub exe (must link + pull bionic libc; entry never runs).
 "$CLANG" --target=x86_64-linux-android31 -fPIC -pie -nostdlib \
   -o "$OUT/stub" "$CRTBEGIN" "$HERE/ndk-loader-spike/stub.c" "$CRTEND" \

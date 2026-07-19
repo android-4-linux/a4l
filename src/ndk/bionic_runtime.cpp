@@ -10,6 +10,7 @@
 
 #include "ndk/bionic_runtime.h"
 
+#include <dlfcn.h>
 #include <elf.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -25,6 +26,7 @@
 #include <atomic>
 #include <cstdarg>
 #include <mutex>
+#include <unordered_map>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -313,6 +315,159 @@ void ensure_null_art_fs() {
   pthread_detach(t);
   for (int i = 0; i < 10000 && g_null_art_fs.load(std::memory_order_acquire) == 0; ++i)
     usleep(100);  // wait for the donor to publish its %fs before any signal can need it
+}
+
+// --- Phase 2: bionic->host-Mesa GL forwarding -------------------------------------------------
+// Flutter/Impeller renders GL on bionic-spawned engine threads, but host Mesa (glibc libglvnd) keeps
+// the current context in per-thread TLS (_glapi_tls_Current). The generated bionic libEGL.so /
+// libGLESv2.so (acl_egl_fwd.c / acl_gles_fwd.c) are thin trampolines: each entrypoint reads the
+// bridge below, wrfsbase's to a *glibc* %fs that is Mesa's TLS home, calls the host Mesa symbol, and
+// swaps back. The bridge is { donor_fs; fns[] } — populated here and its address written into the
+// forwarder libs' acl_gl_{egl,gles}_bridge globals after they load. See docs/ndk-scope.md.
+#include "gl_forward_syms.inc"  // kEglForwardSyms[20], kGlesForwardSyms[106] — ABI-ordered
+struct GlBridge {
+  std::uintptr_t donor_fs;  // offset 0: the donor glibc %fs (Mesa's per-thread TLS lives here)
+  void* fns[128];           // offset 8: host-Mesa function pointers, indexed to match the forwarders
+};
+
+// A parked glibc thread whose %fs the GL threads borrow so Mesa's TLS is a real, stable glibc TCB.
+// Created AFTER host Mesa is dlopen'd, so Mesa's initial-exec _glapi_tls_Current is in this thread's
+// static TLS layout. Single donor => assumes Flutter drives GL from one thread (the raster thread);
+// a second concurrent GL thread would collide on this TLS and needs a per-thread donor (TODO).
+std::atomic<std::uintptr_t> g_gl_donor_fs{0};
+void* gl_fs_donor(void*) {
+  g_gl_donor_fs.store(get_fs(), std::memory_order_release);
+  for (;;) pause();  // park forever: this %fs must outlive the process; the thread never runs itself
+  return nullptr;
+}
+void ensure_gl_donor_fs() {
+  if (g_gl_donor_fs.load(std::memory_order_acquire) != 0) return;
+  pthread_t t;
+  if (pthread_create(&t, nullptr, gl_fs_donor, nullptr) != 0) return;
+  pthread_detach(t);
+  for (int i = 0; i < 10000 && g_gl_donor_fs.load(std::memory_order_acquire) == 0; ++i) usleep(100);
+}
+
+// eglGetProcAddress is special: the pointers it returns are called DIRECTLY by the app (Impeller
+// resolves its whole GL proc table this way), bypassing the static forwarders — so they must be
+// %fs-swapping trampolines too, or Mesa's libGLdispatch reads _glapi_tls_Current under the app's
+// bionic %fs and faults. real Mesa eglGetProcAddress, captured at install time.
+void* (*g_mesa_egl_gpa)(const char*) = nullptr;
+
+// A bump-allocated executable page pool + a cache of Mesa-ptr -> JIT trampoline, so each proc is
+// wrapped once. Guarded by a mutex (eglGetProcAddress can be called from several threads).
+std::mutex g_gl_jit_mu;
+std::unordered_map<void*, void*> g_gl_jit_cache;
+uint8_t* g_gl_jit_page = nullptr;
+size_t g_gl_jit_used = 0, g_gl_jit_cap = 0;
+
+// Emit a trampoline that saves the caller's bionic %fs, wrfsbase's to the GL donor's glibc %fs, calls
+// `mesa` (donor_fs + mesa baked as immediates), and restores the bionic %fs. Same shape as the
+// static forwarders and make_downcall — see those for the rd/wrfsbase encoding. Cached by `mesa`.
+void* gl_jit_wrap(void* mesa) {
+  if (mesa == nullptr) return nullptr;
+  std::lock_guard<std::mutex> lk(g_gl_jit_mu);
+  auto it = g_gl_jit_cache.find(mesa);
+  if (it != g_gl_jit_cache.end()) return it->second;
+
+  const std::uintptr_t donor = g_gl_donor_fs.load(std::memory_order_acquire);
+  static constexpr size_t kStub = 48;  // 41 bytes of code, rounded up
+  if (g_gl_jit_page == nullptr || g_gl_jit_used + kStub > g_gl_jit_cap) {
+    g_gl_jit_cap = 64 * 1024;
+    g_gl_jit_page = static_cast<uint8_t*>(mmap(nullptr, g_gl_jit_cap, PROT_READ | PROT_WRITE | PROT_EXEC,
+                                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    g_gl_jit_used = 0;
+    if (g_gl_jit_page == MAP_FAILED) { g_gl_jit_page = nullptr; return nullptr; }
+  }
+  uint8_t* p = g_gl_jit_page + g_gl_jit_used;
+  size_t n = 0;
+  auto b = [&](std::initializer_list<uint8_t> bytes) { for (uint8_t x : bytes) p[n++] = x; };
+  auto imm64 = [&](std::uintptr_t v) { for (int i = 0; i < 8; ++i) p[n++] = uint8_t(v >> (8 * i)); };
+  b({0xF3, 0x49, 0x0F, 0xAE, 0xC2});          // rdfsbase %r10   (caller bionic %fs)
+  b({0x41, 0x52});                            // push %r10       (rsp 16-aligned)
+  b({0x49, 0xBB}); imm64(donor);              // movabs donor_fs, %r11
+  b({0xF3, 0x49, 0x0F, 0xAE, 0xD3});          // wrfsbase %r11   (%fs = donor glibc)
+  b({0x49, 0xBA}); imm64(reinterpret_cast<std::uintptr_t>(mesa));  // movabs mesa, %r10
+  b({0x41, 0xFF, 0xD2});                      // call *%r10
+  b({0x41, 0x5A});                            // pop %r10        (saved bionic %fs)
+  b({0xF3, 0x49, 0x0F, 0xAE, 0xD2});          // wrfsbase %r10   (%fs = bionic)
+  b({0xC3});                                  // ret
+  g_gl_jit_used += kStub;
+  g_gl_jit_cache.emplace(mesa, p);
+  return p;
+}
+
+// Replacement for eglGetProcAddress installed into the EGL bridge slot: resolve `name` in host Mesa,
+// then hand back a %fs-swapping trampoline instead of the raw dispatch pointer. Runs under the donor
+// %fs (the forwarder swapped before calling this), so calling Mesa here is safe.
+void* acl_egl_get_proc_address(const char* name) {
+  if (g_mesa_egl_gpa == nullptr || name == nullptr) return nullptr;
+  void* mesa = g_mesa_egl_gpa(name);
+  return gl_jit_wrap(mesa);
+}
+
+// dlopen host Mesa, resolve the ABI-ordered symbols into two bridges, and write their addresses into
+// the loaded bionic forwarder libs. `rt` is used only to reach the already-loaded forwarder libs via
+// the bionic linker (load() of an already-open lib returns its handle). No-op unless ACL_GL_FORWARD.
+void install_gl_forwarders(BionicRuntime* rt) {
+#if defined(__x86_64__)
+  if (getenv("ACL_GL_FORWARD") == nullptr) return;
+  const char* sysroot = getenv("ACL_BIONIC_SYSROOT");
+  if (sysroot == nullptr) return;
+  static std::atomic<bool> done{false};
+  if (done.exchange(true)) return;
+
+  // Host Mesa first, so the donor thread's static TLS includes Mesa's initial-exec TLS.
+  void* megl = dlopen("libEGL.so.1", RTLD_NOW | RTLD_LOCAL);
+  void* mgles = dlopen("libGLESv2.so.2", RTLD_NOW | RTLD_LOCAL);
+  if (megl == nullptr || mgles == nullptr) {
+    log::w(kTag, "GL forward: host Mesa dlopen failed (EGL={} GLESv2={})",
+           megl != nullptr, mgles != nullptr);
+    return;
+  }
+  ensure_gl_donor_fs();
+  const std::uintptr_t donor = g_gl_donor_fs.load(std::memory_order_acquire);
+  if (donor == 0) { log::w(kTag, "GL forward: no donor %fs"); return; }
+
+  auto fill = [&](GlBridge& b, void* mh, const char* const* syms, int n) {
+    b.donor_fs = donor;
+    int missing = 0;
+    for (int i = 0; i < n; ++i) {
+      b.fns[i] = dlsym(mh, syms[i]);
+      if (b.fns[i] == nullptr) ++missing;
+    }
+    return missing;
+  };
+  static GlBridge egl_b{}, gles_b{};
+  const int em = fill(egl_b, megl, kEglForwardSyms, 20);
+  const int gm = fill(gles_b, mgles, kGlesForwardSyms, 106);
+
+  // Redirect the eglGetProcAddress slot to acl_egl_get_proc_address, which wraps the pointers Mesa
+  // returns so the app can call them directly (see above). Keep Mesa's real one for it to delegate to.
+  g_mesa_egl_gpa = reinterpret_cast<void* (*)(const char*)>(dlsym(megl, "eglGetProcAddress"));
+  for (int i = 0; i < 20; ++i) {
+    if (std::strcmp(kEglForwardSyms[i], "eglGetProcAddress") == 0) {
+      egl_b.fns[i] = reinterpret_cast<void*>(&acl_egl_get_proc_address);
+      break;
+    }
+  }
+
+  auto wire = [&](const char* lib, const char* sym, GlBridge* b) -> bool {
+    std::string err, path = std::string(sysroot) + "/" + lib;
+    void* h = rt->load(path.c_str(), &err);  // already loaded as a libflutter dep -> same handle
+    if (h == nullptr) { log::w(kTag, "GL forward: {} not loaded ({})", lib, err); return false; }
+    void** slot = static_cast<void**>(rt->symbol(h, sym));
+    if (slot == nullptr) { log::w(kTag, "GL forward: {} missing {}", lib, sym); return false; }
+    *slot = b;
+    return true;
+  };
+  const bool e = wire("libEGL.so", "acl_gl_egl_bridge", &egl_b);
+  const bool g = wire("libGLESv2.so", "acl_gl_gles_bridge", &gles_b);
+  log::i(kTag, "GL forwarders wired: EGL {}/{} GLES {}/{} donor_fs={:#x} (egl={} gles={})",
+         20 - em, 20, 106 - gm, 106, donor, e, g);
+#else
+  (void)rt;
+#endif
 }
 
 void acl_signal_trampoline(int sig, siginfo_t* info, void* uctx) {
@@ -1075,13 +1230,16 @@ void* make_downcall(void* real_native) {
   auto emit = [&](std::initializer_list<unsigned char> b) { for (unsigned char x : b) p[o++] = x; };
   auto imm64 = [&](std::uint64_t v) { std::memcpy(p + o, &v, 8); o += 8; };
   auto imm32 = [&](std::int32_t v) { std::memcpy(p + o, &v, 4); o += 4; };
-  // Frame-pointer trampoline that FORWARDS up to 8 stack arguments: a JNI native with >6 args
-  // (env + class/this + >4 user args) passes the extras on the stack — e.g. libGDX's
-  // Matrix4.prj(float[], float[], int offset, int numVecs, int stride) has `stride` on the stack.
-  // The trampoline's own return address sits between the native's frame and those args, so we
-  // rebuild the args below a fresh call. Entry: %rsp ≡ 8 (mod 16), [rsp]=ret, stack args at
-  // [rsp+8+8k]. Copying 8 slots covers up to 14 total args (every real JNI native); natives with
-  // fewer just copy unused slots (harmless reads of the caller's own stack).
+  // Frame-pointer trampoline that FORWARDS up to kStackSlots stack arguments: a JNI native with >6
+  // integer args (env + class/this + >4 user args) passes the extras on the stack — e.g. libGDX's
+  // Matrix4.prj(float[], float[], int offset, int numVecs, int stride) has `stride` on the stack, and
+  // Flutter's FlutterJNI.nativeSetViewportMetrics has 22 C args, so its three trailing int[] pointers
+  // sit at stack slots 12-14. The trampoline's own return address sits between the native's frame and
+  // those args, so we rebuild the args below a fresh call. Entry: %rsp ≡ 8 (mod 16), [rsp]=ret, stack
+  // args at [rsp+8+8k]. Copying kStackSlots (even, so the call stays 16-aligned) covers up to
+  // 6+kStackSlots integer args; natives with fewer just copy unused slots (harmless reads of the
+  // caller's own stack, always mapped — it is ART's frame).
+  constexpr int kStackSlots = 20;
   emit({0x55});                                         // push %rbp        (save ART's rbp; rsp ≡ 0)
   emit({0x48, 0x89, 0xE5});                             // mov %rsp,%rbp    ([rbp+8]=ret, [rbp+16+8k]=args)
   emit({0x64, 0x4C, 0x8B, 0x1C, 0x25});                 // mov %fs:disp32,%r11  (this thread's
@@ -1098,10 +1256,11 @@ void* make_downcall(void* real_native) {
   emit({0x4C, 0x89, 0x10});                             // mov %r10,0(%rax)  wrap.functions
   emit({0x48, 0x89, 0x78, 0x08});                       // mov %rdi,8(%rax)  wrap.real = ART's env
   emit({0x48, 0x89, 0xC7});                             // mov %rax,%rdi     arg0 = &t_wrap_env
-  // Copy 8 stack slots in reverse (slot7..slot0) so the native sees them just above its return
-  // address. rbp-relative; plain memory, %fs-agnostic. rsp stays ≡ 0 (8 pushes = 64 bytes).
-  for (int k = 7; k >= 0; --k) {
-    emit({0x48, 0x8B, 0x45, static_cast<unsigned char>(0x10 + 8 * k)});  // mov 0x10+8k(%rbp),%rax
+  // Copy the stack slots in reverse (slotN..slot0) so the native sees them just above its return
+  // address. rbp-relative; plain memory, %fs-agnostic. rsp stays ≡ 0 (even push count). disp32 form
+  // (ModRM 0x85), since 0x10+8k exceeds the signed disp8 range once k > 13.
+  for (int k = kStackSlots - 1; k >= 0; --k) {
+    emit({0x48, 0x8B, 0x85}); imm32(0x10 + 8 * k);      // mov 0x10+8k(%rbp),%rax  (disp32)
     emit({0x50});                                       // push %rax
   }
   emit({0xF3, 0x49, 0x0F, 0xAE, 0xD3});                 // wrfsbase %r11  (-> this thread's bionic)
@@ -1329,6 +1488,9 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
   install_signal_shims();
   void* h = load(abs_path, error);
   if (!h) return nullptr;
+  // If this lib pulled in the bionic libEGL.so/libGLESv2.so forwarders (they are its NEEDED deps,
+  // loaded by the line above), point them at host Mesa now — before any GL call. Gated internally.
+  install_gl_forwarders(this);
   // Wrap unconditionally, not just for JNI_OnLoad: a lib whose natives are all bound by NAME has
   // no JNI_OnLoad, and its down-call trampolines still need the wrapped env + the %fs pair that
   // wrap_java_vm establishes (see downcall_symbol).
