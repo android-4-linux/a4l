@@ -403,7 +403,30 @@ void* gl_jit_wrap(void* mesa) {
 void* acl_egl_get_proc_address(const char* name) {
   if (g_mesa_egl_gpa == nullptr || name == nullptr) return nullptr;
   void* mesa = g_mesa_egl_gpa(name);
-  return gl_jit_wrap(mesa);
+  void* w = gl_jit_wrap(mesa);
+  if (getenv("ACL_GL_DIAG") != nullptr)
+    log::i(kTag, "eglGetProcAddress({}) -> mesa={} wrap={} donor={:#x}", name, mesa, w,
+           g_gl_donor_fs.load(std::memory_order_acquire));
+  return w;
+}
+
+// Phase 3: acl-supplied hooks to back the app's NATIVE EGL with acl's GL device (see header). Set by
+// the runtime; read by the two overrides below and by install_gl_forwarders. Run under the donor %fs.
+NativeGlHooks g_native_gl_hooks;
+
+// eglGetDisplay override: hand back acl's EGLDisplay so the app's EGL shares acl's one Wayland
+// connection (its window surface will live on acl's wl_surface). The display_id arg is ignored.
+void* acl_native_egl_get_display(void*) {
+  return g_native_gl_hooks.get_display != nullptr ? g_native_gl_hooks.get_display(g_native_gl_hooks.user)
+                                                  : nullptr;
+}
+// eglCreateWindowSurface override: a wl_egl_window-backed EGLSurface on acl's session wl_surface,
+// matching the app's chosen config. Ignores the ANativeWindow identity (one GL surface = the
+// toplevel), exactly as the egl10 create_window_surface hook does. Args: dpy, config, win, attribs.
+void* acl_native_egl_create_window_surface(void*, void* config, void*, const void*) {
+  return g_native_gl_hooks.create_window_surface != nullptr
+             ? g_native_gl_hooks.create_window_surface(g_native_gl_hooks.user, config)
+             : nullptr;
 }
 
 // dlopen host Mesa, resolve the ABI-ordered symbols into two bridges, and write their addresses into
@@ -449,6 +472,29 @@ void install_gl_forwarders(BionicRuntime* rt) {
     if (std::strcmp(kEglForwardSyms[i], "eglGetProcAddress") == 0) {
       egl_b.fns[i] = reinterpret_cast<void*>(&acl_egl_get_proc_address);
       break;
+    }
+  }
+
+  // Phase 3: if the runtime supplied GL-session hooks, back the app's native EGL with acl's device —
+  // eglGetDisplay -> acl's EGLDisplay, eglCreateWindowSurface -> acl's wl_surface. Otherwise these
+  // slots stay pointed at host Mesa (the headless-probe path, which opens its own Wayland connection).
+  if (g_native_gl_hooks.get_display != nullptr) {
+    for (int i = 0; i < 20; ++i) {
+      if (std::strcmp(kEglForwardSyms[i], "eglGetDisplay") == 0)
+        egl_b.fns[i] = reinterpret_cast<void*>(&acl_native_egl_get_display);
+      else if (std::strcmp(kEglForwardSyms[i], "eglCreateWindowSurface") == 0)
+        egl_b.fns[i] = reinterpret_cast<void*>(&acl_native_egl_create_window_surface);
+    }
+    // Let ANativeWindow_getWidth/Height (in the loaded libandroid.so) report the live session size.
+    // The callback is captureless and TLS-free, safe to invoke from libandroid under bionic %fs.
+    if (g_native_gl_hooks.window_size != nullptr) {
+      std::string err;
+      void* h = rt->load((std::string(sysroot) + "/libandroid.so").c_str(), &err);
+      if (h != nullptr) {
+        if (void** s = static_cast<void**>(rt->symbol(h, "acl_anw_size_hook")))
+          *s = reinterpret_cast<void*>(g_native_gl_hooks.window_size);
+        if (void** u = static_cast<void**>(rt->symbol(h, "acl_anw_size_user"))) *u = g_native_gl_hooks.user;
+      }
     }
   }
 
@@ -1464,6 +1510,8 @@ JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
   return nullptr;
 #endif
 }
+
+void set_native_gl_hooks(const NativeGlHooks& hooks) { g_native_gl_hooks = hooks; }
 
 void BionicRuntime::set_app_class_loader(JNIEnv* real_env, jobject loader) {
 #if defined(__x86_64__)

@@ -316,26 +316,43 @@ typedef struct ARect ARect;
 struct _JNIEnv;
 struct _jobject;
 
+// Phase 3 surface binding: acl backs the app's native EGL with its own GL device (the wl_surface is
+// acl's, on the glibc side). So ANativeWindow_fromSurface need not build a real window — the forwarded
+// eglCreateWindowSurface is overridden to make the surface on acl's session toplevel and ignores the
+// ANativeWindow identity. We return one stable non-null token so the engine's surface bookkeeping
+// proceeds; the size getters report acl's live session size via a callback acl installs after load
+// (acl_anw_size_hook; captureless + TLS-free, so it is safe to call from here under bionic %fs).
+static int g_anw_token;  // a stable, non-null ANativeWindow handle (identity only)
+void* acl_anw_size_hook = 0;  // void (*)(void* user, int* w, int* h), set by acl
+void* acl_anw_size_user = 0;
+static void anw_size(int* w, int* h) {
+  if (acl_anw_size_hook) {
+    ((void (*)(void*, int*, int*))acl_anw_size_hook)(acl_anw_size_user, w, h);
+  } else {
+    if (w) *w = 0;
+    if (h) *h = 0;
+  }
+}
 ACL_EXPORT ANativeWindow* ANativeWindow_fromSurface(struct _JNIEnv* env, struct _jobject* surface) {
   (void)env; (void)surface;
-  ACL_TODO("ANativeWindow_fromSurface");
-  return NULL;
+  return (ANativeWindow*)&g_anw_token;
 }
-ACL_EXPORT void ANativeWindow_release(ANativeWindow* w) { (void)w; ACL_TODO("ANativeWindow_release"); }
+ACL_EXPORT void ANativeWindow_release(ANativeWindow* w) { (void)w; }
 ACL_EXPORT int32_t ANativeWindow_getFormat(ANativeWindow* w) {
   (void)w;
-  ACL_TODO("ANativeWindow_getFormat");
-  return -EINVAL;
+  return 1;  // WINDOW_FORMAT_RGBA_8888
 }
 ACL_EXPORT int32_t ANativeWindow_getWidth(ANativeWindow* w) {
   (void)w;
-  ACL_TODO("ANativeWindow_getWidth");
-  return -EINVAL;
+  int ww = 0, hh = 0;
+  anw_size(&ww, &hh);
+  return ww;
 }
 ACL_EXPORT int32_t ANativeWindow_getHeight(ANativeWindow* w) {
   (void)w;
-  ACL_TODO("ANativeWindow_getHeight");
-  return -EINVAL;
+  int ww = 0, hh = 0;
+  anw_size(&ww, &hh);
+  return hh;
 }
 ACL_EXPORT int32_t ANativeWindow_lock(ANativeWindow* w, ANativeWindow_Buffer* b, ARect* dirty) {
   (void)w; (void)b; (void)dirty;

@@ -20,6 +20,23 @@ namespace acl::ndk {
 // route app native libs (bionic → BionicRuntime) apart from acl's own glibc supplemental libs.
 bool is_bionic_elf(const char* path);
 
+// Phase 3 surface binding: the runtime (which owns the GL session — acl's wl_display-bound GlDevice
+// + the app's wl_surface) supplies these so the bionic EGL forwarders can back the app's NATIVE EGL
+// (Flutter/Impeller) with acl's device, exactly as the Java GLES path (egl10) does. Each callback runs
+// under the GL donor's glibc %fs (a valid glibc TCB) — keep them lock-light and TLS-free where they
+// may also be reached from bionic %fs (window_size). All fields optional; unset => forwarders pass the
+// slot straight to host Mesa (which opens its own Wayland connection — wrong for windowing, fine for
+// the headless probe).
+struct NativeGlHooks {
+  void* (*get_display)(void* user) = nullptr;                    // -> EGLDisplay (acl's, waits for ready)
+  void* (*create_window_surface)(void* user, void* egl_config) = nullptr;  // -> EGLSurface on wl_surface
+  void (*window_size)(void* user, int* w, int* h) = nullptr;     // the session's current pixel size
+  void* user = nullptr;
+};
+// Register the hooks (idempotent; last wins). Called by the runtime at EGL setup. Also wires the
+// window-size callback into a loaded libandroid.so so ANativeWindow_getWidth/Height report real sizes.
+void set_native_gl_hooks(const NativeGlHooks& hooks);
+
 #if ACL_HAVE_JNI
 // The JNI function-table struct types, derived from the `functions` member so this is portable
 // across jni.h variants (OpenJDK names them JNINativeInterface_/JNIInvokeInterface_; Android drops

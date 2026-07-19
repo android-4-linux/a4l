@@ -3306,6 +3306,41 @@ class ArtVm final : public JniVm {
     };
     if (gfx::register_egl10(env, hooks) == JNI_OK)
       log::i(kTag, "egl10: EGLImpl registered (GLThread context + window-surface path live)");
+
+    // Phase 3: back the app's NATIVE EGL (Flutter/Impeller, via the bionic libEGL forwarders) with
+    // the SAME GL session as egl10 — acl's wl_display device + the app's wl_surface. Mirrors the two
+    // hooks above; runs under the GL donor %fs, so the callbacks stay lock-light and TLS-free.
+    acl::ndk::NativeGlHooks nhooks;
+    nhooks.get_display = [](void*) -> void* {
+      // The raster thread blocks for the present path to publish the wayland device, so its context
+      // is created on the SAME device as its window surface (else eglMakeCurrent EGL_BAD_MATCH).
+      std::unique_lock<std::mutex> lk(g_gl_session.mtx);
+      g_gl_session.cv.wait_for(lk, std::chrono::seconds(10), [] { return g_gl_session.ready; });
+      if (g_gl_session.ready && g_gl_session.device != nullptr)
+        return static_cast<void*>(g_gl_session.device->egl_display());
+      return nullptr;
+    };
+    nhooks.create_window_surface = [](void*, void* cfg) -> void* {
+      std::lock_guard<std::mutex> lk(g_gl_session.mtx);
+      if (g_gl_session.device == nullptr || g_gl_session.wl_surface == nullptr) {
+        log::w(kTag, "native egl: eglCreateWindowSurface with no active GL session");
+        return nullptr;
+      }
+      std::string err;
+      auto win = g_gl_session.device->make_window(g_gl_session.w, g_gl_session.h,
+                                                  g_gl_session.wl_surface, {}, &err,
+                                                  static_cast<EGLConfig>(cfg));
+      if (!win) { log::w(kTag, "native egl: make_window failed: {}", err); return nullptr; }
+      void* egl = static_cast<void*>(win->egl_surface());
+      g_gl_session.window = std::move(win);  // keep the wl_egl_window alive
+      log::i(kTag, "native egl: eglCreateWindowSurface -> GL window on acl's toplevel wl_surface");
+      return egl;
+    };
+    nhooks.window_size = [](void*, int* w, int* h) {  // captureless + lock-free: safe under bionic %fs
+      if (w) *w = g_gl_session.w;
+      if (h) *h = g_gl_session.h;
+    };
+    acl::ndk::set_native_gl_hooks(nhooks);
 #endif
   }
 
