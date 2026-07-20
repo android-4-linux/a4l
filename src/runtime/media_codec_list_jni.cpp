@@ -25,16 +25,24 @@ constexpr jint FLAG_IS_HARDWARE_ACCELERATED = (1 << 3);
 constexpr jint COLOR_FormatSurface = 0x7F000789;         // 2130708361
 constexpr jint COLOR_FormatYUV420Flexible = 0x7F420888;  // 2135033992
 constexpr jint COLOR_FormatYUV420Planar = 19;
-// H.264 CodecProfileLevel values (MediaCodecInfo.CodecProfileLevel).
+// CodecProfileLevel values (MediaCodecInfo.CodecProfileLevel). A high level per codec is a decode
+// superset; ExoPlayer checks the stream's profile/level against these.
 constexpr jint AVCProfileBaseline = 0x01, AVCProfileMain = 0x02, AVCProfileHigh = 0x08;
 constexpr jint AVCLevel52 = 0x10000;
+constexpr jint HEVCProfileMain = 0x01, HEVCProfileMain10 = 0x02;
+constexpr jint HEVCHighTierLevel51 = 0x20000;
+constexpr jint VP9Profile0 = 0x01, VP9Profile2 = 0x04;
+constexpr jint VP9Level51 = 0x200;
 
 struct ProfLev { jint profile, level; };
 
-// The codecs acl advertises. One zero-copy HW decoder per type; H.264 first (the video_player common
-// case). HEVC/VP9 can join once this path is exercised end-to-end by ExoPlayer.
+// The codecs acl advertises — one zero-copy HW decoder per type. All map to the same VAAPI/V4L2
+// CodecDecoder (the backend picks the driver); ExoPlayer selects by MIME + profile/level.
 const ProfLev kAvcProfiles[] = {
     {AVCProfileBaseline, AVCLevel52}, {AVCProfileMain, AVCLevel52}, {AVCProfileHigh, AVCLevel52}};
+const ProfLev kHevcProfiles[] = {
+    {HEVCProfileMain, HEVCHighTierLevel51}, {HEVCProfileMain10, HEVCHighTierLevel51}};
+const ProfLev kVp9Profiles[] = {{VP9Profile0, VP9Level51}, {VP9Profile2, VP9Level51}};
 struct CodecEntry {
   const char* name;
   const char* mime;
@@ -43,6 +51,8 @@ struct CodecEntry {
 };
 const CodecEntry kCodecs[] = {
     {"acl.h264.decoder", "video/avc", kAvcProfiles, 3},
+    {"acl.hevc.decoder", "video/hevc", kHevcProfiles, 2},
+    {"acl.vp9.decoder", "video/x-vnd.on2.vp9", kVp9Profiles, 2},
 };
 constexpr int kCodecCount = sizeof(kCodecs) / sizeof(kCodecs[0]);
 
