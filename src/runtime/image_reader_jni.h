@@ -9,12 +9,24 @@
 
 #include <jni.h>
 
+#include "acl_config.h"
+#if ACL_HAVE_GL
+#include "gfx/buffer_queue.h"
+#endif
+
 namespace acl::runtime {
 
 // Register acl's native underside for android.media.ImageReader + its $SurfaceImage over a
 // gfx::BufferQueue (dma-buf pool). No-op (and harmless) when the classes aren't on the classpath or
 // GL is unavailable. Called from register_acl_supplemental_natives.
 void register_image_reader_natives(JNIEnv* env);
+
+#if ACL_HAVE_GL
+// Resolve an android.view.Surface (created by ImageReader.getSurface) to its BufferQueue, or nullptr
+// if it isn't a live acl ImageReader surface. The MediaCodec zero-copy output path uses this to
+// queue_imported() decoded frames into the reader (releaseOutputBuffer(render=true)).
+gfx::BufferQueue* image_reader_queue_from_surface(JNIEnv* env, jobject surface);
+#endif
 
 }  // namespace acl::runtime
 

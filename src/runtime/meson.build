@@ -15,6 +15,11 @@ if have_jni
   if have_gl
     # android.media.ImageReader native underside over gfx::BufferQueue (Flutter external textures).
     runtime_sources += files('image_reader_jni.cpp')
+    # android.media.MediaCodec native underside over media::CodecDecoder (zero-copy video decode).
+    # Needs CodecDecoder, which is built only when FFmpeg is present (acl_media, at final link).
+    if have_ffmpeg
+      runtime_sources += files('media_codec_jni.cpp')
+    endif
   endif
   runtime_deps += jni_dep
   runtime_deps += meson.get_compiler('cpp').find_library('dl', required : false)

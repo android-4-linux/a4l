@@ -100,6 +100,19 @@ if py3.found() and have_gl and have_ffmpeg
     depends : [video_decode_probe],
     timeout : 120,
   )
+  # android.media.MediaCodec native underside end-to-end ([[flutter-texture-bridge]] M5): a real
+  # MediaCodec decodes H.264 into an ImageReader Surface via acl's zero-copy CodecDecoder (the path
+  # video_player_android drives). Needs the vendored framework (run-apk.sh) + the AOSP toolchain +
+  # ffmpeg + VAAPI; SKIPs otherwise.
+  if framework_android_jar != ''
+    test(
+      'media-codec-decode',
+      py3,
+      args : [files('run_media_codec_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+    )
+  endif
 endif
 
 if py3.found() and have_jni

@@ -57,6 +57,7 @@
 #include "pkg/apk.h"  // AAssetManager provider: read+inflate app assets from the APK
 #include "runtime/framework_natives.h"
 #include "runtime/image_reader_jni.h"  // media_jni loadLibrary -> ImageReader natives (M3c)
+#include "runtime/media_codec_jni.h"   // media_jni loadLibrary -> MediaCodec natives (M5)
 #include "svc/svc.h"
 #include "wm/present.h"
 #if ACL_PROFILE_AUTOMOTIVE
@@ -275,7 +276,8 @@ jstring JNICALL ndk_native_load(JNIEnv* env, jclass, jstring jpath, jobject load
   // success — exactly what the real lib's JNI_OnLoad would do, before <clinit> calls nativeClassInit.
   if (path.find("libmedia_jni.so") != std::string::npos) {
     register_image_reader_natives(env);
-    log::i(kTag, "loadLibrary(media_jni): registered acl ImageReader natives");
+    register_media_codec_natives(env);  // MediaCodec sync decode -> Surface over media::CodecDecoder (M5)
+    log::i(kTag, "loadLibrary(media_jni): registered acl ImageReader + MediaCodec natives");
     return nullptr;
   }
 #endif

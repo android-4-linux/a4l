@@ -417,6 +417,14 @@ void register_image_reader_natives(JNIEnv* env) {
   ndk::set_anw_ops(&anw_from_surface, &anw_lock, &anw_unlock_post);
 }
 
+gfx::BufferQueue* image_reader_queue_from_surface(JNIEnv* env, jobject surface) {
+  if (env == nullptr || surface == nullptr || g_surface_ctx_fid == nullptr) return nullptr;
+  const jlong no = env->GetLongField(surface, g_surface_ctx_fid);  // Surface.mNativeObject == ReaderCtx
+  if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+  auto* ctx = reinterpret_cast<ReaderCtx*>(no);
+  return reader_live(ctx) ? ctx->queue.get() : nullptr;
+}
+
 }  // namespace acl::runtime
 
 #endif  // ACL_HAVE_GL
