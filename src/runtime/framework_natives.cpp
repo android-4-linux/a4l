@@ -18,6 +18,7 @@
 #include <string>
 
 #include "audio/audio.h"
+#include "gfx/ahardware_buffer.h"  // android.hardware.HardwareBuffer -> gfx AHardwareBuffer
 #include "gfx/gfx.h"
 #include "log/log.h"
 #include "svc/svc.h"
@@ -166,6 +167,32 @@ void JNICALL Canvas_nativeDrawRect(JNIEnv*, jclass, jlong ptr, jfloat l, jfloat 
     s->fill_rect(static_cast<int>(l), static_cast<int>(t), static_cast<int>(r),
                  static_cast<int>(b), static_cast<std::uint32_t>(color));
   }
+}
+
+// --- android.hardware.HardwareBuffer -> acl::gfx AHardwareBuffer (dma-buf) ------
+// nativePtr is a gfx::AHardwareBuffer* (a refcounted gbm dma-buf); the native
+// AHardwareBuffer_fromHardwareBuffer reads it back for the engine's EGLImage import.
+jlong JNICALL HardwareBuffer_nCreate(JNIEnv*, jclass, jint w, jint h, jint format,
+                                     jint layers, jlong usage) {
+#if ACL_HAVE_GL
+  ::AHardwareBuffer_Desc d{};
+  d.width = static_cast<std::uint32_t>(w);
+  d.height = static_cast<std::uint32_t>(h);
+  d.layers = static_cast<std::uint32_t>(layers);
+  d.format = static_cast<std::uint32_t>(format);
+  d.usage = static_cast<std::uint64_t>(usage);
+  return reinterpret_cast<jlong>(gfx::ahb_allocate(d));
+#else
+  (void)w; (void)h; (void)format; (void)layers; (void)usage;
+  return 0;
+#endif
+}
+void JNICALL HardwareBuffer_nRelease(JNIEnv*, jclass, jlong ptr) {
+#if ACL_HAVE_GL
+  gfx::ahb_release(reinterpret_cast<::AHardwareBuffer*>(ptr));
+#else
+  (void)ptr;
+#endif
 }
 
 // Bind `n` static natives on class `name`; returns false (cleared) if the class or
@@ -365,6 +392,13 @@ void register_framework_natives(JNIEnv* env) {
        reinterpret_cast<void*>(&MediaSessionManager_activeCount)},
   };
   bind(env, "android/media/session/MediaSessionManager", msm_m, 1);
+  const JNINativeMethod hwb_m[] = {
+      {const_cast<char*>("nCreate"), const_cast<char*>("(IIIIJ)J"),
+       reinterpret_cast<void*>(&HardwareBuffer_nCreate)},
+      {const_cast<char*>("nRelease"), const_cast<char*>("(J)V"),
+       reinterpret_cast<void*>(&HardwareBuffer_nRelease)},
+  };
+  bind(env, "android/hardware/HardwareBuffer", hwb_m, 2);
   const JNINativeMethod ms_m[] = {
       {const_cast<char*>("nativeRegister"), const_cast<char*>("()V"),
        reinterpret_cast<void*>(&MediaSession_register)},
