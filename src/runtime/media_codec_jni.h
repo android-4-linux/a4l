@@ -17,6 +17,10 @@ namespace acl::runtime {
 // libmedia_jni.so load interception, alongside register_image_reader_natives.
 void register_media_codec_natives(JNIEnv* env);
 
+// Register acl's native underside for android.media.MediaCodecList — advertises acl's HW decoder so
+// media3/ExoPlayer's MediaCodecUtil discovers it (the gate before it creates a MediaCodec).
+void register_media_codec_list_natives(JNIEnv* env);
+
 }  // namespace acl::runtime
 
 #endif  // ACL_RUNTIME_MEDIA_CODEC_JNI_H

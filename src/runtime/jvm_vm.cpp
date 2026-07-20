@@ -276,8 +276,9 @@ jstring JNICALL ndk_native_load(JNIEnv* env, jclass, jstring jpath, jobject load
   // success — exactly what the real lib's JNI_OnLoad would do, before <clinit> calls nativeClassInit.
   if (path.find("libmedia_jni.so") != std::string::npos) {
     register_image_reader_natives(env);
-    register_media_codec_natives(env);  // MediaCodec sync decode -> Surface over media::CodecDecoder (M5)
-    log::i(kTag, "loadLibrary(media_jni): registered acl ImageReader + MediaCodec natives");
+    register_media_codec_natives(env);       // MediaCodec sync decode -> Surface over CodecDecoder (M5)
+    register_media_codec_list_natives(env);  // MediaCodecList: advertise acl's HW decoder (ExoPlayer gate)
+    log::i(kTag, "loadLibrary(media_jni): registered acl ImageReader + MediaCodec + MediaCodecList natives");
     return nullptr;
   }
 #endif

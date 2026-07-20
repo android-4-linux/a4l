@@ -19,6 +19,7 @@ import tempfile
 SKIP = 77
 
 CHECKS = [
+    "MC decode: findDecoderForFormat=acl.h264.decoder",  # MediaCodecList discovery (ExoPlayer's gate)
     "native_start: decoder up",              # MediaCodec.start -> CodecDecoder configured
     "MC decode: output format 320x240",      # INFO_OUTPUT_FORMAT_CHANGED -> getOutputFormat (ExoPlayer path)
     "MC decode: frame in ImageReader 320x240",  # a decoded frame reached the consumer via queue_imported
@@ -117,8 +118,9 @@ def main() -> int:
             sys.stderr.write(f"FAIL: missing '{c}'\n"); ok = False
     if not ok:
         sys.stderr.write("--- output ---\n" + out + "\n"); return 1
-    sys.stdout.write("OK: MediaCodec decoded H.264 into an ImageReader Surface (zero-copy, "
-                     "createDecoderByType -> configure -> queueInputBuffer -> releaseOutputBuffer)\n")
+    sys.stdout.write("OK: MediaCodecList discovered acl.h264.decoder; MediaCodec decoded H.264 into an "
+                     "ImageReader Surface zero-copy (findDecoderForFormat -> createByCodecName -> "
+                     "configure -> queueInputBuffer -> releaseOutputBuffer) — the ExoPlayer path\n")
     return 0
 
 

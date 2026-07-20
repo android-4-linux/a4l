@@ -12,6 +12,7 @@ import android.hardware.HardwareBuffer;
 import android.media.Image;
 import android.media.ImageReader;
 import android.media.MediaCodec;
+import android.media.MediaCodecList;
 import android.media.MediaFormat;
 import android.os.Bundle;
 import android.util.Log;
@@ -37,8 +38,12 @@ public class Main extends Activity {
 
             ImageReader r = ImageReader.newInstance(320, 240, ImageFormat.PRIVATE, 3,
                     HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE | HardwareBuffer.USAGE_CPU_WRITE_OFTEN);
-            MediaCodec c = MediaCodec.createDecoderByType("video/avc");
             MediaFormat f = MediaFormat.createVideoFormat("video/avc", 320, 240);
+            // Discover the decoder the way media3/ExoPlayer does — MediaCodecList capability matching —
+            // then create it by name (not createDecoderByType), the full ExoPlayer path.
+            String codecName = new MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(f);
+            Log.i("acl", "MC decode: findDecoderForFormat=" + codecName);
+            MediaCodec c = MediaCodec.createByCodecName(codecName);
             c.configure(f, r.getSurface(), null, 0);   // decode straight into the ImageReader Surface
             c.start();
 
