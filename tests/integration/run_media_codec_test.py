@@ -18,12 +18,19 @@ import tempfile
 
 SKIP = 77
 
-CHECKS = [
+# Two run modes off the same classes.dex: synchronous (Main) and asynchronous setCallback (MainAsync).
+SYNC_CHECKS = [
     "MC decode: findDecoderForFormat=acl.h264.decoder",  # MediaCodecList discovery (ExoPlayer's gate)
     "native_start: decoder up",              # MediaCodec.start -> CodecDecoder configured
     "MC decode: output format 320x240",      # INFO_OUTPUT_FORMAT_CHANGED -> getOutputFormat (ExoPlayer path)
     "MC decode: frame in ImageReader 320x240",  # a decoded frame reached the consumer via queue_imported
     "MC decode: PASS",
+]
+ASYNC_CHECKS = [
+    "native_start: decoder up (ASYNC)",      # setCallback -> async driver thread
+    "ASYNC: onOutputFormatChanged 320x240",  # the driver delivered CB_OUTPUT_FORMAT_CHANGE
+    "ASYNC: frame in ImageReader 320x240",   # onOutputBufferAvailable -> releaseOutputBuffer(render)
+    "ASYNC test: PASS",
 ]
 
 
@@ -80,47 +87,53 @@ def main() -> int:
         run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", clip, "-c:v", "copy",
              "-bsf:v", "h264_mp4toannexb", "-f", "h264", os.path.join(app, "assets/raw.h264")])
 
-        # 2. Main.java -> dex.
+        # 2. Main.java + MainAsync.java -> one classes.dex (same package).
         cls = os.path.join(work, "cls"); os.makedirs(cls)
         run([javac, "--release", "8", "-cp", android_jar, "-d", cls,
-             os.path.join(fixtures, "media_codec/Main.java")])
+             os.path.join(fixtures, "media_codec/Main.java"),
+             os.path.join(fixtures, "media_codec/MainAsync.java")])
         dexdir = os.path.join(work, "dex"); os.makedirs(dexdir)
         run([d8, "--min-api", "24", "--lib", android_jar, "--output", dexdir]
             + glob.glob(os.path.join(cls, "**/*.class"), recursive=True))
-
-        # 3. assemble the APK: manifest + classes.dex + assets/raw.h264, STORED + zipalign 4.
-        with open(os.path.join(app, "AndroidManifest.xml"), "wb") as fh:
-            fh.write(build_axml(utf8=True, package="com.acl.mctest", launcher="com.acl.mctest.Main"))
         run(["cp", os.path.join(dexdir, "classes.dex"), app])
-        unaligned = os.path.join(work, "u.apk"); apk = os.path.join(work, "mc.apk")
-        run(["zip", "-X", "-0", "-j", "-q", unaligned,
-             os.path.join(app, "AndroidManifest.xml"), os.path.join(app, "classes.dex")])
-        run(["zip", "-X", "-0", "-q", unaligned, "assets/raw.h264"], cwd=app)
-        run([zipalign, "-f", "4", unaligned, apk])
 
-        # 4. run through run-apk.sh (real vendored framework; SKIPs, exit 77, if not built).
-        env = dict(os.environ, XDG_CACHE_HOME=os.path.join(work, "cache"))
-        p = subprocess.run([os.path.join(src_root, "tools/run-apk.sh"), apk],
-                           env=env, capture_output=True, text=True, timeout=300)
-        out = p.stdout + p.stderr
-        if p.returncode == SKIP:
-            sys.stdout.write("SKIP: run-apk.sh (vendored framework not built)\n" + out); return SKIP
+        # 3. assemble + run one APK per launcher (sync Main, async MainAsync) off the same dex+asset.
+        def build_and_run(launcher, tag):
+            with open(os.path.join(app, "AndroidManifest.xml"), "wb") as fh:
+                fh.write(build_axml(utf8=True, package="com.acl.mctest", launcher=launcher))
+            unaligned = os.path.join(work, f"u-{tag}.apk"); apk = os.path.join(work, f"mc-{tag}.apk")
+            run(["zip", "-X", "-0", "-j", "-q", unaligned,
+                 os.path.join(app, "AndroidManifest.xml"), os.path.join(app, "classes.dex")])
+            run(["zip", "-X", "-0", "-q", unaligned, "assets/raw.h264"], cwd=app)
+            run([zipalign, "-f", "4", unaligned, apk])
+            env = dict(os.environ, XDG_CACHE_HOME=os.path.join(work, f"cache-{tag}"))
+            p = subprocess.run([os.path.join(src_root, "tools/run-apk.sh"), apk],
+                               env=env, capture_output=True, text=True, timeout=300)
+            return p.returncode, p.stdout + p.stderr
+
+        runs = [("com.acl.mctest.Main", "sync", SYNC_CHECKS),
+                ("com.acl.mctest.MainAsync", "async", ASYNC_CHECKS)]
+        out = ""
+        for launcher, tag, checks in runs:
+            rc, o = build_and_run(launcher, tag)
+            out += f"=== {tag} ===\n" + o
+            if rc == SKIP:
+                sys.stdout.write("SKIP: run-apk.sh (vendored framework not built)\n" + out); return SKIP
+            if "SKIP: no VAAPI" in o or "CodecDecoder::configure failed" in o:
+                sys.stdout.write("SKIP: no VAAPI for zero-copy decode\n" + out); return SKIP
+            if rc != 0:
+                sys.stderr.write(f"FAIL: {tag} run exit {rc}\n" + out); return 1
+            for c in checks:
+                if c not in o:
+                    sys.stderr.write(f"FAIL: {tag} missing '{c}'\n" + out); return 1
     except subprocess.CalledProcessError as e:
         sys.stderr.write(f"FAIL: build step: {e.cmd}\n{e.stderr}\n"); return 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
-    if "SKIP: no VAAPI" in out or "CodecDecoder::configure failed" in out:
-        sys.stdout.write("SKIP: no VAAPI for zero-copy decode\n" + out); return SKIP
-    ok = p.returncode == 0
-    for c in CHECKS:
-        if c not in out:
-            sys.stderr.write(f"FAIL: missing '{c}'\n"); ok = False
-    if not ok:
-        sys.stderr.write("--- output ---\n" + out + "\n"); return 1
     sys.stdout.write("OK: MediaCodecList discovered acl.h264.decoder; MediaCodec decoded H.264 into an "
-                     "ImageReader Surface zero-copy (findDecoderForFormat -> createByCodecName -> "
-                     "configure -> queueInputBuffer -> releaseOutputBuffer) — the ExoPlayer path\n")
+                     "ImageReader Surface zero-copy in BOTH synchronous and asynchronous (setCallback) "
+                     "modes — the ExoPlayer path\n")
     return 0
 
 

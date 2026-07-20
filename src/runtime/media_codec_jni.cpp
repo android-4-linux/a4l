@@ -13,10 +13,16 @@
 #if ACL_HAVE_GL
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "gfx/ahardware_buffer.h"
@@ -34,6 +40,11 @@ constexpr jint INFO_TRY_AGAIN_LATER = -1;
 constexpr jint INFO_OUTPUT_FORMAT_CHANGED = -2;
 constexpr jint BUFFER_FLAG_CODEC_CONFIG = 2;
 constexpr jint BUFFER_FLAG_END_OF_STREAM = 4;
+// Async callback delivery (postEventFromNative what/arg1).
+constexpr jint EVENT_CALLBACK = 1;
+constexpr jint CB_INPUT_AVAILABLE = 1;
+constexpr jint CB_OUTPUT_AVAILABLE = 2;
+constexpr jint CB_OUTPUT_FORMAT_CHANGE = 4;
 
 // Cached ids (resolved at register time; classes are boot-classpath, stable).
 jclass g_mc_cls = nullptr;
@@ -45,6 +56,9 @@ jmethodID g_integer_valueof = nullptr;   // Integer.valueOf(int)
 jclass g_hashmap_cls = nullptr;
 jmethodID g_hashmap_ctor = nullptr;      // HashMap()
 jmethodID g_hashmap_put = nullptr;       // HashMap.put(Object,Object)
+jmethodID g_post_event = nullptr;        // MediaCodec.postEventFromNative(int,int,int,Object)
+jclass g_bufinfo_cls = nullptr;
+jmethodID g_bufinfo_ctor = nullptr;      // MediaCodec$BufferInfo()
 
 // One MediaCodec instance's decode state.
 struct CodecCtx {
@@ -70,6 +84,19 @@ struct CodecCtx {
   };
   std::vector<OutSlot> outslots;
   bool format_signaled = false;  // dequeueOutputBuffer returns INFO_OUTPUT_FORMAT_CHANGED once first
+
+  // Async Callback mode (setCallback): a driver thread OWNS the CodecDecoder and delivers events via
+  // MediaCodec.postEventFromNative; queueInputBuffer only enqueues packet copies (so the decoder is
+  // never touched from two threads). ExoPlayer uses this on configs that enable async operation.
+  bool async = false;
+  jobject self = nullptr;        // global ref to the MediaCodec (for postEventFromNative)
+  JavaVM* vm = nullptr;
+  std::thread driver;
+  std::atomic<bool> stop{false};
+  std::mutex amu;                // guards pending + input-buffer free state + outslots in async mode
+  std::condition_variable acv;
+  struct Packet { std::vector<std::uint8_t> data; std::int64_t pts = 0; bool eos = false; };
+  std::deque<Packet> pending;    // input packets from queueInputBuffer, consumed by the driver
 };
 
 CodecCtx* ctx_of(JNIEnv* env, jobject thiz) {
@@ -121,6 +148,59 @@ jobject build_format_map(JNIEnv* env, CodecCtx* ctx) {
   put_int("crop-right", ctx->width > 0 ? ctx->width - 1 : 0);
   put_int("crop-bottom", ctx->height > 0 ? ctx->height - 1 : 0);
   return m;
+}
+
+// The async driver thread: OWNS the CodecDecoder and delivers MediaCodec callbacks via
+// postEventFromNative (Java routes them to the app's mCallback on its handler). Input is decoupled
+// through ctx->pending, so the decoder is only ever touched here — no cross-thread avcodec race.
+void async_driver(CodecCtx* ctx) {
+  JNIEnv* env = nullptr;
+  if (ctx->vm->AttachCurrentThread(reinterpret_cast<void**>(&env), nullptr) != JNI_OK) return;
+  auto post = [&](jint cb, jint arg2, jobject obj) {
+    env->CallVoidMethod(ctx->self, g_post_event, EVENT_CALLBACK, cb, arg2, obj);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+  };
+  { jobject fmt = build_format_map(env, ctx); post(CB_OUTPUT_FORMAT_CHANGE, 0, fmt); if (fmt) env->DeleteLocalRef(fmt); }
+  std::string err;
+  while (!ctx->stop.load(std::memory_order_acquire)) {
+    std::vector<int> offer;
+    std::vector<CodecCtx::Packet> send;
+    {
+      std::unique_lock<std::mutex> lk(ctx->amu);
+      for (std::size_t i = 0; i < ctx->inbufs.size(); ++i)
+        if (ctx->inbufs[i].free) { ctx->inbufs[i].free = false; offer.push_back(static_cast<int>(i)); }
+      while (!ctx->pending.empty()) { send.push_back(std::move(ctx->pending.front())); ctx->pending.pop_front(); }
+    }
+    for (int idx : offer) post(CB_INPUT_AVAILABLE, idx, nullptr);  // "buffer idx is free — fill + queue it"
+    for (auto& p : send) {
+      if (p.eos) ctx->dec->send_packet(nullptr, 0, p.pts, &err);
+      else ctx->dec->send_packet(p.data.data(), p.data.size(), p.pts, &err);
+    }
+    for (;;) {  // drain every ready frame
+      gfx::DmabufFrame f{};
+      std::int64_t pts = 0;
+      if (ctx->dec->receive_frame(&f, &pts, &err) <= 0) break;
+      ::AHardwareBuffer* ahb = gfx::ahb_import(f);
+      if (ahb == nullptr) continue;
+      int slot;
+      {
+        std::lock_guard<std::mutex> lk(ctx->amu);
+        slot = -1;
+        for (std::size_t i = 0; i < ctx->outslots.size(); ++i)
+          if (!ctx->outslots[i].used) { slot = static_cast<int>(i); break; }
+        if (slot < 0) { ctx->outslots.push_back({}); slot = static_cast<int>(ctx->outslots.size()) - 1; }
+        ctx->outslots[slot] = {ahb, true, pts};
+      }
+      jobject info = env->NewObject(g_bufinfo_cls, g_bufinfo_ctor);
+      env->CallVoidMethod(info, g_bufinfo_set, 0, 0, static_cast<jlong>(pts), 0);
+      post(CB_OUTPUT_AVAILABLE, slot, info);
+      if (info) env->DeleteLocalRef(info);
+    }
+    std::unique_lock<std::mutex> lk(ctx->amu);
+    if (ctx->pending.empty() && !ctx->stop.load(std::memory_order_acquire))
+      ctx->acv.wait_for(lk, std::chrono::milliseconds(4));
+  }
+  ctx->vm->DetachCurrentThread();
 }
 
 // ── android.media.MediaCodec natives ──────────────────────────────────────────────────────────────
@@ -190,7 +270,12 @@ void JNICALL MC_native_start(JNIEnv* env, jobject thiz) {
   for (auto& b : ctx->inbufs) b.mem.resize(bufsz);
   ctx->outslots.resize(8);
   ctx->started = true;
-  log::i(kTag, "native_start: decoder up, {} input buffers x {}B", ctx->inbufs.size(), bufsz);
+  if (ctx->async && ctx->vm != nullptr && ctx->self != nullptr) {
+    ctx->driver = std::thread(async_driver, ctx);  // async mode: the driver delivers callbacks
+    log::i(kTag, "native_start: decoder up (ASYNC), {} input buffers x {}B", ctx->inbufs.size(), bufsz);
+  } else {
+    log::i(kTag, "native_start: decoder up, {} input buffers x {}B", ctx->inbufs.size(), bufsz);
+  }
 }
 
 jint JNICALL MC_native_dequeueInputBuffer(JNIEnv* env, jobject thiz, jlong /*timeoutUs*/) {
@@ -217,6 +302,24 @@ void JNICALL MC_native_queueInputBuffer(JNIEnv* env, jobject thiz, jint index, j
   CodecCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr || !ctx->started || ctx->dec == nullptr) return;
   std::string err;
+  if (ctx->async) {
+    // Async: copy the packet for the driver + re-free the buffer (the driver re-offers it). The
+    // decoder is only touched on the driver thread, so no cross-thread avcodec access.
+    std::lock_guard<std::mutex> lk(ctx->amu);
+    CodecCtx::Packet p;
+    p.pts = pts;
+    if ((flags & BUFFER_FLAG_END_OF_STREAM) != 0) {
+      p.eos = true;
+    } else if (index >= 0 && static_cast<std::size_t>(index) < ctx->inbufs.size() && offset >= 0 &&
+               size > 0 && static_cast<std::size_t>(offset + size) <= ctx->inbufs[index].mem.size()) {
+      const auto& mem = ctx->inbufs[index].mem;
+      p.data.assign(mem.begin() + offset, mem.begin() + offset + size);
+    }
+    ctx->pending.push_back(std::move(p));
+    if (index >= 0 && static_cast<std::size_t>(index) < ctx->inbufs.size()) ctx->inbufs[index].free = true;
+    ctx->acv.notify_one();
+    return;
+  }
   if ((flags & BUFFER_FLAG_END_OF_STREAM) != 0 && size == 0) {
     ctx->dec->send_packet(nullptr, 0, pts, &err);  // drain
   } else if (index >= 0 && static_cast<std::size_t>(index) < ctx->inbufs.size()) {
@@ -259,19 +362,28 @@ jint JNICALL MC_native_dequeueOutputBuffer(JNIEnv* env, jobject thiz, jobject in
 void JNICALL MC_releaseOutputBuffer(JNIEnv* env, jobject thiz, jint index, jboolean render,
                                     jboolean /*updatePTS*/, jlong /*timeNs*/) {
   CodecCtx* ctx = ctx_of(env, thiz);
-  if (ctx == nullptr || index < 0 || static_cast<std::size_t>(index) >= ctx->outslots.size()) return;
-  auto& s = ctx->outslots[index];
-  if (!s.used || s.ahb == nullptr) return;
-  if (render == JNI_TRUE && ctx->out_queue != nullptr) {
-    ctx->out_queue->queue_imported(s.ahb);  // zero-copy: hand the frame to the ImageReader consumer
-  } else {
-    gfx::ahb_release(s.ahb);                 // not rendered (or no surface) — drop
+  if (ctx == nullptr || index < 0) return;
+  ::AHardwareBuffer* ahb = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(ctx->amu);  // outslots shared with the async driver thread
+    if (static_cast<std::size_t>(index) >= ctx->outslots.size()) return;
+    auto& s = ctx->outslots[index];
+    if (!s.used || s.ahb == nullptr) return;
+    ahb = s.ahb;
+    s = {};
   }
-  s = {};
+  if (render == JNI_TRUE && ctx->out_queue != nullptr) {
+    ctx->out_queue->queue_imported(ahb);  // zero-copy: hand the frame to the ImageReader consumer
+  } else {
+    gfx::ahb_release(ahb);                 // not rendered (or no surface) — drop
+  }
 }
 
 void teardown(CodecCtx* ctx) {
   if (ctx == nullptr) return;
+  ctx->stop.store(true, std::memory_order_release);  // stop the async driver (if any) before the decoder
+  ctx->acv.notify_all();
+  if (ctx->driver.joinable()) ctx->driver.join();
   for (auto& s : ctx->outslots)
     if (s.used && s.ahb != nullptr) gfx::ahb_release(s.ahb);
   ctx->outslots.clear();
@@ -291,6 +403,7 @@ void JNICALL MC_native_release(JNIEnv* env, jobject thiz) {
   CodecCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr) return;
   teardown(ctx);
+  if (ctx->self != nullptr) env->DeleteGlobalRef(ctx->self);  // the async self-ref
   delete ctx;
   env->SetLongField(thiz, g_mc_ctx_fid, 0);
 }
@@ -307,7 +420,15 @@ jstring JNICALL MC_native_getName(JNIEnv* env, jobject thiz) {
   return env->NewStringUTF(ctx != nullptr && !ctx->name.empty() ? ctx->name.c_str() : "acl.decoder");
 }
 jstring JNICALL MC_getCanonicalName(JNIEnv* env, jobject thiz) { return MC_native_getName(env, thiz); }
-void JNICALL MC_native_setCallback(JNIEnv*, jobject, jobject) {}  // async mode: not driven in sync path
+void JNICALL MC_native_setCallback(JNIEnv* env, jobject thiz, jobject cb) {
+  CodecCtx* ctx = ctx_of(env, thiz);
+  if (ctx == nullptr) return;
+  if (cb != nullptr) {  // a non-null callback selects async mode; native_start launches the driver
+    ctx->async = true;
+    if (ctx->self == nullptr) ctx->self = env->NewGlobalRef(thiz);
+    env->GetJavaVM(&ctx->vm);
+  }
+}
 void JNICALL MC_native_enableOnFrameRenderedListener(JNIEnv*, jobject, jboolean) {}
 void JNICALL MC_native_enableOnFirstTunnelFrameReadyListener(JNIEnv*, jobject, jboolean) {}
 jobject JNICALL MC_getFormatNative(JNIEnv* env, jobject thiz, jboolean /*input*/) {
@@ -333,9 +454,12 @@ void register_media_codec_natives(JNIEnv* env) {
   if (mc == nullptr) { env->ExceptionClear(); return; }  // no framework MediaCodec -> nothing to do
   g_mc_cls = static_cast<jclass>(env->NewGlobalRef(mc));
   g_mc_ctx_fid = env->GetFieldID(mc, "mNativeContext", "J");
+  g_post_event = env->GetMethodID(mc, "postEventFromNative", "(IIILjava/lang/Object;)V");
   if (env->ExceptionCheck()) env->ExceptionClear();
 
   if (jclass bi = env->FindClass("android/media/MediaCodec$BufferInfo"); bi != nullptr) {
+    g_bufinfo_cls = static_cast<jclass>(env->NewGlobalRef(bi));
+    g_bufinfo_ctor = env->GetMethodID(bi, "<init>", "()V");
     g_bufinfo_set = env->GetMethodID(bi, "set", "(IIJI)V");
     if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteLocalRef(bi);
