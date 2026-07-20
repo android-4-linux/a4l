@@ -222,6 +222,19 @@ if py3.found() and have_jni
         depends : [acl_exe, ndk_apk],
         timeout : 300,
       )
+      # ANativeWindow producer end-to-end ([[flutter-texture-bridge]] M3c): a bionic-ABI .so drives
+      # one frame through the real NDK ANativeWindow C ABI (fromSurface -> lock -> unlockAndPost)
+      # into an acl android.media.ImageReader, and the consumer acquires it. Runs the app through
+      # run-apk.sh (the REAL vendored framework is needed for ImageReader), so it SKIPs when that or
+      # the bionic toolchain is absent. The producer path a MediaCodec setVideoSurface would use.
+      test(
+        'run-apk-anw-producer-art',
+        py3,
+        args : [files('run_anw_producer_test.py'), acl_exe,
+                meson.project_source_root(), framework_android_jar],
+        depends : [acl_exe],
+        timeout : 300,
+      )
     endif
 
     # P2.2 / ADR-0008: acl registers the REAL framework native floor from the host
