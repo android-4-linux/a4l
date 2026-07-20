@@ -26,6 +26,7 @@ int main() { std::fprintf(stderr, "hwbuf-probe: built without GL support\n"); re
 #include <GLES2/gl2ext.h>
 
 #include "gfx/ahardware_buffer.h"
+#include "gfx/buffer_queue.h"
 #include "gfx/gl_egl.h"
 #include "gfx/hardware_buffer.h"
 
@@ -199,6 +200,48 @@ int main() {
   if (img_b != EGL_NO_IMAGE_KHR) eglDestroyImageKHR(dpy, img_b);
   eglDestroyImageKHR(dpy, img_a);
   acl::gfx::ahb_release(ahb);
+
+  // Path D (M3c BufferQueue): the ImageReader pool. Produce a frame (dequeue -> fill -> queue), then
+  // consume the latest (acquire) and sample it through the M2 translation — the full producer ->
+  // consumer -> engine-texture flow the real ImageReader drives.
+  {
+    std::string qerr;
+    int frame_cb = 0;
+    auto q = acl::gfx::BufferQueue::create(W, H, static_cast<std::uint32_t>(HbFormat::R8G8B8A8_UNORM),
+                                           0, 3, &qerr);
+    if (!q) { std::fprintf(stderr, "hwbuf-probe: FAIL [M3c] BufferQueue create: %s\n", qerr.c_str()); return 1; }
+    q->set_on_frame_available([&frame_cb] { ++frame_cb; });
+    const std::uint32_t kQFill = 0xFF20C040;
+    AHardwareBuffer* pb = q->dequeue();                 // producer: take a free buffer
+    if (pb == nullptr) { std::fprintf(stderr, "hwbuf-probe: FAIL [M3c] dequeue null\n"); return 1; }
+    acl::gfx::ahb_fill_color(pb, kQFill);
+    q->queue(pb);                                        // producer: publish it
+    AHardwareBuffer* cb2 = q->acquire_latest();          // consumer: take the latest
+    int qrc = 1;
+    if (cb2 != pb) std::fprintf(stderr, "hwbuf-probe: FAIL [M3c] acquire != produced\n");
+    else if (frame_cb != 1) std::fprintf(stderr, "hwbuf-probe: FAIL [M3c] frame cb fired %d times\n", frame_cb);
+    else {
+      EGLImageKHR qi = static_cast<EGLImageKHR>(acl::gfx::egl_image_from_ahb(
+          dpy, cb2, nullptr, reinterpret_cast<acl::gfx::EglCreateImageFn>(eglCreateImageKHR)));
+      if (qi == EGL_NO_IMAGE_KHR) std::fprintf(stderr, "hwbuf-probe: FAIL [M3c] import\n");
+      else {
+        glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex);
+        glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, qi);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        std::uint8_t p[4] = {0, 0, 0, 0};
+        glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, p);
+        if (p[0] == ((kQFill >> 16) & 0xff) && p[1] == ((kQFill >> 8) & 0xff) && p[2] == (kQFill & 0xff))
+          qrc = 0;
+        else std::fprintf(stderr, "hwbuf-probe: FAIL [M3c] want %06x got %02x%02x%02x\n",
+                          kQFill & 0xffffff, p[0], p[1], p[2]);
+        eglDestroyImageKHR(dpy, qi);
+      }
+    }
+    q->release(cb2);
+    if (qrc == 0) std::printf("hwbuf-probe: PASS [M3c BufferQueue] — produce->acquire->sample %06x\n", kQFill & 0xffffff);
+    else rc = 1;
+  }
   if (rc == 0)
     std::printf("hwbuf-probe: ALL PASS — %dx%d, stride=%u, mod=%#lx\n", W, H, f.planes[0].stride,
                 static_cast<unsigned long>(f.modifier));
