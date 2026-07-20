@@ -526,3 +526,64 @@ ACL_EXPORT int AAsset_openFileDescriptor64(AAsset* a, off64_t* outStart, off64_t
   (void)a; (void)outStart; (void)outLength;
   return -1;
 }
+
+// --- DNS resolver seeding -----------------------------------------------------------------------
+// Android resolves DNS through netd's /dev/socket/dnsproxyd; acl runs no netd, so bionic's
+// getaddrinfo tries that socket (ENOENT) and falls back to its in-libc resolver — which has NO
+// nameservers configured, so it queries 0.0.0.0 and every lookup fails. That is why an app's
+// network image/HTTP fetches never resolve a host. netd normally seeds the resolver via the libc
+// entry point _resolv_set_nameservers_for_net(); do the same, mirroring the host's
+// /etc/resolv.conf so the fallback resolver has real servers. netid 0 (NETID_UNSET) is the default
+// context getaddrinfo() uses. Runs in bionic context, driven explicitly by acl (like
+// acl_ndk_log_init) because .init_array constructors do not run under acl's in-process loader.
+// Provenance: bionic public resolver contract (_resolv_set_nameservers_for_net is the same symbol
+// netd links, from bionic/libc/dns, Apache-2.0); resolv.conf format is standard. No GPL-3.0 sources.
+extern int _resolv_set_nameservers_for_net(unsigned netid, const char** servers,
+                                           unsigned numservers, const char* domains,
+                                           const void* params);
+
+#define ACL_RESOLV_MAXNS 4
+
+ACL_EXPORT void acl_seed_dns_resolv(void) {
+  // Run bionic's resolver in "local" mode. Without netd, getaddrinfo falls back to the in-libc
+  // resolver, whose DNS cache is created with zero entries UNLESS ANDROID_DNS_MODE=local (on real
+  // Android only netd's proxy uses the local cache). A zero-sized cache makes _cache_lookup_p do a
+  // `hash % 0` and take SIGFPE. Set it before the first getaddrinfo/cache creation below.
+  setenv("ANDROID_DNS_MODE", "local", 1);
+
+  char store[ACL_RESOLV_MAXNS][64];
+  const char* servers[ACL_RESOLV_MAXNS];
+  unsigned n = 0;
+
+  FILE* f = fopen("/etc/resolv.conf", "re");
+  if (f != NULL) {
+    char line[256];
+    while (n < ACL_RESOLV_MAXNS && fgets(line, sizeof(line), f) != NULL) {
+      char* p = line;
+      while (*p == ' ' || *p == '\t') p++;
+      if (strncmp(p, "nameserver", 10) != 0) continue;
+      p += 10;
+      while (*p == ' ' || *p == '\t') p++;
+      unsigned k = 0;
+      while (p[k] != '\0' && p[k] != '\n' && p[k] != '\r' && p[k] != ' ' && p[k] != '\t'
+             && k + 1 < sizeof(store[0])) { store[n][k] = p[k]; k++; }
+      if (k == 0) continue;
+      store[n][k] = '\0';
+      servers[n] = store[n];
+      n++;
+    }
+    fclose(f);
+  }
+
+  // If the host config yielded nothing (no systemd-resolved, unreadable file, …), fall back to
+  // public resolvers so DNS still works out of the box.
+  if (n == 0) {
+    static const char* const kFallback[] = { "1.1.1.1", "8.8.8.8" };
+    for (unsigned i = 0; i < 2 && n < ACL_RESOLV_MAXNS; i++) servers[n++] = kFallback[i];
+  }
+
+  int rc = _resolv_set_nameservers_for_net(0u, servers, n, "", NULL);
+  __android_log_print(rc == 0 ? ANDROID_LOG_INFO : ANDROID_LOG_WARN, LOG_TAG,
+                      "seeded %u DNS nameserver(s) for default net (rc=%d, first=%s)",
+                      n, rc, n > 0 ? servers[0] : "(none)");
+}

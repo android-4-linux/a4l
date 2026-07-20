@@ -1861,6 +1861,13 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
             RunScope scope(*this);
             reinterpret_cast<void (*)()>(init)();
           }
+          // Seed bionic's DNS resolver (no netd/dnsproxyd here, so getaddrinfo would otherwise have
+          // no nameservers and every host lookup — image/HTTP downloads — fails). Mirrors the host
+          // /etc/resolv.conf; runs in bionic %fs since it calls libc resolver internals.
+          if (void* seed = symbol(la, "acl_seed_dns_resolv")) {
+            RunScope scope(*this);
+            reinterpret_cast<void (*)()>(seed)();
+          }
           // Point libandroid's AAssetManager at acl's pkg-backed provider. Installed unconditionally
           // (this runs once, at first lib load, possibly before set_asset_provider); the trampolines
           // self-guard on g_asset_open_cb and miss until acl sets it. They restore glibc %fs before
