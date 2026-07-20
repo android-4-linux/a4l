@@ -258,6 +258,20 @@ jlong JNICALL HardwareBuffer_nCreateFromGraphicBuffer(JNIEnv*, jclass, jobject) 
 void JNICALL HardwareBuffer_nWriteToParcel(JNIEnv*, jclass, jlong, jobject) {}
 jlong JNICALL HardwareBuffer_nReadFromParcel(JNIEnv*, jclass, jobject) { return 0; }
 
+// --- android.hardware.SyncFence -> trivial (acl has no real GPU fences) -------
+// The engine's ImageReader acquire path wraps each buffer's fence in a SyncFence; acl's CPU-produced
+// buffers are already signaled, so a fence is a no-op. nGetDestructor is called from SyncFence's
+// <clinit> (a NativeAllocationRegistry), so these must be registered before it is used.
+void syncfence_noop_free(void*) {}
+jlong JNICALL SyncFence_nGetDestructor(JNIEnv*, jclass) {
+  return reinterpret_cast<jlong>(&syncfence_noop_free);
+}
+jlong JNICALL SyncFence_nCreate(JNIEnv*, jclass, jint /*fd*/) { return 0; }  // no native fence object
+jboolean JNICALL SyncFence_nIsValid(JNIEnv*, jclass, jlong p) { return p != 0 ? JNI_TRUE : JNI_FALSE; }
+jint JNICALL SyncFence_nGetFd(JNIEnv*, jclass, jlong) { return -1; }
+jboolean JNICALL SyncFence_nWait(JNIEnv*, jclass, jlong, jlong) { return JNI_TRUE; }  // already signaled
+jlong JNICALL SyncFence_nGetSignalTime(JNIEnv*, jclass, jlong) { return 0; }
+
 // Bind `n` static natives on class `name`; returns false (cleared) if the class or
 // registration is absent.
 bool bind(JNIEnv* env, const char* name, const JNINativeMethod* methods, int n) {
@@ -334,6 +348,21 @@ void register_acl_supplemental_natives(JNIEnv* env) {
   log::write(ok ? log::Level::Info : log::Level::Warn, "acl.runtime.jvm",
              ok ? "acl supplemental natives bound: HardwareBuffer (12)"
                 : "HardwareBuffer native bind failed (class absent or signature mismatch)");
+  const JNINativeMethod sf_m[] = {
+      {const_cast<char*>("nGetDestructor"), const_cast<char*>("()J"),
+       reinterpret_cast<void*>(&SyncFence_nGetDestructor)},
+      {const_cast<char*>("nCreate"), const_cast<char*>("(I)J"),
+       reinterpret_cast<void*>(&SyncFence_nCreate)},
+      {const_cast<char*>("nIsValid"), const_cast<char*>("(J)Z"),
+       reinterpret_cast<void*>(&SyncFence_nIsValid)},
+      {const_cast<char*>("nGetFd"), const_cast<char*>("(J)I"),
+       reinterpret_cast<void*>(&SyncFence_nGetFd)},
+      {const_cast<char*>("nWait"), const_cast<char*>("(JJ)Z"),
+       reinterpret_cast<void*>(&SyncFence_nWait)},
+      {const_cast<char*>("nGetSignalTime"), const_cast<char*>("(J)J"),
+       reinterpret_cast<void*>(&SyncFence_nGetSignalTime)},
+  };
+  bind(env, "android/hardware/SyncFence", sf_m, 6);
   // NB: android.media.ImageReader natives are NOT registered here — its <clinit> loadLibrary(
   // "media_jni") is intercepted in jvm_vm's nativeLoad override (which calls
   // register_image_reader_natives before nativeClassInit runs), matching the real lib's JNI_OnLoad.

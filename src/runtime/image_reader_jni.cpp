@@ -12,7 +12,10 @@
 
 #include <time.h>
 
+#include <atomic>
+#include <cstdlib>
 #include <memory>
+#include <thread>
 
 #include "gfx/ahardware_buffer.h"
 #include "gfx/buffer_queue.h"
@@ -35,7 +38,17 @@ struct ReaderCtx {
   std::unique_ptr<gfx::BufferQueue> queue;
   JavaVM* vm = nullptr;
   jobject weak_self = nullptr;  // global ref to WeakReference<ImageReader>
+  std::thread producer;         // optional self-producer (ACL_IMAGEREADER_TEST_PRODUCER)
+  std::atomic<bool> stop{false};
 };
+
+// A recognizable animated ARGB color from a frame counter (~3s R/G/B cycle).
+std::uint32_t hue(int frame) {
+  const double t = (frame % 90) / 90.0 * 6.283185;
+  auto ch = [](double x) { return static_cast<std::uint32_t>((0.5 + 0.5 * x) * 255.0) & 0xffu; };
+  return 0xFF000000u | (ch(__builtin_sin(t)) << 16) | (ch(__builtin_sin(t + 2.094)) << 8) |
+         ch(__builtin_sin(t + 4.188));
+}
 
 ReaderCtx* ctx_of(JNIEnv* env, jobject reader) {
   return g_ctx_fid != nullptr
@@ -84,11 +97,30 @@ void JNICALL IR_nativeInit(JNIEnv* env, jobject thiz, jobject weakSelf, jint w, 
   });
   env->SetLongField(thiz, g_ctx_fid, reinterpret_cast<jlong>(ctx));
   log::i(kTag, "nativeInit {}x{} maxImages={} hbFormat={}", w, h, maxImgs, hbFormat);
+
+  // Opt-in self-producer: animate frames straight into the queue so the engine composites acl-made
+  // frames without a producer Surface. Proves the M1..M3 texture path end-to-end (the real
+  // producer-side Surface is M3c stage 3). The frame-available callback attaches this thread.
+  if (std::getenv("ACL_IMAGEREADER_TEST_PRODUCER") != nullptr) {
+    ctx->producer = std::thread([c] {
+      for (int frame = 0; !c->stop.load(std::memory_order_relaxed); ++frame) {
+        if (::AHardwareBuffer* b = c->queue->dequeue()) {
+          gfx::ahb_fill_color(b, hue(frame));
+          c->queue->queue(b);  // -> frame-available -> postEventFromNative -> the engine acquires
+        }
+        timespec ts{0, 33 * 1000 * 1000};
+        nanosleep(&ts, nullptr);
+      }
+    });
+    log::i(kTag, "nativeInit: self-producer started (ACL_IMAGEREADER_TEST_PRODUCER)");
+  }
 }
 
 void JNICALL IR_nativeClose(JNIEnv* env, jobject thiz) {
   ReaderCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr) return;
+  ctx->stop.store(true, std::memory_order_relaxed);
+  if (ctx->producer.joinable()) ctx->producer.join();
   if (ctx->weak_self != nullptr) env->DeleteGlobalRef(ctx->weak_self);
   delete ctx;  // BufferQueue destructor releases the pooled buffers
   env->SetLongField(thiz, g_ctx_fid, 0);
@@ -103,6 +135,7 @@ jint JNICALL IR_nativeImageSetup(JNIEnv* env, jobject thiz, jobject image, jbool
   if (b == nullptr) return 1;
   env->SetLongField(image, g_img_buf_fid, reinterpret_cast<jlong>(b));
   env->SetLongField(image, g_img_ts_fid, now_ns());
+  if (std::getenv("ACL_IR_DIAG") != nullptr) log::i(kTag, "nativeImageSetup: acquired b={} fid={}", (void*)b, (void*)g_img_buf_fid);
   return 0;
 }
 
@@ -126,6 +159,7 @@ void JNICALL IR_nativeUnlockGraphicBuffer(JNIEnv*, jclass, jobject) {}
 // ── ImageReader$SurfaceImage natives ────────────────────────────────────────────────────────────
 jobject JNICALL SI_nativeGetHardwareBuffer(JNIEnv* env, jobject thiz) {
   ::AHardwareBuffer* b = img_buf(env, thiz);
+  if (std::getenv("ACL_IR_DIAG") != nullptr) log::i(kTag, "getHardwareBuffer: b={} fid={} hb_ctor={}", (void*)b, (void*)g_img_buf_fid, (void*)g_hb_ctor);
   if (b == nullptr || g_hb_cls == nullptr || g_hb_ctor == nullptr) return nullptr;
   // The returned HardwareBuffer holds its OWN ref (its NativeAllocationRegistry finalizer releases
   // it); the BufferQueue keeps its ref until nativeReleaseImage.
