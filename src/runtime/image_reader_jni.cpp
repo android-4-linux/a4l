@@ -15,13 +15,17 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <thread>
+#include <unordered_set>
 
 #include "gfx/ahardware_buffer.h"
 #include "gfx/buffer_queue.h"
 #include "log/log.h"
+#include "ndk/bionic_runtime.h"
 
 namespace acl::runtime {
 namespace {
@@ -37,6 +41,8 @@ jclass g_hb_cls = nullptr;         // global ref: android.hardware.HardwareBuffe
 jmethodID g_hb_ctor = nullptr;     // private HardwareBuffer(long)
 jclass g_surface_cls = nullptr;    // global ref: android.view.Surface
 jmethodID g_surface_ctor = nullptr;  // private Surface(long) — pure-Java, no Surface natives needed
+jfieldID g_surface_ctx_fid = nullptr;  // android.view.Surface.mNativeObject (J) — our ReaderCtx
+JavaVM* g_anw_vm = nullptr;        // for the ANativeWindow_fromSurface producer resolve (GetEnv)
 
 struct ReaderCtx {
   std::unique_ptr<gfx::BufferQueue> queue;
@@ -46,7 +52,66 @@ struct ReaderCtx {
   int frame = 0;
   std::thread producer;         // self-produce: queues an animated frame every ~30ms
   std::atomic<bool> stop{false};
+  ::AHardwareBuffer* anw_pending = nullptr;  // dequeued+locked by ANativeWindow_lock, until unlockAndPost
 };
+
+// Live ImageReader contexts, so an ANativeWindow producer can validate that a Surface's mNativeObject
+// is really one of our readers (and not the GL-window token) before cycling its BufferQueue. Small N.
+std::mutex g_readers_mu;
+std::unordered_set<ReaderCtx*> g_readers;
+bool reader_live(ReaderCtx* ctx) {
+  std::lock_guard<std::mutex> lk(g_readers_mu);
+  return g_readers.count(ctx) != 0;
+}
+
+// ── ANativeWindow producer ops (backing libandroid's ANativeWindow_* via set_anw_ops) ─────────────
+// Resolve a producer Surface to its ImageReader: read Surface.mNativeObject (its ReaderCtx, set by
+// nativeGetSurface) via JNI on the calling thread's env (GetEnv — the proven up-call pattern, same as
+// postEventFromNative), and return it only if it's a live reader. NULL for any other surface (the GL
+// window), so ANativeWindow_fromSurface falls back to its identity token. Runs under glibc %fs (the
+// trampoline swapped), where the local `surface` ref is valid because it's the same thread.
+void* anw_from_surface(void* jsurface) {
+  if (g_anw_vm == nullptr || g_surface_ctx_fid == nullptr || jsurface == nullptr) return nullptr;
+  JNIEnv* env = nullptr;
+  if (g_anw_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) return nullptr;
+  const jlong no = env->GetLongField(static_cast<jobject>(jsurface), g_surface_ctx_fid);
+  if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+  auto* ctx = reinterpret_cast<ReaderCtx*>(no);
+  return reader_live(ctx) ? ctx : nullptr;
+}
+// Producer dequeues + CPU-maps the next free buffer. -EAGAIN when the pool is momentarily full (all
+// buffers outstanding) so the producer retries; -EBUSY if a prior lock wasn't posted; -EINVAL on a
+// dead reader / map failure. On 0, *out describes the mapped buffer and it stays "pending" until post.
+int anw_lock(void* anw, ndk::AnwBuffer* out) {
+  auto* ctx = reinterpret_cast<ReaderCtx*>(anw);
+  if (!reader_live(ctx) || out == nullptr) return -EINVAL;
+  if (ctx->anw_pending != nullptr) return -EBUSY;
+  ::AHardwareBuffer* b = ctx->queue->dequeue();
+  if (b == nullptr) return -EAGAIN;
+  std::uint32_t stride_bytes = 0;
+  void* bits = gfx::ahb_lock(b, &stride_bytes);
+  if (bits == nullptr) return -EINVAL;  // buffer returns to FREE at next dequeue (still owned by queue)
+  ctx->anw_pending = b;
+  ::AHardwareBuffer_Desc d{};
+  gfx::ahb_describe(b, &d);
+  out->bits = bits;
+  out->width = static_cast<std::int32_t>(d.width);
+  out->height = static_cast<std::int32_t>(d.height);
+  out->stride = static_cast<std::int32_t>(stride_bytes / 4);  // 4 bytes/px (RGBA/ABGR8888)
+  out->format = 1;                                            // WINDOW_FORMAT_RGBA_8888
+  return 0;
+}
+// Producer publishes the pending buffer: unmap + queue -> onImageAvailable -> the engine composites.
+int anw_unlock_post(void* anw) {
+  auto* ctx = reinterpret_cast<ReaderCtx*>(anw);
+  if (!reader_live(ctx)) return -EINVAL;
+  if (ctx->anw_pending == nullptr) return -EINVAL;
+  ::AHardwareBuffer* b = ctx->anw_pending;
+  ctx->anw_pending = nullptr;
+  gfx::ahb_unlock(b);
+  ctx->queue->queue(b);
+  return 0;
+}
 
 // A recognizable animated ARGB color from a frame counter (~3s R/G/B cycle).
 std::uint32_t hue(int frame) {
@@ -104,6 +169,7 @@ void JNICALL IR_nativeInit(JNIEnv* env, jobject thiz, jobject weakSelf, jint w, 
     if (attached) c->vm->DetachCurrentThread();
   });
   ctx->self_produce = std::getenv("ACL_IMAGEREADER_TEST_PRODUCER") != nullptr;
+  { std::lock_guard<std::mutex> lk(g_readers_mu); g_readers.insert(ctx); }  // ANativeWindow producer registry
   env->SetLongField(thiz, g_ctx_fid, reinterpret_cast<jlong>(ctx));
   log::i(kTag, "nativeInit {}x{} maxImages={} hbFormat={} self_produce={}", w, h, maxImgs, hbFormat,
          ctx->self_produce);
@@ -134,6 +200,7 @@ void JNICALL IR_nativeInit(JNIEnv* env, jobject thiz, jobject weakSelf, jint w, 
 void JNICALL IR_nativeClose(JNIEnv* env, jobject thiz) {
   ReaderCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr) return;
+  { std::lock_guard<std::mutex> lk(g_readers_mu); g_readers.erase(ctx); }  // no new ANativeWindow producer calls
   ctx->stop.store(true, std::memory_order_release);
   if (ctx->producer.joinable()) ctx->producer.join();  // stop producing before tearing down the queue
   if (ctx->weak_self != nullptr) env->DeleteGlobalRef(ctx->weak_self);
@@ -256,6 +323,7 @@ bool bind(JNIEnv* env, const char* cls, const JNINativeMethod* m, int n) {
 
 void register_image_reader_natives(JNIEnv* env) {
   if (env == nullptr) return;
+  env->GetJavaVM(&g_anw_vm);  // for the ANativeWindow_fromSurface producer resolve
   jclass rc = env->FindClass("android/media/ImageReader");
   if (rc == nullptr) { env->ExceptionClear(); return; }  // no framework -> nothing to do
   g_reader_cls = static_cast<jclass>(env->NewGlobalRef(rc));
@@ -279,6 +347,7 @@ void register_image_reader_natives(JNIEnv* env) {
   if (jclass sf = env->FindClass("android/view/Surface"); sf != nullptr) {
     g_surface_cls = static_cast<jclass>(env->NewGlobalRef(sf));
     g_surface_ctor = env->GetMethodID(sf, "<init>", "(J)V");  // private, pure-Java
+    g_surface_ctx_fid = env->GetFieldID(sf, "mNativeObject", "J");  // producer resolve (fromSurface)
     if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteLocalRef(sf);
   }
@@ -341,6 +410,11 @@ void register_image_reader_natives(JNIEnv* env) {
              (ir_ok && si_ok && pfu_ok)
                  ? "ImageReader + SurfaceImage + PublicFormatUtils natives bound (consumer path)"
                  : "ImageReader native bind incomplete");
+
+  // Back libandroid's ANativeWindow_* (producer side) with these readers' BufferQueues. Setting the
+  // host ops is enough; the loader points ANativeWindow_fromSurface/lock/unlockAndPost at %fs-aware
+  // trampolines that call them (bionic_runtime), and the trampolines self-guard until this runs.
+  ndk::set_anw_ops(&anw_from_surface, &anw_lock, &anw_unlock_post);
 }
 
 }  // namespace acl::runtime

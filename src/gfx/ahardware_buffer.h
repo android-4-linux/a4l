@@ -59,6 +59,12 @@ void ahb_describe(const AHardwareBuffer* ahb, AHardwareBuffer_Desc* out);
 // source for the external-texture proof. Byte order follows the buffer's DRM fourcc (RGBA/ABGR8888).
 void ahb_fill_color(AHardwareBuffer* ahb, std::uint32_t argb);
 
+// CPU-map the buffer for a producer to write into (AHardwareBuffer_lock / ANativeWindow_lock backing):
+// returns the mapped base pointer and sets *out_stride_bytes to the row pitch in BYTES; nullptr on
+// failure. ahb_unlock() must follow. The bytes are laid out per the buffer's DRM fourcc (ABGR8888).
+void* ahb_lock(AHardwareBuffer* ahb, std::uint32_t* out_stride_bytes);
+void ahb_unlock(AHardwareBuffer* ahb);
+
 // The pointer signature of host Mesa's eglCreateImageKHR (dpy, ctx, target, buffer, attrib_list).
 using EglCreateImageFn = void* (*)(void* dpy, void* ctx, unsigned target, void* buffer,
                                    const std::int32_t* attrib_list);

@@ -1841,6 +1841,44 @@ void acl_ahb_release_tramp(void* ahb) {
   g_ahb_release_fn(ahb);
   ndk_set_fs(bionic_fs);
 }
+
+// ANativeWindow producer backing (libandroid's ANativeWindow_fromSurface/lock/unlockAndPost). All
+// three touch host state (from_native_obj resolves a Surface's mNativeObject via host JNI + a reader
+// registry; lock/unlock_post cycle a gfx BufferQueue + the allocator), so each restores glibc %fs
+// like acl_asset_free_tramp. Self-guard on the runtime-set ops (set_anw_ops).
+void* (*g_anw_from_fn)(void*) = nullptr;
+int (*g_anw_lock_fn)(void*, AnwBuffer*) = nullptr;
+int (*g_anw_unlock_fn)(void*) = nullptr;
+void* acl_anw_from_tramp(void* surface) {
+  if (g_anw_from_fn == nullptr) return nullptr;
+  const std::uintptr_t bionic_fs = ndk_get_fs();
+  const std::uintptr_t glibc_fs = ensure_paired_glibc_fs();
+  if (glibc_fs == 0) return nullptr;
+  ndk_set_fs(glibc_fs);
+  void* r = g_anw_from_fn(surface);
+  ndk_set_fs(bionic_fs);
+  return r;
+}
+int acl_anw_lock_tramp(void* anw, void* out) {
+  if (g_anw_lock_fn == nullptr) return -EINVAL;
+  const std::uintptr_t bionic_fs = ndk_get_fs();
+  const std::uintptr_t glibc_fs = ensure_paired_glibc_fs();
+  if (glibc_fs == 0) return -EINVAL;
+  ndk_set_fs(glibc_fs);
+  const int r = g_anw_lock_fn(anw, static_cast<AnwBuffer*>(out));
+  ndk_set_fs(bionic_fs);
+  return r;
+}
+int acl_anw_unlock_post_tramp(void* anw) {
+  if (g_anw_unlock_fn == nullptr) return -EINVAL;
+  const std::uintptr_t bionic_fs = ndk_get_fs();
+  const std::uintptr_t glibc_fs = ensure_paired_glibc_fs();
+  if (glibc_fs == 0) return -EINVAL;
+  ndk_set_fs(glibc_fs);
+  const int r = g_anw_unlock_fn(anw);
+  ndk_set_fs(bionic_fs);
+  return r;
+}
 }  // namespace
 
 void set_asset_provider(int (*open_cb)(void*, const char*, void**, long*),
@@ -1855,6 +1893,13 @@ void set_ahb_ops(void (*describe)(const void*, void*), void (*acquire)(void*),
   g_ahb_describe_fn = describe;
   g_ahb_acquire_fn = acquire;
   g_ahb_release_fn = release;
+}
+
+void set_anw_ops(void* (*from_native_obj)(void*), int (*lock)(void*, AnwBuffer*),
+                 int (*unlock_post)(void*)) {
+  g_anw_from_fn = from_native_obj;
+  g_anw_lock_fn = lock;
+  g_anw_unlock_fn = unlock_post;
 }
 
 // ── ALooper <-> Java Looper bridge ────────────────────────────────────────────────────────────
@@ -1955,6 +2000,14 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
             *a = reinterpret_cast<void*>(&acl_ahb_acquire_tramp);
           if (void** r = static_cast<void**>(symbol(la, "acl_ahb_release_hook")))
             *r = reinterpret_cast<void*>(&acl_ahb_release_tramp);
+          // ANativeWindow producer hooks -> %fs-aware trampolines (self-guard on g_anw_*_fn, set by
+          // the runtime via set_anw_ops to image_reader's BufferQueue producer ops).
+          if (void** af = static_cast<void**>(symbol(la, "acl_anw_from_hook")))
+            *af = reinterpret_cast<void*>(&acl_anw_from_tramp);
+          if (void** al = static_cast<void**>(symbol(la, "acl_anw_lock_hook")))
+            *al = reinterpret_cast<void*>(&acl_anw_lock_tramp);
+          if (void** ap = static_cast<void**>(symbol(la, "acl_anw_unlock_post_hook")))
+            *ap = reinterpret_cast<void*>(&acl_anw_unlock_post_tramp);
         }
       }
     }

@@ -53,6 +53,24 @@ void set_native_gl_hooks(const NativeGlHooks& hooks);
 void set_ahb_ops(void (*describe)(const void* ahb, void* desc), void (*acquire)(void* ahb),
                  void (*release)(void* ahb));
 
+// ANativeWindow producer over the ImageReader BufferQueue (Flutter external textures; ultimately
+// MediaCodec setVideoSurface). A native producer resolves the producer Surface via
+// ANativeWindow_fromSurface -> `from_native_obj`(Surface.mNativeObject), then cycles a frame with
+// lock()/unlock_post(): lock dequeues a free pooled buffer and CPU-maps it (fills *out); unlock_post
+// queues it (fires onImageAvailable so the engine composites). Host ops set by the runtime
+// (image_reader_jni, which owns the ReaderCtx/BufferQueue); libandroid's ANativeWindow_* call
+// %fs-aware trampolines that restore glibc %fs (the ops touch gfx/gbm + the allocator).
+// AnwBuffer mirrors the ANativeWindow_Buffer fields a producer writes.
+struct AnwBuffer {
+  void* bits;          // mapped base pointer
+  std::int32_t width;
+  std::int32_t height;
+  std::int32_t stride;  // in PIXELS (ANativeWindow_Buffer.stride convention)
+  std::int32_t format;  // WINDOW_FORMAT_* (1 = RGBA_8888)
+};
+void set_anw_ops(void* (*from_native_obj)(void* native_obj),
+                 int (*lock)(void* anw, AnwBuffer* out), int (*unlock_post)(void* anw));
+
 void set_asset_provider(int (*open_cb)(void* user, const char* name, void** out_buf, long* out_len),
                         void (*free_cb)(void* user, void* buf), void* user);
 

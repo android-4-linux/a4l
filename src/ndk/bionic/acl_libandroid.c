@@ -383,7 +383,23 @@ ACL_EXPORT void acl_looper_bridge_pump(void) {
 #define ACL_TODO(fn) ALOGE("%s is not implemented yet (acl libandroid slice; docs/ndk-scope.md)", fn)
 
 typedef struct ANativeWindow ANativeWindow;
-typedef struct ANativeWindow_Buffer ANativeWindow_Buffer;
+// The NDK ANativeWindow_Buffer ABI (android/native_window.h) — a producer writes `bits` after lock().
+typedef struct ANativeWindow_Buffer {
+  int32_t width;
+  int32_t height;
+  int32_t stride;
+  int32_t format;
+  void* bits;
+  uint32_t reserved[6];
+} ANativeWindow_Buffer;
+// Matches acl::ndk::AnwBuffer (bionic_runtime.h) — what the lock hook fills for us to copy across.
+typedef struct AclAnwBuf {
+  void* bits;
+  int32_t width;
+  int32_t height;
+  int32_t stride;
+  int32_t format;
+} AclAnwBuf;
 typedef struct AAssetManager AAssetManager;
 typedef struct AAsset AAsset;
 typedef struct ARect ARect;
@@ -396,7 +412,15 @@ struct _jobject;
 // ANativeWindow identity. We return one stable non-null token so the engine's surface bookkeeping
 // proceeds; the size getters report acl's live session size via a callback acl installs after load
 // (acl_anw_size_hook; captureless + TLS-free, so it is safe to call from here under bionic %fs).
-static int g_anw_token;  // a stable, non-null ANativeWindow handle (identity only)
+static int g_anw_token;  // a stable, non-null ANativeWindow handle (identity only; the GL-window path)
+// ANativeWindow producer over an acl ImageReader's BufferQueue. When a Surface belongs to an acl
+// ImageReader (its mNativeObject is a live ReaderCtx), fromSurface returns that ctx as the window and
+// lock/unlockAndPost cycle it. These call the runtime's %fs-aware trampolines (bionic_runtime), which
+// resolve the Surface (host JNI), CPU-map a pooled buffer, and queue it. Set by the loader; a plain
+// global (this lib is -fvisibility=hidden, so acl resolves them by name to install).
+ACL_EXPORT void* acl_anw_from_hook = 0;         // void* (*)(void* surface) -> ctx or NULL
+ACL_EXPORT void* acl_anw_lock_hook = 0;         // int (*)(void* anw, AclAnwBuf* out)
+ACL_EXPORT void* acl_anw_unlock_post_hook = 0;  // int (*)(void* anw)
 ACL_EXPORT void* acl_anw_size_hook = 0;  // void (*)(void* user, int* w, int* h), set by acl
 ACL_EXPORT void* acl_anw_size_user = 0;
 static void anw_size(int* w, int* h) {
@@ -408,7 +432,15 @@ static void anw_size(int* w, int* h) {
   }
 }
 ACL_EXPORT ANativeWindow* ANativeWindow_fromSurface(struct _JNIEnv* env, struct _jobject* surface) {
-  (void)env; (void)surface;
+  (void)env;
+  // If this Surface is an acl ImageReader producer (mNativeObject is a live ReaderCtx), back the
+  // window with that reader's BufferQueue — the host hook reads mNativeObject (JNI) + validates. Any
+  // other surface (the app's GL window) keeps the identity token: eglCreateWindowSurface is overridden
+  // to acl's session toplevel and ignores the ANativeWindow identity.
+  if (acl_anw_from_hook != 0 && surface != NULL) {
+    void* anw = ((void* (*)(void*))acl_anw_from_hook)(surface);
+    if (anw != NULL) return (ANativeWindow*)anw;
+  }
   return (ANativeWindow*)&g_anw_token;
 }
 ACL_EXPORT void ANativeWindow_release(ANativeWindow* w) { (void)w; }
@@ -429,14 +461,30 @@ ACL_EXPORT int32_t ANativeWindow_getHeight(ANativeWindow* w) {
   return hh;
 }
 ACL_EXPORT int32_t ANativeWindow_lock(ANativeWindow* w, ANativeWindow_Buffer* b, ARect* dirty) {
-  (void)w; (void)b; (void)dirty;
-  ACL_TODO("ANativeWindow_lock");
-  return -EINVAL;
+  (void)dirty;
+  if (w == NULL || b == NULL) return -EINVAL;
+  if (w == (ANativeWindow*)&g_anw_token || acl_anw_lock_hook == 0) {
+    ACL_TODO("ANativeWindow_lock (non-ImageReader window)");  // GL-window path has no CPU producer
+    return -EINVAL;
+  }
+  AclAnwBuf ab;
+  memset(&ab, 0, sizeof(ab));
+  int rc = ((int (*)(void*, void*))acl_anw_lock_hook)(w, &ab);  // dequeue + CPU-map the next buffer
+  if (rc != 0) return rc;
+  b->width = ab.width;
+  b->height = ab.height;
+  b->stride = ab.stride;
+  b->format = ab.format;
+  b->bits = ab.bits;
+  return 0;
 }
 ACL_EXPORT int32_t ANativeWindow_unlockAndPost(ANativeWindow* w) {
-  (void)w;
-  ACL_TODO("ANativeWindow_unlockAndPost");
-  return -EINVAL;
+  if (w == NULL) return -EINVAL;
+  if (w == (ANativeWindow*)&g_anw_token || acl_anw_unlock_post_hook == 0) {
+    ACL_TODO("ANativeWindow_unlockAndPost (non-ImageReader window)");
+    return -EINVAL;
+  }
+  return ((int (*)(void*))acl_anw_unlock_post_hook)(w);  // queue -> onImageAvailable -> engine composites
 }
 
 // ── AAssetManager (NDK) ──────────────────────────────────────────────────────────────────────

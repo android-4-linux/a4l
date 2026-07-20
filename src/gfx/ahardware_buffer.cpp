@@ -66,6 +66,20 @@ void ahb_describe(const AHardwareBuffer* ahb, AHardwareBuffer_Desc* out) {
   if (ahb != nullptr && out != nullptr) *out = ahb->desc;
 }
 
+void* ahb_lock(AHardwareBuffer* ahb, std::uint32_t* out_stride_bytes) {
+  if (ahb == nullptr || !ahb->buffer) return nullptr;
+  std::string err;
+  std::uint32_t stride = 0;
+  void* base = ahb->buffer->lock(&stride, &err);
+  if (base == nullptr) { log::w(kTag, "ahb_lock: lock failed: {}", err); return nullptr; }
+  if (out_stride_bytes != nullptr) *out_stride_bytes = stride;  // HardwareBuffer::lock reports bytes
+  return base;
+}
+
+void ahb_unlock(AHardwareBuffer* ahb) {
+  if (ahb != nullptr && ahb->buffer) ahb->buffer->unlock();
+}
+
 void ahb_fill_color(AHardwareBuffer* ahb, std::uint32_t argb) {
   if (ahb == nullptr || !ahb->buffer) return;
   std::string err;
