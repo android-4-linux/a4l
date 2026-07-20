@@ -169,11 +169,23 @@ void JNICALL Canvas_nativeDrawRect(JNIEnv*, jclass, jlong ptr, jfloat l, jfloat 
   }
 }
 
-// --- android.hardware.HardwareBuffer -> acl::gfx AHardwareBuffer (dma-buf) ------
-// nativePtr is a gfx::AHardwareBuffer* (a refcounted gbm dma-buf); the native
-// AHardwareBuffer_fromHardwareBuffer reads it back for the engine's EGLImage import.
-jlong JNICALL HardwareBuffer_nCreate(JNIEnv*, jclass, jint w, jint h, jint format,
-                                     jint layers, jlong usage) {
+// --- android.hardware.HardwareBuffer (the REAL vendored AOSP class) -> gfx AHardwareBuffer -------
+// acl vendors the real android.hardware.HardwareBuffer (framework-graphics), so we implement its
+// native underside, not a shim. mNativeObject is a gfx::AHardwareBuffer* (a refcounted gbm dma-buf).
+// Signatures mirror frameworks/base/core/java/android/hardware/HardwareBuffer.java (docs/AOSP).
+#if ACL_HAVE_GL
+::AHardwareBuffer_Desc ahb_desc_of(jlong ptr) {
+  ::AHardwareBuffer_Desc d{};
+  gfx::ahb_describe(reinterpret_cast<::AHardwareBuffer*>(ptr), &d);
+  return d;
+}
+// The NativeAllocationRegistry free function: releases one ref when the Java HardwareBuffer is GC'd.
+// Called on ART's (glibc) cleaner thread, so the free is on a valid glibc %fs.
+void ahb_native_finalize(void* ptr) { gfx::ahb_release(static_cast<::AHardwareBuffer*>(ptr)); }
+#endif
+
+jlong JNICALL HardwareBuffer_nCreateHardwareBuffer(JNIEnv*, jclass, jint w, jint h, jint format,
+                                                   jint layers, jlong usage) {
 #if ACL_HAVE_GL
   ::AHardwareBuffer_Desc d{};
   d.width = static_cast<std::uint32_t>(w);
@@ -187,20 +199,64 @@ jlong JNICALL HardwareBuffer_nCreate(JNIEnv*, jclass, jint w, jint h, jint forma
   return 0;
 #endif
 }
-void JNICALL HardwareBuffer_nRelease(JNIEnv*, jclass, jlong ptr) {
+jlong JNICALL HardwareBuffer_nGetNativeFinalizer(JNIEnv*, jclass) {
 #if ACL_HAVE_GL
-  gfx::ahb_release(reinterpret_cast<::AHardwareBuffer*>(ptr));
+  return reinterpret_cast<jlong>(&ahb_native_finalize);
 #else
-  (void)ptr;
+  return 0;
 #endif
 }
-void JNICALL HardwareBuffer_nFillColor(JNIEnv*, jclass, jlong ptr, jint argb) {
+jint JNICALL HardwareBuffer_nGetWidth(JNIEnv*, jclass, jlong ptr) {
 #if ACL_HAVE_GL
-  gfx::ahb_fill_color(reinterpret_cast<::AHardwareBuffer*>(ptr), static_cast<std::uint32_t>(argb));
+  return static_cast<jint>(ahb_desc_of(ptr).width);
 #else
-  (void)ptr; (void)argb;
+  (void)ptr; return 0;
 #endif
 }
+jint JNICALL HardwareBuffer_nGetHeight(JNIEnv*, jclass, jlong ptr) {
+#if ACL_HAVE_GL
+  return static_cast<jint>(ahb_desc_of(ptr).height);
+#else
+  (void)ptr; return 0;
+#endif
+}
+jint JNICALL HardwareBuffer_nGetFormat(JNIEnv*, jclass, jlong ptr) {
+#if ACL_HAVE_GL
+  return static_cast<jint>(ahb_desc_of(ptr).format);
+#else
+  (void)ptr; return 0;
+#endif
+}
+jint JNICALL HardwareBuffer_nGetLayers(JNIEnv*, jclass, jlong ptr) {
+#if ACL_HAVE_GL
+  const jint l = static_cast<jint>(ahb_desc_of(ptr).layers);
+  return l > 0 ? l : 1;
+#else
+  (void)ptr; return 1;
+#endif
+}
+jlong JNICALL HardwareBuffer_nGetUsage(JNIEnv*, jclass, jlong ptr) {
+#if ACL_HAVE_GL
+  return static_cast<jlong>(ahb_desc_of(ptr).usage);
+#else
+  (void)ptr; return 0;
+#endif
+}
+jboolean JNICALL HardwareBuffer_nIsSupported(JNIEnv*, jclass, jint, jint, jint, jint, jlong) {
+  return JNI_TRUE;
+}
+jlong JNICALL HardwareBuffer_nEstimateSize(JNIEnv*, jclass, jlong ptr) {
+#if ACL_HAVE_GL
+  const ::AHardwareBuffer_Desc d = ahb_desc_of(ptr);
+  return static_cast<jlong>(d.width) * d.height * 4;  // conservative RGBA estimate
+#else
+  (void)ptr; return 0;
+#endif
+}
+// Not backed (no GraphicBuffer / Parcel marshalling on acl); exported so the class links.
+jlong JNICALL HardwareBuffer_nCreateFromGraphicBuffer(JNIEnv*, jclass, jobject) { return 0; }
+void JNICALL HardwareBuffer_nWriteToParcel(JNIEnv*, jclass, jlong, jobject) {}
+jlong JNICALL HardwareBuffer_nReadFromParcel(JNIEnv*, jclass, jobject) { return 0; }
 
 // Bind `n` static natives on class `name`; returns false (cleared) if the class or
 // registration is absent.
@@ -241,6 +297,44 @@ jlong JNICALL SystemClock_currentThreadTimeMillis(JNIEnv*, jclass) {
 }
 
 }  // namespace
+
+// acl-supplied framework natives that the host libandroid_runtime does NOT provide (its host build
+// omits graphics-buffer/gralloc natives). Registered in BOTH the shim-floor path and the ART-native
+// path (after libandroid_runtime's registrars), so classes like the vendored android.hardware.
+// HardwareBuffer get their native underside from acl (backed by gfx::ahb / a gbm dma-buf).
+void register_acl_supplemental_natives(JNIEnv* env) {
+  if (env == nullptr) return;
+  const JNINativeMethod hwb_m[] = {
+      {const_cast<char*>("nCreateHardwareBuffer"), const_cast<char*>("(IIIIJ)J"),
+       reinterpret_cast<void*>(&HardwareBuffer_nCreateHardwareBuffer)},
+      {const_cast<char*>("nGetNativeFinalizer"), const_cast<char*>("()J"),
+       reinterpret_cast<void*>(&HardwareBuffer_nGetNativeFinalizer)},
+      {const_cast<char*>("nGetWidth"), const_cast<char*>("(J)I"),
+       reinterpret_cast<void*>(&HardwareBuffer_nGetWidth)},
+      {const_cast<char*>("nGetHeight"), const_cast<char*>("(J)I"),
+       reinterpret_cast<void*>(&HardwareBuffer_nGetHeight)},
+      {const_cast<char*>("nGetFormat"), const_cast<char*>("(J)I"),
+       reinterpret_cast<void*>(&HardwareBuffer_nGetFormat)},
+      {const_cast<char*>("nGetLayers"), const_cast<char*>("(J)I"),
+       reinterpret_cast<void*>(&HardwareBuffer_nGetLayers)},
+      {const_cast<char*>("nGetUsage"), const_cast<char*>("(J)J"),
+       reinterpret_cast<void*>(&HardwareBuffer_nGetUsage)},
+      {const_cast<char*>("nIsSupported"), const_cast<char*>("(IIIIJ)Z"),
+       reinterpret_cast<void*>(&HardwareBuffer_nIsSupported)},
+      {const_cast<char*>("nEstimateSize"), const_cast<char*>("(J)J"),
+       reinterpret_cast<void*>(&HardwareBuffer_nEstimateSize)},
+      {const_cast<char*>("nCreateFromGraphicBuffer"), const_cast<char*>("(Landroid/graphics/GraphicBuffer;)J"),
+       reinterpret_cast<void*>(&HardwareBuffer_nCreateFromGraphicBuffer)},
+      {const_cast<char*>("nWriteHardwareBufferToParcel"), const_cast<char*>("(JLandroid/os/Parcel;)V"),
+       reinterpret_cast<void*>(&HardwareBuffer_nWriteToParcel)},
+      {const_cast<char*>("nReadHardwareBufferFromParcel"), const_cast<char*>("(Landroid/os/Parcel;)J"),
+       reinterpret_cast<void*>(&HardwareBuffer_nReadFromParcel)},
+  };
+  const bool ok = bind(env, "android/hardware/HardwareBuffer", hwb_m, 12);
+  log::write(ok ? log::Level::Info : log::Level::Warn, "acl.runtime.jvm",
+             ok ? "acl supplemental natives bound: HardwareBuffer (12)"
+                : "HardwareBuffer native bind failed (class absent or signature mismatch)");
+}
 
 void register_framework_natives(JNIEnv* env) {
   if (env == nullptr) return;
@@ -399,15 +493,7 @@ void register_framework_natives(JNIEnv* env) {
        reinterpret_cast<void*>(&MediaSessionManager_activeCount)},
   };
   bind(env, "android/media/session/MediaSessionManager", msm_m, 1);
-  const JNINativeMethod hwb_m[] = {
-      {const_cast<char*>("nCreate"), const_cast<char*>("(IIIIJ)J"),
-       reinterpret_cast<void*>(&HardwareBuffer_nCreate)},
-      {const_cast<char*>("nRelease"), const_cast<char*>("(J)V"),
-       reinterpret_cast<void*>(&HardwareBuffer_nRelease)},
-      {const_cast<char*>("nFillColor"), const_cast<char*>("(JI)V"),
-       reinterpret_cast<void*>(&HardwareBuffer_nFillColor)},
-  };
-  bind(env, "android/hardware/HardwareBuffer", hwb_m, 3);
+  register_acl_supplemental_natives(env);
   const JNINativeMethod ms_m[] = {
       {const_cast<char*>("nativeRegister"), const_cast<char*>("()V"),
        reinterpret_cast<void*>(&MediaSession_register)},

@@ -605,12 +605,15 @@ ACL_EXPORT void* acl_ahb_release_hook = 0;   // void (*)(void* ahb)
 
 AHardwareBuffer* AHardwareBuffer_fromHardwareBuffer(JNIEnv* env, jobject hb) {
   if (env == NULL || hb == NULL) return NULL;
+  // The REAL android.hardware.HardwareBuffer stashes the native AHardwareBuffer* in its private
+  // `long mNativeObject` field (AOSP: "do not rename, this field is used by native code"). acl's
+  // nCreateHardwareBuffer put a gfx::AHardwareBuffer* there; read it back.
   jclass c = (*env)->GetObjectClass(env, hb);
   if (c == NULL) { (*env)->ExceptionClear(env); return NULL; }
-  jmethodID m = (*env)->GetMethodID(env, c, "aclNativePtr", "()J");
+  jfieldID f = (*env)->GetFieldID(env, c, "mNativeObject", "J");
   (*env)->DeleteLocalRef(env, c);
-  if (m == NULL) { (*env)->ExceptionClear(env); return NULL; }
-  jlong ptr = (*env)->CallLongMethod(env, hb, m);
+  if (f == NULL) { (*env)->ExceptionClear(env); return NULL; }
+  jlong ptr = (*env)->GetLongField(env, hb, f);
   return (AHardwareBuffer*)(intptr_t)ptr;
 }
 

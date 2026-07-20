@@ -3207,6 +3207,9 @@ class ArtVm final : public JniVm {
            "ART native floor: {} framework native group(s) from libandroid_runtime "
            "({} unavailable)",
            ok, unavailable);
+    // libandroid_runtime's host build omits graphics-buffer natives, so supply acl's (the vendored
+    // android.hardware.HardwareBuffer's native underside over a gbm dma-buf — Flutter external textures).
+    register_acl_supplemental_natives(env);
     // Override InputEventReceiver.nativeDispose. The real one (just registered above) destructs
     // NativeInputEventReceiver, whose destructor calls AndroidRuntime::getJNIEnv() — null on acl (we
     // run the JNI Invocation API directly, never AndroidRuntime::startVm, so its mJavaVM is null) →
