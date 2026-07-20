@@ -175,6 +175,27 @@ int main() {
   if (img_b == EGL_NO_IMAGE_KHR) { std::fprintf(stderr, "hwbuf-probe: AHB translation failed (%#x)\n", eglGetError()); rc = 1; }
   else rc |= check(img_b, "M2 AHardwareBuffer->dma-buf translation");
 
+  // Path C (M4 producer fill): the producer's own frame source. Refill the buffer a solid color via
+  // ahb_fill_color and confirm the SAME EGLImage now samples it (CPU fill -> dma-buf -> texture).
+  if (img_b != EGL_NO_IMAGE_KHR) {
+    const std::uint32_t kFill = 0xFF3060C0;  // ARGB
+    acl::gfx::ahb_fill_color(ahb, kFill);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex);
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, img_b);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    std::uint8_t p[4] = {0, 0, 0, 0};
+    glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, p);
+    const std::uint8_t wr = (kFill >> 16) & 0xff, wg = (kFill >> 8) & 0xff, wb = kFill & 0xff;
+    if (p[0] == wr && p[1] == wg && p[2] == wb)
+      std::printf("hwbuf-probe: PASS [M4 producer fill] — solid %06x sampled\n", kFill & 0xffffff);
+    else {
+      std::fprintf(stderr, "hwbuf-probe: FAIL [M4 producer fill] want %02x%02x%02x got %02x%02x%02x\n",
+                   wr, wg, wb, p[0], p[1], p[2]);
+      rc = 1;
+    }
+  }
+
   if (img_b != EGL_NO_IMAGE_KHR) eglDestroyImageKHR(dpy, img_b);
   eglDestroyImageKHR(dpy, img_a);
   acl::gfx::ahb_release(ahb);

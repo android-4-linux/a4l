@@ -194,6 +194,13 @@ void JNICALL HardwareBuffer_nRelease(JNIEnv*, jclass, jlong ptr) {
   (void)ptr;
 #endif
 }
+void JNICALL HardwareBuffer_nFillColor(JNIEnv*, jclass, jlong ptr, jint argb) {
+#if ACL_HAVE_GL
+  gfx::ahb_fill_color(reinterpret_cast<::AHardwareBuffer*>(ptr), static_cast<std::uint32_t>(argb));
+#else
+  (void)ptr; (void)argb;
+#endif
+}
 
 // Bind `n` static natives on class `name`; returns false (cleared) if the class or
 // registration is absent.
@@ -397,8 +404,10 @@ void register_framework_natives(JNIEnv* env) {
        reinterpret_cast<void*>(&HardwareBuffer_nCreate)},
       {const_cast<char*>("nRelease"), const_cast<char*>("(J)V"),
        reinterpret_cast<void*>(&HardwareBuffer_nRelease)},
+      {const_cast<char*>("nFillColor"), const_cast<char*>("(JI)V"),
+       reinterpret_cast<void*>(&HardwareBuffer_nFillColor)},
   };
-  bind(env, "android/hardware/HardwareBuffer", hwb_m, 2);
+  bind(env, "android/hardware/HardwareBuffer", hwb_m, 3);
   const JNINativeMethod ms_m[] = {
       {const_cast<char*>("nativeRegister"), const_cast<char*>("()V"),
        reinterpret_cast<void*>(&MediaSession_register)},

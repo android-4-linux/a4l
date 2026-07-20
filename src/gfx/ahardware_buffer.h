@@ -55,6 +55,10 @@ void ahb_acquire(AHardwareBuffer* ahb);
 void ahb_release(AHardwareBuffer* ahb);
 void ahb_describe(const AHardwareBuffer* ahb, AHardwareBuffer_Desc* out);
 
+// Fill the whole buffer with a solid color (0xAARRGGBB) via a CPU lock — the acl producer's frame
+// source for the external-texture proof. Byte order follows the buffer's DRM fourcc (RGBA/ABGR8888).
+void ahb_fill_color(AHardwareBuffer* ahb, std::uint32_t argb);
+
 // The pointer signature of host Mesa's eglCreateImageKHR (dpy, ctx, target, buffer, attrib_list).
 using EglCreateImageFn = void* (*)(void* dpy, void* ctx, unsigned target, void* buffer,
                                    const std::int32_t* attrib_list);

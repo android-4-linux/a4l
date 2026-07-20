@@ -62,6 +62,25 @@ void ahb_describe(const AHardwareBuffer* ahb, AHardwareBuffer_Desc* out) {
   if (ahb != nullptr && out != nullptr) *out = ahb->desc;
 }
 
+void ahb_fill_color(AHardwareBuffer* ahb, std::uint32_t argb) {
+  if (ahb == nullptr || !ahb->buffer) return;
+  std::string err;
+  std::uint32_t stride = 0;
+  auto* base = static_cast<std::uint8_t*>(ahb->buffer->lock(&stride, &err));
+  if (base == nullptr) { log::w(kTag, "ahb_fill_color: lock failed: {}", err); return; }
+  // The buffer fourcc is ABGR8888 (byte order R,G,B,A); lay the argb out that way.
+  const std::uint8_t px[4] = {static_cast<std::uint8_t>(argb >> 16),  // R
+                              static_cast<std::uint8_t>(argb >> 8),   // G
+                              static_cast<std::uint8_t>(argb),        // B
+                              static_cast<std::uint8_t>(argb >> 24)}; // A
+  const std::uint32_t w = ahb->buffer->desc().width, h = ahb->buffer->desc().height;
+  for (std::uint32_t y = 0; y < h; ++y) {
+    std::uint8_t* row = base + static_cast<std::size_t>(y) * stride;
+    for (std::uint32_t x = 0; x < w; ++x) { row[0] = px[0]; row[1] = px[1]; row[2] = px[2]; row[3] = px[3]; row += 4; }
+  }
+  ahb->buffer->unlock();
+}
+
 void* egl_image_from_ahb(void* dpy, const AHardwareBuffer* ahb, const std::int32_t* in_attribs,
                          EglCreateImageFn real) {
   if (ahb == nullptr || real == nullptr || !ahb->buffer) return nullptr;

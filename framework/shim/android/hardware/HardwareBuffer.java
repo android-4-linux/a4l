@@ -53,6 +53,10 @@ public final class HardwareBuffer implements AutoCloseable {
   // own producer/JNI. Not part of the public SDK.
   public long aclNativePtr() { return nativePtr; }
 
+  // acl producer test source: paint the whole buffer a solid color (0xAARRGGBB). Not part of the
+  // public SDK; used by the external-texture proof to put a recognizable frame on screen.
+  public void aclFillColor(int argb) { if (nativePtr != 0L) nFillColor(nativePtr, argb); }
+
   @Override
   public void close() {
     if (nativePtr != 0L) { nRelease(nativePtr); nativePtr = 0L; }
@@ -60,4 +64,5 @@ public final class HardwareBuffer implements AutoCloseable {
 
   private static native long nCreate(int width, int height, int format, int layers, long usage);
   private static native void nRelease(long ptr);
+  private static native void nFillColor(long ptr, int argb);
 }
