@@ -56,6 +56,7 @@
 #include "ndk/native_bind.h"
 #include "pkg/apk.h"  // AAssetManager provider: read+inflate app assets from the APK
 #include "runtime/framework_natives.h"
+#include "runtime/image_reader_jni.h"  // media_jni loadLibrary -> ImageReader natives (M3c)
 #include "svc/svc.h"
 #include "wm/present.h"
 #if ACL_PROFILE_AUTOMOTIVE
@@ -267,6 +268,17 @@ jstring JNICALL ndk_native_load(JNIEnv* env, jclass, jstring jpath, jobject load
     if (bound > 0) log::i(kTag, "bound {} native(s) by name across the lib's classes", bound);
     return nullptr;
   }
+#if ACL_HAVE_GL
+  // acl supplements framework native libs the host build omits. android.media.ImageReader's <clinit>
+  // does loadLibrary("media_jni") then nativeClassInit(); there is no host libmedia_jni.so, so
+  // satisfy the load by registering acl's ImageReader natives (over gfx::BufferQueue) and reporting
+  // success — exactly what the real lib's JNI_OnLoad would do, before <clinit> calls nativeClassInit.
+  if (path.find("libmedia_jni.so") != std::string::npos) {
+    register_image_reader_natives(env);
+    log::i(kTag, "loadLibrary(media_jni): registered acl ImageReader natives");
+    return nullptr;
+  }
+#endif
   // Not a bionic app lib: a glibc/system lib (acl's own soundpool, or an ART system lib like
   // conscrypt's libjavacrypto that a boot class loads). ART resolves a bare library NAME within its
   // own namespaces' search paths; our override replaced that, so a plain dlopen of the bare name

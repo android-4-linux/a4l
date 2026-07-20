@@ -12,6 +12,10 @@ runtime_deps = [fmt_dep]   # via log/log.h; split_vm.cpp uses acl_ipc (header-on
 # runtime, so it needs libdl.
 if have_jni
   runtime_sources += files('jvm_vm.cpp', 'framework_natives.cpp')
+  if have_gl
+    # android.media.ImageReader native underside over gfx::BufferQueue (Flutter external textures).
+    runtime_sources += files('image_reader_jni.cpp')
+  endif
   runtime_deps += jni_dep
   runtime_deps += meson.get_compiler('cpp').find_library('dl', required : false)
   # GLSurfaceView: jvm_vm.cpp registers the EGLImpl natives (gfx/egl10_jni.h) + drives

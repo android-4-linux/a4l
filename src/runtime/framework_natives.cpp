@@ -334,6 +334,9 @@ void register_acl_supplemental_natives(JNIEnv* env) {
   log::write(ok ? log::Level::Info : log::Level::Warn, "acl.runtime.jvm",
              ok ? "acl supplemental natives bound: HardwareBuffer (12)"
                 : "HardwareBuffer native bind failed (class absent or signature mismatch)");
+  // NB: android.media.ImageReader natives are NOT registered here — its <clinit> loadLibrary(
+  // "media_jni") is intercepted in jvm_vm's nativeLoad override (which calls
+  // register_image_reader_natives before nativeClassInit runs), matching the real lib's JNI_OnLoad.
 }
 
 void register_framework_natives(JNIEnv* env) {
