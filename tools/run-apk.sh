@@ -152,9 +152,24 @@ if [ -z "${ACL_NO_SYSTEM:-}" ] && command -v bwrap >/dev/null 2>&1; then
       if [ -L "$d" ]; then SANDBOX+=(--symlink "$(readlink "$d")" "$d")
       elif [ -d "$d" ]; then SANDBOX+=(--bind "$d" "$d"); fi
     done
-    SANDBOX+=(--ro-bind "$SYSDIR" /system --ro-bind "$SYSDIR/fonts" "$HOME_DIR/fonts")
+    # The engine's Skia (SkFontMgr_Android) resolves face filenames from fonts.xml against its
+    # compiled-in SK_FONT_FILE_PREFIX, which in this engine build is "/fonts/" (root-relative), not
+    # /system/fonts or $ANDROID_ROOT/fonts. Bind the AOSP fonts at all three so the faces resolve.
+    SANDBOX+=(--ro-bind "$SYSDIR" /system \
+              --ro-bind "$SYSDIR/fonts" "$HOME_DIR/fonts" \
+              --ro-bind "$SYSDIR/fonts" /fonts)
+    # The AOSP target's own fonts.xml is version 23 and maps sans-serif to a VARIABLE Roboto that
+    # the engine's Skia yields no glyphs from (all default text renders blank). Override it with a
+    # minimal config pointing at the STATIC faces in the same fonts dir. Opt out with ACL_AOSP_FONTS=1.
+    FONTS_MIN="$ACLROOT/tools/aosp/fonts-min.xml"
+    if [ -z "${ACL_AOSP_FONTS:-}" ] && [ -f "$FONTS_MIN" ]; then
+      SANDBOX+=(--ro-bind "$FONTS_MIN" /system/etc/fonts.xml)
+    fi
     printf 'run-apk: engine fonts via bwrap (/system/etc/fonts.xml + %s/fonts)\n' "$HOME_DIR" >&2
   fi
 fi
 
-"${SANDBOX[@]}" "${RUNNER[@]}" "$ACL_BIN" run "$APK" --vm=art "$@" 2>&1
+# Optional exec wrapper inserted just before the acl binary (inside the sandbox), e.g. for
+# tracing: ACL_EXEC_WRAP="strace -f -e trace=openat -qq -o /tmp/x.strace". Unset in normal runs.
+read -r -a EXEC_WRAP <<< "${ACL_EXEC_WRAP:-}"
+"${SANDBOX[@]}" "${RUNNER[@]}" "${EXEC_WRAP[@]}" "$ACL_BIN" run "$APK" --vm=art "$@" 2>&1

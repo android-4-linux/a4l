@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Provenance: minimal replacement for the AOSP target's system/etc/fonts.xml. That file is
+     version 23 and points the sans-serif family at a VARIABLE Roboto (Roboto-Regular.ttf, ~2.3MB);
+     the Flutter engine's Skia (SkFontMgr_Android) yields no usable glyphs from it, so all default
+     text renders blank. Map the standard families to the STATIC faces shipped in the same AOSP
+     fonts dir instead. Bound over /system/etc/fonts.xml by run-apk.sh, which also binds the AOSP
+     fonts at /fonts (this engine build's SK_FONT_FILE_PREFIX) so the faces resolve. No GPL-3.0 sources. -->
+<familyset version="21">
+  <!-- The first family is the default (used for text with no explicit family). -->
+  <family>
+    <font weight="400" style="normal">RobotoStatic-Regular.ttf</font>
+    <font weight="700" style="normal">RobotoStatic-Regular.ttf</font>
+    <font weight="400" style="italic">RobotoStatic-Regular.ttf</font>
+    <font weight="700" style="italic">RobotoStatic-Regular.ttf</font>
+  </family>
+  <family name="sans-serif">
+    <font weight="400" style="normal">RobotoStatic-Regular.ttf</font>
+    <font weight="700" style="normal">RobotoStatic-Regular.ttf</font>
+    <font weight="400" style="italic">RobotoStatic-Regular.ttf</font>
+    <font weight="700" style="italic">RobotoStatic-Regular.ttf</font>
+  </family>
+  <family name="serif">
+    <font weight="400" style="normal">NotoSerif-Regular.ttf</font>
+  </family>
+  <family name="monospace">
+    <font weight="400" style="normal">DroidSansMono.ttf</font>
+  </family>
+  <alias name="sans-serif-medium" to="sans-serif" weight="500" />
+  <alias name="sans-serif-condensed" to="sans-serif" />
+  <alias name="arial" to="sans-serif" />
+  <alias name="helvetica" to="sans-serif" />
+  <alias name="Roboto" to="sans-serif" />
+  <alias name="serif-monospace" to="monospace" />
+  <alias name="monospace-condensed" to="monospace" />
+</familyset>
