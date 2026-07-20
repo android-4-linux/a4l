@@ -50,12 +50,16 @@ AHardwareBuffer* ahb_allocate(const AHardwareBuffer_Desc& desc) {
 }
 
 void ahb_acquire(AHardwareBuffer* ahb) {
-  if (ahb != nullptr) box_of(ahb)->refs.fetch_add(1, std::memory_order_relaxed);
+  if (ahb == nullptr) return;
+  const int n = box_of(ahb)->refs.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (getenv("ACL_AHB_DIAG") != nullptr) log::i(kTag, "acquire {} -> refs={}", (void*)ahb, n);
 }
 
 void ahb_release(AHardwareBuffer* ahb) {
   if (ahb == nullptr) return;
-  if (box_of(ahb)->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) delete box_of(ahb);
+  const int prev = box_of(ahb)->refs.fetch_sub(1, std::memory_order_acq_rel);
+  if (getenv("ACL_AHB_DIAG") != nullptr) log::i(kTag, "release {} -> refs={}", (void*)ahb, prev - 1);
+  if (prev == 1) delete box_of(ahb);
 }
 
 void ahb_describe(const AHardwareBuffer* ahb, AHardwareBuffer_Desc* out) {
