@@ -165,6 +165,18 @@ if [ -z "${ACL_NO_SYSTEM:-}" ] && command -v bwrap >/dev/null 2>&1; then
     if [ -z "${ACL_AOSP_FONTS:-}" ] && [ -f "$FONTS_MIN" ]; then
       SANDBOX+=(--ro-bind "$FONTS_MIN" /system/etc/fonts.xml)
     fi
+    # Dart's HttpClient (Flutter NetworkImage, dart:io TLS) loads its trusted roots on Android from
+    # /system/etc/security/cacerts, which the AOSP target ships empty — so every HTTPS fetch fails
+    # its cert check (network images never load). Bind the CA store gen-cacerts.sh already built
+    # (hashed <subject>.0 PEMs) into that path. Opt out with ACL_NO_CACERTS=1.
+    CACERTS="$HOME_DIR/etc/security/cacerts"
+    if [ -z "${ACL_NO_CACERTS:-}" ] && [ -d "$CACERTS" ] && [ -n "$(ls -A "$CACERTS" 2>/dev/null)" ]; then
+      # /system is bound read-only and the AOSP target has no .../security/cacerts dir, so bwrap
+      # can't create that mountpoint under it. Overlay a writable tmpfs on the existing
+      # /system/etc/security (its only contents, otacerts.zip + fsverity, aren't needed here) and
+      # bind the CA store into it.
+      SANDBOX+=(--tmpfs /system/etc/security --ro-bind "$CACERTS" /system/etc/security/cacerts)
+    fi
     printf 'run-apk: engine fonts via bwrap (/system/etc/fonts.xml + %s/fonts)\n' "$HOME_DIR" >&2
   fi
 fi
