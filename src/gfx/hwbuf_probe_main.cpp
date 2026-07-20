@@ -242,6 +242,66 @@ int main() {
     if (qrc == 0) std::printf("hwbuf-probe: PASS [M3c BufferQueue] — produce->acquire->sample %06x\n", kQFill & 0xffffff);
     else rc = 1;
   }
+  // Path E (ZERO-COPY import — the video-decode path): a hardware decoder owns its output dma-bufs
+  // (VAAPI/V4L2-M2M surfaces exported via av_hwframe_map to DRM_PRIME); acl imports each frame's
+  // dma-buf with NO pixel copy and routes it to the consumer via BufferQueue::queue_imported. Proof:
+  // CPU-fill a distinct color into a SOURCE buffer, ahb_import ITS dma-buf as a separate
+  // AHardwareBuffer (the "decoder frame"), queue+acquire it, and sample. The imported buffer is never
+  // written, so reading the source's color back proves the two share memory — the import is zero-copy.
+  {
+    const std::uint32_t kImp = 0xFF8040C0;  // ARGB, distinct from every other path
+    const std::uint8_t ir = (kImp >> 16) & 0xff, ig = (kImp >> 8) & 0xff, ib = kImp & 0xff;
+    int erc = 1;
+    auto src = HardwareBuffer::allocate(W, H, HbFormat::R8G8B8A8_UNORM, 0, &err);  // stands in for a decoder surface
+    std::uint32_t sstride = 0;
+    std::uint8_t* sb = src ? static_cast<std::uint8_t*>(src->lock(&sstride, &err)) : nullptr;
+    if (sb == nullptr) {
+      std::fprintf(stderr, "hwbuf-probe: FAIL [E] source alloc/lock: %s\n", err.c_str());
+      rc = 1;
+    } else {
+      for (int y = 0; y < H; ++y) {
+        std::uint8_t* row = sb + static_cast<std::size_t>(y) * sstride;
+        for (int x = 0; x < W; ++x) { row[0] = ir; row[1] = ig; row[2] = ib; row[3] = 255; row += 4; }
+      }
+      src->unlock();
+      AHardwareBuffer* imp = acl::gfx::ahb_import(src->frame());  // import the SOURCE's dma-buf (fd dup, no copy)
+      std::string qerr;
+      auto q2 = acl::gfx::BufferQueue::create(W, H, static_cast<std::uint32_t>(HbFormat::R8G8B8A8_UNORM),
+                                              0, 3, &qerr);
+      if (imp == nullptr || !q2) {
+        std::fprintf(stderr, "hwbuf-probe: FAIL [E] ahb_import/queue create\n");
+      } else {
+        q2->queue_imported(imp);  // hands the decoder frame to the consumer (transfers the ref)
+        AHardwareBuffer* got = q2->acquire_latest();
+        if (got != imp) {
+          std::fprintf(stderr, "hwbuf-probe: FAIL [E] acquire_latest != imported\n");
+        } else {
+          EGLImageKHR ei = static_cast<EGLImageKHR>(acl::gfx::egl_image_from_ahb(
+              dpy, got, nullptr, reinterpret_cast<acl::gfx::EglCreateImageFn>(eglCreateImageKHR)));
+          if (ei == EGL_NO_IMAGE_KHR) {
+            std::fprintf(stderr, "hwbuf-probe: FAIL [E] EGLImage import of imported buffer\n");
+          } else {
+            glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex);
+            glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, ei);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            std::uint8_t p[4] = {0, 0, 0, 0};
+            glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, p);
+            if (p[0] == ir && p[1] == ig && p[2] == ib) erc = 0;
+            else std::fprintf(stderr, "hwbuf-probe: FAIL [E] want %06x got %02x%02x%02x (import copied?)\n",
+                              kImp & 0xffffff, p[0], p[1], p[2]);
+            eglDestroyImageKHR(dpy, ei);
+          }
+        }
+        q2->release(got);  // drops the queue's ref -> the imported buffer's dup fd is closed
+      }
+    }
+    if (erc == 0)
+      std::printf("hwbuf-probe: PASS [E zero-copy import] — decoder dma-buf imported + queued + "
+                  "sampled %06x with NO copy\n", kImp & 0xffffff);
+    else rc = 1;
+  }
+
   if (rc == 0)
     std::printf("hwbuf-probe: ALL PASS — %dx%d, stride=%u, mod=%#lx\n", W, H, f.planes[0].stride,
                 static_cast<unsigned long>(f.modifier));

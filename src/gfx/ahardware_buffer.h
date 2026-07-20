@@ -51,6 +51,11 @@ AHardwareBuffer* ahb_create(std::shared_ptr<HardwareBuffer> hb);
 // Returns nullptr on failure (no render node / gbm). refcount 1.
 AHardwareBuffer* ahb_allocate(const AHardwareBuffer_Desc& desc);
 
+// Import an external dma-buf (a video decoder's DRM_PRIME frame) as an AHardwareBuffer, ZERO-COPY
+// (dup fd + record layout, no pixel copy — see HardwareBuffer::import). refcount 1; nullptr on failure.
+// The engine imports frame() directly, so a decoded frame reaches the compositor with no copy.
+AHardwareBuffer* ahb_import(const DmabufFrame& frame);
+
 void ahb_acquire(AHardwareBuffer* ahb);
 void ahb_release(AHardwareBuffer* ahb);
 void ahb_describe(const AHardwareBuffer* ahb, AHardwareBuffer_Desc* out);

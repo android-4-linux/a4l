@@ -51,6 +51,14 @@ class BufferQueue {
   // the ImageReader JNI maps to onImageAvailable). No-op if the buffer isn't one of ours / not dequeued.
   void queue(AHardwareBuffer* buffer);
 
+  // Producer (ZERO-COPY decode path): queue an EXTERNALLY-imported buffer (a hardware decoder's
+  // DRM_PRIME frame wrapped via ahb_import) as READY, transferring the caller's ref to the queue.
+  // Unlike a pooled buffer, it is not reused: once acquired-and-released (or superseded by a newer
+  // frame) the queue drops its ref and removes the slot. Fires the frame-available callback. This is
+  // how MediaCodec setVideoSurface feeds decoded frames — the decoder owns the buffer pool, acl just
+  // routes each frame's dma-buf to the consumer with no copy.
+  void queue_imported(AHardwareBuffer* imported);
+
   // Consumer: take the most-recently-queued buffer (ImageReader.acquireLatestImage) — older READY
   // buffers are recycled to FREE. Returns nullptr if nothing is ready. The buffer is ACQUIRED until
   // release()d.
@@ -68,7 +76,8 @@ class BufferQueue {
   struct Slot {
     AHardwareBuffer* buf = nullptr;  // owned (refcount held by the queue)
     State state = State::Free;
-    std::uint64_t seq = 0;  // queue order, to find the latest READY
+    std::uint64_t seq = 0;   // queue order, to find the latest READY
+    bool imported = false;   // queue_imported: a transient decoder buffer, dropped (not pooled) after use
   };
 
   std::mutex mtx_;

@@ -55,6 +55,14 @@ class HardwareBuffer {
                                                    HbFormat format, std::uint64_t usage,
                                                    std::string* error);
 
+  // Import an EXTERNAL dma-buf (a hardware video decoder's output — VAAPI/V4L2-M2M via FFmpeg
+  // av_hwframe_map to DRM_PRIME — or any producer's dma-buf) as a HardwareBuffer, ZERO-COPY: it dups
+  // the fd (so this owns its own handle; the caller keeps theirs) and records the plane layout, with
+  // NO gbm allocation and NO pixel copy. frame() then returns `src` (with the dup'd fd) so the
+  // engine's eglCreateImageKHR imports the decoder's memory directly. Not CPU-mappable (lock() fails
+  // — imported buffers are GPU-produced/GPU-sampled). Returns nullptr + *error on a bad fd / dup fail.
+  static std::unique_ptr<HardwareBuffer> import(const DmabufFrame& src, std::string* error);
+
   ~HardwareBuffer();
   HardwareBuffer(const HardwareBuffer&) = delete;
   HardwareBuffer& operator=(const HardwareBuffer&) = delete;

@@ -49,6 +49,13 @@ AHardwareBuffer* ahb_allocate(const AHardwareBuffer_Desc& desc) {
   return ahb_create(std::move(hb));
 }
 
+AHardwareBuffer* ahb_import(const DmabufFrame& frame) {
+  std::string err;
+  auto hb = HardwareBuffer::import(frame, &err);
+  if (!hb) { log::w(kTag, "ahb_import {}x{} failed: {}", frame.width, frame.height, err); return nullptr; }
+  return ahb_create(std::move(hb));
+}
+
 void ahb_acquire(AHardwareBuffer* ahb) {
   if (ahb == nullptr) return;
   const int n = box_of(ahb)->refs.fetch_add(1, std::memory_order_relaxed) + 1;
