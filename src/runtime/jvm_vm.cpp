@@ -3703,6 +3703,12 @@ class ArtVm final : public JniVm {
     nhooks.egl_image_from_ahb = reinterpret_cast<void* (*)(void*, const void*, const int*, void*)>(
         &acl::gfx::egl_image_from_ahb);
     acl::ndk::set_native_gl_hooks(nhooks);
+    // Back libandroid's AHardwareBuffer_{describe,acquire,release} with gfx::ahb_*. The typed
+    // signatures are ABI-compatible with the void*-typed op slots (AHardwareBuffer*/Desc* are pointers).
+    acl::ndk::set_ahb_ops(
+        reinterpret_cast<void (*)(const void*, void*)>(&acl::gfx::ahb_describe),
+        reinterpret_cast<void (*)(void*)>(&acl::gfx::ahb_acquire),
+        reinterpret_cast<void (*)(void*)>(&acl::gfx::ahb_release));
 #endif
   }
 

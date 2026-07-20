@@ -1808,6 +1808,29 @@ void acl_asset_free_tramp(void* user, void* buf) {
   g_asset_free_cb(user, buf);
   ndk_set_fs(bionic_fs);
 }
+
+// AHardwareBuffer describe/acquire/release backing (Flutter external textures). The host ops are
+// gfx::ahb_* (set by the runtime via set_ahb_ops, so libacl_ndk keeps no gfx link dep). describe (a
+// struct read) and acquire (an atomic) are TLS-free, so their trampolines call the host op directly;
+// release frees (glibc malloc), so it restores glibc %fs first, like acl_asset_free_tramp.
+void (*g_ahb_describe_fn)(const void*, void*) = nullptr;
+void (*g_ahb_acquire_fn)(void*) = nullptr;
+void (*g_ahb_release_fn)(void*) = nullptr;
+void acl_ahb_describe_tramp(const void* ahb, void* desc) {
+  if (g_ahb_describe_fn != nullptr) g_ahb_describe_fn(ahb, desc);
+}
+void acl_ahb_acquire_tramp(void* ahb) {
+  if (g_ahb_acquire_fn != nullptr) g_ahb_acquire_fn(ahb);
+}
+void acl_ahb_release_tramp(void* ahb) {
+  if (g_ahb_release_fn == nullptr) return;
+  const std::uintptr_t bionic_fs = ndk_get_fs();
+  const std::uintptr_t glibc_fs = ensure_paired_glibc_fs();
+  if (glibc_fs == 0) return;  // pool exhausted: leak rather than corrupt
+  ndk_set_fs(glibc_fs);
+  g_ahb_release_fn(ahb);
+  ndk_set_fs(bionic_fs);
+}
 }  // namespace
 
 void set_asset_provider(int (*open_cb)(void*, const char*, void**, long*),
@@ -1815,6 +1838,13 @@ void set_asset_provider(int (*open_cb)(void*, const char*, void**, long*),
   g_asset_open_cb = open_cb;
   g_asset_free_cb = free_cb;
   g_asset_provider_user = user;
+}
+
+void set_ahb_ops(void (*describe)(const void*, void*), void (*acquire)(void*),
+                 void (*release)(void*)) {
+  g_ahb_describe_fn = describe;
+  g_ahb_acquire_fn = acquire;
+  g_ahb_release_fn = release;
 }
 
 // ── ALooper <-> Java Looper bridge ────────────────────────────────────────────────────────────
@@ -1907,6 +1937,14 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
           if (void** f = static_cast<void**>(symbol(la, "acl_asset_free_hook")))
             *f = reinterpret_cast<void*>(&acl_asset_free_tramp);
           if (void** u = static_cast<void**>(symbol(la, "acl_asset_user"))) *u = g_asset_provider_user;
+          // AHardwareBuffer describe/acquire/release hooks -> the %fs-aware trampolines above (they
+          // self-guard on g_ahb_*_fn, which the runtime sets to gfx::ahb_* via set_ahb_ops).
+          if (void** d = static_cast<void**>(symbol(la, "acl_ahb_describe_hook")))
+            *d = reinterpret_cast<void*>(&acl_ahb_describe_tramp);
+          if (void** a = static_cast<void**>(symbol(la, "acl_ahb_acquire_hook")))
+            *a = reinterpret_cast<void*>(&acl_ahb_acquire_tramp);
+          if (void** r = static_cast<void**>(symbol(la, "acl_ahb_release_hook")))
+            *r = reinterpret_cast<void*>(&acl_ahb_release_tramp);
         }
       }
     }

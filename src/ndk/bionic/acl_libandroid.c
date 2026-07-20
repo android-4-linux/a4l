@@ -33,6 +33,9 @@
 #include <unistd.h>
 
 #include <android/log.h>
+#include <android/hardware_buffer.h>       // AHardwareBuffer + AHardwareBuffer_Desc (NDK contract)
+#include <android/hardware_buffer_jni.h>   // AHardwareBuffer_{from,to}HardwareBuffer
+#include <jni.h>     // AHardwareBuffer_fromHardwareBuffer reads the Java HardwareBuffer's nativePtr
 #include <stdio.h>   // snprintf
 #include <string.h>  // strlen
 #include <sys/uio.h>  // writev
@@ -586,4 +589,58 @@ ACL_EXPORT void acl_seed_dns_resolv(void) {
   __android_log_print(rc == 0 ? ANDROID_LOG_INFO : ANDROID_LOG_WARN, LOG_TAG,
                       "seeded %u DNS nameserver(s) for default net (rc=%d, first=%s)",
                       n, rc, n > 0 ? servers[0] : "(none)");
+}
+
+// --- AHardwareBuffer (NDK libandroid) -----------------------------------------------------------
+// The Flutter engine dlopen("libandroid.so") + dlsym's these to import a Java HardwareBuffer as a
+// texture (see [[flutter-texture-bridge]] M3b). The Java android.hardware.HardwareBuffer's nativePtr
+// (aclNativePtr()) IS an acl gfx AHardwareBuffer*, so fromHardwareBuffer just reads it back — pure
+// JNI, no host bridge. describe/acquire/release operate on that host object, so they call through
+// hooks the loader installs (bionic_runtime.cpp): describe/acquire are TLS-free; release frees
+// (glibc malloc) and its trampoline restores glibc %fs first. Provenance: NDK
+// android/hardware_buffer.h + hardware_buffer_jni.h contract. No GPL-3.0 sources.
+ACL_EXPORT void* acl_ahb_describe_hook = 0;  // void (*)(const void* ahb, void* desc)
+ACL_EXPORT void* acl_ahb_acquire_hook = 0;   // void (*)(void* ahb)
+ACL_EXPORT void* acl_ahb_release_hook = 0;   // void (*)(void* ahb)
+
+AHardwareBuffer* AHardwareBuffer_fromHardwareBuffer(JNIEnv* env, jobject hb) {
+  if (env == NULL || hb == NULL) return NULL;
+  jclass c = (*env)->GetObjectClass(env, hb);
+  if (c == NULL) { (*env)->ExceptionClear(env); return NULL; }
+  jmethodID m = (*env)->GetMethodID(env, c, "aclNativePtr", "()J");
+  (*env)->DeleteLocalRef(env, c);
+  if (m == NULL) { (*env)->ExceptionClear(env); return NULL; }
+  jlong ptr = (*env)->CallLongMethod(env, hb, m);
+  return (AHardwareBuffer*)(intptr_t)ptr;
+}
+
+// Not on the consumer/texture path (acl producers allocate via android.hardware.HardwareBuffer.create,
+// which is JNI-backed). Exported so the engine's dlsym succeeds; returns null.
+jobject AHardwareBuffer_toHardwareBuffer(JNIEnv* env, AHardwareBuffer* ahb) {
+  (void)env; (void)ahb; return NULL;
+}
+
+void AHardwareBuffer_describe(const AHardwareBuffer* ahb, AHardwareBuffer_Desc* desc) {
+  if (acl_ahb_describe_hook != 0 && ahb != NULL && desc != NULL)
+    ((void (*)(const void*, void*))acl_ahb_describe_hook)(ahb, desc);
+}
+void AHardwareBuffer_acquire(AHardwareBuffer* ahb) {
+  if (acl_ahb_acquire_hook != 0 && ahb != NULL) ((void (*)(void*))acl_ahb_acquire_hook)(ahb);
+}
+void AHardwareBuffer_release(AHardwareBuffer* ahb) {
+  if (acl_ahb_release_hook != 0 && ahb != NULL) ((void (*)(void*))acl_ahb_release_hook)(ahb);
+}
+int AHardwareBuffer_isSupported(const AHardwareBuffer_Desc* desc) { (void)desc; return 1; }
+
+// Producer-side NDK allocation is not used by acl (producers go through the JNI HardwareBuffer.create
+// path); exported so the engine's dlsym resolves. Returns an error (non-zero).
+int AHardwareBuffer_allocate(const AHardwareBuffer_Desc* desc, AHardwareBuffer** out) {
+  (void)desc; if (out != NULL) *out = NULL; return -1;
+}
+int AHardwareBuffer_lock(AHardwareBuffer* ahb, uint64_t usage, int32_t fence, const ARect* rect,
+                         void** out) {
+  (void)ahb; (void)usage; (void)fence; (void)rect; if (out != NULL) *out = NULL; return -1;
+}
+int AHardwareBuffer_unlock(AHardwareBuffer* ahb, int32_t* fence) {
+  (void)ahb; if (fence != NULL) *fence = -1; return 0;
 }

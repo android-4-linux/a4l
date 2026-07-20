@@ -110,6 +110,10 @@ BIONIC_INC=(
   -I"$AOSP/bionic/libc/kernel/uapi/asm-x86"
   -I"$AOSP/bionic/libc/kernel/android/uapi"
   -I"$AOSP/system/logging/liblog/include"
+  # LAST (lowest priority): the NDK sysroot supplies the framework headers bionic's libc does not —
+  # android/hardware_buffer.h + hardware_buffer_jni.h and jni.h for libandroid's AHardwareBuffer C
+  # ABI (Flutter external textures). Placed after the bionic includes so libc headers still win.
+  -I"$AOSP/out/soong/ndk/sysroot/usr/include"
 )
 "$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls \
   -fvisibility=hidden -O2 -Wl,-soname,libandroid.so \

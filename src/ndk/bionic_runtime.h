@@ -46,6 +46,13 @@ void set_native_gl_hooks(const NativeGlHooks& hooks);
 // filling *out_buf/*out_len on hit or 0 on miss; `free_cb` releases such a buffer. Both run acl-side
 // (glibc) code — the runtime restores the caller's glibc %fs around them. Called once by the runtime
 // after the app APK is known, before the app's native code opens any asset.
+// Install the host AHardwareBuffer describe/acquire/release ops (gfx::ahb_*). The loader points
+// libandroid's AHardwareBuffer_{describe,acquire,release} at %fs-aware trampolines that call these,
+// so libacl_ndk keeps no gfx link dependency (set from the runtime, which links gfx). release frees,
+// so its trampoline restores glibc %fs; describe/acquire are TLS-free.
+void set_ahb_ops(void (*describe)(const void* ahb, void* desc), void (*acquire)(void* ahb),
+                 void (*release)(void* ahb));
+
 void set_asset_provider(int (*open_cb)(void* user, const char* name, void** out_buf, long* out_len),
                         void (*free_cb)(void* user, void* buf), void* user);
 
