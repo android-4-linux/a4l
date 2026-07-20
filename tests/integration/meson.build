@@ -89,6 +89,19 @@ if py3.found()
   )
 endif
 
+# Zero-copy hardware video-decode path ([[flutter-texture-bridge]] M5): FFmpeg VAAPI decode ->
+# DRM_PRIME dma-buf -> ahb_import (no copy) -> multi-plane NV12 EGLImage -> YUV->RGB sample. Generates
+# a solid-color clip and asserts the probe recovers the color. SKIPs without ffmpeg/VAAPI/GL.
+if py3.found() and have_gl and have_ffmpeg
+  test(
+    'video-decode-zerocopy',
+    py3,
+    args : [files('run_video_decode_test.py'), video_decode_probe],
+    depends : [video_decode_probe],
+    timeout : 120,
+  )
+endif
+
 if py3.found() and have_jni
   hello_apk = custom_target(
     'hello-apk',
