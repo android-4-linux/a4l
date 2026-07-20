@@ -12,7 +12,6 @@
 #include <drm_fourcc.h>
 
 #include <cstdio>
-#include <cstring>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -36,10 +35,12 @@ struct Ff {
   FF_FN(av_buffer_ref); FF_FN(av_buffer_unref);
   FF_FN(avformat_open_input); FF_FN(avformat_find_stream_info); FF_FN(avformat_close_input);
   FF_FN(av_find_best_stream); FF_FN(av_read_frame);
-  FF_FN(avcodec_find_decoder); FF_FN(avcodec_alloc_context3); FF_FN(avcodec_parameters_to_context);
+  FF_FN(avcodec_find_decoder); FF_FN(avcodec_find_decoder_by_name);
+  FF_FN(avcodec_alloc_context3); FF_FN(avcodec_parameters_to_context);
   FF_FN(avcodec_open2); FF_FN(avcodec_free_context); FF_FN(avcodec_get_hw_config);
   FF_FN(avcodec_send_packet); FF_FN(avcodec_receive_frame);
   FF_FN(av_hwdevice_ctx_create); FF_FN(av_hwframe_map);
+  FF_FN(av_hwdevice_find_type_by_name); FF_FN(av_hwdevice_get_type_name);
 #undef FF_FN
   bool ok = false;
 };
@@ -73,10 +74,12 @@ bool load_ffmpeg() {
   FF_BIND(av_buffer_ref); FF_BIND(av_buffer_unref);
   FF_BIND(avformat_open_input); FF_BIND(avformat_find_stream_info); FF_BIND(avformat_close_input);
   FF_BIND(av_find_best_stream); FF_BIND(av_read_frame);
-  FF_BIND(avcodec_find_decoder); FF_BIND(avcodec_alloc_context3); FF_BIND(avcodec_parameters_to_context);
+  FF_BIND(avcodec_find_decoder); FF_BIND(avcodec_find_decoder_by_name);
+  FF_BIND(avcodec_alloc_context3); FF_BIND(avcodec_parameters_to_context);
   FF_BIND(avcodec_open2); FF_BIND(avcodec_free_context); FF_BIND(avcodec_get_hw_config);
   FF_BIND(avcodec_send_packet); FF_BIND(avcodec_receive_frame);
   FF_BIND(av_hwdevice_ctx_create); FF_BIND(av_hwframe_map);
+  FF_BIND(av_hwdevice_find_type_by_name); FF_BIND(av_hwdevice_get_type_name);
 #undef FF_BIND
   g_ff.ok = all;
   log::i(kTag, "FFmpeg video decode {}", all ? "ready (VAAPI, RTLD_LOCAL)" : "unavailable");
@@ -132,31 +135,57 @@ std::unique_ptr<VideoDecoder> VideoDecoder::open(const std::string& path, std::s
   d->stream_index = g_ff.av_find_best_stream(d->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
   if (d->stream_index < 0 || codec == nullptr) return fail("no video stream");
 
-  // Find the VAAPI hw config for this codec (the hw pixfmt to negotiate in get_format).
+  // Backend selection — the zero-copy DRM_PRIME output + import is IDENTICAL across all; only the
+  // device/driver differs. ACL_VIDEO_DECODER forces a named decoder (e.g. h264_v4l2m2m / h264_rkmpp on
+  // ARM/automotive boards — the V4L2 M2M vendor decoders, which use the M2M hardware and output
+  // DRM_PRIME directly, needing no hwdevice). Otherwise the default decoder + a HW device: VAAPI on
+  // x86 desktop, or DRM (V4L2-request stateless — RK3588 rkvdec etc.) on ARM.
+  if (const char* named = std::getenv("ACL_VIDEO_DECODER")) {
+    if (const AVCodec* nc = g_ff.avcodec_find_decoder_by_name(named)) codec = nc;
+    else log::w(kTag, "ACL_VIDEO_DECODER='{}' not found; using default {}", named, codec->name);
+  }
+
+  // HW device preference: ACL_HWDEC_DEVICE overrides (a device-type name: "vaapi"/"drm"/...); default
+  // is VAAPI then DRM. A named vendor M2M decoder may match none (it self-produces DRM_PRIME).
   enum AVPixelFormat hw_pixfmt = AV_PIX_FMT_NONE;
-  for (int i = 0;; ++i) {
-    const AVCodecHWConfig* cfg = g_ff.avcodec_get_hw_config(codec, i);
-    if (cfg == nullptr) break;
-    if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && cfg->device_type == AV_HWDEVICE_TYPE_VAAPI) {
-      hw_pixfmt = cfg->pix_fmt;
-      break;
+  enum AVHWDeviceType hw_type = AV_HWDEVICE_TYPE_NONE;
+  enum AVHWDeviceType prefs[2] = {AV_HWDEVICE_TYPE_VAAPI, AV_HWDEVICE_TYPE_DRM};
+  int nprefs = 2;
+  if (const char* dev = std::getenv("ACL_HWDEC_DEVICE")) { prefs[0] = g_ff.av_hwdevice_find_type_by_name(dev); nprefs = 1; }
+  for (int pi = 0; pi < nprefs && hw_type == AV_HWDEVICE_TYPE_NONE; ++pi) {
+    if (prefs[pi] == AV_HWDEVICE_TYPE_NONE) continue;
+    for (int i = 0;; ++i) {
+      const AVCodecHWConfig* cfg = g_ff.avcodec_get_hw_config(codec, i);
+      if (cfg == nullptr) break;
+      if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && cfg->device_type == prefs[pi]) {
+        hw_pixfmt = cfg->pix_fmt;
+        hw_type = prefs[pi];
+        break;
+      }
     }
   }
-  if (hw_pixfmt == AV_PIX_FMT_NONE) return fail("codec has no VAAPI hwaccel");
 
   d->codec = g_ff.avcodec_alloc_context3(codec);
   if (d->codec == nullptr) return fail("alloc codec context failed");
   if (g_ff.avcodec_parameters_to_context(d->codec, d->fmt->streams[d->stream_index]->codecpar) < 0)
     return fail("parameters_to_context failed");
 
-  // VAAPI device (renderD128 unless ACL_DRM_RENDER_NODE overrides). Zero-copy decode target.
-  const char* node = std::getenv("ACL_DRM_RENDER_NODE");
-  if (g_ff.av_hwdevice_ctx_create(&d->hw_device, AV_HWDEVICE_TYPE_VAAPI,
-                                  (node && *node) ? node : nullptr, nullptr, 0) < 0)
-    return fail("av_hwdevice_ctx_create(VAAPI) failed");
-  d->codec->hw_device_ctx = g_ff.av_buffer_ref(d->hw_device);
-  d->codec->opaque = reinterpret_cast<void*>(static_cast<std::intptr_t>(hw_pixfmt));
-  d->codec->get_format = get_hw_format;
+  if (hw_type != AV_HWDEVICE_TYPE_NONE) {
+    // hwaccel path (VAAPI / DRM-V4L2-request): a HW device + get_format; the decoded surface is mapped
+    // to DRM_PRIME in next_frame. renderD128 unless ACL_DRM_RENDER_NODE overrides.
+    const char* node = std::getenv("ACL_DRM_RENDER_NODE");
+    if (g_ff.av_hwdevice_ctx_create(&d->hw_device, hw_type, (node && *node) ? node : nullptr, nullptr, 0) < 0)
+      return fail("av_hwdevice_ctx_create failed");
+    d->codec->hw_device_ctx = g_ff.av_buffer_ref(d->hw_device);
+    d->codec->opaque = reinterpret_cast<void*>(static_cast<std::intptr_t>(hw_pixfmt));
+    d->codec->get_format = get_hw_format;
+    log::i(kTag, "hw decode via {} ({})", g_ff.av_hwdevice_get_type_name(hw_type), codec->name);
+  } else {
+    // No hwaccel device: a vendor M2M decoder (rkmpp/v4l2m2m) that outputs DRM_PRIME itself; next_frame
+    // uses that frame directly. If it instead yields system-memory NV12, ahb_import fails LOUDLY (no
+    // silent CPU copy) — the zero-copy contract is preserved.
+    log::i(kTag, "decode via {} (no hwdevice; expecting DRM_PRIME output)", codec->name);
+  }
 
   if (g_ff.avcodec_open2(d->codec, codec, nullptr) < 0) return fail("avcodec_open2 failed");
   d->width = static_cast<std::uint32_t>(d->codec->width);
@@ -198,11 +227,18 @@ int VideoDecoder::next_frame(gfx::DmabufFrame* out, std::string* error) {
     }
   }
 
-  // Map the VAAPI surface to a DRM_PRIME dma-buf — DIRECT = zero-copy (no download to system memory).
-  d->drm_frame->format = AV_PIX_FMT_DRM_PRIME;
-  if (g_ff.av_hwframe_map(d->drm_frame, d->hw_frame, AV_HWFRAME_MAP_DIRECT | AV_HWFRAME_MAP_READ) < 0)
-    return err("av_hwframe_map(DRM_PRIME) failed");
-  const auto* desc = reinterpret_cast<const AVDRMFrameDescriptor*>(d->drm_frame->data[0]);
+  // Obtain a DRM_PRIME view of the decoded frame. A hwaccel surface (VAAPI/DRM-V4L2-request) is mapped
+  // DIRECT (zero-copy export, no download); a vendor M2M decoder (rkmpp/v4l2m2m) already produced a
+  // DRM_PRIME frame, so use it as-is. Either way the fd(s) live in an AVDRMFrameDescriptor.
+  const AVDRMFrameDescriptor* desc = nullptr;
+  if (d->hw_frame->format == AV_PIX_FMT_DRM_PRIME) {
+    desc = reinterpret_cast<const AVDRMFrameDescriptor*>(d->hw_frame->data[0]);
+  } else {
+    d->drm_frame->format = AV_PIX_FMT_DRM_PRIME;
+    if (g_ff.av_hwframe_map(d->drm_frame, d->hw_frame, AV_HWFRAME_MAP_DIRECT | AV_HWFRAME_MAP_READ) < 0)
+      return err("av_hwframe_map(DRM_PRIME) failed (frame is not a hw surface? check the decoder outputs DRM_PRIME)");
+    desc = reinterpret_cast<const AVDRMFrameDescriptor*>(d->drm_frame->data[0]);
+  }
   if (desc == nullptr || desc->nb_objects < 1 || desc->nb_layers < 1) return err("empty DRM descriptor");
 
   // Single-object layout (the common VAAPI/V4L2-M2M case): all planes share objects[0].fd at offsets.
