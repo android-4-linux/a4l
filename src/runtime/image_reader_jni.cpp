@@ -14,6 +14,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <memory>
 #include <thread>
@@ -41,9 +42,10 @@ struct ReaderCtx {
   std::unique_ptr<gfx::BufferQueue> queue;
   JavaVM* vm = nullptr;
   jobject weak_self = nullptr;  // global ref to WeakReference<ImageReader>
-  bool self_produce = false;    // ACL_IMAGEREADER_TEST_PRODUCER: make a frame inline on acquire
+  bool self_produce = false;    // ACL_IMAGEREADER_TEST_PRODUCER: run a producer thread of test frames
   int frame = 0;
-  jlong last_produce_ns = 0;    // rate-limit inline production so acquireLatestImage's drain ends
+  std::thread producer;         // self-produce: queues an animated frame every ~30ms
+  std::atomic<bool> stop{false};
 };
 
 // A recognizable animated ARGB color from a frame counter (~3s R/G/B cycle).
@@ -106,27 +108,34 @@ void JNICALL IR_nativeInit(JNIEnv* env, jobject thiz, jobject weakSelf, jint w, 
   log::i(kTag, "nativeInit {}x{} maxImages={} hbFormat={} self_produce={}", w, h, maxImgs, hbFormat,
          ctx->self_produce);
 
-  // One-shot KICK: after the ImageReaderSurfaceProducer sets its OnImageAvailableListener (which
-  // happens just after nativeGetSurface returns), produce the first frame + queue it. That fires
-  // onImageAvailable, the engine acquires, and nativeImageSetup's own produce+queue then self-
-  // sustains the animation. Only this first post runs off-thread (safe: it just posts to the
-  // listener's handler); every acquire afterward is on the engine's threads.
+  // Test PRODUCER THREAD: once ImageReaderSurfaceProducer installs its OnImageAvailableListener (just
+  // after nativeGetSurface returns), keep dequeuing a free buffer, filling it with the next animated
+  // hue, and queuing it (~30fps). Each queue() fires on_frame_available -> postEventFromNative -> the
+  // listener's handler -> the engine's acquireLatestImage/composite (on its own threads). Producing
+  // off-thread here (only dequeue/fill/queue + a post) decouples us from the consumer's cadence, so
+  // the frame genuinely animates. dequeue() returns null while all buffers are outstanding — skip and
+  // retry (the consumer's acquire_latest recycles them). Joined in nativeClose.
   if (ctx->self_produce) {
-    std::thread([c] {
-      timespec ts{0, 300 * 1000 * 1000};
-      nanosleep(&ts, nullptr);
-      if (::AHardwareBuffer* p = c->queue->dequeue()) {
-        gfx::ahb_fill_color(p, hue(c->frame++));
-        c->last_produce_ns = now_ns();
-        c->queue->queue(p);  // -> on_frame_available -> postEventFromNative -> engine acquires
+    ctx->producer = std::thread([c] {
+      timespec warm{0, 300 * 1000 * 1000};
+      nanosleep(&warm, nullptr);  // let the listener install first
+      while (!c->stop.load(std::memory_order_acquire)) {
+        if (::AHardwareBuffer* p = c->queue->dequeue()) {
+          gfx::ahb_fill_color(p, hue(c->frame++));
+          c->queue->queue(p);  // -> on_frame_available -> postEventFromNative -> engine acquires
+        }
+        timespec tick{0, 30 * 1000 * 1000};
+        nanosleep(&tick, nullptr);
       }
-    }).detach();
+    });
   }
 }
 
 void JNICALL IR_nativeClose(JNIEnv* env, jobject thiz) {
   ReaderCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr) return;
+  ctx->stop.store(true, std::memory_order_release);
+  if (ctx->producer.joinable()) ctx->producer.join();  // stop producing before tearing down the queue
   if (ctx->weak_self != nullptr) env->DeleteGlobalRef(ctx->weak_self);
   delete ctx;  // BufferQueue destructor releases the pooled buffers
   env->SetLongField(thiz, g_ctx_fid, 0);
@@ -137,23 +146,9 @@ void JNICALL IR_nativeClose(JNIEnv* env, jobject thiz) {
 jint JNICALL IR_nativeImageSetup(JNIEnv* env, jobject thiz, jobject image, jboolean /*legacy*/) {
   ReaderCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr) return 1;
+  // Bind the newest ready buffer (the producer thread queues them; see nativeInit). acquire_latest
+  // recycles older ready buffers so the drain loop terminates once none are newer. NO_BUFS -> 1.
   ::AHardwareBuffer* b = ctx->queue->acquire_latest();
-  // Opt-in test producer, INLINE on the engine's thread (no cross-thread attach). RATE-LIMITED to
-  // ~30fps: acquireLatestImage drains the queue in a tight loop, so producing every call would spin
-  // forever. Once per ~33ms window we produce + queue the NEXT frame; queue() fires onImageAvailable,
-  // which SELF-SUSTAINS the engine's acquire/composite loop (and animates). The drain's rapid
-  // follow-up calls (<33ms) skip production -> NO_BUFS -> the loop ends.
-  if (ctx->self_produce) {
-    const jlong now = now_ns();
-    if (now - ctx->last_produce_ns >= 33000000LL) {
-      if (::AHardwareBuffer* p = ctx->queue->dequeue()) {
-        gfx::ahb_fill_color(p, hue(ctx->frame++));
-        ctx->queue->queue(p);
-        ctx->last_produce_ns = now;
-        if (b == nullptr) b = ctx->queue->acquire_latest();  // first frame: use what we just made
-      }
-    }
-  }
   if (b == nullptr) return 1;
   env->SetLongField(image, g_img_buf_fid, reinterpret_cast<jlong>(b));
   env->SetLongField(image, g_img_ts_fid, now_ns());

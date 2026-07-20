@@ -607,11 +607,18 @@ void install_gl_forwarders(BionicRuntime* rt) {
   const int npub = g_gl_donor_published.load(std::memory_order_acquire);
   if (npub == 0) { log::w(kTag, "GL forward: no donor %fs"); return; }
 
+  // Extension entry points (glEGLImageTargetTexture2DOES, egl*ImageKHR, …) are NOT exported as direct
+  // symbols by Mesa's libGLESv2/libEGL — they resolve only via eglGetProcAddress. dlsym returns null
+  // for them, leaving a null bridge slot that a forwarder would call into (SIGSEGV). Fall back to
+  // Mesa's eglGetProcAddress so those slots get the real dispatch pointer.
+  auto mesa_gpa = reinterpret_cast<void* (*)(const char*)>(dlsym(megl, "eglGetProcAddress"));
   auto fill = [&](GlBridge& b, void* mh, const char* const* syms, int n) {
     b.donor_fs = 0;  // unused: forwarders resolve a per-thread donor via acl_gl_pick_donor
     int missing = 0;
     for (int i = 0; i < n; ++i) {
       b.fns[i] = dlsym(mh, syms[i]);
+      if (b.fns[i] == nullptr && mesa_gpa != nullptr)
+        b.fns[i] = reinterpret_cast<void*>(mesa_gpa(syms[i]));  // extension: resolve via eglGetProcAddress
       if (b.fns[i] == nullptr) ++missing;
     }
     return missing;
@@ -641,10 +648,13 @@ void install_gl_forwarders(BionicRuntime* rt) {
   // returns so the app can call them directly (see above). Keep Mesa's real one for it to delegate to.
   g_mesa_egl_gpa = reinterpret_cast<void* (*)(const char*)>(dlsym(megl, "eglGetProcAddress"));
   for (int i = 0; i < 20; ++i) {
-    if (std::strcmp(kEglForwardSyms[i], "eglGetProcAddress") == 0) {
+    if (std::strcmp(kEglForwardSyms[i], "eglGetProcAddress") == 0)
       egl_b.fns[i] = reinterpret_cast<void*>(&acl_egl_get_proc_address);
-      break;
-    }
+    // The engine calls eglCreateImageKHR DIRECTLY (linked, not via eglGetProcAddress) to import an
+    // AHardwareBuffer as EGL_NATIVE_BUFFER_ANDROID, which host Mesa rejects. Route the direct slot
+    // through the same M2 shim (translates to EGL_LINUX_DMA_BUF_EXT); it forwards other targets to Mesa.
+    else if (std::strcmp(kEglForwardSyms[i], "eglCreateImageKHR") == 0)
+      egl_b.fns[i] = reinterpret_cast<void*>(&acl_egl_create_image_khr);
   }
 
   // Phase 3: if the runtime supplied GL-session hooks, back the app's native EGL with acl's device —

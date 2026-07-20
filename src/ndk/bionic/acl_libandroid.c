@@ -611,7 +611,7 @@ ACL_EXPORT void* acl_ahb_describe_hook = 0;  // void (*)(const void* ahb, void* 
 ACL_EXPORT void* acl_ahb_acquire_hook = 0;   // void (*)(void* ahb)
 ACL_EXPORT void* acl_ahb_release_hook = 0;   // void (*)(void* ahb)
 
-AHardwareBuffer* AHardwareBuffer_fromHardwareBuffer(JNIEnv* env, jobject hb) {
+ACL_EXPORT AHardwareBuffer* AHardwareBuffer_fromHardwareBuffer(JNIEnv* env, jobject hb) {
   if (env == NULL || hb == NULL) return NULL;
   // The REAL android.hardware.HardwareBuffer stashes the native AHardwareBuffer* in its private
   // `long mNativeObject` field (AOSP: "do not rename, this field is used by native code"). acl's
@@ -627,31 +627,37 @@ AHardwareBuffer* AHardwareBuffer_fromHardwareBuffer(JNIEnv* env, jobject hb) {
 
 // Not on the consumer/texture path (acl producers allocate via android.hardware.HardwareBuffer.create,
 // which is JNI-backed). Exported so the engine's dlsym succeeds; returns null.
-jobject AHardwareBuffer_toHardwareBuffer(JNIEnv* env, AHardwareBuffer* ahb) {
+ACL_EXPORT jobject AHardwareBuffer_toHardwareBuffer(JNIEnv* env, AHardwareBuffer* ahb) {
   (void)env; (void)ahb; return NULL;
 }
 
-void AHardwareBuffer_describe(const AHardwareBuffer* ahb, AHardwareBuffer_Desc* desc) {
+ACL_EXPORT void AHardwareBuffer_describe(const AHardwareBuffer* ahb, AHardwareBuffer_Desc* desc) {
   if (acl_ahb_describe_hook != 0 && ahb != NULL && desc != NULL)
     ((void (*)(const void*, void*))acl_ahb_describe_hook)(ahb, desc);
 }
-void AHardwareBuffer_acquire(AHardwareBuffer* ahb) {
+ACL_EXPORT void AHardwareBuffer_acquire(AHardwareBuffer* ahb) {
   if (acl_ahb_acquire_hook != 0 && ahb != NULL) ((void (*)(void*))acl_ahb_acquire_hook)(ahb);
 }
-void AHardwareBuffer_release(AHardwareBuffer* ahb) {
+ACL_EXPORT void AHardwareBuffer_release(AHardwareBuffer* ahb) {
   if (acl_ahb_release_hook != 0 && ahb != NULL) ((void (*)(void*))acl_ahb_release_hook)(ahb);
 }
-int AHardwareBuffer_isSupported(const AHardwareBuffer_Desc* desc) { (void)desc; return 1; }
+ACL_EXPORT int AHardwareBuffer_isSupported(const AHardwareBuffer_Desc* desc) { (void)desc; return 1; }
+// The engine keys its EGLImage LRU cache on this (impeller GetSystemUniqueID). The AHardwareBuffer*
+// is already a stable per-buffer id here. Returns 0 on success (NDK contract).
+ACL_EXPORT int AHardwareBuffer_getId(const AHardwareBuffer* ahb, uint64_t* out_id) {
+  if (out_id != NULL) *out_id = (uint64_t)(uintptr_t)ahb;
+  return 0;
+}
 
 // Producer-side NDK allocation is not used by acl (producers go through the JNI HardwareBuffer.create
 // path); exported so the engine's dlsym resolves. Returns an error (non-zero).
-int AHardwareBuffer_allocate(const AHardwareBuffer_Desc* desc, AHardwareBuffer** out) {
+ACL_EXPORT int AHardwareBuffer_allocate(const AHardwareBuffer_Desc* desc, AHardwareBuffer** out) {
   (void)desc; if (out != NULL) *out = NULL; return -1;
 }
-int AHardwareBuffer_lock(AHardwareBuffer* ahb, uint64_t usage, int32_t fence, const ARect* rect,
+ACL_EXPORT int AHardwareBuffer_lock(AHardwareBuffer* ahb, uint64_t usage, int32_t fence, const ARect* rect,
                          void** out) {
   (void)ahb; (void)usage; (void)fence; (void)rect; if (out != NULL) *out = NULL; return -1;
 }
-int AHardwareBuffer_unlock(AHardwareBuffer* ahb, int32_t* fence) {
+ACL_EXPORT int AHardwareBuffer_unlock(AHardwareBuffer* ahb, int32_t* fence) {
   (void)ahb; if (fence != NULL) *fence = -1; return 0;
 }
