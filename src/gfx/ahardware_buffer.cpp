@@ -120,16 +120,36 @@ void* egl_image_from_ahb(void* dpy, const AHardwareBuffer* ahb, const std::int32
       EGL_WIDTH, static_cast<EGLint>(f.width),
       EGL_HEIGHT, static_cast<EGLint>(f.height),
       EGL_LINUX_DRM_FOURCC_EXT, static_cast<EGLint>(f.drm_format),
-      EGL_DMA_BUF_PLANE0_FD_EXT, f.fd,
-      EGL_DMA_BUF_PLANE0_OFFSET_EXT, static_cast<EGLint>(f.planes[0].offset),
-      EGL_DMA_BUF_PLANE0_PITCH_EXT, static_cast<EGLint>(f.planes[0].stride),
   };
-  // Pass the modifier only when it is a real, non-linear tiling (needs the modifiers extension).
-  if (f.modifier != DRM_FORMAT_MOD_INVALID && f.modifier != DRM_FORMAT_MOD_LINEAR) {
-    attrs.push_back(EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT);
-    attrs.push_back(static_cast<EGLint>(f.modifier & 0xffffffffu));
-    attrs.push_back(EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT);
-    attrs.push_back(static_cast<EGLint>(f.modifier >> 32));
+  // Emit per-plane attribs for EVERY plane, not just plane 0: multi-plane YUV (NV12=2, I420=3 — the
+  // hardware-decode output format) must import all planes so Mesa's samplerExternalOES does YUV->RGB
+  // with NO CPU convert (zero copy). Single-plane RGBA is just plane_count==1. All planes share f.fd
+  // (one dma-buf object at distinct offsets — the VAAPI/V4L2-M2M NV12 layout); each carries its own
+  // offset/pitch and the frame's modifier. (Per-plane fds — some multi-object exporters — would need
+  // a DmabufFrame model change; single-object is the common decoder case.)
+  struct PlaneEnums { EGLint fd, offset, pitch, mod_lo, mod_hi; };
+  static const PlaneEnums kPlane[DmabufFrame::kMaxPlanes] = {
+      {EGL_DMA_BUF_PLANE0_FD_EXT, EGL_DMA_BUF_PLANE0_OFFSET_EXT, EGL_DMA_BUF_PLANE0_PITCH_EXT,
+       EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT},
+      {EGL_DMA_BUF_PLANE1_FD_EXT, EGL_DMA_BUF_PLANE1_OFFSET_EXT, EGL_DMA_BUF_PLANE1_PITCH_EXT,
+       EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT},
+      {EGL_DMA_BUF_PLANE2_FD_EXT, EGL_DMA_BUF_PLANE2_OFFSET_EXT, EGL_DMA_BUF_PLANE2_PITCH_EXT,
+       EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT},
+      {EGL_DMA_BUF_PLANE3_FD_EXT, EGL_DMA_BUF_PLANE3_OFFSET_EXT, EGL_DMA_BUF_PLANE3_PITCH_EXT,
+       EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT},
+  };
+  const bool tiled = f.modifier != DRM_FORMAT_MOD_INVALID && f.modifier != DRM_FORMAT_MOD_LINEAR;
+  std::uint32_t np = f.plane_count < 1 ? 1 : (f.plane_count > DmabufFrame::kMaxPlanes
+                                                  ? DmabufFrame::kMaxPlanes
+                                                  : f.plane_count);
+  for (std::uint32_t i = 0; i < np; ++i) {
+    attrs.push_back(kPlane[i].fd);     attrs.push_back(f.fd);
+    attrs.push_back(kPlane[i].offset); attrs.push_back(static_cast<EGLint>(f.planes[i].offset));
+    attrs.push_back(kPlane[i].pitch);  attrs.push_back(static_cast<EGLint>(f.planes[i].stride));
+    if (tiled) {  // modifier per plane (the modifiers extension requires it on each)
+      attrs.push_back(kPlane[i].mod_lo); attrs.push_back(static_cast<EGLint>(f.modifier & 0xffffffffu));
+      attrs.push_back(kPlane[i].mod_hi); attrs.push_back(static_cast<EGLint>(f.modifier >> 32));
+    }
   }
   attrs.push_back(EGL_IMAGE_PRESERVED_KHR);
   attrs.push_back(preserved);
