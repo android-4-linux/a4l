@@ -31,6 +31,7 @@ constexpr const char* kTag = "acl.media.codec";
 
 // MediaCodec constants (MediaCodec.java).
 constexpr jint INFO_TRY_AGAIN_LATER = -1;
+constexpr jint INFO_OUTPUT_FORMAT_CHANGED = -2;
 constexpr jint BUFFER_FLAG_CODEC_CONFIG = 2;
 constexpr jint BUFFER_FLAG_END_OF_STREAM = 4;
 
@@ -40,6 +41,10 @@ jfieldID g_mc_ctx_fid = nullptr;   // MediaCodec.mNativeContext (J) — holds ou
 jmethodID g_bufinfo_set = nullptr; // MediaCodec$BufferInfo.set(int,int,long,int)
 jclass g_integer_cls = nullptr;
 jmethodID g_integer_intvalue = nullptr;
+jmethodID g_integer_valueof = nullptr;   // Integer.valueOf(int)
+jclass g_hashmap_cls = nullptr;
+jmethodID g_hashmap_ctor = nullptr;      // HashMap()
+jmethodID g_hashmap_put = nullptr;       // HashMap.put(Object,Object)
 
 // One MediaCodec instance's decode state.
 struct CodecCtx {
@@ -64,6 +69,7 @@ struct CodecCtx {
     std::int64_t pts = 0;
   };
   std::vector<OutSlot> outslots;
+  bool format_signaled = false;  // dequeueOutputBuffer returns INFO_OUTPUT_FORMAT_CHANGED once first
 };
 
 CodecCtx* ctx_of(JNIEnv* env, jobject thiz) {
@@ -87,6 +93,34 @@ void append_bytebuffer(JNIEnv* env, jobject bb, std::vector<std::uint8_t>& out) 
     const auto* p = static_cast<const std::uint8_t*>(addr);
     out.insert(out.end(), p, p + cap);
   }
+}
+
+// Build the output MediaFormat as a HashMap<String,Object> — MediaCodec.getOutputFormat wraps it in a
+// MediaFormat. A video renderer (ExoPlayer) reads width/height/crop to size the output Surface.
+jobject build_format_map(JNIEnv* env, CodecCtx* ctx) {
+  if (g_hashmap_cls == nullptr || g_hashmap_ctor == nullptr) return nullptr;
+  jobject m = env->NewObject(g_hashmap_cls, g_hashmap_ctor);
+  if (m == nullptr) return nullptr;
+  auto put_str = [&](const char* k, const char* v) {
+    jstring jk = env->NewStringUTF(k), jv = env->NewStringUTF(v);
+    env->CallObjectMethod(m, g_hashmap_put, jk, jv);
+    env->DeleteLocalRef(jk); env->DeleteLocalRef(jv);
+  };
+  auto put_int = [&](const char* k, int v) {
+    jstring jk = env->NewStringUTF(k);
+    jobject jv = env->CallStaticObjectMethod(g_integer_cls, g_integer_valueof, static_cast<jint>(v));
+    env->CallObjectMethod(m, g_hashmap_put, jk, jv);
+    env->DeleteLocalRef(jk); if (jv) env->DeleteLocalRef(jv);
+  };
+  put_str("mime", "video/raw");
+  put_int("width", ctx->width);
+  put_int("height", ctx->height);
+  put_int("color-format", 2135033992);  // COLOR_FormatYUV420Flexible (the frame is a HW YUV surface)
+  put_int("crop-left", 0);
+  put_int("crop-top", 0);
+  put_int("crop-right", ctx->width > 0 ? ctx->width - 1 : 0);
+  put_int("crop-bottom", ctx->height > 0 ? ctx->height - 1 : 0);
+  return m;
 }
 
 // ── android.media.MediaCodec natives ──────────────────────────────────────────────────────────────
@@ -200,6 +234,9 @@ void JNICALL MC_native_queueInputBuffer(JNIEnv* env, jobject thiz, jint index, j
 jint JNICALL MC_native_dequeueOutputBuffer(JNIEnv* env, jobject thiz, jobject info, jlong /*timeoutUs*/) {
   CodecCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr || !ctx->started || ctx->dec == nullptr) return INFO_TRY_AGAIN_LATER;
+  // Signal the output format once before the first frame (ExoPlayer's MediaCodecRenderer reads
+  // getOutputFormat() on this, then continues dequeuing). Our dimensions are known from configure.
+  if (!ctx->format_signaled) { ctx->format_signaled = true; return INFO_OUTPUT_FORMAT_CHANGED; }
   gfx::DmabufFrame f{};
   std::int64_t pts = 0;
   std::string err;
@@ -273,8 +310,14 @@ jstring JNICALL MC_getCanonicalName(JNIEnv* env, jobject thiz) { return MC_nativ
 void JNICALL MC_native_setCallback(JNIEnv*, jobject, jobject) {}  // async mode: not driven in sync path
 void JNICALL MC_native_enableOnFrameRenderedListener(JNIEnv*, jobject, jboolean) {}
 void JNICALL MC_native_enableOnFirstTunnelFrameReadyListener(JNIEnv*, jobject, jboolean) {}
-jobject JNICALL MC_getFormatNative(JNIEnv*, jobject, jboolean) { return nullptr; }
-jobject JNICALL MC_getOutputFormatNative(JNIEnv*, jobject, jint) { return nullptr; }
+jobject JNICALL MC_getFormatNative(JNIEnv* env, jobject thiz, jboolean /*input*/) {
+  CodecCtx* ctx = ctx_of(env, thiz);
+  return ctx != nullptr ? build_format_map(env, ctx) : nullptr;
+}
+jobject JNICALL MC_getOutputFormatNative(JNIEnv* env, jobject thiz, jint /*index*/) {
+  CodecCtx* ctx = ctx_of(env, thiz);
+  return ctx != nullptr ? build_format_map(env, ctx) : nullptr;
+}
 jobject JNICALL MC_native_getMetrics(JNIEnv*, jobject) { return nullptr; }
 
 bool bind(JNIEnv* env, jclass c, const JNINativeMethod* m, int n) {
@@ -300,8 +343,16 @@ void register_media_codec_natives(JNIEnv* env) {
   if (jclass ic = env->FindClass("java/lang/Integer"); ic != nullptr) {
     g_integer_cls = static_cast<jclass>(env->NewGlobalRef(ic));
     g_integer_intvalue = env->GetMethodID(ic, "intValue", "()I");
+    g_integer_valueof = env->GetStaticMethodID(ic, "valueOf", "(I)Ljava/lang/Integer;");
     env->DeleteLocalRef(ic);
   }
+  if (jclass hm = env->FindClass("java/util/HashMap"); hm != nullptr) {
+    g_hashmap_cls = static_cast<jclass>(env->NewGlobalRef(hm));
+    g_hashmap_ctor = env->GetMethodID(hm, "<init>", "()V");
+    g_hashmap_put = env->GetMethodID(hm, "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+    env->DeleteLocalRef(hm);
+  }
+  if (env->ExceptionCheck()) env->ExceptionClear();
 
   static const JNINativeMethod m[] = {
       {const_cast<char*>("native_init"), const_cast<char*>("()V"), reinterpret_cast<void*>(&MC_native_init)},

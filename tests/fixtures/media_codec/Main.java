@@ -51,10 +51,15 @@ public class Main extends Activity {
             c.queueInputBuffer(eos, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);  // drain
 
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-            boolean got = false;
+            boolean got = false, formatSeen = false;
             for (int i = 0; i < 200 && !got; i++) {
                 int o = c.dequeueOutputBuffer(info, 20000);
-                if (o >= 0) {
+                if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    MediaFormat of = c.getOutputFormat();  // ExoPlayer reads this to size the surface
+                    formatSeen = true;
+                    Log.i("acl", "MC decode: output format " + of.getInteger(MediaFormat.KEY_WIDTH)
+                            + "x" + of.getInteger(MediaFormat.KEY_HEIGHT));
+                } else if (o >= 0) {
                     c.releaseOutputBuffer(o, true);      // render -> queue_imported into the ImageReader
                     Image img = r.acquireLatestImage();  // the decoded frame flowed to the consumer
                     if (img != null) {
@@ -64,6 +69,7 @@ public class Main extends Activity {
                     }
                 }
             }
+            Log.i("acl", "MC decode: formatChanged=" + formatSeen);
             c.stop();
             c.release();
             Log.i("acl", got ? "MC decode: PASS" : "MC decode: FAIL (no frame)");

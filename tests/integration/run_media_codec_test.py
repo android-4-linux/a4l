@@ -20,6 +20,7 @@ SKIP = 77
 
 CHECKS = [
     "native_start: decoder up",              # MediaCodec.start -> CodecDecoder configured
+    "MC decode: output format 320x240",      # INFO_OUTPUT_FORMAT_CHANGED -> getOutputFormat (ExoPlayer path)
     "MC decode: frame in ImageReader 320x240",  # a decoded frame reached the consumer via queue_imported
     "MC decode: PASS",
 ]
