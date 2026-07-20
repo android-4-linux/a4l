@@ -15,8 +15,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
-#include <vector>
 
 #if !ACL_HAVE_GL
 int main() { std::fprintf(stderr, "video-decode-probe: built without GL support\n"); return 2; }
@@ -46,15 +46,36 @@ GLuint compile(GLenum type, const char* src) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2) { std::fprintf(stderr, "usage: acl-video-decode-probe <clip> [r,g,b]\n"); return 2; }
-  const char* clip = argv[1];
+  if (argc < 2) { std::fprintf(stderr, "usage: acl-video-decode-probe <clip> [r,g,b] [--packet]\n"); return 2; }
+  const char* clip = nullptr;
   int er = -1, eg = -1, eb = -1;
-  if (argc >= 3) std::sscanf(argv[2], "%d,%d,%d", &er, &eg, &eb);
+  bool packet_mode = false;  // --packet: exercise Demuxer -> CodecDecoder (MediaExtractor -> MediaCodec)
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--packet") == 0) packet_mode = true;
+    else if (argv[i][0] == '-') continue;
+    else if (clip == nullptr) clip = argv[i];
+    else std::sscanf(argv[i], "%d,%d,%d", &er, &eg, &eb);
+  }
+  if (clip == nullptr) { std::fprintf(stderr, "usage: acl-video-decode-probe <clip> [r,g,b] [--packet]\n"); return 2; }
 
   std::string err;
-  auto dec = acl::media::VideoDecoder::open(clip, &err);
-  if (!dec) { std::fprintf(stderr, "video-decode-probe: open failed (%s) — skip\n", err.c_str()); return 2; }
-  const int W = static_cast<int>(dec->width()), H = static_cast<int>(dec->height());
+  // Two frame sources sharing the zero-copy output: the file decoder (VideoDecoder = demux+decode) and
+  // the packet path (Demuxer + CodecDecoder = MediaExtractor + MediaCodec). Both yield DmabufFrames.
+  std::unique_ptr<acl::media::VideoDecoder> fdec;
+  std::unique_ptr<acl::media::Demuxer> demux;
+  std::unique_ptr<acl::media::CodecDecoder> cdec;
+  int W = 0, H = 0;
+  if (packet_mode) {
+    demux = acl::media::Demuxer::open(clip, &err);
+    if (!demux) { std::fprintf(stderr, "video-decode-probe: demux open failed (%s) — skip\n", err.c_str()); return 2; }
+    W = demux->width(); H = demux->height();
+    cdec = acl::media::CodecDecoder::configure(demux->mime(), demux->extradata(), demux->extradata_size(), W, H, &err);
+    if (!cdec) { std::fprintf(stderr, "video-decode-probe: codec configure failed (%s) — skip\n", err.c_str()); return 2; }
+  } else {
+    fdec = acl::media::VideoDecoder::open(clip, &err);
+    if (!fdec) { std::fprintf(stderr, "video-decode-probe: open failed (%s) — skip\n", err.c_str()); return 2; }
+    W = static_cast<int>(fdec->width()); H = static_cast<int>(fdec->height());
+  }
   if (W <= 0 || H <= 0) { std::fprintf(stderr, "video-decode-probe: bad dims %dx%d — skip\n", W, H); return 2; }
 
   auto dev = GlDevice::CreateGbm(&err);
@@ -109,8 +130,27 @@ int main(int argc, char** argv) {
   // Decode + import + sample the first frame. The frame's dma-buf is the DECODER's output surface,
   // imported zero-copy (ahb_import dups the fd — no pixel copy); the engine samples it identically.
   acl::gfx::DmabufFrame f{};
-  int r = dec->next_frame(&f, &err);
-  if (r <= 0) { std::fprintf(stderr, "video-decode-probe: next_frame=%d (%s) — %s\n", r, err.c_str(), r == 0 ? "empty clip; skip" : "fail"); return r == 0 ? 2 : 1; }
+  int r = 0;
+  if (packet_mode) {
+    // MediaExtractor -> MediaCodec: pump access units until the first frame emerges (then drain).
+    bool eos = false;
+    for (int guard = 0; guard < 4000 && r == 0; ++guard) {
+      if (!eos) {
+        const std::uint8_t* pd = nullptr; std::size_t ps = 0; std::int64_t pts = 0;
+        int rs = demux->read_sample(&pd, &ps, &pts, &err);
+        if (rs < 0) { std::fprintf(stderr, "video-decode-probe: read_sample failed (%s)\n", err.c_str()); return 1; }
+        if (rs == 0) { eos = true; cdec->send_packet(nullptr, 0, 0, &err); }  // EOS drain
+        else if (cdec->send_packet(pd, ps, pts, &err) < 0) { std::fprintf(stderr, "video-decode-probe: send_packet failed (%s)\n", err.c_str()); return 1; }
+      }
+      r = cdec->receive_frame(&f, nullptr, &err);
+      if (r < 0) { std::fprintf(stderr, "video-decode-probe: receive_frame failed (%s)\n", err.c_str()); return 1; }
+      if (eos && r == 0) break;  // fully drained, no frame
+    }
+  } else {
+    r = fdec->next_frame(&f, &err);
+  }
+  if (r <= 0) { std::fprintf(stderr, "video-decode-probe: no frame (r=%d %s) — %s\n", r, err.c_str(), r == 0 ? "empty; skip" : "fail"); return r == 0 ? 2 : 1; }
+  std::printf("video-decode-probe: mode=%s\n", packet_mode ? "packet (Demuxer+CodecDecoder)" : "file (VideoDecoder)");
   std::printf("video-decode-probe: decoded %dx%d fourcc=%#x planes=%u mod=%#lx fd=%d\n",
               f.width, f.height, f.drm_format, f.plane_count, static_cast<unsigned long>(f.modifier), f.fd);
 

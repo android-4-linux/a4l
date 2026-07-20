@@ -50,6 +50,62 @@ class VideoDecoder {
   std::unique_ptr<Impl> d_;
 };
 
+// Demuxes a container into encoded access units + codec config — android.media.MediaExtractor's role.
+// The counterpart to CodecDecoder (MediaCodec): Demuxer.read_sample() -> CodecDecoder.send_packet().
+class Demuxer {
+ public:
+  static std::unique_ptr<Demuxer> open(const std::string& path, std::string* error);
+  ~Demuxer();
+  Demuxer(const Demuxer&) = delete;
+  Demuxer& operator=(const Demuxer&) = delete;
+
+  const std::string& mime() const;             // MediaFormat MIME of the video track ("video/avc", …)
+  const std::uint8_t* extradata() const;       // codec-specific data (SPS/PPS) — MediaFormat csd
+  std::size_t extradata_size() const;
+  int width() const;
+  int height() const;
+
+  // Next video access unit: 1 and fills *data/*size/*pts_us, 0 at end-of-stream, -1 + *error. The
+  // data is valid until the next read_sample() call.
+  int read_sample(const std::uint8_t** data, std::size_t* size, std::int64_t* pts_us, std::string* error);
+
+ private:
+  Demuxer();
+  struct DImpl;
+  std::unique_ptr<DImpl> d_;
+};
+
+// Decodes encoded access units to zero-copy DRM_PRIME frames — the engine under android.media
+// .MediaCodec (setVideoSurface). Configured from a MIME + codec-specific data (MediaFormat csd), fed
+// raw access units (queueInputBuffer), and yields each decoded frame as a gfx::DmabufFrame the caller
+// ahb_import's into the output Surface's ImageReader (queue_imported). Same HW backend + zero-copy
+// output as VideoDecoder; the difference is the input is pre-demuxed packets, not a file.
+class CodecDecoder {
+ public:
+  // Configure a hardware decoder for `mime` (e.g. "video/avc") with optional codec-specific data
+  // (H.264/HEVC SPS+PPS as Annex-B — MediaFormat csd-0[+csd-1] concatenated) and the frame size.
+  // nullptr + *error if FFmpeg / a HW device / the codec is unavailable.
+  static std::unique_ptr<CodecDecoder> configure(const std::string& mime, const std::uint8_t* csd,
+                                                  std::size_t csd_size, int width, int height,
+                                                  std::string* error);
+  ~CodecDecoder();
+  CodecDecoder(const CodecDecoder&) = delete;
+  CodecDecoder& operator=(const CodecDecoder&) = delete;
+
+  // Feed one encoded access unit (queueInputBuffer). data=nullptr/size=0 signals end-of-stream (drain).
+  // Returns 0 sent, 1 EAGAIN (the decoder's output is full — receive_frame first, then retry), -1 err.
+  int send_packet(const std::uint8_t* data, std::size_t size, std::int64_t pts_us, std::string* error);
+
+  // Pull the next decoded frame as a zero-copy DRM_PRIME dma-buf. 1 + *out (ahb_import it now — its fd
+  // is owned by the decoder until the next call), 0 if none is ready yet (feed more input), -1 + *error.
+  int receive_frame(gfx::DmabufFrame* out, std::int64_t* pts_us, std::string* error);
+
+ private:
+  CodecDecoder();
+  struct CImpl;
+  std::unique_ptr<CImpl> d_;
+};
+
 }  // namespace acl::media
 
 #endif  // ACL_HAVE_GL

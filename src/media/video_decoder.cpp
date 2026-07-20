@@ -12,6 +12,9 @@
 #include <drm_fourcc.h>
 
 #include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -30,6 +33,7 @@ constexpr const char* kTag = "acl.media.video";
 // ── FFmpeg resolved at runtime (RTLD_LOCAL), like soundpool — keeps its transitive deps private.
 struct Ff {
 #define FF_FN(n) decltype(&::n) n = nullptr
+  FF_FN(av_malloc);
   FF_FN(av_frame_alloc); FF_FN(av_frame_free); FF_FN(av_frame_unref);
   FF_FN(av_packet_alloc); FF_FN(av_packet_free); FF_FN(av_packet_unref);
   FF_FN(av_buffer_ref); FF_FN(av_buffer_unref);
@@ -69,6 +73,7 @@ bool load_ffmpeg() {
   };
   bool all = true;
 #define FF_BIND(n) do { g_ff.n = reinterpret_cast<decltype(g_ff.n)>(sym(#n)); if (!g_ff.n) { all = false; log::w(kTag, "FFmpeg missing {}", #n); } } while (0)
+  FF_BIND(av_malloc);
   FF_BIND(av_frame_alloc); FF_BIND(av_frame_free); FF_BIND(av_frame_unref);
   FF_BIND(av_packet_alloc); FF_BIND(av_packet_free); FF_BIND(av_packet_unref);
   FF_BIND(av_buffer_ref); FF_BIND(av_buffer_unref);
@@ -93,6 +98,100 @@ enum AVPixelFormat get_hw_format(AVCodecContext* ctx, const enum AVPixelFormat* 
     if (*p == want) return *p;
   log::w(kTag, "get_format: hw pixfmt not offered; falling back to software");
   return fmts[0];
+}
+
+// Shared backend selection (file + packet decoders): attach a HW decode device to `ctx`. Preference
+// VAAPI (x86) then DRM (V4L2-request stateless, ARM) via avcodec_get_hw_config; ACL_HWDEC_DEVICE
+// overrides the device type. On a match, sets ctx->hw_device_ctx + get_format and returns the device
+// in *hw_dev. A named vendor M2M decoder (rkmpp/v4l2m2m) may match none — it self-produces DRM_PRIME,
+// so leaving no hwdevice is valid. Returns false only on a device-create failure.
+bool configure_hw_decode(AVCodecContext* ctx, const AVCodec* codec, AVBufferRef** hw_dev) {
+  enum AVPixelFormat hw_pixfmt = AV_PIX_FMT_NONE;
+  enum AVHWDeviceType hw_type = AV_HWDEVICE_TYPE_NONE;
+  enum AVHWDeviceType prefs[2] = {AV_HWDEVICE_TYPE_VAAPI, AV_HWDEVICE_TYPE_DRM};
+  int nprefs = 2;
+  if (const char* dev = std::getenv("ACL_HWDEC_DEVICE")) { prefs[0] = g_ff.av_hwdevice_find_type_by_name(dev); nprefs = 1; }
+  for (int pi = 0; pi < nprefs && hw_type == AV_HWDEVICE_TYPE_NONE; ++pi) {
+    if (prefs[pi] == AV_HWDEVICE_TYPE_NONE) continue;
+    for (int i = 0;; ++i) {
+      const AVCodecHWConfig* cfg = g_ff.avcodec_get_hw_config(codec, i);
+      if (cfg == nullptr) break;
+      if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && cfg->device_type == prefs[pi]) {
+        hw_pixfmt = cfg->pix_fmt;
+        hw_type = prefs[pi];
+        break;
+      }
+    }
+  }
+  if (hw_type != AV_HWDEVICE_TYPE_NONE) {
+    const char* node = std::getenv("ACL_DRM_RENDER_NODE");
+    if (g_ff.av_hwdevice_ctx_create(hw_dev, hw_type, (node && *node) ? node : nullptr, nullptr, 0) < 0)
+      return false;
+    ctx->hw_device_ctx = g_ff.av_buffer_ref(*hw_dev);
+    ctx->opaque = reinterpret_cast<void*>(static_cast<std::intptr_t>(hw_pixfmt));
+    ctx->get_format = get_hw_format;
+    log::i(kTag, "hw decode via {} ({})", g_ff.av_hwdevice_get_type_name(hw_type), codec->name);
+  } else {
+    log::i(kTag, "decode via {} (no hwdevice; expecting DRM_PRIME output)", codec->name);
+  }
+  return true;
+}
+
+// Shared DRM_PRIME descriptor -> gfx::DmabufFrame (file + packet decoders). Flattens EVERY layer's
+// planes (VAAPI/radeonsi exports NV12 as R8 luma + GR88 chroma layers, not one NV12 layer — reading
+// only layer0 drops chroma) and sets the combined YUV fourcc from the plane count. Single-object only.
+int drm_desc_to_dmabuf(const AVDRMFrameDescriptor* desc, std::uint32_t w, std::uint32_t h,
+                       gfx::DmabufFrame* out) {
+  if (desc == nullptr || desc->nb_objects < 1 || desc->nb_layers < 1) return -1;
+  if (desc->nb_objects != 1) return -2;  // multi-object (per-plane fds) not yet supported
+  gfx::DmabufFrame f{};
+  f.fd = desc->objects[0].fd;
+  f.width = w;
+  f.height = h;
+  f.modifier = desc->objects[0].format_modifier;
+  f.modifier_tiled = f.modifier != 0 && f.modifier != DRM_FORMAT_MOD_INVALID;
+  std::uint32_t pc = 0;
+  std::uint64_t total = 0;
+  for (int L = 0; L < desc->nb_layers && pc < gfx::DmabufFrame::kMaxPlanes; ++L) {
+    const AVDRMLayerDescriptor& layer = desc->layers[L];
+    for (int P = 0; P < layer.nb_planes && pc < gfx::DmabufFrame::kMaxPlanes; ++P) {
+      f.planes[pc].offset = static_cast<std::uint32_t>(layer.planes[P].offset);
+      f.planes[pc].stride = static_cast<std::uint32_t>(layer.planes[P].pitch);
+      const std::uint64_t end = f.planes[pc].offset + static_cast<std::uint64_t>(f.planes[pc].stride) * h;
+      if (end > total) total = end;
+      ++pc;
+    }
+  }
+  f.plane_count = pc;
+  f.mem_size = total;
+  f.host_mapped = false;
+  if (pc == 2) f.drm_format = DRM_FORMAT_NV12;
+  else if (pc == 3) f.drm_format = DRM_FORMAT_YUV420;
+  else f.drm_format = desc->layers[0].format;
+  *out = f;
+  return 1;
+}
+
+// A DRM_PRIME descriptor for a decoded frame: a hwaccel surface (VAAPI/DRM) mapped DIRECT (zero-copy
+// export, no download), or a vendor M2M decoder's already-DRM_PRIME frame used as-is. nullptr on fail.
+const AVDRMFrameDescriptor* map_drm(AVFrame* hw, AVFrame* drm) {
+  if (hw->format == AV_PIX_FMT_DRM_PRIME) return reinterpret_cast<const AVDRMFrameDescriptor*>(hw->data[0]);
+  drm->format = AV_PIX_FMT_DRM_PRIME;
+  if (g_ff.av_hwframe_map(drm, hw, AV_HWFRAME_MAP_DIRECT | AV_HWFRAME_MAP_READ) < 0) return nullptr;
+  return reinterpret_cast<const AVDRMFrameDescriptor*>(drm->data[0]);
+}
+
+// MediaCodec MIME -> AVCodecID (the video codecs acl targets). AV_CODEC_ID_NONE if unmapped.
+enum AVCodecID codec_id_for_mime(const std::string& mime) {
+  if (mime == "video/avc") return AV_CODEC_ID_H264;
+  if (mime == "video/hevc") return AV_CODEC_ID_HEVC;
+  if (mime == "video/x-vnd.on2.vp8") return AV_CODEC_ID_VP8;
+  if (mime == "video/x-vnd.on2.vp9") return AV_CODEC_ID_VP9;
+  if (mime == "video/av01") return AV_CODEC_ID_AV1;
+  if (mime == "video/mp4v-es") return AV_CODEC_ID_MPEG4;
+  if (mime == "video/3gpp") return AV_CODEC_ID_H263;
+  if (mime == "video/mpeg2") return AV_CODEC_ID_MPEG2VIDEO;
+  return AV_CODEC_ID_NONE;
 }
 }  // namespace
 
@@ -145,48 +244,11 @@ std::unique_ptr<VideoDecoder> VideoDecoder::open(const std::string& path, std::s
     else log::w(kTag, "ACL_VIDEO_DECODER='{}' not found; using default {}", named, codec->name);
   }
 
-  // HW device preference: ACL_HWDEC_DEVICE overrides (a device-type name: "vaapi"/"drm"/...); default
-  // is VAAPI then DRM. A named vendor M2M decoder may match none (it self-produces DRM_PRIME).
-  enum AVPixelFormat hw_pixfmt = AV_PIX_FMT_NONE;
-  enum AVHWDeviceType hw_type = AV_HWDEVICE_TYPE_NONE;
-  enum AVHWDeviceType prefs[2] = {AV_HWDEVICE_TYPE_VAAPI, AV_HWDEVICE_TYPE_DRM};
-  int nprefs = 2;
-  if (const char* dev = std::getenv("ACL_HWDEC_DEVICE")) { prefs[0] = g_ff.av_hwdevice_find_type_by_name(dev); nprefs = 1; }
-  for (int pi = 0; pi < nprefs && hw_type == AV_HWDEVICE_TYPE_NONE; ++pi) {
-    if (prefs[pi] == AV_HWDEVICE_TYPE_NONE) continue;
-    for (int i = 0;; ++i) {
-      const AVCodecHWConfig* cfg = g_ff.avcodec_get_hw_config(codec, i);
-      if (cfg == nullptr) break;
-      if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && cfg->device_type == prefs[pi]) {
-        hw_pixfmt = cfg->pix_fmt;
-        hw_type = prefs[pi];
-        break;
-      }
-    }
-  }
-
   d->codec = g_ff.avcodec_alloc_context3(codec);
   if (d->codec == nullptr) return fail("alloc codec context failed");
   if (g_ff.avcodec_parameters_to_context(d->codec, d->fmt->streams[d->stream_index]->codecpar) < 0)
     return fail("parameters_to_context failed");
-
-  if (hw_type != AV_HWDEVICE_TYPE_NONE) {
-    // hwaccel path (VAAPI / DRM-V4L2-request): a HW device + get_format; the decoded surface is mapped
-    // to DRM_PRIME in next_frame. renderD128 unless ACL_DRM_RENDER_NODE overrides.
-    const char* node = std::getenv("ACL_DRM_RENDER_NODE");
-    if (g_ff.av_hwdevice_ctx_create(&d->hw_device, hw_type, (node && *node) ? node : nullptr, nullptr, 0) < 0)
-      return fail("av_hwdevice_ctx_create failed");
-    d->codec->hw_device_ctx = g_ff.av_buffer_ref(d->hw_device);
-    d->codec->opaque = reinterpret_cast<void*>(static_cast<std::intptr_t>(hw_pixfmt));
-    d->codec->get_format = get_hw_format;
-    log::i(kTag, "hw decode via {} ({})", g_ff.av_hwdevice_get_type_name(hw_type), codec->name);
-  } else {
-    // No hwaccel device: a vendor M2M decoder (rkmpp/v4l2m2m) that outputs DRM_PRIME itself; next_frame
-    // uses that frame directly. If it instead yields system-memory NV12, ahb_import fails LOUDLY (no
-    // silent CPU copy) — the zero-copy contract is preserved.
-    log::i(kTag, "decode via {} (no hwdevice; expecting DRM_PRIME output)", codec->name);
-  }
-
+  if (!configure_hw_decode(d->codec, codec, &d->hw_device)) return fail("av_hwdevice_ctx_create failed");
   if (g_ff.avcodec_open2(d->codec, codec, nullptr) < 0) return fail("avcodec_open2 failed");
   d->width = static_cast<std::uint32_t>(d->codec->width);
   d->height = static_cast<std::uint32_t>(d->codec->height);
@@ -227,58 +289,188 @@ int VideoDecoder::next_frame(gfx::DmabufFrame* out, std::string* error) {
     }
   }
 
-  // Obtain a DRM_PRIME view of the decoded frame. A hwaccel surface (VAAPI/DRM-V4L2-request) is mapped
-  // DIRECT (zero-copy export, no download); a vendor M2M decoder (rkmpp/v4l2m2m) already produced a
-  // DRM_PRIME frame, so use it as-is. Either way the fd(s) live in an AVDRMFrameDescriptor.
-  const AVDRMFrameDescriptor* desc = nullptr;
-  if (d->hw_frame->format == AV_PIX_FMT_DRM_PRIME) {
-    desc = reinterpret_cast<const AVDRMFrameDescriptor*>(d->hw_frame->data[0]);
-  } else {
-    d->drm_frame->format = AV_PIX_FMT_DRM_PRIME;
-    if (g_ff.av_hwframe_map(d->drm_frame, d->hw_frame, AV_HWFRAME_MAP_DIRECT | AV_HWFRAME_MAP_READ) < 0)
-      return err("av_hwframe_map(DRM_PRIME) failed (frame is not a hw surface? check the decoder outputs DRM_PRIME)");
-    desc = reinterpret_cast<const AVDRMFrameDescriptor*>(d->drm_frame->data[0]);
+  const AVDRMFrameDescriptor* desc = map_drm(d->hw_frame, d->drm_frame);
+  if (desc == nullptr) return err("av_hwframe_map(DRM_PRIME) failed (decoder not outputting a hw surface?)");
+  const int rc = drm_desc_to_dmabuf(desc, d->width, d->height, out);
+  if (rc == -2) return err("multi-object DRM frame (per-plane fds) not yet supported");
+  if (rc != 1) return err("empty/invalid DRM descriptor");
+  return 1;
+}
+
+// ── Demuxer (MediaExtractor's role) ───────────────────────────────────────────────────────────────
+namespace {
+const char* mime_for_codec_id(enum AVCodecID id) {
+  switch (id) {
+    case AV_CODEC_ID_H264: return "video/avc";
+    case AV_CODEC_ID_HEVC: return "video/hevc";
+    case AV_CODEC_ID_VP8: return "video/x-vnd.on2.vp8";
+    case AV_CODEC_ID_VP9: return "video/x-vnd.on2.vp9";
+    case AV_CODEC_ID_AV1: return "video/av01";
+    case AV_CODEC_ID_MPEG4: return "video/mp4v-es";
+    case AV_CODEC_ID_MPEG2VIDEO: return "video/mpeg2";
+    default: return "";
   }
-  if (desc == nullptr || desc->nb_objects < 1 || desc->nb_layers < 1) return err("empty DRM descriptor");
+}
+}  // namespace
 
-  // Single-object layout (the common VAAPI/V4L2-M2M case): all planes share objects[0].fd at offsets.
-  // (Multi-object frames would need a per-plane-fd DmabufFrame — a later model change; reject for now.)
-  if (desc->nb_objects != 1) return err("multi-object DRM frame (per-plane fds) not yet supported");
+struct Demuxer::DImpl {
+  AVFormatContext* fmt = nullptr;
+  AVPacket* pkt = nullptr;
+  int stream_index = -1;
+  std::string mime;
+  std::vector<std::uint8_t> extradata;
+  int width = 0, height = 0;
+  ~DImpl() {
+    if (pkt) g_ff.av_packet_free(&pkt);
+    if (fmt) g_ff.avformat_close_input(&fmt);
+  }
+};
 
-  gfx::DmabufFrame f{};
-  f.fd = desc->objects[0].fd;  // owned by drm_frame; caller must ahb_import (dup) before next_frame
-  f.width = d->width;
-  f.height = d->height;
-  f.modifier = desc->objects[0].format_modifier;
-  f.modifier_tiled = f.modifier != 0 && f.modifier != DRM_FORMAT_MOD_INVALID;
+Demuxer::Demuxer() : d_(std::make_unique<DImpl>()) {}
+Demuxer::~Demuxer() = default;
+const std::string& Demuxer::mime() const { return d_->mime; }
+const std::uint8_t* Demuxer::extradata() const { return d_->extradata.empty() ? nullptr : d_->extradata.data(); }
+std::size_t Demuxer::extradata_size() const { return d_->extradata.size(); }
+int Demuxer::width() const { return d_->width; }
+int Demuxer::height() const { return d_->height; }
 
-  // Flatten EVERY layer's planes into the frame: VAAPI/radeonsi exports NV12 as TWO layers of the one
-  // object (layer0 = R8 luma, layer1 = GR88 chroma), not a single NV12 layer. Collecting all planes and
-  // setting the combined YUV fourcc makes Mesa sample it as NV12 (YUV->RGB in the sampler), not as
-  // disjoint R8/GR88 textures (which drops chroma — the "122,0,0" luma-only bug).
-  std::uint32_t pc = 0;
-  std::uint64_t total = 0;
-  for (int L = 0; L < desc->nb_layers && pc < gfx::DmabufFrame::kMaxPlanes; ++L) {
-    const AVDRMLayerDescriptor& layer = desc->layers[L];
-    for (int P = 0; P < layer.nb_planes && pc < gfx::DmabufFrame::kMaxPlanes; ++P) {
-      f.planes[pc].offset = static_cast<std::uint32_t>(layer.planes[P].offset);
-      f.planes[pc].stride = static_cast<std::uint32_t>(layer.planes[P].pitch);
-      const std::uint64_t end = f.planes[pc].offset +
-                                static_cast<std::uint64_t>(f.planes[pc].stride) * d->height;
-      if (end > total) total = end;
-      ++pc;
+std::unique_ptr<Demuxer> Demuxer::open(const std::string& path, std::string* error) {
+  auto fail = [&](const char* m) -> std::unique_ptr<Demuxer> { if (error) *error = m; return nullptr; };
+  if (!load_ffmpeg()) return fail("FFmpeg unavailable");
+  auto dm = std::unique_ptr<Demuxer>(new Demuxer());
+  DImpl* d = dm->d_.get();
+  if (g_ff.avformat_open_input(&d->fmt, path.c_str(), nullptr, nullptr) < 0) return fail("open_input failed");
+  if (g_ff.avformat_find_stream_info(d->fmt, nullptr) < 0) return fail("find_stream_info failed");
+  d->stream_index = g_ff.av_find_best_stream(d->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+  if (d->stream_index < 0) return fail("no video stream");
+  const AVCodecParameters* par = d->fmt->streams[d->stream_index]->codecpar;
+  d->width = par->width;
+  d->height = par->height;
+  d->mime = mime_for_codec_id(par->codec_id);
+  if (par->extradata != nullptr && par->extradata_size > 0)
+    d->extradata.assign(par->extradata, par->extradata + par->extradata_size);
+  d->pkt = g_ff.av_packet_alloc();
+  if (!d->pkt) return fail("packet alloc failed");
+  log::i(kTag, "demux {}x{} {} (extradata {}B)", d->width, d->height,
+         d->mime.empty() ? "?" : d->mime.c_str(), d->extradata.size());
+  return dm;
+}
+
+int Demuxer::read_sample(const std::uint8_t** data, std::size_t* size, std::int64_t* pts_us,
+                         std::string* error) {
+  DImpl* d = d_.get();
+  g_ff.av_packet_unref(d->pkt);  // release the previous sample before overwriting it
+  for (;;) {
+    int r = g_ff.av_read_frame(d->fmt, d->pkt);
+    if (r == AVERROR_EOF) return 0;
+    if (r < 0) { if (error) *error = "av_read_frame failed"; return -1; }
+    if (d->pkt->stream_index == d->stream_index) {
+      if (data) *data = d->pkt->data;
+      if (size) *size = static_cast<std::size_t>(d->pkt->size);
+      if (pts_us) *pts_us = d->pkt->pts;  // stream time_base units (MediaExtractor converts; test ignores)
+      return 1;
     }
+    g_ff.av_packet_unref(d->pkt);  // not our stream — skip
   }
-  f.plane_count = pc;
-  f.mem_size = total;
-  f.host_mapped = false;  // GPU surface — not CPU-mappable
-  // The combined fourcc from the plane count: 2 -> NV12, 3 -> YUV420 (8-bit; 10-bit P010/I010 is a
-  // later case), 1 -> the single layer's own format (packed RGB). This is what the EGLImage samples as.
-  if (pc == 2) f.drm_format = DRM_FORMAT_NV12;
-  else if (pc == 3) f.drm_format = DRM_FORMAT_YUV420;
-  else f.drm_format = desc->layers[0].format;
+}
 
-  *out = f;
+// ── CodecDecoder (MediaCodec's decode engine) ─────────────────────────────────────────────────────
+struct CodecDecoder::CImpl {
+  AVCodecContext* codec = nullptr;
+  AVBufferRef* hw_device = nullptr;
+  AVPacket* pkt = nullptr;
+  AVFrame* hw_frame = nullptr;
+  AVFrame* drm_frame = nullptr;
+  std::uint32_t width = 0, height = 0;
+  ~CImpl() {
+    if (drm_frame) g_ff.av_frame_free(&drm_frame);
+    if (hw_frame) g_ff.av_frame_free(&hw_frame);
+    if (pkt) g_ff.av_packet_free(&pkt);
+    if (codec) g_ff.avcodec_free_context(&codec);  // frees ctx->extradata (av_malloc'd) too
+    if (hw_device) g_ff.av_buffer_unref(&hw_device);
+  }
+};
+
+CodecDecoder::CodecDecoder() : d_(std::make_unique<CImpl>()) {}
+CodecDecoder::~CodecDecoder() = default;
+
+std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime, const std::uint8_t* csd,
+                                                      std::size_t csd_size, int width, int height,
+                                                      std::string* error) {
+  auto fail = [&](const char* m) -> std::unique_ptr<CodecDecoder> { if (error) *error = m; return nullptr; };
+  if (!load_ffmpeg()) return fail("FFmpeg unavailable");
+  const enum AVCodecID id = codec_id_for_mime(mime);
+  if (id == AV_CODEC_ID_NONE) return fail("unsupported MIME");
+  const AVCodec* codec = g_ff.avcodec_find_decoder(id);
+  if (const char* named = std::getenv("ACL_VIDEO_DECODER")) {
+    if (const AVCodec* nc = g_ff.avcodec_find_decoder_by_name(named)) codec = nc;
+  }
+  if (codec == nullptr) return fail("no decoder for MIME");
+
+  auto dec = std::unique_ptr<CodecDecoder>(new CodecDecoder());
+  CImpl* d = dec->d_.get();
+  d->codec = g_ff.avcodec_alloc_context3(codec);
+  if (d->codec == nullptr) return fail("alloc codec context failed");
+  d->codec->width = width;
+  d->codec->height = height;
+  // Codec-specific data (SPS/PPS) as the context's extradata. av_malloc'd (+ padding) so
+  // avcodec_free_context frees it; the decoder reads it at open time.
+  if (csd != nullptr && csd_size > 0) {
+    auto* ed = static_cast<std::uint8_t*>(g_ff.av_malloc(csd_size + AV_INPUT_BUFFER_PADDING_SIZE));
+    if (ed == nullptr) return fail("extradata alloc failed");
+    std::memcpy(ed, csd, csd_size);
+    std::memset(ed + csd_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    d->codec->extradata = ed;
+    d->codec->extradata_size = static_cast<int>(csd_size);
+  }
+  if (!configure_hw_decode(d->codec, codec, &d->hw_device)) return fail("av_hwdevice_ctx_create failed");
+  if (g_ff.avcodec_open2(d->codec, codec, nullptr) < 0) return fail("avcodec_open2 failed");
+  d->width = static_cast<std::uint32_t>(width > 0 ? width : d->codec->width);
+  d->height = static_cast<std::uint32_t>(height > 0 ? height : d->codec->height);
+  d->pkt = g_ff.av_packet_alloc();
+  d->hw_frame = g_ff.av_frame_alloc();
+  d->drm_frame = g_ff.av_frame_alloc();
+  if (!d->pkt || !d->hw_frame || !d->drm_frame) return fail("frame/packet alloc failed");
+  log::i(kTag, "MediaCodec decoder configured {} {}x{} ({})", mime, d->width, d->height, codec->name);
+  return dec;
+}
+
+int CodecDecoder::send_packet(const std::uint8_t* data, std::size_t size, std::int64_t pts_us,
+                              std::string* error) {
+  CImpl* d = d_.get();
+  if (data == nullptr || size == 0) {  // end-of-stream: drain
+    const int r = g_ff.avcodec_send_packet(d->codec, nullptr);
+    if (r < 0 && r != AVERROR_EOF) { if (error) *error = "send EOS failed"; return -1; }
+    return 0;
+  }
+  // Borrow the caller's compressed buffer (small — the bitstream, NOT pixels; the decoder deep-copies
+  // it internally since d->pkt->buf is null). Cleared after so d->pkt never frees the caller's memory.
+  d->pkt->data = const_cast<std::uint8_t*>(data);
+  d->pkt->size = static_cast<int>(size);
+  d->pkt->pts = pts_us;
+  const int r = g_ff.avcodec_send_packet(d->codec, d->pkt);
+  d->pkt->data = nullptr;
+  d->pkt->size = 0;
+  if (r == AVERROR(EAGAIN)) return 1;  // output full — caller must receive_frame, then retry this packet
+  if (r < 0) { if (error) *error = "avcodec_send_packet failed"; return -1; }
+  return 0;
+}
+
+int CodecDecoder::receive_frame(gfx::DmabufFrame* out, std::int64_t* pts_us, std::string* error) {
+  auto err = [&](const char* m) -> int { if (error) *error = m; return -1; };
+  if (out == nullptr) return err("null out");
+  CImpl* d = d_.get();
+  g_ff.av_frame_unref(d->drm_frame);
+  g_ff.av_frame_unref(d->hw_frame);
+  const int r = g_ff.avcodec_receive_frame(d->codec, d->hw_frame);
+  if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) return 0;  // none ready / drained
+  if (r < 0) return err("avcodec_receive_frame failed");
+  const AVDRMFrameDescriptor* desc = map_drm(d->hw_frame, d->drm_frame);
+  if (desc == nullptr) return err("map DRM_PRIME failed (decoder not outputting a hw surface?)");
+  const int rc = drm_desc_to_dmabuf(desc, d->width, d->height, out);
+  if (rc == -2) return err("multi-object DRM frame (per-plane fds) not yet supported");
+  if (rc != 1) return err("invalid DRM descriptor");
+  if (pts_us) *pts_us = d->hw_frame->pts;
   return 1;
 }
 

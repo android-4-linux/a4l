@@ -42,17 +42,23 @@ def main() -> int:
         if gen.returncode != 0 or not os.path.isfile(clip):
             sys.stdout.write(f"SKIP: ffmpeg could not encode the fixture ({gen.stderr.strip()[:200]})\n")
             return SKIP
-        p = subprocess.run([probe, clip, f"{r},{g},{b}"], capture_output=True, text=True, timeout=120)
-        out = p.stdout + p.stderr
+        # Both frame sources: file (VideoDecoder = demux+decode) and packet (Demuxer + CodecDecoder =
+        # MediaExtractor + MediaCodec). Both must recover the color via the zero-copy DRM_PRIME import.
+        runs = [("file", [probe, clip, f"{r},{g},{b}"]),
+                ("packet", [probe, clip, f"{r},{g},{b}", "--packet"])]
+        out = ""
+        for label, cmd in runs:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            out += f"--- {label} ---\n" + p.stdout + p.stderr
+            if p.returncode in (SKIP, 2):
+                sys.stdout.write("SKIP: no VAAPI/GL for zero-copy decode\n" + out)
+                return SKIP
+            if p.returncode != 0:
+                sys.stderr.write(f"FAIL: video-decode probe ({label})\n" + out)
+                return 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
-    if p.returncode == SKIP or p.returncode == 2:
-        sys.stdout.write("SKIP: no VAAPI/GL for zero-copy decode\n" + out)
-        return SKIP
-    if p.returncode != 0:
-        sys.stderr.write("FAIL: video-decode probe\n" + out)
-        return 1
     sys.stdout.write(out)
     return 0
 
