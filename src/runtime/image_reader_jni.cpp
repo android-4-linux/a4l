@@ -16,6 +16,7 @@
 
 #include <cstdlib>
 #include <memory>
+#include <thread>
 
 #include "gfx/ahardware_buffer.h"
 #include "gfx/buffer_queue.h"
@@ -33,6 +34,8 @@ jfieldID g_img_buf_fid = nullptr;  // ImageReader$SurfaceImage.mNativeBuffer (J)
 jfieldID g_img_ts_fid = nullptr;   // ImageReader$SurfaceImage.mTimestamp (J)
 jclass g_hb_cls = nullptr;         // global ref: android.hardware.HardwareBuffer
 jmethodID g_hb_ctor = nullptr;     // private HardwareBuffer(long)
+jclass g_surface_cls = nullptr;    // global ref: android.view.Surface
+jmethodID g_surface_ctor = nullptr;  // private Surface(long) — pure-Java, no Surface natives needed
 
 struct ReaderCtx {
   std::unique_ptr<gfx::BufferQueue> queue;
@@ -102,6 +105,23 @@ void JNICALL IR_nativeInit(JNIEnv* env, jobject thiz, jobject weakSelf, jint w, 
   env->SetLongField(thiz, g_ctx_fid, reinterpret_cast<jlong>(ctx));
   log::i(kTag, "nativeInit {}x{} maxImages={} hbFormat={} self_produce={}", w, h, maxImgs, hbFormat,
          ctx->self_produce);
+
+  // One-shot KICK: after the ImageReaderSurfaceProducer sets its OnImageAvailableListener (which
+  // happens just after nativeGetSurface returns), produce the first frame + queue it. That fires
+  // onImageAvailable, the engine acquires, and nativeImageSetup's own produce+queue then self-
+  // sustains the animation. Only this first post runs off-thread (safe: it just posts to the
+  // listener's handler); every acquire afterward is on the engine's threads.
+  if (ctx->self_produce) {
+    std::thread([c] {
+      timespec ts{0, 300 * 1000 * 1000};
+      nanosleep(&ts, nullptr);
+      if (::AHardwareBuffer* p = c->queue->dequeue()) {
+        gfx::ahb_fill_color(p, hue(c->frame++));
+        c->last_produce_ns = now_ns();
+        c->queue->queue(p);  // -> on_frame_available -> postEventFromNative -> engine acquires
+      }
+    }).detach();
+  }
 }
 
 void JNICALL IR_nativeClose(JNIEnv* env, jobject thiz) {
@@ -118,19 +138,19 @@ jint JNICALL IR_nativeImageSetup(JNIEnv* env, jobject thiz, jobject image, jbool
   ReaderCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr) return 1;
   ::AHardwareBuffer* b = ctx->queue->acquire_latest();
-  // Opt-in test producer: if nothing is ready, make a frame INLINE on this (the engine's) thread —
-  // no separate producer thread, no cross-thread attach. RATE-LIMITED to ~30fps: acquireLatestImage
-  // drains the queue in a tight loop (acquireNextImage until null), so producing on every call would
-  // spin forever. The first call in a ~33ms window produces; the drain's follow-up calls get NO_BUFS,
-  // ending the loop and letting the animation advance one frame per window.
-  if (b == nullptr && ctx->self_produce) {
+  // Opt-in test producer, INLINE on the engine's thread (no cross-thread attach). RATE-LIMITED to
+  // ~30fps: acquireLatestImage drains the queue in a tight loop, so producing every call would spin
+  // forever. Once per ~33ms window we produce + queue the NEXT frame; queue() fires onImageAvailable,
+  // which SELF-SUSTAINS the engine's acquire/composite loop (and animates). The drain's rapid
+  // follow-up calls (<33ms) skip production -> NO_BUFS -> the loop ends.
+  if (ctx->self_produce) {
     const jlong now = now_ns();
     if (now - ctx->last_produce_ns >= 33000000LL) {
       if (::AHardwareBuffer* p = ctx->queue->dequeue()) {
         gfx::ahb_fill_color(p, hue(ctx->frame++));
         ctx->queue->queue(p);
         ctx->last_produce_ns = now;
-        b = ctx->queue->acquire_latest();
+        if (b == nullptr) b = ctx->queue->acquire_latest();  // first frame: use what we just made
       }
     }
   }
@@ -151,8 +171,21 @@ void JNICALL IR_nativeReleaseImage(JNIEnv* env, jobject thiz, jobject image) {
 
 jint JNICALL IR_nativeDetachImage(JNIEnv*, jobject, jobject) { return 0; }
 void JNICALL IR_nativeDiscardFreeBuffers(JNIEnv*, jobject) {}
-// The producer-side Surface — M3c stage 3. Null for now (the consumer path works without it).
-jobject JNICALL IR_nativeGetSurface(JNIEnv*, jobject) { return nullptr; }
+// The producer-side Surface (M3c stage 3). Return a real android.view.Surface whose mNativeObject is
+// this reader's ReaderCtx — a valid, non-null handle so the engine's ImageReaderSurfaceProducer
+// activates. Surface(long) is pure Java (no Surface natives). The ANativeWindow producer over the
+// BufferQueue (ANativeWindow_fromSurface reads mNativeObject) lands next; the consumer/composite path
+// works via the ImageReader directly.
+jobject JNICALL IR_nativeGetSurface(JNIEnv* env, jobject thiz) {
+  ReaderCtx* ctx = ctx_of(env, thiz);
+  if (ctx == nullptr || g_surface_cls == nullptr || g_surface_ctor == nullptr) return nullptr;
+  jvalue a;
+  a.j = reinterpret_cast<jlong>(ctx);
+  jobject surf = env->NewObjectA(g_surface_cls, g_surface_ctor, &a);
+  if (surf == nullptr) { env->ExceptionClear(); return nullptr; }
+  log::i(kTag, "nativeGetSurface -> Surface(mNativeObject=ctx)");
+  return surf;
+}
 jobjectArray JNICALL IR_nativeCreateImagePlanes(JNIEnv*, jclass, jint, jobject, jint, jint, jint,
                                                 jint, jint, jint) {
   return nullptr;  // HardwareBuffer-format readers use getHardwareBuffer(), not planes
@@ -174,7 +207,14 @@ jobject JNICALL SI_nativeGetHardwareBuffer(JNIEnv* env, jobject thiz) {
   arg.j = reinterpret_cast<jlong>(b);
   jobject hb = env->NewObjectA(g_hb_cls, g_hb_ctor, &arg);
   if (hb == nullptr) { env->ExceptionClear(); gfx::ahb_release(b); return nullptr; }
-  if (diag) log::i(kTag, "getHardwareBuffer: exit hb ok");
+  if (diag) {
+    jmethodID gw = env->GetMethodID(g_hb_cls, "getWidth", "()I");
+    jmethodID gf = env->GetMethodID(g_hb_cls, "getFormat", "()I");
+    jint w = gw != nullptr ? env->CallIntMethod(hb, gw) : -1;
+    jint fmt = gf != nullptr ? env->CallIntMethod(hb, gf) : -1;
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    log::i(kTag, "getHardwareBuffer: hb.getWidth()={} getFormat()={} (expect 256, 1)", w, fmt);
+  }
   return hb;
 }
 jint JNICALL SI_nativeGetWidth(JNIEnv* env, jobject thiz) {
@@ -240,6 +280,12 @@ void register_image_reader_natives(JNIEnv* env) {
     g_hb_ctor = env->GetMethodID(hb, "<init>", "(J)V");
     if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteLocalRef(hb);
+  }
+  if (jclass sf = env->FindClass("android/view/Surface"); sf != nullptr) {
+    g_surface_cls = static_cast<jclass>(env->NewGlobalRef(sf));
+    g_surface_ctor = env->GetMethodID(sf, "<init>", "(J)V");  // private, pure-Java
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(sf);
   }
 
   static const JNINativeMethod ir_m[] = {
