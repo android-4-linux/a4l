@@ -28,6 +28,9 @@ if have_gl
   # HardwareBuffer: a gbm_bo exported as a dma-buf (gfx::DmabufFrame) — the zero-copy graphics
   # buffer under Flutter's external-texture path and android.hardware.HardwareBuffer.
   gfx_sources += files('hardware_buffer.cpp')
+  # AHardwareBuffer representation + the EGL_NATIVE_BUFFER_ANDROID -> EGL_LINUX_DMA_BUF_EXT
+  # translation the engine's texture import needs (M2).
+  gfx_sources += files('ahardware_buffer.cpp')
   gfx_deps += [egl_dep, glesv2_dep, gbm_dep, gl_libdrm_dep, wl_egl_dep]
   # GLSurfaceView Stage 2a: the com.google.android.gles_jni.EGLImpl natives (EGL10 on host
   # libEGL). Needs JNI headers; compiled only when the JVM/JNI is present.

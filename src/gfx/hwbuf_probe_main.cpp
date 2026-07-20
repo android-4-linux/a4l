@@ -25,6 +25,7 @@ int main() { std::fprintf(stderr, "hwbuf-probe: built without GL support\n"); re
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 
+#include "gfx/ahardware_buffer.h"
 #include "gfx/gl_egl.h"
 #include "gfx/hardware_buffer.h"
 
@@ -67,7 +68,7 @@ int main() {
   }
 
   // 1) Allocate an RGBA HardwareBuffer and CPU-fill the test pattern via lock().
-  auto hb = HardwareBuffer::allocate(W, H, HbFormat::R8G8B8A8_UNORM, 0, &err);
+  std::shared_ptr<HardwareBuffer> hb = HardwareBuffer::allocate(W, H, HbFormat::R8G8B8A8_UNORM, 0, &err);
   if (!hb) { std::fprintf(stderr, "hwbuf-probe: allocate failed (%s) — skip\n", err.c_str()); return 2; }
   std::uint32_t stride = 0;
   auto* base = static_cast<std::uint8_t*>(hb->lock(&stride, &err));
@@ -86,27 +87,11 @@ int main() {
     std::fprintf(stderr, "hwbuf-probe: missing EGLImage/OES entry points — skip\n");
     return 2;
   }
-  const auto& f = hb->frame();
-  EGLint attrs[] = {
-      EGL_WIDTH, W, EGL_HEIGHT, H,
-      EGL_LINUX_DRM_FOURCC_EXT, static_cast<EGLint>(f.drm_format),
-      EGL_DMA_BUF_PLANE0_FD_EXT, f.fd,
-      EGL_DMA_BUF_PLANE0_OFFSET_EXT, static_cast<EGLint>(f.planes[0].offset),
-      EGL_DMA_BUF_PLANE0_PITCH_EXT, static_cast<EGLint>(f.planes[0].stride),
-      EGL_NONE};
-  EGLImageKHR img = eglCreateImageKHR(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attrs);
-  if (img == EGL_NO_IMAGE_KHR) { std::fprintf(stderr, "hwbuf-probe: eglCreateImageKHR failed (%#x)\n", eglGetError()); return 1; }
-
-  GLuint tex = 0;
+  // Set up the sampling harness ONCE: an OES texture, an offscreen RGBA FBO, the samplerExternalOES
+  // program, and a 1:1 quad. Each check() rebinds the OES texture to a different EGLImage and reads
+  // back, so both import paths run through identical sampling.
+  GLuint tex = 0, fbo = 0, color = 0;
   glGenTextures(1, &tex);
-  glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex);
-  glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, img);
-  glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-  if (GLenum e = glGetError(); e != GL_NO_ERROR) { std::fprintf(stderr, "hwbuf-probe: bind OES texture failed (%#x)\n", e); return 1; }
-
-  // 3) Sample the external texture into an offscreen RGBA FBO at 1:1.
-  GLuint fbo = 0, color = 0;
   glGenTextures(1, &color);
   glBindTexture(GL_TEXTURE_2D, color);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
@@ -131,46 +116,72 @@ int main() {
   glUseProgram(prog);
   glUniform1i(glGetUniformLocation(prog, "uTex"), 0);
   glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex);
-
-  const GLfloat verts[] = {  // pos.xy, tex.xy  (triangle strip)
-      -1, -1, 0, 0,   1, -1, 1, 0,   -1, 1, 0, 1,   1, 1, 1, 1};
+  const GLfloat verts[] = {-1, -1, 0, 0,   1, -1, 1, 0,   -1, 1, 0, 1,   1, 1, 1, 1};
   glViewport(0, 0, W, H);
   glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), verts);
   glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), verts + 2);
   glEnableVertexAttribArray(0); glEnableVertexAttribArray(1);
-  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
-  // 4) Read back and compare. glReadPixels is bottom-up; texcoord v=0 maps to FBO row 0, which
-  // sampled dma-buf row 0 (top). So FBO row r == pattern row r (the strip already y-flips NDC vs
-  // texcoord consistently). Verify a grid of texels bit-exact.
-  std::vector<std::uint8_t> got(static_cast<std::size_t>(W) * H * 4);
-  glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, got.data());
-  if (GLenum e = glGetError(); e != GL_NO_ERROR) { std::fprintf(stderr, "hwbuf-probe: readback failed (%#x)\n", e); return 1; }
-
-  int mismatches = 0, checked = 0;
-  for (int y = 0; y < H; y += 8) {
-    for (int x = 0; x < W; x += 8) {
-      std::uint8_t want[4]; pattern(x, y, want);
-      const std::uint8_t* g = &got[(static_cast<std::size_t>(y) * W + x) * 4];
-      ++checked;
-      if (std::memcmp(want, g, 4) != 0) {
-        if (mismatches < 6)
-          std::fprintf(stderr, "  (%2d,%2d) want %3d,%3d,%3d,%3d got %3d,%3d,%3d,%3d\n",
-                       x, y, want[0], want[1], want[2], want[3], g[0], g[1], g[2], g[3]);
-        ++mismatches;
+  // Bind `image` to the OES texture, draw the quad, read back, and compare bit-exact to the pattern.
+  // Returns 0 on success, nonzero on failure/mismatch. glReadPixels row r == dma-buf row r (the
+  // strip y-flips NDC vs texcoord consistently).
+  auto check = [&](EGLImageKHR image, const char* label) -> int {
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex);
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, image);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    if (GLenum e = glGetError(); e != GL_NO_ERROR) { std::fprintf(stderr, "hwbuf-probe[%s]: bind OES failed (%#x)\n", label, e); return 1; }
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    std::vector<std::uint8_t> got(static_cast<std::size_t>(W) * H * 4);
+    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, got.data());
+    if (GLenum e = glGetError(); e != GL_NO_ERROR) { std::fprintf(stderr, "hwbuf-probe[%s]: readback failed (%#x)\n", label, e); return 1; }
+    int mism = 0, checked = 0;
+    for (int y = 0; y < H; y += 8)
+      for (int x = 0; x < W; x += 8) {
+        std::uint8_t want[4]; pattern(x, y, want);
+        const std::uint8_t* g = &got[(static_cast<std::size_t>(y) * W + x) * 4];
+        ++checked;
+        if (std::memcmp(want, g, 4) != 0) {
+          if (mism < 4) std::fprintf(stderr, "  [%s] (%2d,%2d) want %3d,%3d,%3d,%3d got %3d,%3d,%3d,%3d\n",
+                                     label, x, y, want[0], want[1], want[2], want[3], g[0], g[1], g[2], g[3]);
+          ++mism;
+        }
       }
-    }
-  }
+    if (mism != 0) { std::fprintf(stderr, "hwbuf-probe: FAIL [%s] — %d/%d texels mismatched\n", label, mism, checked); return 1; }
+    std::printf("hwbuf-probe: PASS [%s] — %d texels sampled bit-exact\n", label, checked);
+    return 0;
+  };
 
-  eglDestroyImageKHR(dpy, img);
-  if (mismatches != 0) {
-    std::fprintf(stderr, "hwbuf-probe: FAIL — %d/%d sampled texels mismatched\n", mismatches, checked);
-    return 1;
-  }
-  std::printf("hwbuf-probe: PASS — %dx%d dma-buf imported as EGLImage and sampled bit-exact (%d texels, stride=%u, mod=%#lx)\n",
-              W, H, checked, hb->frame().planes[0].stride, static_cast<unsigned long>(hb->frame().modifier));
-  return 0;
+  const auto& f = hb->frame();
+
+  // Path A (M1): the engine's direct dma-buf import — eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT).
+  EGLint attrs[] = {
+      EGL_WIDTH, W, EGL_HEIGHT, H,
+      EGL_LINUX_DRM_FOURCC_EXT, static_cast<EGLint>(f.drm_format),
+      EGL_DMA_BUF_PLANE0_FD_EXT, f.fd,
+      EGL_DMA_BUF_PLANE0_OFFSET_EXT, static_cast<EGLint>(f.planes[0].offset),
+      EGL_DMA_BUF_PLANE0_PITCH_EXT, static_cast<EGLint>(f.planes[0].stride),
+      EGL_NONE};
+  EGLImageKHR img_a = eglCreateImageKHR(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attrs);
+  if (img_a == EGL_NO_IMAGE_KHR) { std::fprintf(stderr, "hwbuf-probe: direct import failed (%#x)\n", eglGetError()); return 1; }
+  int rc = check(img_a, "M1 direct dma-buf import");
+
+  // Path B (M2): wrap as an AHardwareBuffer and go through acl's translation — this is exactly what
+  // the eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID, ahb) interceptor does for the engine.
+  AHardwareBuffer* ahb = acl::gfx::ahb_create(hb);
+  EGLImageKHR img_b = static_cast<EGLImageKHR>(acl::gfx::egl_image_from_ahb(
+      dpy, ahb, nullptr, reinterpret_cast<acl::gfx::EglCreateImageFn>(eglCreateImageKHR)));
+  if (img_b == EGL_NO_IMAGE_KHR) { std::fprintf(stderr, "hwbuf-probe: AHB translation failed (%#x)\n", eglGetError()); rc = 1; }
+  else rc |= check(img_b, "M2 AHardwareBuffer->dma-buf translation");
+
+  if (img_b != EGL_NO_IMAGE_KHR) eglDestroyImageKHR(dpy, img_b);
+  eglDestroyImageKHR(dpy, img_a);
+  acl::gfx::ahb_release(ahb);
+  if (rc == 0)
+    std::printf("hwbuf-probe: ALL PASS — %dx%d, stride=%u, mod=%#lx\n", W, H, f.planes[0].stride,
+                static_cast<unsigned long>(f.modifier));
+  return rc;
 }
 
 #endif  // ACL_HAVE_GL

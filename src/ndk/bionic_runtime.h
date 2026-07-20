@@ -31,6 +31,10 @@ struct NativeGlHooks {
   void* (*get_display)(void* user) = nullptr;                    // -> EGLDisplay (acl's, waits for ready)
   void* (*create_window_surface)(void* user, void* egl_config) = nullptr;  // -> EGLSurface on wl_surface
   void (*window_size)(void* user, int* w, int* h) = nullptr;     // the session's current pixel size
+  // Translate the engine's eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID, ahb) into a dma-buf EGLImage
+  // (host Mesa can't consume the Android target). Set by the runtime to gfx::egl_image_from_ahb;
+  // `ahb` is the AHardwareBuffer*, `real` is host Mesa's eglCreateImageKHR. Runs under a donor %fs.
+  void* (*egl_image_from_ahb)(void* dpy, const void* ahb, const int* attribs, void* real) = nullptr;
   void* user = nullptr;
 };
 // Register the hooks (idempotent; last wins). Called by the runtime at EGL setup. Also wires the

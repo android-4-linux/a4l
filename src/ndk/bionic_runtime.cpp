@@ -526,8 +526,19 @@ void* gl_jit_wrap(void* mesa) {
 // Replacement for eglGetProcAddress installed into the EGL bridge slot: resolve `name` in host Mesa,
 // then hand back a %fs-swapping trampoline instead of the raw dispatch pointer. Runs under the donor
 // %fs (the forwarder swapped before calling this), so calling Mesa here is safe.
+// The external-texture import shims (defined after g_native_gl_hooks, which they read). Host Mesa
+// has neither entry point, so acl_egl_get_proc_address hands these back — wrapped like any Mesa ptr
+// so they run under a donor %fs — for the engine's Texture/ImageExternalTexture path.
+void* acl_egl_get_native_client_buffer_android(void* ahb);
+void* acl_egl_create_image_khr(void* dpy, void* ctx, unsigned target, void* buffer, const int* attribs);
+
 void* acl_egl_get_proc_address(const char* name) {
   if (g_mesa_egl_gpa == nullptr || name == nullptr) return nullptr;
+  // The engine imports an AHardwareBuffer as an EGLImage via these two; translate to a dma-buf import.
+  if (std::strcmp(name, "eglGetNativeClientBufferANDROID") == 0)
+    return gl_jit_wrap(reinterpret_cast<void*>(&acl_egl_get_native_client_buffer_android));
+  if (std::strcmp(name, "eglCreateImageKHR") == 0)
+    return gl_jit_wrap(reinterpret_cast<void*>(&acl_egl_create_image_khr));
   void* mesa = g_mesa_egl_gpa(name);
   void* w = gl_jit_wrap(mesa);
   if (getenv("ACL_GL_DIAG") != nullptr)
@@ -538,6 +549,25 @@ void* acl_egl_get_proc_address(const char* name) {
 // Phase 3: acl-supplied hooks to back the app's NATIVE EGL with acl's GL device (see header). Set by
 // the runtime; read by the two overrides below and by install_gl_forwarders. Run under the donor %fs.
 NativeGlHooks g_native_gl_hooks;
+
+// eglGetNativeClientBufferANDROID: host Mesa lacks it. The engine passes the returned EGLClientBuffer
+// straight back into eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID, ...), so the AHardwareBuffer* IS
+// the client buffer our create-image shim expects.
+void* acl_egl_get_native_client_buffer_android(void* ahb) { return ahb; }
+
+// eglCreateImageKHR: translate the engine's AHardwareBuffer import (EGL_NATIVE_BUFFER_ANDROID, value
+// 0x3140) into a dma-buf EGLImage via the runtime-installed hook; forward every other target to Mesa
+// unchanged. Runs under a donor %fs (the gpa wrapper swapped), so calling Mesa here is safe.
+void* acl_egl_create_image_khr(void* dpy, void* ctx, unsigned target, void* buffer, const int* attribs) {
+  constexpr unsigned kEglNativeBufferAndroid = 0x3140;
+  static void* (*mesa_create_image)(void*, void*, unsigned, void*, const int*) = nullptr;
+  if (mesa_create_image == nullptr && g_mesa_egl_gpa != nullptr)
+    mesa_create_image = reinterpret_cast<decltype(mesa_create_image)>(g_mesa_egl_gpa("eglCreateImageKHR"));
+  if (mesa_create_image == nullptr) return nullptr;
+  if (target == kEglNativeBufferAndroid && g_native_gl_hooks.egl_image_from_ahb != nullptr)
+    return g_native_gl_hooks.egl_image_from_ahb(dpy, buffer, attribs, reinterpret_cast<void*>(mesa_create_image));
+  return mesa_create_image(dpy, ctx, target, buffer, attribs);
+}
 
 // eglGetDisplay override: hand back acl's EGLDisplay so the app's EGL shares acl's one Wayland
 // connection (its window surface will live on acl's wl_surface). The display_id arg is ignored.

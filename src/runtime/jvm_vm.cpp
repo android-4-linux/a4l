@@ -48,6 +48,7 @@
 #endif
 #if ACL_HAVE_GL
 #include "gfx/gl_egl.h"     // GLSurfaceView: host GL device (EGLImpl get_display)
+#include "gfx/ahardware_buffer.h"  // Flutter external textures: AHardwareBuffer EGLImage translation
 #include "gfx/egl10_jni.h"  // GLSurfaceView: com.google.android.gles_jni.EGLImpl natives
 #endif
 #include "log/log.h"
@@ -3695,6 +3696,12 @@ class ArtVm final : public JniVm {
       if (w) *w = g_gl_session.w;
       if (h) *h = g_gl_session.h;
     };
+    // Flutter external textures: the engine imports an app/producer AHardwareBuffer as an EGLImage
+    // via eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID, ahb), which host Mesa can't consume. Point the
+    // forwarder's translation hook at gfx::egl_image_from_ahb (dma-buf import). The typed signature is
+    // ABI-compatible with the void*-typed hook slot (all params are pointers).
+    nhooks.egl_image_from_ahb = reinterpret_cast<void* (*)(void*, const void*, const int*, void*)>(
+        &acl::gfx::egl_image_from_ahb);
     acl::ndk::set_native_gl_hooks(nhooks);
 #endif
   }
