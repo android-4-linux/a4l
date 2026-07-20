@@ -614,6 +614,8 @@ AHardwareBuffer* AHardwareBuffer_fromHardwareBuffer(JNIEnv* env, jobject hb) {
   (*env)->DeleteLocalRef(env, c);
   if (f == NULL) { (*env)->ExceptionClear(env); return NULL; }
   jlong ptr = (*env)->GetLongField(env, hb, f);
+  if (getenv("ACL_IR_DIAG") != NULL)
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "AHardwareBuffer_fromHardwareBuffer -> %p", (void*)(intptr_t)ptr);
   return (AHardwareBuffer*)(intptr_t)ptr;
 }
 

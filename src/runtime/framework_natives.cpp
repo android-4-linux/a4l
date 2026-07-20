@@ -11,7 +11,9 @@
 
 #include "runtime/framework_natives.h"
 
+#include <sys/syscall.h>  // SYS_gettid
 #include <time.h>
+#include <unistd.h>  // syscall
 
 #include <array>
 #include <cstdint>
@@ -247,6 +249,9 @@ jboolean JNICALL HardwareBuffer_nIsSupported(JNIEnv*, jclass, jint, jint, jint, 
 }
 jlong JNICALL HardwareBuffer_nEstimateSize(JNIEnv*, jclass, jlong ptr) {
 #if ACL_HAVE_GL
+  if (std::getenv("ACL_IR_DIAG") != nullptr)
+    log::write(log::Level::Info, "acl.gfx", "nEstimateSize ptr=" + std::to_string(ptr) +
+               " tid=" + std::to_string(static_cast<long>(::syscall(SYS_gettid))));
   const ::AHardwareBuffer_Desc d = ahb_desc_of(ptr);
   return static_cast<jlong>(d.width) * d.height * 4;  // conservative RGBA estimate
 #else

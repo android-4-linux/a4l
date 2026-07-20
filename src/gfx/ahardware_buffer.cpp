@@ -115,8 +115,9 @@ void* egl_image_from_ahb(void* dpy, const AHardwareBuffer* ahb, const std::int32
   attrs.push_back(EGL_NONE);
 
   void* img = real(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attrs.data());
-  if (img == nullptr && getenv("ACL_GL_DIAG") != nullptr)
-    log::w(kTag, "egl_image_from_ahb: dma-buf import failed (fourcc={:#x} fd={})", f.drm_format, f.fd);
+  if (getenv("ACL_IR_DIAG") != nullptr || (img == nullptr && getenv("ACL_GL_DIAG") != nullptr))
+    log::i(kTag, "egl_image_from_ahb: {} (fourcc={:#x} fd={})", img != nullptr ? "ok" : "FAILED",
+           f.drm_format, f.fd);
   return img;
 }
 

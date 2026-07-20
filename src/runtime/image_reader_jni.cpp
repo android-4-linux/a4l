@@ -10,7 +10,9 @@
 
 #if ACL_HAVE_GL
 
+#include <sys/syscall.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <cstdlib>
 #include <memory>
@@ -38,6 +40,7 @@ struct ReaderCtx {
   jobject weak_self = nullptr;  // global ref to WeakReference<ImageReader>
   bool self_produce = false;    // ACL_IMAGEREADER_TEST_PRODUCER: make a frame inline on acquire
   int frame = 0;
+  jlong last_produce_ns = 0;    // rate-limit inline production so acquireLatestImage's drain ends
 };
 
 // A recognizable animated ARGB color from a frame counter (~3s R/G/B cycle).
@@ -89,7 +92,9 @@ void JNICALL IR_nativeInit(JNIEnv* env, jobject thiz, jobject weakSelf, jint w, 
       if (c->vm->AttachCurrentThread(reinterpret_cast<void**>(&e), nullptr) != JNI_OK) return;
       attached = true;
     }
-    e->CallStaticVoidMethod(g_reader_cls, g_post_event, c->weak_self);
+    jvalue a;
+    a.l = c->weak_self;
+    e->CallStaticVoidMethodA(g_reader_cls, g_post_event, &a);  // A-variant: variadic is mangled (see above)
     if (e->ExceptionCheck()) e->ExceptionClear();
     if (attached) c->vm->DetachCurrentThread();
   });
@@ -114,13 +119,19 @@ jint JNICALL IR_nativeImageSetup(JNIEnv* env, jobject thiz, jobject image, jbool
   if (ctx == nullptr) return 1;
   ::AHardwareBuffer* b = ctx->queue->acquire_latest();
   // Opt-in test producer: if nothing is ready, make a frame INLINE on this (the engine's) thread —
-  // no separate producer thread, so no cross-thread attach. queue() notifies the listener, which
-  // schedules the next composite, so it animates. Proves the M1..M3 path without a producer Surface.
+  // no separate producer thread, no cross-thread attach. RATE-LIMITED to ~30fps: acquireLatestImage
+  // drains the queue in a tight loop (acquireNextImage until null), so producing on every call would
+  // spin forever. The first call in a ~33ms window produces; the drain's follow-up calls get NO_BUFS,
+  // ending the loop and letting the animation advance one frame per window.
   if (b == nullptr && ctx->self_produce) {
-    if (::AHardwareBuffer* p = ctx->queue->dequeue()) {
-      gfx::ahb_fill_color(p, hue(ctx->frame++));
-      ctx->queue->queue(p);
-      b = ctx->queue->acquire_latest();
+    const jlong now = now_ns();
+    if (now - ctx->last_produce_ns >= 33000000LL) {
+      if (::AHardwareBuffer* p = ctx->queue->dequeue()) {
+        gfx::ahb_fill_color(p, hue(ctx->frame++));
+        ctx->queue->queue(p);
+        ctx->last_produce_ns = now;
+        b = ctx->queue->acquire_latest();
+      }
     }
   }
   if (b == nullptr) return 1;
@@ -133,6 +144,7 @@ jint JNICALL IR_nativeImageSetup(JNIEnv* env, jobject thiz, jobject image, jbool
 void JNICALL IR_nativeReleaseImage(JNIEnv* env, jobject thiz, jobject image) {
   ReaderCtx* ctx = ctx_of(env, thiz);
   ::AHardwareBuffer* b = img_buf(env, image);
+  if (std::getenv("ACL_IR_DIAG") != nullptr) log::i(kTag, "nativeReleaseImage b={}", (void*)b);
   if (ctx != nullptr && b != nullptr) ctx->queue->release(b);
   if (image != nullptr) env->SetLongField(image, g_img_buf_fid, 0);
 }
@@ -150,12 +162,19 @@ void JNICALL IR_nativeUnlockGraphicBuffer(JNIEnv*, jclass, jobject) {}
 // ── ImageReader$SurfaceImage natives ────────────────────────────────────────────────────────────
 jobject JNICALL SI_nativeGetHardwareBuffer(JNIEnv* env, jobject thiz) {
   ::AHardwareBuffer* b = img_buf(env, thiz);
+  const bool diag = std::getenv("ACL_IR_DIAG") != nullptr;
+  if (diag) log::i(kTag, "getHardwareBuffer: enter b={} tid={}", (void*)b, static_cast<long>(::syscall(SYS_gettid)));
   if (b == nullptr || g_hb_cls == nullptr || g_hb_ctor == nullptr) return nullptr;
   // The returned HardwareBuffer holds its OWN ref (its NativeAllocationRegistry finalizer releases
   // it); the BufferQueue keeps its ref until nativeReleaseImage.
   gfx::ahb_acquire(b);
-  jobject hb = env->NewObject(g_hb_cls, g_hb_ctor, reinterpret_cast<jlong>(b));
+  // NewObjectA (explicit jvalue array), NOT the variadic NewObject: through acl's wrapped/%fs-
+  // switching JNIEnv on the engine's raster thread, a variadic jlong is mangled (arrives as 2).
+  jvalue arg;
+  arg.j = reinterpret_cast<jlong>(b);
+  jobject hb = env->NewObjectA(g_hb_cls, g_hb_ctor, &arg);
   if (hb == nullptr) { env->ExceptionClear(); gfx::ahb_release(b); return nullptr; }
+  if (diag) log::i(kTag, "getHardwareBuffer: exit hb ok");
   return hb;
 }
 jint JNICALL SI_nativeGetWidth(JNIEnv* env, jobject thiz) {
