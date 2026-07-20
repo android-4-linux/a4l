@@ -25,6 +25,9 @@ endif
 # so this is compiled independently of have_vulkan.
 if have_gl
   gfx_sources += files('gl_egl.cpp')
+  # HardwareBuffer: a gbm_bo exported as a dma-buf (gfx::DmabufFrame) — the zero-copy graphics
+  # buffer under Flutter's external-texture path and android.hardware.HardwareBuffer.
+  gfx_sources += files('hardware_buffer.cpp')
   gfx_deps += [egl_dep, glesv2_dep, gbm_dep, gl_libdrm_dep, wl_egl_dep]
   # GLSurfaceView Stage 2a: the com.google.android.gles_jni.EGLImpl natives (EGL10 on host
   # libEGL). Needs JNI headers; compiled only when the JVM/JNI is present.
@@ -46,3 +49,17 @@ gfx_dep = declare_dependency(
   dependencies : gfx_deps,
 )
 module_libs += gfx_lib
+
+# Dev tool + M1 proof for the Flutter external-texture bridge: allocate a HardwareBuffer, CPU-fill a
+# pattern, import its dma-buf as an EGLImage, sample it via GL_TEXTURE_EXTERNAL_OES, and read back
+# bit-exact. Headless (surfaceless EGL on a render node). Built only when the GL backend is present.
+if have_gl
+  executable(
+    'acl-hwbuf-probe',
+    files('hwbuf_probe_main.cpp'),
+    include_directories : [config_inc, core_inc],
+    link_with : [gfx_lib, acl_log],
+    dependencies : [fmt_dep, egl_dep, glesv2_dep, gbm_dep, gl_libdrm_dep],
+    install : false,
+  )
+endif
