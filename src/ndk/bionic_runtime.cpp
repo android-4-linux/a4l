@@ -559,6 +559,40 @@ void* acl_egl_get_proc_address(const char* name) {
   return w;
 }
 
+// ── Vulkan forwarder (bionic libvulkan.so -> host Mesa) ────────────────────────────────────────
+// Chromium's WebView Vulkan functor uses acl's VkInstance/device (created by graphics_jni's
+// gpu_dmabuf.cpp with the HOST glibc Mesa libvulkan). Chromium resolves every Vulkan entrypoint via
+// vkGetInstanceProcAddr, so the staged bionic libvulkan.so forwards that ONE call here (under a donor
+// %fs) and we hand back each pointer WRAPPED in a per-thread-donor trampoline — so Chromium and acl
+// share the same host Mesa loader (the instance handles match) and Chromium can call Vulkan directly
+// from bionic %fs. Same shape as acl_egl_get_proc_address; runs under the donor %fs the forwarder set.
+void* (*g_mesa_vk_gipa)(void*, const char*) = nullptr;  // host vkGetInstanceProcAddr
+void* (*g_mesa_vk_gdpa)(void*, const char*) = nullptr;  // host vkGetDeviceProcAddr (resolved lazily)
+
+void* acl_vk_get_device_proc_addr(void* device, const char* name) {
+  if (g_mesa_vk_gdpa == nullptr || name == nullptr) return nullptr;
+  return gl_jit_wrap(reinterpret_cast<void*>(g_mesa_vk_gdpa(device, name)));
+}
+
+void* acl_vk_get_instance_proc_addr(void* instance, const char* name) {
+  if (g_mesa_vk_gipa == nullptr || name == nullptr) return nullptr;
+  // Keep the proc-addr chain going through acl (each returns a %fs-wrapped acl entry, not a raw host
+  // pointer) so every function Chromium later calls runs under a donor %fs.
+  if (std::strcmp(name, "vkGetInstanceProcAddr") == 0)
+    return gl_jit_wrap(reinterpret_cast<void*>(&acl_vk_get_instance_proc_addr));
+  if (std::strcmp(name, "vkGetDeviceProcAddr") == 0) {
+    if (g_mesa_vk_gdpa == nullptr)
+      g_mesa_vk_gdpa = reinterpret_cast<void* (*)(void*, const char*)>(
+          g_mesa_vk_gipa(instance, "vkGetDeviceProcAddr"));
+    return gl_jit_wrap(reinterpret_cast<void*>(&acl_vk_get_device_proc_addr));
+  }
+  void* host = reinterpret_cast<void*>(g_mesa_vk_gipa(instance, name));
+  void* w = gl_jit_wrap(host);
+  if (getenv("ACL_VK_DIAG") != nullptr)
+    log::i(kTag, "vkGetInstanceProcAddr({}) -> host={} wrap={}", name, host, w);
+  return w;
+}
+
 // Phase 3: acl-supplied hooks to back the app's NATIVE EGL with acl's GL device (see header). Set by
 // the runtime; read by the two overrides below and by install_gl_forwarders. Run under the donor %fs.
 NativeGlHooks g_native_gl_hooks;
@@ -706,6 +740,31 @@ void install_gl_forwarders(BionicRuntime* rt) {
   const bool g = wire("libGLESv2.so", "acl_gl_gles_bridge", &gles_b);
   log::i(kTag, "GL forwarders wired: EGL {}/{} GLES {}/{} donor-pool={} pick={} (egl={} gles={})",
          20 - em, 20, 106 - gm, 106, npub, g_gl_pick_donor != nullptr, e, g);
+
+  // Vulkan forwarder: the staged bionic libvulkan.so forwards vkGetInstanceProcAddr to
+  // acl_vk_get_instance_proc_addr (bridge fns[0]), which relays to host Mesa's libvulkan — the SAME
+  // one graphics_jni's gpu_dmabuf.cpp creates the present VkInstance/device with, so Chromium's WebView
+  // Vulkan functor shares one loader and the handles are compatible. Wired only when a bionic
+  // libvulkan.so was staged (ACL_WEBVIEW_VULKAN); harmless otherwise (Chromium never calls it in GL
+  // mode). Uses the SAME donor pool as GL.
+  {
+    void* mvk = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (mvk == nullptr) mvk = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    if (mvk != nullptr)
+      g_mesa_vk_gipa = reinterpret_cast<void* (*)(void*, const char*)>(dlsym(mvk, "vkGetInstanceProcAddr"));
+    static GlBridge vk_b{};
+    vk_b.fns[0] = reinterpret_cast<void*>(&acl_vk_get_instance_proc_addr);
+    std::string verr, vpath = std::string(sysroot) + "/libvulkan.so";
+    if (void* vh = rt->load(vpath.c_str(), &verr)) {
+      if (auto** slot = static_cast<void**>(rt->symbol(vh, "acl_vk_bridge"))) {
+        *slot = &vk_b;
+        log::i(kTag, "Vulkan forwarder wired (host vkGetInstanceProcAddr={})",
+               reinterpret_cast<void*>(g_mesa_vk_gipa));
+      }
+    } else {
+      log::i(kTag, "Vulkan forwarder: no staged libvulkan.so ({}) — GL/software mode", verr);
+    }
+  }
 #else
   (void)rt;
 #endif

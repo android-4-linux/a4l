@@ -135,9 +135,15 @@ GLCRTE="$INT/bionic/libc/crtend_so/android_x86_64/obj/bionic/libc/arch-common/bi
 # the lazy resolver (which would clobber the live argument registers). libEGL.so owns the shared
 # per-thread-donor helper; libGLESv2.so DT_NEEDED links it so its forwarders resolve acl_gl_pick_donor.
 # libEGL FIRST so it exists for the libGLESv2 link.
+# libvulkan.so is the Vulkan analog of the GL forwarders (bionic->host-Mesa; DT_NEEDED libEGL for the
+# shared acl_gl_pick_donor). Staged only in WebView Vulkan-functor mode (ACL_WEBVIEW_VULKAN) so the
+# default GL/software path is unchanged; acl's install wiring handles its absence gracefully.
+VK_FWD=""
+[ -n "${ACL_WEBVIEW_VULKAN:-}" ] && VK_FWD="libvulkan.so:acl_vulkan_fwd.c:$SYS/libEGL.so"
 for pair in "libEGL.so:acl_egl_fwd.c:" "libGLESv2.so:acl_gles_fwd.c:$SYS/libEGL.so" \
             "libjnigraphics.so:acl_libjnigraphics.c:" \
-            "libwebviewchromium_plat_support.so:acl_libwebviewchromium_plat_support.c:"; do
+            "libwebviewchromium_plat_support.so:acl_libwebviewchromium_plat_support.c:" \
+            ${VK_FWD:+"$VK_FWD"}; do
   gso="${pair%%:*}"; rest="${pair#*:}"; gsrc="${rest%%:*}"; gextra="${rest#*:}"
   "$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls -mfsgsbase \
     -O2 -Wl,-soname,"$gso" -Wl,-z,now "${BIONIC_INC[@]}" -o "$SYS/$gso" \
