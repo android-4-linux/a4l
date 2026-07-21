@@ -940,6 +940,7 @@ void JNICALL PresentDriver_nClose(JNIEnv* env, jclass, jlong sp) {
 jlong JNICALL PresentDriver_nGlOpen(JNIEnv* env, jclass, jobject view, jint w, jint h,
                                     jstring title, jstring appId) {
 #if ACL_HAVE_GL
+  log::i(kTag, "nGlOpen: entry ({}x{}) — backing a SurfaceView with an acl GL session", w, h);
   if (!wm::wayland_available()) { log::i(kTag, "nGlOpen: no Wayland compositor reachable"); return 0; }
   auto* s = new PresentSession();
   s->is_gl = true;
@@ -3707,12 +3708,21 @@ class ArtVm final : public JniVm {
     // hooks above; runs under the GL donor %fs, so the callbacks stay lock-light and TLS-free.
     acl::ndk::NativeGlHooks nhooks;
     nhooks.get_display = [](void*) -> void* {
-      // The raster thread blocks for the present path to publish the wayland device, so its context
-      // is created on the SAME device as its window surface (else eglMakeCurrent EGL_BAD_MATCH).
+      // The engine blocks for the present path to publish the wayland device, so its context is
+      // created on the SAME device as its window surface (else eglMakeCurrent EGL_BAD_MATCH).
+      // NOTE: the newer Flutter engine creates its GL environment AND rendering surface
+      // SYNCHRONOUSLY ON THE MAIN THREAD during onCreate — before acl's post-onCreate nGlOpen
+      // publishes the session. Blocking here then deadlocks (the main thread waits for a session
+      // only the main thread can publish). The fix is to pre-publish the wayland GL session before
+      // onCreate for native-EGL apps (see present flow); a gbm fallback display is insufficient —
+      // the engine's offscreen surface needs a config from the real session device.
       std::unique_lock<std::mutex> lk(g_gl_session.mtx);
-      g_gl_session.cv.wait_for(lk, std::chrono::seconds(10), [] { return g_gl_session.ready; });
-      if (g_gl_session.ready && g_gl_session.device != nullptr)
+      const bool got = g_gl_session.cv.wait_for(lk, std::chrono::seconds(10),
+                                                [] { return g_gl_session.ready; });
+      if (got && g_gl_session.device != nullptr)
         return static_cast<void*>(g_gl_session.device->egl_display());
+      log::w(kTag, "native egl: get_display TIMED OUT (GL session not published before the engine's "
+                   "on-main-thread GL init; nGlOpen runs only post-onCreate) -> engine BAD_DISPLAY");
       return nullptr;
     };
     nhooks.create_window_surface = [](void*, void* cfg) -> void* {
