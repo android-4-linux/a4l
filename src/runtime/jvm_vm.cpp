@@ -10,8 +10,10 @@
 
 #include "runtime/jvm_vm.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <thread>
 #include <string>
@@ -3325,11 +3327,24 @@ class ArtVm final : public JniVm {
     // android.graphics.HardwareRendererObserver — Chromium WebView's AwContents attaches a frame-metrics
     // observer (FrameMetrics), whose natives live in libhwui (dropped by acl). Unbound, nCreateObserver
     // throws UnsatisfiedLinkError and AwContents.<init> fails -> WebView inflation fails. acl has no hwui
-    // frame timeline: hand back a dummy observer handle and report "no frame data" (nGetNextBuffer=-1).
+    // frame timeline: hand back an observer handle and report "no frame data" (nGetNextBuffer=-1).
+    //
+    // The handle MUST be a real object, not a dummy sentinel: HardwareRendererObserver.<init> wraps it in
+    // com.android.internal.util.VirtualRefBasePtr, which immediately nIncStrong()s it (and nDecStrong()s on
+    // release). graphics_jni's VirtualRefBasePtr natives reinterpret_cast the handle to a VirtualLightRefBase
+    // (vptr@0, atomic<int32_t> refcount@8) and inc/decStrong it, deleting at zero — so a sentinel like 1
+    // dereferences ~0x9 and SIGSEGVs (which WebView's crashpad then turns into a fatal _exit). Return an
+    // ABI-identical VirtualLightRefBase so the inc/decStrong round-trips and frees cleanly on GC.
     if (jclass hro = find_class_optional(env, "android/graphics/HardwareRendererObserver")) {
+      struct AclVirtualLightRef {  // layout-compatible with graphics_jni's VirtualLightRefBase
+        virtual ~AclVirtualLightRef() = default;
+        mutable std::atomic<std::int32_t> ref_count{0};
+      };
       const JNINativeMethod m[] = {
           {const_cast<char*>("nCreateObserver"), const_cast<char*>("(Ljava/lang/ref/WeakReference;Z)J"),
-           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jobject, jboolean) -> jlong { return 1; })},
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jobject, jboolean) -> jlong {
+             return reinterpret_cast<jlong>(new AclVirtualLightRef());
+           })},
           {const_cast<char*>("nGetNextBuffer"), const_cast<char*>("(J[J)I"),
            reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jlongArray) -> jint { return -1; })},
       };
