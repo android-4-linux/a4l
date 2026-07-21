@@ -726,6 +726,9 @@ ACL_EXPORT int AHardwareBuffer_unlock(AHardwareBuffer* ahb, int32_t* fence) {
 #ifndef MFD_ALLOW_SEALING
 #define MFD_ALLOW_SEALING 0x0002U
 #endif
+#ifndef F_SEAL_FUTURE_WRITE
+#define F_SEAL_FUTURE_WRITE 0x0010  // Linux 5.1+
+#endif
 ACL_EXPORT int ASharedMemory_create(const char* name, size_t size) {
   int fd = memfd_create(name != NULL ? name : "acl-shmem", MFD_CLOEXEC | MFD_ALLOW_SEALING);
   if (fd < 0) return -errno;
@@ -737,10 +740,17 @@ ACL_EXPORT size_t ASharedMemory_getSize(int fd) {
   return fstat(fd, &st) == 0 ? (size_t)st.st_size : 0;
 }
 ACL_EXPORT int ASharedMemory_setProt(int fd, int prot) {
-  // ashmem restricts the region's MAX protection; emulate for the read-only case with a write seal
-  // (+ shrink/grow seals) so the region can no longer be mapped writable — matching ashmem semantics.
+  // ashmem restricts the region's MAX protection; emulate the read-only case by sealing the memfd so
+  // it can no longer be mapped writable (Chromium's ashmem-dev.c get_prot_region probes writability
+  // with an RW mmap, so the seal must make that mmap fail). Prefer F_SEAL_FUTURE_WRITE: Chromium's
+  // ReadOnlySharedMemoryRegion::Create converts a region to read-only WHILE it is still mapped
+  // writable, and a full F_SEAL_WRITE EBUSYs whenever a writable mapping is outstanding (leaving the
+  // region unsealed -> the CheckPlatformHandlePermissionsCorrespondToMode CHECK aborts). FUTURE_WRITE
+  // blocks only new writable mmaps, so it applies regardless of existing mappings. Fall back to
+  // F_SEAL_WRITE on kernels without FUTURE_WRITE (< 5.1).
   if (!(prot & PROT_WRITE))
-    fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW);  // best-effort
+    if (fcntl(fd, F_ADD_SEALS, F_SEAL_FUTURE_WRITE | F_SEAL_SHRINK | F_SEAL_GROW) < 0)
+      fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW);  // best-effort
   return 0;
 }
 
