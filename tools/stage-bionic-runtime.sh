@@ -136,7 +136,8 @@ GLCRTE="$INT/bionic/libc/crtend_so/android_x86_64/obj/bionic/libc/arch-common/bi
 # per-thread-donor helper; libGLESv2.so DT_NEEDED links it so its forwarders resolve acl_gl_pick_donor.
 # libEGL FIRST so it exists for the libGLESv2 link.
 for pair in "libEGL.so:acl_egl_fwd.c:" "libGLESv2.so:acl_gles_fwd.c:$SYS/libEGL.so" \
-            "libjnigraphics.so:acl_libjnigraphics.c:"; do
+            "libjnigraphics.so:acl_libjnigraphics.c:" \
+            "libwebviewchromium_plat_support.so:acl_libwebviewchromium_plat_support.c:"; do
   gso="${pair%%:*}"; rest="${pair#*:}"; gsrc="${rest%%:*}"; gextra="${rest#*:}"
   "$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls -mfsgsbase \
     -O2 -Wl,-soname,"$gso" -Wl,-z,now "${BIONIC_INC[@]}" -o "$SYS/$gso" \

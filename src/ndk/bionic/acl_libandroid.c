@@ -443,6 +443,7 @@ ACL_EXPORT ANativeWindow* ANativeWindow_fromSurface(struct _JNIEnv* env, struct 
   }
   return (ANativeWindow*)&g_anw_token;
 }
+ACL_EXPORT void ANativeWindow_acquire(ANativeWindow* w) { (void)w; }  // refcount is a no-op (see release)
 ACL_EXPORT void ANativeWindow_release(ANativeWindow* w) { (void)w; }
 ACL_EXPORT int32_t ANativeWindow_getFormat(ANativeWindow* w) {
   (void)w;

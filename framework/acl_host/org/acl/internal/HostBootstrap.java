@@ -204,6 +204,127 @@ public final class HostBootstrap {
         seedVirtualInputDevice();
     }
 
+    // ── WebView (Stage 1): install a vendored Chromium WebView provider ───────────────────────────
+    // acl has no WebViewUpdateService/Binder, so the normal WebViewFactory.getProvider() path (ask the
+    // update service which package to use -> ClassLoader over its APK -> load native -> Class.forName
+    // the factory -> create) cannot run. Instead, when ACL_WEBVIEW_APK points at a Chromium WebView APK
+    // (e.g. AOSP external/chromium-webview/prebuilt/x86_64/webview.apk), build the provider here and set
+    // WebViewFactory.sProviderInstance directly — getProvider() then returns it and never touches the
+    // update service. The 96MB libwebviewchromium.so loads through acl's bionic linker (ACL_BIONIC_LINKER).
+    // Opt-in (unset -> no-op), and eager: an app that wants WebView pays the load; others are untouched.
+    private static boolean sWebViewInstalled;
+    static android.content.pm.PackageInfo sWebViewPackageInfo;  // the vendored WebView pkg (AppPackageManager)
+    static synchronized void installWebViewProvider() {
+        if (sWebViewInstalled) return;
+        final String apkPath = System.getenv("ACL_WEBVIEW_APK");
+        if (apkPath == null || apkPath.isEmpty()) return;  // not configured
+        sWebViewInstalled = true;
+        try {
+            java.io.File apk = new java.io.File(apkPath);
+            if (!apk.exists()) {
+                System.err.println("acl WebView: ACL_WEBVIEW_APK not found: " + apkPath);
+                return;
+            }
+            // Host is x86_64; match the APK's lib/<abi>/.
+            final String abi = "x86_64";
+            java.io.File libDir = new java.io.File(System.getProperty("java.io.tmpdir"), "acl-webview-lib");
+            libDir.mkdirs();
+            // Extract the native engine (+ chromium linker/crashpad, best-effort) next to it.
+            java.io.File soFile = null;
+            try (java.util.zip.ZipFile zf = new java.util.zip.ZipFile(apk)) {
+                for (String so : new String[]{"libwebviewchromium.so", "libchromium_android_linker.so",
+                                              "libcrashpad_handler_trampoline.so"}) {
+                    java.util.zip.ZipEntry e = zf.getEntry("lib/" + abi + "/" + so);
+                    if (e == null) continue;
+                    java.io.File out = new java.io.File(libDir, so);
+                    if (!out.exists() || out.length() != e.getSize()) {
+                        try (java.io.InputStream in = zf.getInputStream(e);
+                             java.io.OutputStream os = new java.io.FileOutputStream(out)) {
+                            byte[] buf = new byte[1 << 16]; int n;
+                            while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+                        }
+                    }
+                    if (so.equals("libwebviewchromium.so")) soFile = out;
+                }
+            }
+            if (soFile == null) {
+                System.err.println("acl WebView: lib/" + abi + "/libwebviewchromium.so not in APK");
+                return;
+            }
+            // ClassLoader over the WebView APK's classes.dex; parent = the framework (boot) loader so
+            // android.webkit.* resolves. Native search path = the extracted lib dir.
+            ClassLoader parent = android.webkit.WebView.class.getClassLoader();
+            // Native search path: the extracted engine dir + acl's bionic sysroot (where
+            // stage-bionic-runtime.sh builds libwebviewchromium_plat_support.so, the draw-functor glue
+            // the provider loads via System.loadLibrary).
+            String sysroot = System.getenv("ACL_BIONIC_SYSROOT");
+            String libPath = libDir.getAbsolutePath() + (sysroot != null ? ":" + sysroot : "");
+            dalvik.system.DexClassLoader cl = new dalvik.system.DexClassLoader(
+                    apkPath, libPath, libPath, parent);
+            // Resolve the factory class WITHOUT running its <clinit> (loadClass, not Class.forName), so
+            // we can load the native engine first.
+            Class<?> factoryCls = cl.loadClass("com.android.webview.chromium.WebViewChromiumFactoryProviderForT");
+            // Load the native engine ASSOCIATED WITH the WebView classloader. Runtime.load0(fromClass,
+            // path) -> nativeLoad(path, fromClass.getClassLoader(), null), so acl's bionic-load hook sets
+            // the FindClass loader to the WebView loader — Chromium's JNI_OnLoad resolves org.chromium.*
+            // (a plain System.load would bind the lib to HostBootstrap's loader and JNI_OnLoad CHECK-fails).
+            System.err.println("acl WebView: loading " + soFile.getAbsolutePath() + " (" + soFile.length() + "B)");
+            java.lang.reflect.Method load0 = Runtime.class.getDeclaredMethod("load0", Class.class, String.class);
+            load0.setAccessible(true);
+            load0.invoke(Runtime.getRuntime(), factoryCls, soFile.getAbsolutePath());
+            // The provider ctor reads WebViewFactory.getLoadedPackageInfo() (= sPackageInfo), which the
+            // bypassed getWebViewContextAndSetProvider() would have set. Build one for the WebView APK.
+            android.content.pm.PackageInfo pi = new android.content.pm.PackageInfo();
+            pi.packageName = "com.android.webview";
+            pi.versionName = "120.0.0.0";
+            try { pi.setLongVersionCode(541412306L); } catch (Throwable ignored) { pi.versionCode = 541412306; }
+            android.content.pm.ApplicationInfo ai = new android.content.pm.ApplicationInfo();
+            ai.packageName = "com.android.webview";
+            // AwBrowserProcess reads className.toLowerCase().contains("monochrome") to pick the WebView
+            // variant; the standalone SystemWebView's Application class (no "monochrome") => standalone.
+            ai.className = "org.chromium.android_webview.nonembedded.WebViewApkApplication";
+            ai.sourceDir = apkPath;
+            ai.publicSourceDir = apkPath;
+            ai.nativeLibraryDir = libDir.getAbsolutePath();
+            ai.metaData = new android.os.Bundle();
+            ai.metaData.putString("com.android.webview.WebViewLibrary", "libwebviewchromium.so");
+            pi.applicationInfo = ai;
+            sWebViewPackageInfo = pi;  // so AppPackageManager can resolve "com.android.webview"
+            Class<?> wvf0 = Class.forName("android.webkit.WebViewFactory");
+            setStaticField(wvf0, "sPackageInfo", pi);
+            // Add the WebView APK to the app's AssetManager as a shared library so it gets a resource
+            // package id — WebViewDelegate.getPackageId("com.android.webview") reads that (chromium needs
+            // its own resources). getProviderClass() normally does this; we bypassed it.
+            if (sApplication != null) {
+                try {
+                    android.content.res.AssetManager am = sApplication.getAssets();
+                    java.lang.reflect.Method addLib = android.content.res.AssetManager.class
+                            .getMethod("addAssetPathAsSharedLibrary", String.class);
+                    Object cookie = addLib.invoke(am, apkPath);
+                    System.err.println("acl WebView: added WebView APK to app assets (cookie=" + cookie + ")");
+                } catch (Throwable t) {
+                    System.err.println("acl WebView: addAssetPathAsSharedLibrary failed: " + t);
+                }
+            }
+            // WebViewDelegate has a package-private no-arg ctor.
+            java.lang.reflect.Constructor<?> dctor =
+                    Class.forName("android.webkit.WebViewDelegate").getDeclaredConstructor();
+            dctor.setAccessible(true);
+            Object delegate = dctor.newInstance();
+            // WebViewChromiumFactoryProviderForT.create(WebViewDelegate) -> the provider instance.
+            java.lang.reflect.Method create = factoryCls.getMethod(
+                    "create", Class.forName("android.webkit.WebViewDelegate"));
+            Object provider = create.invoke(null, delegate);
+            // Publish it so WebViewFactory.getProvider() returns it (skips the update-service path).
+            Class<?> wvf = Class.forName("android.webkit.WebViewFactory");
+            setStaticField(wvf, "sProviderInstance", provider);
+            System.err.println("acl WebView: provider installed (" + factoryCls.getName() + ")");
+        } catch (Throwable t) {
+            System.err.println("acl WebView: provider install failed: " + t);
+            t.printStackTrace();
+        }
+    }
+
     // KeyCharacterMap.load(VIRTUAL_KEYBOARD) → InputManager.getInputDevice(-1) → null (no input
     // service) → UnavailableException, which takes down PhoneWindow.preparePanel (menu setup) and
     // any KeyEvent character mapping. Seed InputManager's device cache with a virtual keyboard
@@ -1076,6 +1197,8 @@ public final class HostBootstrap {
         @Override public android.content.pm.PackageInfo getPackageInfo(String p, int flags)
                 throws android.content.pm.PackageManager.NameNotFoundException {
             if (p != null && p.equals(pkg)) return ownPackageInfo();
+            // The vendored WebView package (chromium queries it during provider init).
+            if (sWebViewPackageInfo != null && "com.android.webview".equals(p)) return sWebViewPackageInfo;
             throw new android.content.pm.PackageManager.NameNotFoundException(p);
         }
         @Override public android.content.pm.PackageInfo getPackageInfo(String p,
@@ -1121,6 +1244,8 @@ public final class HostBootstrap {
             // it default to Impeller, whose GL context init fails on acl ("Bad Display" -> raster
             // SIGSEGV); acl's supported Flutter backend is Skia/GLES, which the app's manifest
             // selects via EnableImpeller=false. Firebase/WorkManager read their config the same way.
+            if (sWebViewPackageInfo != null && "com.android.webview".equals(p))
+                return sWebViewPackageInfo.applicationInfo;
             AppContext c = sAppContext;
             if (c != null && (p == null || p.equals(pkg))) {
                 try {
@@ -1137,6 +1262,16 @@ public final class HostBootstrap {
         @Override public android.content.pm.ApplicationInfo getApplicationInfo(String p,
                 android.content.pm.PackageManager.ApplicationInfoFlags flags) {
             return getApplicationInfo(p, 0);  // API 33 typed-flags overload (StubPackageManager throws)
+        }
+        // WebView support gate (WebViewFactory.isWebViewSupported): acl provides a vendored Chromium
+        // WebView provider (installWebViewProvider), so advertise the feature when it is configured.
+        @Override public boolean hasSystemFeature(String name) {
+            if (android.content.pm.PackageManager.FEATURE_WEBVIEW.equals(name))
+                return System.getenv("ACL_WEBVIEW_APK") != null;
+            return false;
+        }
+        @Override public boolean hasSystemFeature(String name, int version) {
+            return hasSystemFeature(name);
         }
     }
 
@@ -1225,6 +1360,11 @@ public final class HostBootstrap {
             if (cur != null) setField(at, cur, "mInitialApplication", app);
         } catch (Throwable ignored) {
         }
+        // WebView needs the full app environment (process name from seedActivityThread above, initial
+        // Application, app Context), so install the provider here — not in init() (too early: chromium's
+        // AwBrowserProcess reads ActivityThread.currentProcessName() and NPEs on a null). Before
+        // app.onCreate so an app using WebView in its Application still finds it.
+        installWebViewProvider();
         // ActivityThread.installContentProviders runs every <provider>'s onCreate BEFORE
         // Application.onCreate — androidx.startup's InitializationProvider bootstraps WorkManager/
         // Firebase from there, so it must run first.
@@ -2342,6 +2482,10 @@ public final class HostBootstrap {
         // KeyguardManager's ctor does ServiceManager.getServiceOrThrow("trust") (throws without it);
         // a no-op ITrustManager proxy is enough (isDeviceLocked/isKeyguardLocked → false).
         svc.put("trust", "android.app.trust.ITrustManager");
+        // WebView provider init reads IWebViewUpdateService.isMultiProcessEnabled() etc.; a no-op proxy
+        // (multiprocess=false, no updates) is enough — acl installs the provider directly (see
+        // installWebViewProvider), so the update-service is only queried for these secondary flags.
+        svc.put("webviewupdate", "android.webkit.IWebViewUpdateService");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},
