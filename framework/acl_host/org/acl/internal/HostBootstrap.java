@@ -264,6 +264,24 @@ public final class HostBootstrap {
             // Resolve the factory class WITHOUT running its <clinit> (loadClass, not Class.forName), so
             // we can load the native engine first.
             Class<?> factoryCls = cl.loadClass("com.android.webview.chromium.WebViewChromiumFactoryProviderForT");
+            // Optional Chromium command-line flags (ACL_WEBVIEW_ARGS), e.g.
+            // "--enable-logging=stderr --v=1" to surface GPU-init failures, or "--disable-gpu" for the
+            // software path. Init the webview CommandLine before the provider brings up its GPU pipeline.
+            try {
+                String extra = System.getenv("ACL_WEBVIEW_ARGS");
+                if (extra != null && !extra.isEmpty()) {
+                    Class<?> cmd = cl.loadClass("org.chromium.base.CommandLine");
+                    if (!(Boolean) cmd.getMethod("isInitialized").invoke(null)) {
+                        java.util.List<String> args = new java.util.ArrayList<>();
+                        args.add("webview");
+                        for (String a : extra.split("\\s+")) if (!a.isEmpty()) args.add(a);
+                        cmd.getMethod("init", String[].class).invoke(null, (Object) args.toArray(new String[0]));
+                        System.err.println("acl WebView: CommandLine " + args);
+                    }
+                }
+            } catch (Throwable t) {
+                System.err.println("acl WebView: CommandLine init skipped: " + t);
+            }
             // Load the native engine ASSOCIATED WITH the WebView classloader. Runtime.load0(fromClass,
             // path) -> nativeLoad(path, fromClass.getClassLoader(), null), so acl's bionic-load hook sets
             // the FindClass loader to the WebView loader — Chromium's JNI_OnLoad resolves org.chromium.*
