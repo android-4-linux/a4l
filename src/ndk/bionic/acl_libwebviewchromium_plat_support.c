@@ -14,6 +14,7 @@
 // The legacy DrawGLFunctor / GraphicsUtils tables stay null — modern WebView (ForT) uses AwDrawFn.
 #include <jni.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 // ── draw_fn.h ABI (GL subset; SurfaceControl/Vulkan pointers kept opaque) ─────────────────────────
@@ -57,7 +58,20 @@ typedef struct {
 #define ACL_MAX_FUNCTORS 64
 static struct { int used; int released; void* data; AwDrawFnFunctorCallbacks cb; } g_functors[ACL_MAX_FUNCTORS];
 
-static int query_render_mode(void) { return AW_DRAW_FN_RENDER_MODE_OPENGL_ES; }
+// The render mode is THE single gate that flips Chromium's whole VK-vs-GL path: when it returns
+// VULKAN, AwDrawFnImpl::IsUsingVulkan() is true, aw_main_delegate appends
+// --webview-draw-functor-uses-vulkan, and the functor's init_vk/draw_vk/post_draw_vk callbacks are
+// invoked instead of draw_gl (non-interop, pure-Vulkan — acl's Ganesh-Vulkan present model). acl gates
+// it on ACL_WEBVIEW_VULKAN so the mode can be turned on only once acl's VK functor seam + present
+// device are ready (returning VULKAN before then would make Chromium's mandatory gpu InitializeVulkan
+// CHECK-crash, no fallback). Read once (Chromium queries it early, before the first draw).
+static int query_render_mode(void) {
+  static int mode = -1;
+  if (mode < 0)
+    mode = (getenv("ACL_WEBVIEW_VULKAN") != NULL) ? AW_DRAW_FN_RENDER_MODE_VULKAN
+                                                  : AW_DRAW_FN_RENDER_MODE_OPENGL_ES;
+  return mode;
+}
 
 static int create_functor_v3(void* data, int version, AwDrawFnFunctorCallbacks* cb) {
   (void)version;
@@ -97,6 +111,23 @@ __attribute__((visibility("default"))) void acl_webview_functor_on_sync(int func
 __attribute__((visibility("default"))) void acl_webview_functor_draw_gl(int functor, void* draw_gl_params) {
   if (functor > 0 && functor < ACL_MAX_FUNCTORS && g_functors[functor].used && g_functors[functor].cb.draw_gl)
     g_functors[functor].cb.draw_gl(functor, g_functors[functor].data, draw_gl_params);
+}
+// Vulkan seam (RENDER_MODE_VULKAN): acl's Ganesh-Vulkan present drives these instead of on_sync/draw_gl.
+// init_vk (once) hands Chromium acl's VkInstance/PhysicalDevice/Device/Queue via AwDrawFn_InitVkParams;
+// draw_vk records Chromium's compositing into the AwDrawFn_DrawVkParams.secondary_command_buffer (which
+// acl fills from Skia's GrVkDrawableInfo for the present frame); post_draw_vk finalizes. Called under a
+// bionic %fs (RunScope) — no GL, so no GL donor. Safe no-ops for unknown/released handles.
+__attribute__((visibility("default"))) void acl_webview_functor_init_vk(int functor, void* init_vk_params) {
+  if (functor > 0 && functor < ACL_MAX_FUNCTORS && g_functors[functor].used && g_functors[functor].cb.init_vk)
+    g_functors[functor].cb.init_vk(functor, g_functors[functor].data, init_vk_params);
+}
+__attribute__((visibility("default"))) void acl_webview_functor_draw_vk(int functor, void* draw_vk_params) {
+  if (functor > 0 && functor < ACL_MAX_FUNCTORS && g_functors[functor].used && g_functors[functor].cb.draw_vk)
+    g_functors[functor].cb.draw_vk(functor, g_functors[functor].data, draw_vk_params);
+}
+__attribute__((visibility("default"))) void acl_webview_functor_post_draw_vk(int functor, void* post_draw_vk_params) {
+  if (functor > 0 && functor < ACL_MAX_FUNCTORS && g_functors[functor].used && g_functors[functor].cb.post_draw_vk)
+    g_functors[functor].cb.post_draw_vk(functor, g_functors[functor].data, post_draw_vk_params);
 }
 // Called by acl with a GLES context CURRENT when a functor is being torn down (release_functor was
 // signalled): deliver on_context_destroyed + on_destroyed, then free the slot.

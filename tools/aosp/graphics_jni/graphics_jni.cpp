@@ -3195,7 +3195,15 @@ jint RecordingCanvas_nGetMaximumTextureHeight() { return 8192; }
 void RecordingCanvas_nDrawCircleProp(jlong, jlong, jlong, jlong, jlong) {}
 void RecordingCanvas_nDrawRoundRectProp(jlong, jlong, jlong, jlong, jlong, jlong, jlong, jlong) {}
 void RecordingCanvas_nDrawRipple(jlong, jlong, jlong, jlong, jlong, jlong, jlong, jint, jlong) {}
-void RecordingCanvas_nDrawWebViewFunctor(jlong, jint) {}
+// The WebView hardware draw: RecordingCanvas.drawWebViewFunctor(functor) lands here on acl's present-
+// root canvas. Route the functor into acl's Ganesh-Vulkan present via the AwDrawFn Vulkan path
+// (webview_functor.cpp): draw an SkDrawable whose Skia GPU flush hands Chromium the frame's secondary
+// command buffer to record into. No-op if the VK seam isn't wired (GL mode / hooks unset) — the WebView
+// area is then left unpainted rather than crashing.
+extern "C" bool acl_graphics_draw_webview_functor(void* sk_canvas, int functor);
+void RecordingCanvas_nDrawWebViewFunctor(jlong canvas, jint functor) {
+  acl_graphics_draw_webview_functor(reinterpret_cast<void*>(canvas), static_cast<int>(functor));
+}
 // nPunchHole (SurfaceView transparency) is @FastNative on BaseRecordingCanvas -> keep env/jclass.
 void BaseRecordingCanvas_nPunchHole(JNIEnv*, jclass, jlong, jfloat, jfloat, jfloat, jfloat, jfloat, jfloat) {}
 

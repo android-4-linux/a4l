@@ -1,0 +1,23 @@
+diff --git a/android_webview/browser/gfx/aw_vulkan_context_provider.cc b/android_webview/browser/gfx/aw_vulkan_context_provider.cc
+index 001e0ec867c13..50118d5fd3673 100644
+--- a/android_webview/browser/gfx/aw_vulkan_context_provider.cc
++++ b/android_webview/browser/gfx/aw_vulkan_context_provider.cc
+@@ -11,6 +11,7 @@
+ #include "base/callback_helpers.h"
+ #include "base/files/file_path.h"
+ #include "base/logging.h"
++#include "base/threading/thread_restrictions.h"
+ #include "base/native_library.h"
+ #include "base/ranges/algorithm.h"
+ #include "gpu/config/skia_limits.h"
+@@ -42,6 +43,10 @@ bool InitVulkanForWebView(VkInstance instance,
+   // If we are re-initing, we don't need to re-load the shared library or
+   // re-bind unassociated pointers. These shouldn't change.
+   if (!vulkan_function_pointers->vkGetInstanceProcAddr) {
++    // acl: WebView's InitVk runs on the app UI thread (acl unifies present+UI), where blocking is
++    // disallowed; on device it runs on hwui's render thread. Loading libvulkan once at init is a
++    // legitimate blocking op regardless of thread, so allow it here.
++    base::ScopedAllowBlockingForTesting acl_allow_blocking;
+     base::NativeLibraryLoadError native_library_load_error;
+     base::NativeLibrary vulkan_loader_library = base::LoadNativeLibrary(
+         base::FilePath("libvulkan.so"), &native_library_load_error);

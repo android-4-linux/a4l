@@ -79,6 +79,11 @@ struct Gpu {
   VkDevice device = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t qfam = UINT32_MAX;
+  // Enabled device extension list + features2 chain, kept for the WebView AwDrawFn InitVk (hands
+  // Chromium the host device it must render Skia into — see the VK functor path).
+  const char* const* device_exts = nullptr;
+  uint32_t device_ext_count = 0;
+  VkPhysicalDeviceFeatures2* features2 = nullptr;
   VkImageUsageFlags usage = 0;
   Target targets[kBuffers];  // ping-pong dma-buf images (copy destinations)
   sk_sp<GrDirectContext> gr;
@@ -133,26 +138,59 @@ bool init_device() {
     if (qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) { g.qfam = i; break; }
   if (g.qfam == UINT32_MAX) return false;
 
-  const char* exts[] = {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
-                        VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
-                        VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
-                        VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME};
+  // Kept STATIC: the Chromium WebView AwDrawFn Vulkan functor's InitVk takes the host's device +
+  // enabled extension list + features2 and builds Skia's GrVkBackendContext from them (which may keep
+  // the pointers), so this list and the features2 chain must outlive device creation. The added
+  // VK_KHR_external_semaphore_fd + the ycbcr-conversion feature mirror what hwui's VulkanManager
+  // enables and what Chromium's per-frame semaphore handshake / AHardwareBuffer sampling need.
+  static const char* const kDeviceExts[] = {
+      VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+      VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
+      VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
+      VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME,
+      VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+  };
+  static VkPhysicalDeviceSamplerYcbcrConversionFeatures kYcbcr{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES, nullptr, VK_TRUE};
+  static VkPhysicalDeviceFeatures2 kFeatures2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &kYcbcr, {}};
+  g.device_exts = kDeviceExts;
+  g.device_ext_count = static_cast<uint32_t>(std::size(kDeviceExts));
+  g.features2 = &kFeatures2;
+
   const float prio = 1.0f;
   VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
   qci.queueFamilyIndex = g.qfam;
   qci.queueCount = 1;
   qci.pQueuePriorities = &prio;
   VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+  dci.pNext = &kFeatures2;  // features2 (ycbcr) in the pNext chain; pEnabledFeatures must stay null
   dci.queueCreateInfoCount = 1;
   dci.pQueueCreateInfos = &qci;
-  dci.enabledExtensionCount = 4;
-  dci.ppEnabledExtensionNames = exts;
+  dci.enabledExtensionCount = g.device_ext_count;
+  dci.ppEnabledExtensionNames = kDeviceExts;
   if (VKD.vkCreateDevice(g.phys, &dci, nullptr, &g.device) != VK_SUCCESS) {
     std::fprintf(stderr, "acl-gpu: createDevice fail\n");
     return false;
   }
   VKD.init(vk::Device(g.device));  // load ALL device-level entrypoints (consistent dispatch)
   VKD.vkGetDeviceQueue(g.device, g.qfam, 0, &g.queue);
+  return true;
+}
+
+// Hand the present VkDevice + enabled extensions/features to the WebView AwDrawFn InitVk builder
+// (webview_functor.cpp). Chromium renders its Skia into a secondary command buffer on THIS device, so
+// its device must be the same one acl composites the frame with. Returns false until the device is up.
+extern "C" bool acl_gpu_vk_handles(void** inst, void** phys, void** dev, void** q, uint32_t* qfam,
+                                   const char* const** exts, uint32_t* n_exts, void** features2) {
+  if (g.device == VK_NULL_HANDLE) return false;
+  *inst = g.instance;
+  *phys = g.phys;
+  *dev = g.device;
+  *q = g.queue;
+  *qfam = g.qfam;
+  *exts = g.device_exts;
+  *n_exts = g.device_ext_count;
+  *features2 = g.features2;
   return true;
 }
 

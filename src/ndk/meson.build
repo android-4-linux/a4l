@@ -29,7 +29,7 @@ bionic_offsets_h = custom_target(
 
 acl_ndk = static_library(
   'acl_ndk',
-  files('ndk.cpp', 'bionic_runtime.cpp', 'native_bind.cpp') + [bionic_offsets_h],
+  files('ndk.cpp', 'bionic_runtime.cpp', 'native_bind.cpp', 'webview_functor_vk.cpp') + [bionic_offsets_h],
   include_directories : [config_inc, core_inc],
   dependencies : ndk_deps,
   cpp_args : ['-fno-stack-protector'],

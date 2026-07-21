@@ -57,6 +57,7 @@
 #include "log/log.h"
 #include "ndk/bionic_runtime.h"
 #include "ndk/native_bind.h"
+#include "ndk/webview_functor_vk.h"  // WebView AwDrawFn Vulkan functor %fs-bridge wrappers
 #include "pkg/apk.h"  // AAssetManager provider: read+inflate app assets from the APK
 #include "runtime/framework_natives.h"
 #include "runtime/image_reader_jni.h"  // media_jni loadLibrary -> ImageReader natives (M3c)
@@ -666,6 +667,18 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env, jclass, jobject view, jint w, jin
     if (auto set_present =
             reinterpret_cast<void (*)(jlong)>(::dlsym(RTLD_DEFAULT, "acl_graphics_set_present_canvas")))
       set_present(ch);
+    // Register acl's bionic-%fs RunScope wrappers for the WebView AwDrawFn Vulkan functor into
+    // graphics_jni (webview_functor.cpp), so its SkDrawable can drive Chromium's init_vk/draw_vk/
+    // post_draw_vk. Once per process; graphics_jni is loaded by here.
+    if (static bool wv_hooked = false; !wv_hooked) {
+      if (auto set_hooks = reinterpret_cast<void (*)(void (*)(int, void*), void (*)(int, void*),
+                                                     void (*)(int, void*))>(
+              ::dlsym(RTLD_DEFAULT, "acl_graphics_set_webview_vk_hooks"))) {
+        set_hooks(&acl_webview_functor_vk_init, &acl_webview_functor_vk_draw,
+                  &acl_webview_functor_vk_post_draw);
+        wv_hooked = true;
+      }
+    }
     bool recording = false;
     if (jclass rnC = env->FindClass("android/graphics/RenderNode")) {
       jmethodID rnCtor = env->GetMethodID(rnC, "<init>", "(Ljava/lang/String;)V");

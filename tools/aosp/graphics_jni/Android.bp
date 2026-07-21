@@ -13,6 +13,7 @@ cc_library_shared {
     srcs: [
         "graphics_jni.cpp",
         "gpu_dmabuf.cpp",
+        "webview_functor.cpp",  // WebView AwDrawFn Vulkan functor -> Ganesh-Vulkan present (SkDrawable)
         "asset_fd.cpp",  // AssetManager.openFd (host/layoutlib stubs it "Implement me")
     ],
     header_libs: [
