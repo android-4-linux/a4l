@@ -906,6 +906,28 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("user".equals(name)) {
+                // UserManager(Context, IUserManager). Chromium's WebView reads
+                // getApplicationRestrictions() (managed-config); a null service NPEs, and a default
+                // (null) Bundle NPEs its caller — so back it with a proxy returning an EMPTY Bundle for
+                // the *Restrictions reads and defaults otherwise. Single-user host (ADR-3).
+                try {
+                    Class<?> ium = Class.forName("android.os.IUserManager");
+                    Object svc = java.lang.reflect.Proxy.newProxyInstance(ium.getClassLoader(),
+                            new Class<?>[]{ium}, (p, m, a) -> {
+                                String mn = m.getName();
+                                if (mn.endsWith("Restrictions") && m.getReturnType() == android.os.Bundle.class)
+                                    return new android.os.Bundle();
+                                return defaultValue(m.getReturnType());
+                            });
+                    java.lang.reflect.Constructor<?> c = android.os.UserManager.class
+                            .getDeclaredConstructor(android.content.Context.class, ium);
+                    c.setAccessible(true);
+                    return c.newInstance(this, svc);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             return null;
         }
         // getSystemService(Class) → getSystemServiceName(Class) → getSystemService(String).
@@ -923,6 +945,7 @@ public final class HostBootstrap {
             if ("android.net.ConnectivityManager".equals(serviceClass.getName())) return "connectivity";
             if ("android.bluetooth.BluetoothManager".equals(serviceClass.getName())) return "bluetooth";
             if (serviceClass == android.os.storage.StorageManager.class) return "storage";
+            if (serviceClass == android.os.UserManager.class) return "user";
             if (serviceClass == android.hardware.SensorManager.class) return "sensor";
             // ViewRootImpl.<init> reads getSystemService(AudioManager.class) (navigation sound
             // effects); map it so the Dialog/PopupWindow add path gets a real AudioManager.

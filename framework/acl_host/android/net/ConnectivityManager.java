@@ -41,11 +41,38 @@ public class ConnectivityManager {
         return (nGetState() & 0x4) != 0;
     }
 
+    // acl models a single default network; report its info for any live Network. Chromium's
+    // AndroidNetworkLibrary/NetworkChangeNotifier reads this for the WebView network state.
+    public NetworkInfo getNetworkInfo(Network network) {
+        if (network == null) return null;
+        return getActiveNetworkInfo();
+    }
+    public NetworkInfo getNetworkInfo(int networkType) {
+        return getActiveNetworkInfo();
+    }
+    public Network[] getAllNetworks() {
+        return getActiveNetwork() != null ? new Network[]{ Network.DEFAULT } : new Network[0];
+    }
+    public NetworkInfo[] getAllNetworkInfo() {
+        NetworkInfo ni = getActiveNetworkInfo();
+        return ni != null ? new NetworkInfo[]{ ni } : new NetworkInfo[0];
+    }
+    public LinkProperties getLinkProperties(Network network) {
+        return network != null ? new LinkProperties() : null;
+    }
+
     public void registerDefaultNetworkCallback(NetworkCallback cb) { register(cb); }
     public void registerDefaultNetworkCallback(NetworkCallback cb, android.os.Handler h) { register(cb); }
     public void registerNetworkCallback(NetworkRequest req, NetworkCallback cb) { register(cb); }
     public void registerNetworkCallback(NetworkRequest req, NetworkCallback cb, android.os.Handler h) { register(cb); }
     public void unregisterNetworkCallback(NetworkCallback cb) { callbacks.remove(cb); }
+
+    // Default-network activity listener (chromium's NetworkActiveNotifier). acl has one always-on
+    // default network, so there is no idle/active transition to report — accept + drop.
+    public interface OnNetworkActiveListener { void onNetworkActive(); }
+    public void addDefaultNetworkActiveListener(OnNetworkActiveListener l) {}
+    public void removeDefaultNetworkActiveListener(OnNetworkActiveListener l) {}
+    public boolean isDefaultNetworkActive() { return getActiveNetwork() != null; }
 
     private void register(NetworkCallback cb) {
         callbacks.addIfAbsent(cb);

@@ -6,6 +6,10 @@ package android.net;
 
 public class NetworkInfo {
     public enum State { CONNECTING, CONNECTED, SUSPENDED, DISCONNECTING, DISCONNECTED, UNKNOWN }
+    public enum DetailedState {
+        IDLE, SCANNING, CONNECTING, AUTHENTICATING, OBTAINING_IPADDR, CONNECTED, SUSPENDED,
+        DISCONNECTING, DISCONNECTED, FAILED, BLOCKED, VERIFYING_POOR_LINK, CAPTIVE_PORTAL_CHECK
+    }
 
     private final boolean connected;
     private final int type;  // legacy ConnectivityManager.TYPE_*
@@ -28,4 +32,15 @@ public class NetworkInfo {
             default: return "NONE";
         }
     }
+    // acl has no mobile-network subtype; chromium's NetworkChangeNotifier reads these for the
+    // connection-type/subtype it reports to WebView. Report unknown subtype + a plain connected state.
+    public int getSubtype() { return 0; }                 // TelephonyManager.NETWORK_TYPE_UNKNOWN
+    public String getSubtypeName() { return ""; }
+    public DetailedState getDetailedState() {
+        return connected ? DetailedState.CONNECTED : DetailedState.DISCONNECTED;
+    }
+    public String getReason() { return null; }
+    public String getExtraInfo() { return null; }
+    public boolean isRoaming() { return false; }
+    public boolean isFailover() { return false; }
 }
