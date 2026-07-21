@@ -134,6 +134,17 @@ GlPresentSession g_gl_session;
 // AndroidGraphics.checkGL20 probe (during onCreate, before present); it must NOT block for the
 // wayland device (that only comes after onCreate) — only the app's separate GLThread blocks.
 std::thread::id g_gl_main_thread;
+// A GL present session created EARLY (by the native-EGL get_display hook, during the Flutter
+// engine's on-main-thread GL init inside onCreate) before PresentDriver.runGl -> nGlOpen runs.
+// nGlOpen adopts it (attaches the decor View) instead of creating a second presenter. See
+// create_gl_session_core + the get_display hook: this breaks the onCreate<->nGlOpen deadlock the
+// newer Flutter engine triggers (it builds its GL environment + surface synchronously in onCreate,
+// before the SurfaceView exists). Guarded by g_pending_gl_mtx; g_present_vm is the app's JavaVM.
+struct PresentSession;                        // fwd (defined below)
+PresentSession* g_pending_gl_session = nullptr;
+std::mutex g_pending_gl_mtx;
+JavaVM* g_present_vm = nullptr;
+std::string g_present_app_id;                 // the app package (window title/app-id), for the pre-created session
 #endif
 
 // Bitmap.createBitmap(w, h) — the way BOTH framework layers spell it.
@@ -931,24 +942,62 @@ void JNICALL PresentDriver_nClose(JNIEnv* env, jclass, jlong sp) {
 
 // Bind org.acl.internal.PresentDriver's native seam. RegisterNatives is atomic per class, so
 // every signature must match; a miss leaves PresentDriver.run to fail fast via nOpen=0.
-// ── GL present (Flutter / SurfaceView): Looper-driven, but Mesa renders + commits the toplevel ──
-// Same Looper model as nOpen (reuses nFd/nDispatch/nRepeatFd/nDispatchRepeat) but with NO Skia
-// presenter and NO nTraverse: acl builds the GL device on the toplevel wl_surface, injects the
-// SurfaceView's Surface (Flutter's raster thread renders + eglSwapBuffers there), and clocks the
-// real Choreographer's vsync from a timerfd — each tick armed with wp_presentation feedback so
-// frame_time_ns() tracks Mesa's commits (the wp_presentation clock, delivered via acl_deliver_vsync).
-jlong JNICALL PresentDriver_nGlOpen(JNIEnv* env, jclass, jobject view, jint w, jint h,
-                                    jstring title, jstring appId) {
 #if ACL_HAVE_GL
-  log::i(kTag, "nGlOpen: entry ({}x{}) — backing a SurfaceView with an acl GL session", w, h);
-  if (!wm::wayland_available()) { log::i(kTag, "nGlOpen: no Wayland compositor reachable"); return 0; }
+// Create the view-independent GL present session: the toplevel presenter, the wayland GlDevice on
+// it, and the vsync timerfd; publish g_gl_session (display + wl_surface) so the app's native EGL
+// (get_display / eglCreateWindowSurface) resolves. NO decor View is attached yet — input is dropped
+// (present_deliver_input null-checks the class refs) until nGlOpen wires it. Returns nullptr on
+// failure. MUST run on the app main thread (the get_display hook during the engine's onCreate GL
+// init, or nGlOpen): the wl_display connection then lives on the thread runGl later dispatches it on.
+PresentSession* create_gl_session_core(JavaVM* vm, int w, int h,
+                                       const std::string& title, const std::string& appId) {
+  if (!wm::wayland_available()) { log::i(kTag, "GL session: no Wayland compositor reachable"); return nullptr; }
   auto* s = new PresentSession();
   s->is_gl = true;
-  env->GetJavaVM(&s->vm);
+  s->vm = vm;
   s->w = w;
   s->h = h;
   s->deliver_vsync =
       reinterpret_cast<void (*)(JNIEnv*, jlong)>(::dlsym(RTLD_DEFAULT, "acl_deliver_vsync"));
+  const wm::InputCallback input = [s](const wm::InputEvent& ev) { present_deliver_input(s, ev); };
+  s->presenter = wm::presenter_open(w, h, title.empty() ? "acl" : title,
+                                    appId.empty() ? "org.acl.app" : appId, input, /*want_ime=*/false);
+  if (!s->presenter) { log::w(kTag, "GL session: presenter_open failed"); delete s; return nullptr; }
+  s->presenter->wait_configured(2000);  // GL device is built on the configured toplevel surface
+  std::string err;
+  auto dev = gfx::GlDevice::CreateWayland(s->presenter->gl_display(), &err);
+  if (!dev) {
+    log::w(kTag, "GL session: CreateWayland failed: {}", err);
+    s->presenter.reset();
+    delete s;
+    return nullptr;
+  }
+  {
+    std::lock_guard<std::mutex> lk(g_gl_session.mtx);
+    g_gl_session.device = std::move(dev);
+    g_gl_session.wl_surface = s->presenter->gl_surface();
+    g_gl_session.w = w;
+    g_gl_session.h = h;
+    g_gl_session.ready = true;
+  }
+  g_gl_session.cv.notify_all();
+  s->vsync_fd = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+  if (s->vsync_fd >= 0) {
+    itimerspec its{};
+    its.it_value.tv_nsec = 16'666'666;
+    its.it_interval.tv_nsec = 16'666'666;  // 60 Hz
+    ::timerfd_settime(s->vsync_fd, 0, &its, nullptr);
+  }
+  log::i(kTag, "GL session: device on acl's toplevel wl_surface ({}x{}, {})", w, h,
+         g_gl_session.device->renderer());
+  return s;
+}
+
+// Attach the decor View + input class refs to a GL session (fresh or adopted), inject the Surface
+// into the SurfaceView so the engine binds its onscreen EGL, and lay out the decor for hit-testing.
+// The presenter/device/vsync-fd already exist (create_gl_session_core); this is the View-dependent
+// half of nGlOpen, run once the decor exists (post-onCreate).
+void attach_view_to_gl_session(JNIEnv* env, PresentSession* s, jobject view, int w, int h) {
   s->view = env->NewGlobalRef(view);
   if (jclass vc = env->GetObjectClass(view)) {
     s->m_measure = env->GetMethodID(vc, "measure", "(II)V");
@@ -981,46 +1030,6 @@ jlong JNICALL PresentDriver_nGlOpen(JNIEnv* env, jclass, jobject view, jint w, j
   }
   if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
 
-  auto to_utf8 = [&](jstring js) -> std::string {
-    if (js == nullptr) return {};
-    const char* c = env->GetStringUTFChars(js, nullptr);
-    std::string out(c != nullptr ? c : "");
-    if (c != nullptr) env->ReleaseStringUTFChars(js, c);
-    return out;
-  };
-  const std::string t = to_utf8(title), a = to_utf8(appId);
-  const wm::InputCallback input = [s](const wm::InputEvent& ev) { present_deliver_input(s, ev); };
-  s->presenter = wm::presenter_open(w, h, t.empty() ? "acl" : t, a.empty() ? "org.acl.app" : a,
-                                    input, /*want_ime=*/false);
-  if (!s->presenter) {
-    log::w(kTag, "nGlOpen: presenter_open failed");
-    if (s->view != nullptr) env->DeleteGlobalRef(s->view);
-    delete s;
-    return 0;
-  }
-  s->presenter->wait_configured(2000);  // GL device is built on the configured toplevel surface
-
-  std::string err;
-  auto dev = gfx::GlDevice::CreateWayland(s->presenter->gl_display(), &err);
-  if (!dev) {
-    log::w(kTag, "nGlOpen: CreateWayland failed: {}", err);
-    if (s->view != nullptr) env->DeleteGlobalRef(s->view);
-    s->presenter.reset();
-    delete s;
-    return 0;
-  }
-  {
-    std::lock_guard<std::mutex> lk(g_gl_session.mtx);
-    g_gl_session.device = std::move(dev);
-    g_gl_session.wl_surface = s->presenter->gl_surface();
-    g_gl_session.w = w;
-    g_gl_session.h = h;
-    g_gl_session.ready = true;
-  }
-  g_gl_session.cv.notify_all();
-  log::i(kTag, "nGlOpen: GL device on acl's toplevel wl_surface ({}); injecting Surface",
-         g_gl_session.device->renderer());
-
   // Inject the Surface into the SurfaceView (HostBootstrap.injectGlSurface) so its holder's
   // surfaceCreated fires and Flutter's engine binds its native EGL to it; lay out the decor so
   // pointer events hit-test down to the SurfaceView.
@@ -1036,24 +1045,50 @@ jlong JNICALL PresentDriver_nGlOpen(JNIEnv* env, jclass, jobject view, jint w, j
     env->CallVoidMethod(view, s->m_layout, 0, 0, w, h);
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
   }
-
   // Switch vsync from self-clocked (immediate) to DELIVERED: scheduleVsync only marks a request
   // pending, and our timerfd tick delivers it at the wp_presentation-aligned frame_time_ns.
   if (auto set_imm = reinterpret_cast<void (*)(int)>(::dlsym(RTLD_DEFAULT, "acl_vsync_set_immediate")))
     set_imm(0);
-
-  // Vsync clock: a ~60 Hz timerfd. Mesa's eglSwapBuffers throttles the actual rendering, so this
-  // only paces the Choreographer tick (Flutter renders only when it has a frame scheduled). The
-  // wp_presentation feedback armed each tick supplies the frame time; the timer guarantees liveness
-  // when Flutter is idle (no commit => no feedback), so input still wakes it.
-  s->vsync_fd = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-  if (s->vsync_fd >= 0) {
-    itimerspec its{};
-    its.it_value.tv_nsec = 16'666'666;
-    its.it_interval.tv_nsec = 16'666'666;  // 60 Hz
-    ::timerfd_settime(s->vsync_fd, 0, &its, nullptr);
-  }
   log::i(kTag, "nGlOpen: {}x{} GL present ready (looper-driven, wp_presentation vsync)", w, h);
+}
+#endif
+
+// ── GL present (Flutter / SurfaceView): Looper-driven, but Mesa renders + commits the toplevel ──
+// Same Looper model as nOpen (reuses nFd/nDispatch/nRepeatFd/nDispatchRepeat) but with NO Skia
+// presenter and NO nTraverse: acl builds the GL device on the toplevel wl_surface, injects the
+// SurfaceView's Surface (Flutter's raster thread renders + eglSwapBuffers there), and clocks the
+// real Choreographer's vsync from a timerfd — each tick armed with wp_presentation feedback so
+// frame_time_ns() tracks Mesa's commits (the wp_presentation clock, delivered via acl_deliver_vsync).
+// If the engine's on-main-thread GL init already created the session (get_display hook), ADOPT it
+// here instead of opening a second presenter.
+jlong JNICALL PresentDriver_nGlOpen(JNIEnv* env, jclass, jobject view, jint w, jint h,
+                                    jstring title, jstring appId) {
+#if ACL_HAVE_GL
+  log::i(kTag, "nGlOpen: entry ({}x{}) — backing a SurfaceView with an acl GL session", w, h);
+  if (!wm::wayland_available()) { log::i(kTag, "nGlOpen: no Wayland compositor reachable"); return 0; }
+  // Adopt a session the get_display hook pre-created during the engine's onCreate GL init, if any.
+  PresentSession* pending = nullptr;
+  { std::lock_guard<std::mutex> lk(g_pending_gl_mtx); pending = g_pending_gl_session; g_pending_gl_session = nullptr; }
+  if (pending != nullptr) {
+    log::i(kTag, "nGlOpen: adopting pre-created GL session (built during the engine's GL init)");
+    PresentSession* s = pending;
+    attach_view_to_gl_session(env, s, view, w, h);
+    return reinterpret_cast<jlong>(s);
+  }
+  // No pre-created session (e.g. an app whose GL init did not call get_display before nGlOpen, or a
+  // GLSurfaceView app): build it now, then attach the decor.
+  auto to_utf8 = [&](jstring js) -> std::string {
+    if (js == nullptr) return {};
+    const char* c = env->GetStringUTFChars(js, nullptr);
+    std::string out(c != nullptr ? c : "");
+    if (c != nullptr) env->ReleaseStringUTFChars(js, c);
+    return out;
+  };
+  JavaVM* vm = nullptr;
+  env->GetJavaVM(&vm);
+  PresentSession* s = create_gl_session_core(vm, w, h, to_utf8(title), to_utf8(appId));
+  if (s == nullptr) { log::w(kTag, "nGlOpen: GL session create failed"); return 0; }
+  attach_view_to_gl_session(env, s, view, w, h);
   return reinterpret_cast<jlong>(s);
 #else
   (void)env; (void)view; (void)w; (void)h; (void)title; (void)appId;
@@ -1080,6 +1115,7 @@ void JNICALL PresentDriver_nGlVsync(JNIEnv* env, jclass, jlong sp) {
 void JNICALL PresentDriver_nGlClose(JNIEnv* env, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
   if (s == nullptr) return;
+  { std::lock_guard<std::mutex> lk(g_pending_gl_mtx); if (g_pending_gl_session == s) g_pending_gl_session = nullptr; }
   {
     std::lock_guard<std::mutex> lk(g_gl_session.mtx);
     g_gl_session.window.reset();
@@ -3655,6 +3691,8 @@ class ArtVm final : public JniVm {
   void load_acl_egl10([[maybe_unused]] JNIEnv* env) {
 #if ACL_HAVE_GL
     g_gl_main_thread = std::this_thread::get_id();  // boot thread = app main/UI thread
+    env->GetJavaVM(&g_present_vm);                   // for the get_display in-place session creation
+    g_present_app_id = config_.package_name.empty() ? "org.acl.app" : config_.package_name;
     gfx::AclEgl10Hooks hooks;
     hooks.get_display = [](void*) -> EGLDisplay {
       // The app's GLThread (NOT the main thread) blocks up to 10s for present_glsurfaceview to
@@ -3708,21 +3746,38 @@ class ArtVm final : public JniVm {
     // hooks above; runs under the GL donor %fs, so the callbacks stay lock-light and TLS-free.
     acl::ndk::NativeGlHooks nhooks;
     nhooks.get_display = [](void*) -> void* {
-      // The engine blocks for the present path to publish the wayland device, so its context is
-      // created on the SAME device as its window surface (else eglMakeCurrent EGL_BAD_MATCH).
-      // NOTE: the newer Flutter engine creates its GL environment AND rendering surface
-      // SYNCHRONOUSLY ON THE MAIN THREAD during onCreate — before acl's post-onCreate nGlOpen
-      // publishes the session. Blocking here then deadlocks (the main thread waits for a session
-      // only the main thread can publish). The fix is to pre-publish the wayland GL session before
-      // onCreate for native-EGL apps (see present flow); a gbm fallback display is insufficient —
-      // the engine's offscreen surface needs a config from the real session device.
-      std::unique_lock<std::mutex> lk(g_gl_session.mtx);
-      const bool got = g_gl_session.cv.wait_for(lk, std::chrono::seconds(10),
-                                                [] { return g_gl_session.ready; });
-      if (got && g_gl_session.device != nullptr)
-        return static_cast<void*>(g_gl_session.device->egl_display());
-      log::w(kTag, "native egl: get_display TIMED OUT (GL session not published before the engine's "
-                   "on-main-thread GL init; nGlOpen runs only post-onCreate) -> engine BAD_DISPLAY");
+      // Fast path: the present session is already published (nGlOpen ran, or a prior get_display
+      // created it) — return its display.
+      {
+        std::unique_lock<std::mutex> lk(g_gl_session.mtx);
+        if (g_gl_session.ready && g_gl_session.device != nullptr)
+          return static_cast<void*>(g_gl_session.device->egl_display());
+      }
+      // The newer Flutter engine builds its GL environment AND rendering surface SYNCHRONOUSLY on
+      // its raster thread DURING onCreate, while the app main thread is blocked in the engine ctor —
+      // before acl's post-onCreate nGlOpen would publish the session. Blocking here then deadlocks
+      // (the main thread can't reach nGlOpen). Since get_display is only ever called by a native-EGL
+      // (Flutter) app, create the full wayland session in place now; nGlOpen adopts it once the decor
+      // exists. The wl_display's main event queue is dispatched by one thread at a time (this
+      // roundtrip completes before runGl's Looper starts), and Mesa drives its own queue from the
+      // raster thread's eglSwapBuffers — the same split as the working post-onCreate path, so the
+      // creating thread does not matter. A gbm fallback would not do — the engine's offscreen surface
+      // needs a config from the real session device.
+      if (g_present_vm != nullptr) {
+        std::lock_guard<std::mutex> plk(g_pending_gl_mtx);
+        if (g_pending_gl_session == nullptr) {
+          const int w = svc::window().display_width(), h = svc::window().display_height();
+          log::i(kTag, "native egl: get_display creating GL session in place ({}x{}) to break the "
+                       "engine onCreate<->nGlOpen deadlock", w, h);
+          g_pending_gl_session = create_gl_session_core(g_present_vm, w, h, g_present_app_id, g_present_app_id);
+        }
+        std::unique_lock<std::mutex> lk(g_gl_session.mtx);
+        if (g_gl_session.ready && g_gl_session.device != nullptr)
+          return static_cast<void*>(g_gl_session.device->egl_display());
+        log::w(kTag, "native egl: get_display in-place session creation FAILED -> engine BAD_DISPLAY");
+        return nullptr;
+      }
+      log::w(kTag, "native egl: get_display has no app JavaVM -> engine BAD_DISPLAY");
       return nullptr;
     };
     nhooks.create_window_surface = [](void*, void* cfg) -> void* {
