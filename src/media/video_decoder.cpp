@@ -33,7 +33,7 @@ constexpr const char* kTag = "acl.media.video";
 // ── FFmpeg resolved at runtime (RTLD_LOCAL), like soundpool — keeps its transitive deps private.
 struct Ff {
 #define FF_FN(n) decltype(&::n) n = nullptr
-  FF_FN(av_malloc);
+  FF_FN(av_malloc); FF_FN(av_strerror);
   FF_FN(av_frame_alloc); FF_FN(av_frame_free); FF_FN(av_frame_unref);
   FF_FN(av_packet_alloc); FF_FN(av_packet_free); FF_FN(av_packet_unref);
   FF_FN(av_buffer_ref); FF_FN(av_buffer_unref);
@@ -73,7 +73,7 @@ bool load_ffmpeg() {
   };
   bool all = true;
 #define FF_BIND(n) do { g_ff.n = reinterpret_cast<decltype(g_ff.n)>(sym(#n)); if (!g_ff.n) { all = false; log::w(kTag, "FFmpeg missing {}", #n); } } while (0)
-  FF_BIND(av_malloc);
+  FF_BIND(av_malloc); FF_BIND(av_strerror);
   FF_BIND(av_frame_alloc); FF_BIND(av_frame_free); FF_BIND(av_frame_unref);
   FF_BIND(av_packet_alloc); FF_BIND(av_packet_free); FF_BIND(av_packet_unref);
   FF_BIND(av_buffer_ref); FF_BIND(av_buffer_unref);
@@ -452,7 +452,10 @@ int CodecDecoder::send_packet(const std::uint8_t* data, std::size_t size, std::i
   d->pkt->data = nullptr;
   d->pkt->size = 0;
   if (r == AVERROR(EAGAIN)) return 1;  // output full — caller must receive_frame, then retry this packet
-  if (r < 0) { if (error) *error = "avcodec_send_packet failed"; return -1; }
+  if (r < 0) {
+    if (error) { char b[256] = {0}; g_ff.av_strerror(r, b, sizeof(b)); *error = "avcodec_send_packet failed (" + std::to_string(r) + " " + b + ")"; }
+    return -1;
+  }
   return 0;
 }
 

@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -84,6 +85,7 @@ struct CodecCtx {
   };
   std::vector<OutSlot> outslots;
   bool format_signaled = false;  // dequeueOutputBuffer returns INFO_OUTPUT_FORMAT_CHANGED once first
+  bool first_input = true;       // prepend csd (SPS/PPS) in-band to the first access unit
 
   // Async Callback mode (setCallback): a driver thread OWNS the CodecDecoder and delivers events via
   // MediaCodec.postEventFromNative; queueInputBuffer only enqueues packet copies (so the decoder is
@@ -97,6 +99,7 @@ struct CodecCtx {
   std::condition_variable acv;
   struct Packet { std::vector<std::uint8_t> data; std::int64_t pts = 0; bool eos = false; };
   std::deque<Packet> pending;    // input packets from queueInputBuffer, consumed by the driver
+  int dbg_sent = 0, dbg_recv = 0;  // ACL_MC_DIAG: log the first few send/receive on the driver
 };
 
 CodecCtx* ctx_of(JNIEnv* env, jobject thiz) {
@@ -111,15 +114,31 @@ int int_value(JNIEnv* env, jobject v) {
   return static_cast<int>(env->CallIntMethod(v, g_integer_intvalue));
 }
 
-// Append a MediaFormat ByteBuffer value's bytes (csd) to `out`.
+// Append a MediaFormat ByteBuffer value's bytes (csd) to `out`. Handles BOTH direct buffers and
+// array-backed HeapByteBuffers — ExoPlayer passes csd-0/csd-1 as ByteBuffer.wrap(byte[]) (heap), so a
+// direct-only read misses the SPS/PPS (csd=0B) and the decoder can't start.
 void append_bytebuffer(JNIEnv* env, jobject bb, std::vector<std::uint8_t>& out) {
   if (bb == nullptr) return;
-  void* addr = env->GetDirectBufferAddress(bb);
-  jlong cap = env->GetDirectBufferCapacity(bb);
-  if (addr != nullptr && cap > 0) {
-    const auto* p = static_cast<const std::uint8_t*>(addr);
-    out.insert(out.end(), p, p + cap);
+  if (void* addr = env->GetDirectBufferAddress(bb)) {
+    const jlong cap = env->GetDirectBufferCapacity(bb);
+    if (cap > 0) out.insert(out.end(), static_cast<std::uint8_t*>(addr), static_cast<std::uint8_t*>(addr) + cap);
+    return;
   }
+  // Heap buffer: read remaining() bytes from its backing array at arrayOffset()+position().
+  jclass cls = env->GetObjectClass(bb);
+  const jint rem = env->CallIntMethod(bb, env->GetMethodID(cls, "remaining", "()I"));
+  if (rem > 0 && env->CallBooleanMethod(bb, env->GetMethodID(cls, "hasArray", "()Z")) == JNI_TRUE) {
+    auto arr = static_cast<jbyteArray>(env->CallObjectMethod(bb, env->GetMethodID(cls, "array", "()[B")));
+    const jint off = env->CallIntMethod(bb, env->GetMethodID(cls, "arrayOffset", "()I")) +
+                     env->CallIntMethod(bb, env->GetMethodID(cls, "position", "()I"));
+    if (jbyte* e = env->GetByteArrayElements(arr, nullptr)) {
+      out.insert(out.end(), reinterpret_cast<std::uint8_t*>(e) + off,
+                 reinterpret_cast<std::uint8_t*>(e) + off + rem);
+      env->ReleaseByteArrayElements(arr, e, JNI_ABORT);
+    }
+    if (arr) env->DeleteLocalRef(arr);
+  }
+  env->DeleteLocalRef(cls);
 }
 
 // Build the output MediaFormat as a HashMap<String,Object> — MediaCodec.getOutputFormat wraps it in a
@@ -171,15 +190,23 @@ void async_driver(CodecCtx* ctx) {
         if (ctx->inbufs[i].free) { ctx->inbufs[i].free = false; offer.push_back(static_cast<int>(i)); }
       while (!ctx->pending.empty()) { send.push_back(std::move(ctx->pending.front())); ctx->pending.pop_front(); }
     }
+    static const bool diag = std::getenv("ACL_MC_DIAG") != nullptr;
     for (int idx : offer) post(CB_INPUT_AVAILABLE, idx, nullptr);  // "buffer idx is free — fill + queue it"
     for (auto& p : send) {
-      if (p.eos) ctx->dec->send_packet(nullptr, 0, p.pts, &err);
-      else ctx->dec->send_packet(p.data.data(), p.data.size(), p.pts, &err);
+      int sr;
+      if (p.eos) sr = ctx->dec->send_packet(nullptr, 0, p.pts, &err);
+      else sr = ctx->dec->send_packet(p.data.data(), p.data.size(), p.pts, &err);
+      if (diag && ctx->dbg_sent < 4) {
+        log::i(kTag, "async send_packet {}B eos={} pts={} -> {} {}", p.data.size(), p.eos, p.pts, sr, err);
+        ctx->dbg_sent++;
+      }
     }
     for (;;) {  // drain every ready frame
       gfx::DmabufFrame f{};
       std::int64_t pts = 0;
-      if (ctx->dec->receive_frame(&f, &pts, &err) <= 0) break;
+      const int rr = ctx->dec->receive_frame(&f, &pts, &err);
+      if (diag && ctx->dbg_recv < 6) { log::i(kTag, "async receive_frame={} pts={} {}", rr, pts, err); ctx->dbg_recv++; }
+      if (rr <= 0) break;
       ::AHardwareBuffer* ahb = gfx::ahb_import(f);
       if (ahb == nullptr) continue;
       int slot;
@@ -225,7 +252,10 @@ void JNICALL MC_native_configure(JNIEnv* env, jobject thiz, jobjectArray keys, j
                                  jint /*flags*/) {
   CodecCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr) return;
-  // Parse the flattened MediaFormat (keys[], values[]) for mime/width/height/csd.
+  // Parse the flattened MediaFormat (keys[], values[]) for mime/width/height/csd. csd is collected BY
+  // INDEX (a std::map, ordered) — the keys[] array order is not guaranteed, and H.264/HEVC require
+  // SPS (csd-0) BEFORE PPS (csd-1), else avcodec sees "PPS references non-existing SPS".
+  std::map<int, std::vector<std::uint8_t>> csd_parts;
   const jsize n = keys != nullptr ? env->GetArrayLength(keys) : 0;
   for (jsize i = 0; i < n; ++i) {
     jstring k = static_cast<jstring>(env->GetObjectArrayElement(keys, i));
@@ -240,13 +270,14 @@ void JNICALL MC_native_configure(JNIEnv* env, jobject thiz, jobjectArray keys, j
       } else if (std::strcmp(ks, "height") == 0) {
         ctx->height = int_value(env, v);
       } else if (std::strncmp(ks, "csd-", 4) == 0) {
-        append_bytebuffer(env, v, ctx->csd);  // csd-0 then csd-1: SPS then PPS (Annex-B)
+        append_bytebuffer(env, v, csd_parts[std::atoi(ks + 4)]);  // by index: csd-0, csd-1, …
       }
       env->ReleaseStringUTFChars(k, ks);
     }
     if (k) env->DeleteLocalRef(k);
     if (v) env->DeleteLocalRef(v);
   }
+  for (auto& [idx, part] : csd_parts) ctx->csd.insert(ctx->csd.end(), part.begin(), part.end());
   // Resolve the output Surface -> its ImageReader BufferQueue (zero-copy sink). null = no surface
   // (buffer-mode decode, not supported for the zero-copy path yet).
   ctx->out_queue = surface != nullptr ? image_reader_queue_from_surface(env, surface) : nullptr;
@@ -313,7 +344,10 @@ void JNICALL MC_native_queueInputBuffer(JNIEnv* env, jobject thiz, jint index, j
     } else if (index >= 0 && static_cast<std::size_t>(index) < ctx->inbufs.size() && offset >= 0 &&
                size > 0 && static_cast<std::size_t>(offset + size) <= ctx->inbufs[index].mem.size()) {
       const auto& mem = ctx->inbufs[index].mem;
-      p.data.assign(mem.begin() + offset, mem.begin() + offset + size);
+      // ExoPlayer's samples carry NO in-band SPS/PPS (they're in the csd/extradata); prepend csd to
+      // the first access unit so avcodec has PPS 0 before the first slice ("non-existing PPS 0" else).
+      if (ctx->first_input && !ctx->csd.empty()) { p.data = ctx->csd; ctx->first_input = false; }
+      p.data.insert(p.data.end(), mem.begin() + offset, mem.begin() + offset + size);
     }
     ctx->pending.push_back(std::move(p));
     if (index >= 0 && static_cast<std::size_t>(index) < ctx->inbufs.size()) ctx->inbufs[index].free = true;
@@ -497,6 +531,10 @@ void register_media_codec_natives(JNIEnv* env) {
       {const_cast<char*>("getBuffer"), const_cast<char*>("(ZI)Ljava/nio/ByteBuffer;"), reinterpret_cast<void*>(&MC_getBuffer)},
       {const_cast<char*>("getImage"), const_cast<char*>("(ZI)Landroid/media/Image;"), reinterpret_cast<void*>(&MC_getImage)},
       {const_cast<char*>("native_setSurface"), const_cast<char*>("(Landroid/view/Surface;)V"), reinterpret_cast<void*>(&MC_native_setSurface)},
+      // ExoPlayer sets the scaling mode after configure; acl scales via the compositor, so no-op it
+      // (unbound, it kills the ExoPlayer:Playback thread).
+      {const_cast<char*>("setVideoScalingMode"), const_cast<char*>("(I)V"),
+       reinterpret_cast<void*>(+[](JNIEnv*, jobject, jint) {})},
       {const_cast<char*>("getCanonicalName"), const_cast<char*>("()Ljava/lang/String;"), reinterpret_cast<void*>(&MC_getCanonicalName)},
       {const_cast<char*>("native_setCallback"), const_cast<char*>("(Landroid/media/MediaCodec$Callback;)V"), reinterpret_cast<void*>(&MC_native_setCallback)},
       {const_cast<char*>("native_enableOnFrameRenderedListener"), const_cast<char*>("(Z)V"), reinterpret_cast<void*>(&MC_native_enableOnFrameRenderedListener)},

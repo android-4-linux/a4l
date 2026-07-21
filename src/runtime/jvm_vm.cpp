@@ -3251,10 +3251,38 @@ class ArtVm final : public JniVm {
            reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jint { return 192000; })},
           {const_cast<char*>("native_getMinSampleRate"), const_cast<char*>("()I"),
            reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jint { return 4000; })},
+          // ExoPlayer's constructor allocates an audio session id (Util.generateAudioSessionIdV21 ->
+          // AudioManager.generateAudioSessionId -> AudioSystem.newAudioSessionId). Unbound, the whole
+          // ExoPlayer:Playback thread dies and video_player's initialize() hangs. Hand out a unique id.
+          {const_cast<char*>("newAudioSessionId"), const_cast<char*>("()I"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jint {
+             static std::atomic<jint> next{10000};
+             return next.fetch_add(1, std::memory_order_relaxed);
+           })},
       };
-      if (env->RegisterNatives(as_cls, m, 3) == JNI_OK)
-        log::i(kTag, "android.media.AudioSystem <clinit> getters bound (channel/sample-rate maxima)");
+      if (env->RegisterNatives(as_cls, m, 4) == JNI_OK)
+        log::i(kTag, "android.media.AudioSystem <clinit> getters bound (channel/sample-rate maxima, session id)");
       env->DeleteLocalRef(as_cls);
+    }
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+    // ExoPlayer/video_player call Surface.isValid()/release() on the output Surface (acl's ImageReader
+    // producer Surface, mNativeObject = ReaderCtx). Surface(long) is pure-Java on acl, so these natives
+    // are otherwise absent; an unbound nativeIsValid kills the ExoPlayer:Playback thread. A non-null
+    // handle is valid; release is a no-op (the ImageReader owns the buffers).
+    if (jclass sf = find_class_optional(env, "android/view/Surface")) {
+      const JNINativeMethod m[] = {
+          {const_cast<char*>("nativeIsValid"), const_cast<char*>("(J)Z"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong p) -> jboolean { return p != 0 ? JNI_TRUE : JNI_FALSE; })},
+          {const_cast<char*>("nativeRelease"), const_cast<char*>("(J)V"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) {})},
+          // ExoPlayer's VideoFrameReleaseHelper hints the display frame rate; acl presents on
+          // wp_presentation, so accept + ignore it (0 = NO_ERROR).
+          {const_cast<char*>("nativeSetFrameRate"), const_cast<char*>("(JFII)I"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jfloat, jint, jint) -> jint { return 0; })},
+      };
+      if (env->RegisterNatives(sf, m, 3) == JNI_OK)
+        log::i(kTag, "android.view.Surface.nativeIsValid/nativeRelease/nativeSetFrameRate bound");
+      env->DeleteLocalRef(sf);
     }
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
     // android.media.AudioPortEventHandler.native_setup — audio_service (com.ryanheise.audioservice)
