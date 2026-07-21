@@ -35,6 +35,7 @@
 #include "svc/appearance/appearance.h"
 #include "svc/battery/battery_jni.h"
 #include "svc/bluetooth/bt_jni.h"
+#include "svc/location/location_jni.h"
 #include "svc/net/connectivity_jni.h"
 #include "svc/notify/notify_jni.h"
 #include "svc/sensor/sensor_jni.h"
@@ -3424,6 +3425,10 @@ class ArtVm final : public JniVm {
     // Bind org.acl.internal.AclSensorManager to the svc/sensor hub (Linux IIO / synthetic). No
     // D-Bus dependency, so this is outside the sdbus block.
     acl::svc::sensor::register_sensor_natives(env);
+    // Bind org.acl.internal.AclLocationManager to the svc/location hub (host GeoClue2 over D-Bus
+    // when built with sdbus-c++, else a synthetic fixed point). The GeoClue2 source is gated inside
+    // the module, so registration itself is unconditional (the synthetic/null source always builds).
+    acl::svc::location::register_location_natives(env);
 #if ACL_HAVE_PIPEWIRE
     // Bind org.acl.internal.AudioBridge (AudioManager master volume) to the host PipeWire
     // default sink.

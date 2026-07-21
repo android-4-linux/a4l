@@ -957,6 +957,17 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("location".equals(name)) {
+                // Real android.location.LocationManager with acl's bridging ILocationManager, which
+                // drives the native acl::svc::location hub (host GeoClue2 over D-Bus) instead of
+                // system_server's LocationManagerService. openmaps' onCreate → permissionsAPI →
+                // requestLocationUpdates() NPE'd on a null service; a real, host-backed one fixes it.
+                try {
+                    return new android.location.LocationManager(this, AclLocationManager.newService());
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             return null;
         }
         // getSystemService(Class) → getSystemServiceName(Class) → getSystemService(String).
@@ -976,6 +987,7 @@ public final class HostBootstrap {
             if (serviceClass == android.os.storage.StorageManager.class) return "storage";
             if (serviceClass == android.os.UserManager.class) return "user";
             if (serviceClass == android.hardware.SensorManager.class) return "sensor";
+            if (serviceClass == android.location.LocationManager.class) return "location";
             if (serviceClass == android.hardware.input.InputManager.class) return "input";
             // ViewRootImpl.<init> reads getSystemService(AudioManager.class) (navigation sound
             // effects); map it so the Dialog/PopupWindow add path gets a real AudioManager.

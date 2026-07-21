@@ -21,6 +21,10 @@ endif
 # AclSensorManager seam.
 if have_jni
   subdir('sensor')
+  # svc/location: android.location.LocationManager over host GeoClue2 (sdbus-c++, when present) or
+  # a synthetic fixed point. Needs JNI for the AclLocationManager seam; the GeoClue2 source is
+  # gated on sdbus inside the module.
+  subdir('location')
 endif
 
 # Automotive vehicle services (svc/car) compile in ONLY under the automotive
