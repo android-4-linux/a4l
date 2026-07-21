@@ -199,6 +199,7 @@ public final class HostBootstrap {
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: ServiceManager seed failed: " + t);
         }
+        seedTelephonyFrameworkInitializer();
         seedSqliteDefaults();
         seedContentService();
         seedVirtualInputDevice();
@@ -2557,6 +2558,26 @@ public final class HostBootstrap {
         // caller's follow-up call doesn't NPE. IBinder stays null (callers null-check it).
         if (rt.isInterface() && rt != android.os.IBinder.class) return noop(rt);
         return null;
+    }
+
+    // TelephonyManager methods (getSignalStrength/getNetworkType/…) resolve ITelephony via
+    // TelephonyFrameworkInitializer.getTelephonyServiceManager(), which the framework normally seeds
+    // during boot but acl does not — so getTelephonyServiceManager() is null and every telephony call
+    // NPEs. Chromium's NetworkChangeNotifierAutoDetect / AndroidNetworkLibrary up-call these, and its
+    // JNI CheckException turns the NPE into a fatal process abort. Seed a real TelephonyServiceManager:
+    // its per-service ServiceRegisterers resolve through the (no-Binder) ServiceManager → null binders,
+    // so telephony calls degrade to null/defaults instead of throwing. Idempotent (the setter throws if
+    // called twice).
+    private static void seedTelephonyFrameworkInitializer() {
+        try {
+            Class<?> tfi = Class.forName("android.telephony.TelephonyFrameworkInitializer");
+            Class<?> tsm = Class.forName("android.os.TelephonyServiceManager");
+            if (tfi.getMethod("getTelephonyServiceManager").invoke(null) == null)
+                tfi.getMethod("setTelephonyServiceManager", tsm)
+                   .invoke(null, tsm.getConstructor().newInstance());
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: telephony framework init seed skipped: " + t);
+        }
     }
 
     // acl has no Binder (ADR-3): seed a no-op ServiceManager. getService(name) returns a
