@@ -264,24 +264,10 @@ public final class HostBootstrap {
             // Resolve the factory class WITHOUT running its <clinit> (loadClass, not Class.forName), so
             // we can load the native engine first.
             Class<?> factoryCls = cl.loadClass("com.android.webview.chromium.WebViewChromiumFactoryProviderForT");
-            // Optional Chromium command-line flags (ACL_WEBVIEW_ARGS), e.g.
-            // "--enable-logging=stderr --v=1" to surface GPU-init failures, or "--disable-gpu" for the
-            // software path. Init the webview CommandLine before the provider brings up its GPU pipeline.
-            try {
-                String extra = System.getenv("ACL_WEBVIEW_ARGS");
-                if (extra != null && !extra.isEmpty()) {
-                    Class<?> cmd = cl.loadClass("org.chromium.base.CommandLine");
-                    if (!(Boolean) cmd.getMethod("isInitialized").invoke(null)) {
-                        java.util.List<String> args = new java.util.ArrayList<>();
-                        args.add("webview");
-                        for (String a : extra.split("\\s+")) if (!a.isEmpty()) args.add(a);
-                        cmd.getMethod("init", String[].class).invoke(null, (Object) args.toArray(new String[0]));
-                        System.err.println("acl WebView: CommandLine " + args);
-                    }
-                }
-            } catch (Throwable t) {
-                System.err.println("acl WebView: CommandLine init skipped: " + t);
-            }
+            // Chromium flags come via ACL_WEBVIEW_ARGS: HostBootstrap marks the app debuggable (see
+            // getApplicationInfo) so WebView's CommandLineUtil reads /data/local/tmp/webview-command-line,
+            // which run-apk binds with those flags. (Initing org.chromium.base.CommandLine directly is not
+            // possible — it is obfuscated in the release APK.)
             // Load the native engine ASSOCIATED WITH the WebView classloader. Runtime.load0(fromClass,
             // path) -> nativeLoad(path, fromClass.getClassLoader(), null), so acl's bionic-load hook sets
             // the FindClass loader to the WebView loader — Chromium's JNI_OnLoad resolves org.chromium.*
@@ -613,6 +599,11 @@ public final class HostBootstrap {
             ai.dataDir = ensure(dataRoot()).getAbsolutePath();
             ai.nativeLibraryDir = new java.io.File(cacheRoot(), "lib").getAbsolutePath();
             ai.flags = android.content.pm.ApplicationInfo.FLAG_HAS_CODE;
+            // With ACL_WEBVIEW_ARGS, mark the app debuggable so WebView's CommandLineUtil reads
+            // /data/local/tmp/webview-command-line (run-apk binds it) — the only way to pass Chromium
+            // flags (--disable-gpu / --enable-logging) on the obfuscated release APK.
+            if (System.getenv("ACL_WEBVIEW_ARGS") != null)
+                ai.flags |= android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE;
             // The manifest's <application> <meta-data> as a Bundle (PackageManager.GET_META_DATA).
             // Libraries read config from here — Expo Updates, Firebase, WorkManager — and call
             // metaData.containsKey/getBoolean on it, so a NULL metaData is an NPE before the app's

@@ -184,6 +184,16 @@ if [ -z "${ACL_NO_SYSTEM:-}" ] && command -v bwrap >/dev/null 2>&1; then
       SANDBOX+=(--tmpfs /system/etc/security --ro-bind "$CACERTS" /system/etc/security/cacerts)
     fi
     printf 'run-apk: engine fonts via bwrap (/system/etc/fonts.xml + %s/fonts)\n' "$HOME_DIR" >&2
+    # WebView command-line file (ACL_WEBVIEW_ARGS): Chromium's CommandLineUtil reads
+    # /data/local/tmp/webview-command-line when the app is debuggable (HostBootstrap sets
+    # FLAG_DEBUGGABLE under ACL_WEBVIEW_ARGS). The only way to pass Chromium flags (--disable-gpu,
+    # --enable-logging=stderr) on the obfuscated release WebView APK. First token is argv[0] (ignored).
+    if [ -n "${ACL_WEBVIEW_ARGS:-}" ]; then
+      WVCL="$W/webview-command-line"
+      printf '_ %s\n' "$ACL_WEBVIEW_ARGS" > "$WVCL"
+      SANDBOX+=(--tmpfs /data --dir /data/local/tmp --ro-bind "$WVCL" /data/local/tmp/webview-command-line)
+      printf 'run-apk: WebView command line -> %s\n' "$ACL_WEBVIEW_ARGS" >&2
+    fi
   fi
 fi
 
