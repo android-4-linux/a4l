@@ -125,7 +125,10 @@ class BionicRuntime {
 
   // dlopen a bionic .so (absolute path required; pre-validated). Returns a bionic handle or nullptr
   // + sets `error` (dlopen failure is graceful, not fatal). Runs with the thread pointer as bionic.
-  void* load(const char* abs_path, std::string* error);
+  // global=true adds the library to bionic's global group (RTLD_GLOBAL), so its symbols are
+  // visible to dlsym(dlopen(nullptr)) — needed for e.g. Chromium's AHardwareBuffer compat shim,
+  // which resolves AHardwareBuffer_* out of the main executable's global namespace.
+  void* load(const char* abs_path, std::string* error, bool global = false);
   // dlsym in a loaded handle. Runs with the thread pointer as bionic.
   void* symbol(void* handle, const char* name);
 

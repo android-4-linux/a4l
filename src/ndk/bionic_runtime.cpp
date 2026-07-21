@@ -718,7 +718,9 @@ void install_gl_forwarders(BionicRuntime* rt) {
     // The callback is captureless and TLS-free, safe to invoke from libandroid under bionic %fs.
     if (g_native_gl_hooks.window_size != nullptr) {
       std::string err;
-      void* h = rt->load((std::string(sysroot) + "/libandroid.so").c_str(), &err);
+      // global=true: put libandroid's AHardwareBuffer_*/ANativeWindow_* symbols in bionic's
+      // global group so Chromium's AHardwareBuffer compat shim (dlsym on dlopen(nullptr)) finds them.
+      void* h = rt->load((std::string(sysroot) + "/libandroid.so").c_str(), &err, /*global=*/true);
       if (h != nullptr) {
         if (void** s = static_cast<void**>(rt->symbol(h, "acl_anw_size_hook")))
           *s = reinterpret_cast<void*>(g_native_gl_hooks.window_size);
@@ -1275,7 +1277,7 @@ std::uintptr_t BionicRuntime::attach_current_thread(std::string* error) {
 #endif
 }
 
-void* BionicRuntime::load(const char* abs_path, std::string* error) {
+void* BionicRuntime::load(const char* abs_path, std::string* error, bool global) {
   if (!abs_path || abs_path[0] != '/') {
     if (error) *error = "bionic load: absolute path required";
     return nullptr;
@@ -1284,8 +1286,11 @@ void* BionicRuntime::load(const char* abs_path, std::string* error) {
   const char* why = nullptr;
   {
     RunScope scope(*this);
+    // 2 = RTLD_NOW; 0x100 = RTLD_GLOBAL (bionic). A later RTLD_GLOBAL dlopen of an
+    // already-loaded library promotes it into the global group.
+    const int flags = global ? (2 | 0x100) : 2;
     h = reinterpret_cast<void* (*)(const char*, int, const void*)>(dlopen_fn_)(
-        abs_path, 2 /*RTLD_NOW*/, dlopen_fn_);
+        abs_path, flags, dlopen_fn_);
     // Take only the POINTER here. Building the std::string inside this scope would call glibc's
     // malloc under bionic %fs, and malloc reads its tcache out of glibc TLS — so the failure path
     // would segfault inside the allocator instead of reporting why the load failed. (dlerror's
@@ -1999,7 +2004,7 @@ bool ensure_looper_bridge_syms() {
   const char* sysroot = getenv("ACL_BIONIC_SYSROOT");
   if (rt == nullptr || sysroot == nullptr) return false;
   std::string err;
-  void* la = rt->load((std::string(sysroot) + "/libandroid.so").c_str(), &err);
+  void* la = rt->load((std::string(sysroot) + "/libandroid.so").c_str(), &err, /*global=*/true);
   if (la == nullptr) return false;
   g_bridge_fd_fn = reinterpret_cast<int (*)()>(rt->symbol(la, "acl_looper_bridge_fd"));
   g_bridge_pump_fn = reinterpret_cast<void (*)()>(rt->symbol(la, "acl_looper_bridge_pump"));
@@ -2055,7 +2060,7 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
     if (!log_routed.exchange(true)) {
       if (const char* sysroot = getenv("ACL_BIONIC_SYSROOT")) {
         std::string lerr;
-        if (void* la = load((std::string(sysroot) + "/libandroid.so").c_str(), &lerr)) {
+        if (void* la = load((std::string(sysroot) + "/libandroid.so").c_str(), &lerr, /*global=*/true)) {
           if (void* init = symbol(la, "acl_ndk_log_init")) {
             RunScope scope(*this);
             reinterpret_cast<void (*)()>(init)();

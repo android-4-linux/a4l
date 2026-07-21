@@ -714,6 +714,17 @@ ACL_EXPORT int AHardwareBuffer_lock(AHardwareBuffer* ahb, uint64_t usage, int32_
 ACL_EXPORT int AHardwareBuffer_unlock(AHardwareBuffer* ahb, int32_t* fence) {
   (void)ahb; if (fence != NULL) *fence = -1; return 0;
 }
+// Cross-process handle transfer over a unix socket. acl is single-process, so WebView's Vulkan
+// compositor should never actually marshal a buffer across the socket — but Chromium's
+// AHardwareBuffer compat shim DCHECKs all eight AHardwareBuffer_* pointers are non-null at load
+// (base/android/android_hardware_buffer_compat.cc). Exported so that dlsym resolves; return an
+// error if ever invoked (the caller then falls back rather than corrupting state).
+ACL_EXPORT int AHardwareBuffer_sendHandleToUnixSocket(const AHardwareBuffer* ahb, int fd) {
+  (void)ahb; (void)fd; return -1;
+}
+ACL_EXPORT int AHardwareBuffer_recvHandleFromUnixSocket(int fd, AHardwareBuffer** out) {
+  (void)fd; if (out != NULL) *out = NULL; return -1;
+}
 
 // ── ASharedMemory (NDK, API 26+) — memfd-backed ─────────────────────────────────────────────────
 // Chromium's base shared memory (ashmem-dev.c) dlsyms these from libandroid on SDK>=26; the fallback
