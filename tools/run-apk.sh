@@ -147,6 +147,12 @@ if [ -z "${ACL_NO_SYSTEM:-}" ] && command -v bwrap >/dev/null 2>&1; then
   if [ -n "${SYSXML:-}" ]; then
     SYSDIR=$(cd "$(dirname "$SYSXML")/.." && pwd)   # .../<product>/system
     SANDBOX=(bwrap --dev-bind /dev /dev --proc /proc)
+    # Optional kernel-level app-uid remap (ACL_SANDBOX_UID): a uid-1000 host user collides with
+    # Android SYSTEM_UID, so Process.myUid()==SYSTEM_UID gates (WebViewFactory, ...) misfire. bwrap's
+    # user namespace maps the host uid to a normal app uid, so getuid() is that value natively —
+    # consistent for both framework identity and file ownership (the Java AclOs wrap is the fallback
+    # for non-bwrap runs). e.g. ACL_SANDBOX_UID=10000.
+    [ -n "${ACL_SANDBOX_UID:-}" ] && SANDBOX+=(--uid "$ACL_SANDBOX_UID" --gid "$ACL_SANDBOX_UID")
     for d in /*; do
       case "$d" in /proc|/dev|/system) continue ;; esac
       if [ -L "$d" ]; then SANDBOX+=(--symlink "$(readlink "$d")" "$d")

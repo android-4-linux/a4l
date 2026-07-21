@@ -186,6 +186,10 @@ public final class HostBootstrap {
     public static synchronized void init() {
         if (sInited) return;
         sInited = true;
+        // Report a normal app uid from Process.myUid() (= Os.getuid()) before any framework code
+        // runs. On acl the app runs as the host user; a uid-1000 user collides with SYSTEM_UID, so
+        // WebViewFactory and other myUid()==SYSTEM_UID gates misfire. See AclOs.
+        AclOs.install();
         try {
             if (android.os.Looper.myLooper() == null) android.os.Looper.prepareMainLooper();
         } catch (Throwable ignored) {
