@@ -1110,10 +1110,29 @@ public final class HostBootstrap {
             return ai;
         }
         @Override public android.content.pm.ApplicationInfo getApplicationInfo(String p, int flags) {
+            // Delegate to the app Context's ApplicationInfo, which carries the manifest <meta-data>
+            // Bundle (plus sourceDir/nativeLibraryDir/dataDir). Callers read app meta-data through
+            // PackageManager, not the Context: Flutter's ApplicationInfoLoader reads
+            // io.flutter.embedding.android.EnableImpeller here — a bare info with null metaData made
+            // it default to Impeller, whose GL context init fails on acl ("Bad Display" -> raster
+            // SIGSEGV); acl's supported Flutter backend is Skia/GLES, which the app's manifest
+            // selects via EnableImpeller=false. Firebase/WorkManager read their config the same way.
+            AppContext c = sAppContext;
+            if (c != null && (p == null || p.equals(pkg))) {
+                try {
+                    android.content.pm.ApplicationInfo ai = c.getApplicationInfo();
+                    if (ai != null) return ai;
+                } catch (Throwable ignored) {
+                }
+            }
             android.content.pm.ApplicationInfo ai = new android.content.pm.ApplicationInfo();
             ai.packageName = p;
             ai.processName = p;
             return ai;
+        }
+        @Override public android.content.pm.ApplicationInfo getApplicationInfo(String p,
+                android.content.pm.PackageManager.ApplicationInfoFlags flags) {
+            return getApplicationInfo(p, 0);  // API 33 typed-flags overload (StubPackageManager throws)
         }
     }
 
@@ -2034,6 +2053,17 @@ public final class HostBootstrap {
                             case "adjustStreamVolume": // (int stream, int direction, int flags, String pkg)
                                 AudioBridge.adjust((Integer) a[0], (Integer) a[1]);
                                 return null;
+                            // Audio-focus arbitration. acl runs one app in-process with nothing else
+                            // competing for the output (ADR-3), so always grant. A FAILED (0) here —
+                            // the default — makes media3/ExoPlayer treat focus as denied and SUPPRESS
+                            // playback (position frozen, playWhenReady honored but paused), which is
+                            // why a video_player app decoded one frame and never advanced. Return
+                            // AUDIOFOCUS_REQUEST_GRANTED (1) so playback proceeds. We never call the
+                            // IAudioFocusDispatcher back (no LOSS/GAIN events) — correct, since no
+                            // other stream ever takes focus away. abandon likewise reports granted.
+                            case "requestAudioFocus":
+                            case "abandonAudioFocus":
+                                return 1;  // AudioManager.AUDIOFOCUS_REQUEST_GRANTED
                             default:
                                 return defaultValue(method.getReturnType());
                         }
