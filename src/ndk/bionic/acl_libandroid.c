@@ -23,13 +23,17 @@
 // private loop that acl does not pump.
 
 #include <errno.h>
+#include <fcntl.h>       // fcntl F_ADD_SEALS / F_SEAL_* (ASharedMemory_setProt)
 #include <pthread.h>
+#include <sys/mman.h>    // memfd_create, PROT_* (ASharedMemory_create/setProt)
+#include <sys/stat.h>    // fstat (ASharedMemory_getSize)
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/types.h>  // off64_t (AAsset_getLength's return type)
+#include <time.h>       // clock_gettime (ASurfaceTransactionStats_getLatchTime)
 #include <unistd.h>
 
 #include <android/log.h>
@@ -710,3 +714,176 @@ ACL_EXPORT int AHardwareBuffer_lock(AHardwareBuffer* ahb, uint64_t usage, int32_
 ACL_EXPORT int AHardwareBuffer_unlock(AHardwareBuffer* ahb, int32_t* fence) {
   (void)ahb; if (fence != NULL) *fence = -1; return 0;
 }
+
+// ── ASharedMemory (NDK, API 26+) — memfd-backed ─────────────────────────────────────────────────
+// Chromium's base shared memory (ashmem-dev.c) dlsyms these from libandroid on SDK>=26; the fallback
+// is /dev/ashmem, which the host lacks (so region creation fails -> WebView font-table DCHECK). Back
+// them with memfd: create+size via memfd_create/ftruncate; read-only conversion (setProt without
+// PROT_WRITE) via write-seal, so Chromium's mmap-probe get_prot_region reports PROT_READ.
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#ifndef MFD_ALLOW_SEALING
+#define MFD_ALLOW_SEALING 0x0002U
+#endif
+ACL_EXPORT int ASharedMemory_create(const char* name, size_t size) {
+  int fd = memfd_create(name != NULL ? name : "acl-shmem", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  if (fd < 0) return -errno;
+  if (ftruncate(fd, (off_t)size) < 0) { int e = errno; close(fd); return -e; }
+  return fd;
+}
+ACL_EXPORT size_t ASharedMemory_getSize(int fd) {
+  struct stat st;
+  return fstat(fd, &st) == 0 ? (size_t)st.st_size : 0;
+}
+ACL_EXPORT int ASharedMemory_setProt(int fd, int prot) {
+  // ashmem restricts the region's MAX protection; emulate for the read-only case with a write seal
+  // (+ shrink/grow seals) so the region can no longer be mapped writable — matching ashmem semantics.
+  if (!(prot & PROT_WRITE))
+    fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW);  // best-effort
+  return 0;
+}
+
+// ── ASurfaceControl (NDK, API 29+) over acl's compositor ─────────────────────────────────────────
+// Chromium WebView composites its rendered content (an AHardwareBuffer per frame) through
+// SurfaceControl: it creates surface controls (a tree rooted at the app window) and, per frame,
+// batches setBuffer/setGeometry/... into a transaction and applies it; the platform latches the
+// buffers and fires an OnComplete callback with a present fence. There is no SurfaceFlinger on acl,
+// so this backs surface controls with logical nodes and (Stage: wiring) presents each frame's
+// AHardwareBuffer via acl's dma-buf path. Chromium's SurfaceControl::IsSupported() CHECKs that these
+// symbols resolve, so they MUST exist in libandroid; apply() must run the OnComplete callback or
+// Chromium blocks its render thread waiting for the frame to latch.
+#define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+
+struct ASurfaceControl {
+  int refs;
+  struct ASurfaceControl* parent;
+  char name[64];
+  AHardwareBuffer* buffer;   // latest latched buffer
+};
+typedef struct { struct ASurfaceControl* sc; AHardwareBuffer* buffer; int fence_fd; int has_buffer; } AclScOp;
+#define ACL_TXN_MAX_OPS 128
+struct ASurfaceTransaction {
+  AclScOp ops[ACL_TXN_MAX_OPS];
+  int n_ops;
+  void* on_complete_ctx; void (*on_complete)(void* ctx, void* stats);
+  void* on_commit_ctx;   void (*on_commit)(void* ctx, void* stats);
+};
+struct ASurfaceTransactionStats {
+  struct ASurfaceControl* scs[ACL_TXN_MAX_OPS];
+  size_t n;
+};
+
+ACL_EXPORT struct ASurfaceControl* ASurfaceControl_createFromWindow(ANativeWindow* parent, const char* name) {
+  (void)parent;
+  struct ASurfaceControl* sc = (struct ASurfaceControl*)calloc(1, sizeof(*sc));
+  if (sc) { sc->refs = 1; if (name) snprintf(sc->name, sizeof(sc->name), "%s", name); }
+  ALOGI("ASurfaceControl_createFromWindow(%s) -> %p", name ? name : "", (void*)sc);
+  return sc;
+}
+ACL_EXPORT struct ASurfaceControl* ASurfaceControl_create(struct ASurfaceControl* parent, const char* name) {
+  struct ASurfaceControl* sc = (struct ASurfaceControl*)calloc(1, sizeof(*sc));
+  if (sc) { sc->refs = 1; sc->parent = parent; if (name) snprintf(sc->name, sizeof(sc->name), "%s", name); }
+  return sc;
+}
+ACL_EXPORT void ASurfaceControl_acquire(struct ASurfaceControl* sc) {
+  if (sc) __atomic_add_fetch(&sc->refs, 1, __ATOMIC_ACQ_REL);
+}
+ACL_EXPORT void ASurfaceControl_release(struct ASurfaceControl* sc) {
+  if (sc && __atomic_sub_fetch(&sc->refs, 1, __ATOMIC_ACQ_REL) <= 0) free(sc);
+}
+
+ACL_EXPORT struct ASurfaceTransaction* ASurfaceTransaction_create(void) {
+  return (struct ASurfaceTransaction*)calloc(1, sizeof(struct ASurfaceTransaction));
+}
+ACL_EXPORT void ASurfaceTransaction_delete(struct ASurfaceTransaction* t) { free(t); }
+
+// The render seam: Chromium hands us the frame's content as an AHardwareBuffer + an acquire fence.
+ACL_EXPORT void ASurfaceTransaction_setBuffer(struct ASurfaceTransaction* t, struct ASurfaceControl* sc,
+                                              AHardwareBuffer* buffer, int acquire_fence_fd) {
+  if (!t || t->n_ops >= ACL_TXN_MAX_OPS) { if (acquire_fence_fd >= 0) close(acquire_fence_fd); return; }
+  AclScOp* op = &t->ops[t->n_ops++];
+  op->sc = sc; op->buffer = buffer; op->fence_fd = acquire_fence_fd; op->has_buffer = 1;
+}
+ACL_EXPORT void ASurfaceTransaction_setOnComplete(struct ASurfaceTransaction* t, void* ctx,
+                                                  void (*func)(void*, void*)) {
+  if (t) { t->on_complete_ctx = ctx; t->on_complete = func; }
+}
+ACL_EXPORT void ASurfaceTransaction_setOnCommit(struct ASurfaceTransaction* t, void* ctx,
+                                                void (*func)(void*, void*)) {
+  if (t) { t->on_commit_ctx = ctx; t->on_commit = func; }
+}
+
+ACL_EXPORT void ASurfaceTransaction_apply(struct ASurfaceTransaction* t) {
+  if (!t) return;
+  struct ASurfaceTransactionStats stats; stats.n = 0;
+  for (int i = 0; i < t->n_ops; ++i) {
+    AclScOp* op = &t->ops[i];
+    if (!op->has_buffer) continue;
+    if (op->sc) { op->sc->buffer = op->buffer; if (stats.n < ACL_TXN_MAX_OPS) stats.scs[stats.n++] = op->sc; }
+    if (op->fence_fd >= 0) close(op->fence_fd);          // acl "acquired" the buffer
+    // TODO(webview render bridge): import op->buffer (AHardwareBuffer -> dma-buf) and composite it as
+    // a wl_subsurface at the surface control's geometry via acl's present loop.
+    ALOGI("ASurfaceControl apply: setBuffer sc=%p buffer=%p (present TODO)", (void*)op->sc, (void*)op->buffer);
+  }
+  // Commit + complete must fire or Chromium's render thread blocks waiting for the frame to latch.
+  if (t->on_commit) t->on_commit(t->on_commit_ctx, &stats);
+  if (t->on_complete) t->on_complete(t->on_complete_ctx, &stats);
+}
+
+// Transaction stats read by the OnComplete callback. Present fence -1 = already presented (no fence);
+// latch time = now; the SC list drives Chromium's per-surface release-fence handling.
+ACL_EXPORT int64_t ASurfaceTransactionStats_getLatchTime(struct ASurfaceTransactionStats* s) {
+  (void)s; struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+ACL_EXPORT int ASurfaceTransactionStats_getPresentFenceFd(struct ASurfaceTransactionStats* s) { (void)s; return -1; }
+ACL_EXPORT void ASurfaceTransactionStats_getASurfaceControls(struct ASurfaceTransactionStats* s,
+                                                             struct ASurfaceControl*** out, size_t* out_n) {
+  if (!s || !out || !out_n) { if (out_n) *out_n = 0; return; }
+  *out_n = s->n;
+  if (s->n == 0) { *out = NULL; return; }
+  struct ASurfaceControl** arr = (struct ASurfaceControl**)malloc(s->n * sizeof(*arr));
+  if (!arr) { *out = NULL; *out_n = 0; return; }
+  for (size_t i = 0; i < s->n; ++i) { arr[i] = s->scs[i]; ASurfaceControl_acquire(arr[i]); }
+  *out = arr;
+}
+ACL_EXPORT void ASurfaceTransactionStats_releaseASurfaceControls(struct ASurfaceControl** arr) {
+  if (arr) free(arr);   // the acquire in getASurfaceControls is balanced by Chromium's own release
+}
+ACL_EXPORT int64_t ASurfaceTransactionStats_getAcquireTime(struct ASurfaceTransactionStats* s,
+                                                           struct ASurfaceControl* sc) { (void)s; (void)sc; return -1; }
+ACL_EXPORT int ASurfaceTransactionStats_getPreviousReleaseFenceFd(struct ASurfaceTransactionStats* s,
+                                                                  struct ASurfaceControl* sc) { (void)s; (void)sc; return -1; }
+
+// Per-surface transaction ops acl does not yet act on (geometry/z/visibility/color/…). The symbols
+// must resolve (SurfaceControl::IsSupported); bodies are no-ops until the compositor wiring lands.
+ACL_EXPORT void ASurfaceTransaction_reparent(struct ASurfaceTransaction* t, struct ASurfaceControl* sc,
+                                             struct ASurfaceControl* np) { (void)t; if (sc) sc->parent = np; }
+ACL_EXPORT void ASurfaceTransaction_setVisibility(void* t, void* sc, int8_t v) { (void)t; (void)sc; (void)v; }
+ACL_EXPORT void ASurfaceTransaction_setZOrder(void* t, void* sc, int32_t z) { (void)t; (void)sc; (void)z; }
+ACL_EXPORT void ASurfaceTransaction_setGeometry(void* t, void* sc, const void* src, const void* dst, int32_t tr) {
+  (void)t; (void)sc; (void)src; (void)dst; (void)tr;
+}
+ACL_EXPORT void ASurfaceTransaction_setCrop(void* t, void* sc, const void* crop) { (void)t; (void)sc; (void)crop; }
+ACL_EXPORT void ASurfaceTransaction_setPosition(void* t, void* sc, int32_t x, int32_t y) { (void)t; (void)sc; (void)x; (void)y; }
+ACL_EXPORT void ASurfaceTransaction_setScale(void* t, void* sc, float sx, float sy) { (void)t; (void)sc; (void)sx; (void)sy; }
+ACL_EXPORT void ASurfaceTransaction_setBufferTransform(void* t, void* sc, int32_t tr) { (void)t; (void)sc; (void)tr; }
+ACL_EXPORT void ASurfaceTransaction_setBufferTransparency(void* t, void* sc, int8_t tp) { (void)t; (void)sc; (void)tp; }
+ACL_EXPORT void ASurfaceTransaction_setBufferAlpha(void* t, void* sc, float a) { (void)t; (void)sc; (void)a; }
+ACL_EXPORT void ASurfaceTransaction_setColor(void* t, void* sc, float r, float g, float b, float a, int ds) {
+  (void)t; (void)sc; (void)r; (void)g; (void)b; (void)a; (void)ds;
+}
+ACL_EXPORT void ASurfaceTransaction_setDamageRegion(void* t, void* sc, const void* rects, uint32_t n) {
+  (void)t; (void)sc; (void)rects; (void)n;
+}
+ACL_EXPORT void ASurfaceTransaction_setDesiredPresentTime(void* t, int64_t ns) { (void)t; (void)ns; }
+ACL_EXPORT void ASurfaceTransaction_setBufferDataSpace(void* t, void* sc, uint64_t ds) { (void)t; (void)sc; (void)ds; }
+ACL_EXPORT void ASurfaceTransaction_setHdrMetadata_smpte2086(void* t, void* sc, const void* m) { (void)t; (void)sc; (void)m; }
+ACL_EXPORT void ASurfaceTransaction_setHdrMetadata_cta861_3(void* t, void* sc, const void* m) { (void)t; (void)sc; (void)m; }
+ACL_EXPORT void ASurfaceTransaction_setFrameRate(void* t, void* sc, float fr, int8_t c) { (void)t; (void)sc; (void)fr; (void)c; }
+ACL_EXPORT void ASurfaceTransaction_setFrameRateWithChangeStrategy(void* t, void* sc, float fr, int8_t c, int8_t s) {
+  (void)t; (void)sc; (void)fr; (void)c; (void)s;
+}
+ACL_EXPORT void ASurfaceTransaction_setEnableBackPressure(void* t, void* sc, int8_t e) { (void)t; (void)sc; (void)e; }
+ACL_EXPORT void ASurfaceTransaction_setFrameTimeline(void* t, int64_t v) { (void)t; (void)v; }

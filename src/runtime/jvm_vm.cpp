@@ -3322,6 +3322,22 @@ class ArtVm final : public JniVm {
       env->DeleteLocalRef(sf);
     }
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+    // android.graphics.HardwareRendererObserver — Chromium WebView's AwContents attaches a frame-metrics
+    // observer (FrameMetrics), whose natives live in libhwui (dropped by acl). Unbound, nCreateObserver
+    // throws UnsatisfiedLinkError and AwContents.<init> fails -> WebView inflation fails. acl has no hwui
+    // frame timeline: hand back a dummy observer handle and report "no frame data" (nGetNextBuffer=-1).
+    if (jclass hro = find_class_optional(env, "android/graphics/HardwareRendererObserver")) {
+      const JNINativeMethod m[] = {
+          {const_cast<char*>("nCreateObserver"), const_cast<char*>("(Ljava/lang/ref/WeakReference;Z)J"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jobject, jboolean) -> jlong { return 1; })},
+          {const_cast<char*>("nGetNextBuffer"), const_cast<char*>("(J[J)I"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jlongArray) -> jint { return -1; })},
+      };
+      if (env->RegisterNatives(hro, m, 2) == JNI_OK)
+        log::i(kTag, "android.graphics.HardwareRendererObserver stubbed (no hwui frame metrics)");
+      env->DeleteLocalRef(hro);
+    }
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
     // android.media.AudioPortEventHandler.native_setup — audio_service (com.ryanheise.audioservice)
     // registers an AudioDeviceCallback during Flutter plugin registration, which inits an
     // AudioPortEventHandler whose native_setup the host libandroid_runtime (no audio HAL) doesn't

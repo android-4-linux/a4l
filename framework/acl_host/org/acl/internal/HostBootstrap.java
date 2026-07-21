@@ -580,6 +580,15 @@ public final class HostBootstrap {
         // this context needs a real Display (Wayland output metrics).
         @Override public android.view.Display getDisplay() { return buildDisplay(); }
         public android.view.Display getDisplayNoVerify() { return buildDisplay(); }
+        // Chromium's DisplayAndroidManager creates a window context for display metrics; a null-base
+        // ContextWrapper NPEs. acl has one display, so return self (own resources/display).
+        @Override public android.content.Context createWindowContext(int type, android.os.Bundle options) {
+            return this;
+        }
+        @Override public android.content.Context createWindowContext(android.view.Display display,
+                int type, android.os.Bundle options) {
+            return this;
+        }
         // ContextWrapper delegates this to a null base on this context; ViewRootImpl.<init>
         // (Dialog/PopupWindow add path) reads getBasePackageName(), so a null-base delegation
         // would NPE. Return the app package (getOpPackageName is already overridden below).
@@ -719,6 +728,17 @@ public final class HostBootstrap {
                 // synthetic). Cached: one instance per app (native events dispatch to it).
                 if (sSensorManager == null) sSensorManager = new AclSensorManager(this);
                 return sSensorManager;
+            }
+            if ("input".equals(name)) {
+                // InputManager.getInstance() (the process singleton; acl seeded its device cache in
+                // seedVirtualInputDevice). Chromium's WebView registers an InputDeviceListener; a null
+                // service NPEs. registerInputDeviceListener no-ops on acl (no hotplug bus).
+                try {
+                    return Class.forName("android.hardware.input.InputManager")
+                            .getMethod("getInstance").invoke(null);
+                } catch (Throwable t) {
+                    return null;
+                }
             }
             if ("layout_inflater".equals(name)) {
                 try {
@@ -956,6 +976,7 @@ public final class HostBootstrap {
             if (serviceClass == android.os.storage.StorageManager.class) return "storage";
             if (serviceClass == android.os.UserManager.class) return "user";
             if (serviceClass == android.hardware.SensorManager.class) return "sensor";
+            if (serviceClass == android.hardware.input.InputManager.class) return "input";
             // ViewRootImpl.<init> reads getSystemService(AudioManager.class) (navigation sound
             // effects); map it so the Dialog/PopupWindow add path gets a real AudioManager.
             if (serviceClass == android.media.AudioManager.class) return "audio";
