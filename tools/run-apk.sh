@@ -188,11 +188,24 @@ if [ -z "${ACL_NO_SYSTEM:-}" ] && command -v bwrap >/dev/null 2>&1; then
     # /data/local/tmp/webview-command-line when the app is debuggable (HostBootstrap sets
     # FLAG_DEBUGGABLE under ACL_WEBVIEW_ARGS). The only way to pass Chromium flags (--disable-gpu,
     # --enable-logging=stderr) on the obfuscated release WebView APK. First token is argv[0] (ignored).
-    if [ -n "${ACL_WEBVIEW_ARGS:-}" ]; then
+    # ACL_WEBVIEW_VULKAN drives the hardware AwDrawFn Vulkan functor (viz + functor share acl's
+    # Ganesh-Vulkan device, compositing straight into the present frame — no AHardwareBuffer copy).
+    # That needs two Chromium switches: --webview-draw-functor-uses-vulkan (functor uses Vulkan) and
+    # --disable-vulkan-surface (viz's GPU-init Vulkan runs headless — acl has no Android WSI surface).
+    # Auto-append them so ACL_WEBVIEW_VULKAN=1 is sufficient. NOTE: on a host with several Vulkan ICDs
+    # installed, a non-matching ICD (e.g. intel on an AMD box) can crash the loader during Chromium's
+    # vkCreateInstance — pin the loader to the working ICD via VK_DRIVER_FILES (it propagates into the
+    # sandbox), e.g. VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json.
+    WV_ARGS="${ACL_WEBVIEW_ARGS:-}"
+    if [ -n "${ACL_WEBVIEW_VULKAN:-}" ]; then
+      case "$WV_ARGS" in *webview-draw-functor-uses-vulkan*) ;; *) WV_ARGS="$WV_ARGS --webview-draw-functor-uses-vulkan" ;; esac
+      case "$WV_ARGS" in *disable-vulkan-surface*) ;; *) WV_ARGS="$WV_ARGS --disable-vulkan-surface" ;; esac
+    fi
+    if [ -n "$WV_ARGS" ]; then
       WVCL="$W/webview-command-line"
-      printf '_ %s\n' "$ACL_WEBVIEW_ARGS" > "$WVCL"
+      printf '_ %s\n' "$WV_ARGS" > "$WVCL"
       SANDBOX+=(--tmpfs /data --dir /data/local/tmp --ro-bind "$WVCL" /data/local/tmp/webview-command-line)
-      printf 'run-apk: WebView command line -> %s\n' "$ACL_WEBVIEW_ARGS" >&2
+      printf 'run-apk: WebView command line -> %s\n' "$WV_ARGS" >&2
     fi
   fi
 fi
