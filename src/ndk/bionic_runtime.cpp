@@ -203,6 +203,19 @@ std::uintptr_t glibc_fs_for(std::uintptr_t bionic_fs) {
   return 0;
 }
 
+// Reverse of glibc_fs_for: the bionic %fs paired to a given glibc %fs, or 0 if none. A glibc %fs is
+// the glibc side of at most one live pairing (a donor is claimed once and never shared, and an ART
+// thread has one bionic TCB), so the match is unambiguous. Used by the down-call attach to recover a
+// bionic-born thread's ORIGINAL bionic TCB instead of minting a second one (see attach_current_thread).
+std::uintptr_t bionic_fs_for(std::uintptr_t glibc_fs) {
+  const int n = g_fs_pair_count.load(std::memory_order_acquire);
+  for (int i = 0; i < n && i < kMaxAttached; ++i) {
+    const std::uintptr_t b = g_fs_pairs[i].bionic_fs.load(std::memory_order_acquire);
+    if (b != 0 && g_fs_pairs[i].glibc_fs == glibc_fs) return b;
+  }
+  return 0;
+}
+
 
 // Entered under bionic %fs (from the bionic .so); restore glibc for the real call, then bionic.
 // Sets the *constant* glibc/bionic %fs (not a save/restore), which composes correctly under JNI
@@ -1070,6 +1083,18 @@ std::uintptr_t BionicRuntime::attach_current_thread(std::string* error) {
   return 0;
 #else
   if (t_bionic_fs != 0) return t_bionic_fs;  // idempotent
+  // A bionic-born thread (e.g. a Chromium engine thread created by bionic pthread_create) that first
+  // entered ART through w_AttachCurrentThread / an ensure_paired_glibc_fs up-call is ALREADY paired:
+  // its ORIGINAL bionic TCB was registered against the glibc donor %fs it is now running Java on. A
+  // JNI down-call out of that Java must land on that original TCB — where the thread's native C++
+  // thread_locals live (e.g. Chromium's SequencedTaskRunner CurrentDefaultHandle) — not a freshly
+  // minted one. Minting a second TCB hides that thread-local state (native CHECKs then fire) and
+  // leaves two bionic TCBs paired to one glibc %fs, desynchronizing the up/down-call swaps (a source
+  // of stray %fs=0 faults). Recover and reuse the original via the reverse pairing lookup.
+  if (const std::uintptr_t paired = bionic_fs_for(ndk_get_fs())) {
+    t_bionic_fs = paired;  // cache on this (glibc/donor) %fs for the down-call fast path
+    return paired;
+  }
   auto fail = [&](const char* why) -> std::uintptr_t {
     if (error) *error = why;
     return 0;
