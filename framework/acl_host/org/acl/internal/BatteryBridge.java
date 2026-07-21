@@ -23,6 +23,19 @@ public final class BatteryBridge {
     private static native int[] nSnapshot();
     private static native String nTechnology();
 
+    /**
+     * The raw svc/battery (UPower) snapshot [level, scale, temperature(dC), voltage(mV), status,
+     * health, plugged, present(0/1)]; healthy defaults when the natives are absent. Never null.
+     * Used to back BatteryManager.getIntProperty (the BATTERY_PROPERTY_* reads Chromium's
+     * PowerMonitor and others do), in addition to the sticky ACTION_BATTERY_CHANGED Intent above.
+     */
+    public static int[] snapshot() {
+        int[] s = null;
+        try { s = nSnapshot(); } catch (Throwable ignored) { /* natives absent */ }
+        if (s == null || s.length < 8) s = new int[] { 100, 100, 0, 0, 3, 2, 0, 1 };
+        return s;
+    }
+
     /** The current battery state as an ACTION_BATTERY_CHANGED Intent (never null). */
     public static Intent batteryIntent() {
         Intent i = new Intent(Intent.ACTION_BATTERY_CHANGED);

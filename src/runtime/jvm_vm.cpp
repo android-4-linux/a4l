@@ -3354,6 +3354,25 @@ class ArtVm final : public JniVm {
       env->DeleteLocalRef(hro);
     }
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+    // android.graphics.HardwareRenderer.nAddObserver/nRemoveObserver — View.addFrameMetricsListener
+    // (reached via WebView's WindowAndroid during dispatchAttachedToWindow) registers a frame-metrics
+    // observer with the render proxy. libhwui is dropped, so these are unbound and the
+    // UnsatisfiedLinkError aborts dispatchAttachedToWindow — leaving the WHOLE view tree (incl. the
+    // WebView) not-attached-to-window, which forces WebView into the software draw path (its
+    // OnDrawHardware gate is `is_hardware_accelerated && attached_to_window()`). No-op them: acl has no
+    // hwui frame timeline to observe, and the observer object is inert.
+    if (jclass hr = find_class_optional(env, "android/graphics/HardwareRenderer")) {
+      const JNINativeMethod m[] = {
+          {const_cast<char*>("nAddObserver"), const_cast<char*>("(JJ)V"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jlong) {})},
+          {const_cast<char*>("nRemoveObserver"), const_cast<char*>("(JJ)V"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jlong) {})},
+      };
+      if (env->RegisterNatives(hr, m, 2) == JNI_OK)
+        log::i(kTag, "android.graphics.HardwareRenderer.nAddObserver/nRemoveObserver stubbed");
+      env->DeleteLocalRef(hr);
+    }
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
     // android.media.AudioPortEventHandler.native_setup — audio_service (com.ryanheise.audioservice)
     // registers an AudioDeviceCallback during Flutter plugin registration, which inits an
     // AudioPortEventHandler whose native_setup the host libandroid_runtime (no audio HAL) doesn't

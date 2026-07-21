@@ -957,6 +957,51 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("phone".equals(name)) {
+                // TelephonyManager(Context): Chromium's AndroidNetworkLibrary /
+                // NetworkChangeNotifierAutoDetect classify the connection via TelephonyManager
+                // (getSignalStrength/getNetworkType); a null service NPEs and chromium's JNI
+                // CheckException aborts the process. The real manager with no telephony binder
+                // returns null/defaults (no host radio), which chromium handles.
+                try {
+                    return new android.telephony.TelephonyManager(this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
+            if ("batterymanager".equals(name)) {
+                // BatteryManager(Context, IBatteryStats, IBatteryPropertiesRegistrar), backed by the
+                // host UPower daemon via svc/battery (BatteryBridge.snapshot()). Chromium's
+                // AndroidBatteryMetrics calls PowerMonitor.getRemainingBatteryCapacity() ->
+                // getIntProperty(BATTERY_PROPERTY_CAPACITY); a null service NPEs and chromium's JNI
+                // CheckException aborts the process. getIntProperty -> queryProperty -> the properties
+                // registrar's getProperty(id, BatteryProperty) — so supply a registrar that fills the
+                // property from the real UPower snapshot [level,scale,temp,mV,status,health,plugged,
+                // present]. Capacity/status are answered; other BATTERY_PROPERTY_* (charge/current/
+                // energy counters, which UPower's DisplayDevice doesn't expose) return non-zero so
+                // BatteryManager yields the "unknown" sentinel rather than a fabricated value.
+                // AclBatteryManager extends BatteryManager and answers getIntProperty from the UPower
+                // snapshot; allocateHollow skips BatteryManager's ctor (which resolves batterystats/
+                // batteryproperties Binder services + android.os.BatteryProperty, none on acl's boot
+                // classpath — the real queryProperty path can't run here).
+                try {
+                    return allocateHollow(AclBatteryManager.class);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
+            if ("captioning".equals(name)) {
+                // CaptioningManager(Context): the WebView's onAttachedToWindow (via its media/
+                // accessibility setup) registers a CaptioningChangeListener; a null service NPEs and
+                // aborts dispatchAttachedToWindow — leaving the tree not-attached-to-window (which
+                // forces WebView's software draw path). The real manager reads captioning Settings
+                // (all defaults/off on the host) and its listener registration is inert.
+                try {
+                    return new android.view.accessibility.CaptioningManager(this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("location".equals(name)) {
                 // Real android.location.LocationManager with acl's bridging ILocationManager, which
                 // drives the native acl::svc::location hub (host GeoClue2 over D-Bus) instead of
@@ -988,6 +1033,9 @@ public final class HostBootstrap {
             if (serviceClass == android.os.UserManager.class) return "user";
             if (serviceClass == android.hardware.SensorManager.class) return "sensor";
             if (serviceClass == android.location.LocationManager.class) return "location";
+            if (serviceClass == android.view.accessibility.CaptioningManager.class) return "captioning";
+            if (serviceClass == android.os.BatteryManager.class) return "batterymanager";
+            if (serviceClass == android.telephony.TelephonyManager.class) return "phone";
             if (serviceClass == android.hardware.input.InputManager.class) return "input";
             // ViewRootImpl.<init> reads getSystemService(AudioManager.class) (navigation sound
             // effects); map it so the Dialog/PopupWindow add path gets a real AudioManager.
