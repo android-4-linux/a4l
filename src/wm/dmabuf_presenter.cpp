@@ -821,16 +821,23 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     return clean;
   }
 
-  // The vsync-aligned time for the frame about to be drawn (Choreographer.frameTimeNanos):
-  // the last wp_presentation time plus one refresh interval, or the raw presentation clock
-  // before any feedback has arrived (or CLOCK_MONOTONIC if wp_presentation is absent).
+  // The vsync-aligned time for the frame about to be drawn (Choreographer.frameTimeNanos): the last
+  // wp_presentation time plus one refresh interval. CRITICAL: this is the Choreographer CLOCK, which
+  // must advance continuously at the refresh rate even when the app is idle / presents stall — it is
+  // present-driven only for grid ALIGNMENT. If it stalls, a media renderer that schedules off vsync
+  // (ExoPlayer's VideoFrameReleaseHelper) deadlocks: no new vsync -> no frame rendered -> no present ->
+  // no new vsync. So if last_present+refresh has fallen into the past, advance it by whole refresh
+  // intervals to the next grid point at or after now.
   std::uint64_t frame_time_ns() const noexcept override {
-    if (last_present_ns_ != 0 && refresh_ns_ != 0) return last_present_ns_ + refresh_ns_;
     const clockid_t clk = presentation_.Bound() ? presentation_.clock() : CLOCK_MONOTONIC;
     timespec ts{};
     clock_gettime(clk, &ts);
-    return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull +
-           static_cast<std::uint64_t>(ts.tv_nsec);
+    const std::uint64_t now =
+        static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(ts.tv_nsec);
+    if (last_present_ns_ == 0 || refresh_ns_ == 0) return now;
+    std::uint64_t t = last_present_ns_ + refresh_ns_;
+    if (t < now) t += ((now - t) / refresh_ns_ + 1) * refresh_ns_;  // catch up to the vsync grid
+    return t;
   }
 
   wl::DisplayHandle display_;

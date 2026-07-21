@@ -201,7 +201,19 @@ void async_driver(CodecCtx* ctx) {
         ctx->dbg_sent++;
       }
     }
-    for (;;) {  // drain every ready frame
+    for (;;) {  // drain ready frames, with backpressure
+      // BACKPRESSURE: a real MediaCodec has a FIXED output-buffer pool; when the app holds them all it
+      // stops emitting frames (the decoder stalls) until releaseOutputBuffer frees one. Without this the
+      // driver floods ExoPlayer with hundreds of undrained output buffers and its render pacing breaks
+      // (only the first frame ever renders). Find a free slot in the fixed pool BEFORE decoding; if
+      // none, stop until a release frees one.
+      int slot = -1;
+      {
+        std::lock_guard<std::mutex> lk(ctx->amu);
+        for (std::size_t i = 0; i < ctx->outslots.size(); ++i)
+          if (!ctx->outslots[i].used) { slot = static_cast<int>(i); break; }
+      }
+      if (slot < 0) break;  // output pool full — wait for releaseOutputBuffer
       gfx::DmabufFrame f{};
       std::int64_t pts = 0;
       const int rr = ctx->dec->receive_frame(&f, &pts, &err);
@@ -209,15 +221,7 @@ void async_driver(CodecCtx* ctx) {
       if (rr <= 0) break;
       ::AHardwareBuffer* ahb = gfx::ahb_import(f);
       if (ahb == nullptr) continue;
-      int slot;
-      {
-        std::lock_guard<std::mutex> lk(ctx->amu);
-        slot = -1;
-        for (std::size_t i = 0; i < ctx->outslots.size(); ++i)
-          if (!ctx->outslots[i].used) { slot = static_cast<int>(i); break; }
-        if (slot < 0) { ctx->outslots.push_back({}); slot = static_cast<int>(ctx->outslots.size()) - 1; }
-        ctx->outslots[slot] = {ahb, true, pts};
-      }
+      { std::lock_guard<std::mutex> lk(ctx->amu); ctx->outslots[slot] = {ahb, true, pts}; }
       jobject info = env->NewObject(g_bufinfo_cls, g_bufinfo_ctor);
       env->CallVoidMethod(info, g_bufinfo_set, 0, 0, static_cast<jlong>(pts), 0);
       post(CB_OUTPUT_AVAILABLE, slot, info);
@@ -406,6 +410,7 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env, jobject thiz, jint index, jbool
     ahb = s.ahb;
     s = {};
   }
+  ctx->acv.notify_one();  // a pool slot freed — resume the backpressured driver
   if (render == JNI_TRUE && ctx->out_queue != nullptr) {
     ctx->out_queue->queue_imported(ahb);  // zero-copy: hand the frame to the ImageReader consumer
   } else {
