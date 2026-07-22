@@ -1937,25 +1937,46 @@ public final class HostBootstrap {
         return sTopOverlayModal;
     }
 
-    // Stop a Dialog/Popup's real ViewRootImpl from scheduling its own traversal (acl drives render).
-    // Setting mTraversalScheduled=TRUE makes scheduleTraversals() early-return — but on window removal
-    // ViewRootImpl.doDie -> unscheduleTraversals() calls removeSyncBarrier(mTraversalBarrier). With no
-    // barrier posted that token is 0 and removeSyncBarrier throws "token not posted", the removeView
-    // fails, and the overlay is left half-removed (the app hangs). Post a REAL sync barrier once and
-    // record its token so the removal removes a valid barrier. Async messages (Choreographer/Compose/
-    // acl's present loop) bypass the barrier, so it only briefly holds the overlay's sync messages.
+    // Stop a Dialog/Popup's real ViewRootImpl from running its own traversal (acl drives render via
+    // presentOverlays — measure/layout/draw the decor directly each frame). When the overlay's
+    // ViewRootImpl schedules a traversal it (a) posts a Choreographer CALLBACK_TRAVERSAL that runs
+    // performTraversals (which would fight acl / draw to a surface acl never gave it) and (b) posts a
+    // main-looper SYNC BARRIER (mTraversalBarrier) that holds until doTraversal runs. So each frame we
+    // CANCEL the pending traversal exactly the way doTraversal's cleanup would — remove the
+    // Choreographer callback, remove the sync barrier, clear mTraversalScheduled — but WITHOUT running
+    // performTraversals. Crucially this leaves NO lasting sync barrier: an earlier version set
+    // mTraversalScheduled=TRUE and left a barrier posted for the overlay's whole lifetime, which
+    // stranded every synchronous main-looper message — including a PopupWindow list item's postDelayed
+    // performClick/pressed-state runnables, so menu items dispatched (consumed=true) but never
+    // selected. And because mTraversalScheduled ends up FALSE, doDie -> unscheduleTraversals skips its
+    // removeSyncBarrier(mTraversalBarrier) (no stale-token throw), so overlay removal still works.
     private static void neuterViewRoot(Object vri) {
         if (vri == null) return;
         try {
             Class<?> vriCls = Class.forName("android.view.ViewRootImpl");
-            if (Boolean.TRUE.equals(getField(vriCls, vri, "mTraversalScheduled"))) return;  // already neutered
-            try {
-                android.os.MessageQueue mq = android.os.Looper.getMainLooper().getQueue();
-                java.lang.reflect.Method post = android.os.MessageQueue.class.getDeclaredMethod("postSyncBarrier");
-                post.setAccessible(true);
-                setField(vriCls, vri, "mTraversalBarrier", ((Integer) post.invoke(mq)).intValue());
-            } catch (Throwable ignored) {}
-            setField(vriCls, vri, "mTraversalScheduled", Boolean.TRUE);
+            if (!Boolean.TRUE.equals(getField(vriCls, vri, "mTraversalScheduled"))) return;  // nothing pending
+            // Cancel the pending Choreographer traversal callback so performTraversals never runs.
+            Object choreo = getField(vriCls, vri, "mChoreographer");
+            Object traversalRunnable = getField(vriCls, vri, "mTraversalRunnable");
+            if (choreo != null && traversalRunnable instanceof Runnable) {
+                try {
+                    java.lang.reflect.Method rm = choreo.getClass().getMethod(
+                            "removeCallbacks", int.class, Runnable.class, Object.class);
+                    rm.invoke(choreo, 2 /*Choreographer.CALLBACK_TRAVERSAL*/, traversalRunnable, null);
+                } catch (Throwable ignored) {}
+            }
+            // Remove the sync barrier scheduleTraversals posted (else it strands sync messages).
+            Object barrier = getField(vriCls, vri, "mTraversalBarrier");
+            if (barrier instanceof Integer) {
+                try {
+                    android.os.MessageQueue mq = android.os.Looper.getMainLooper().getQueue();
+                    java.lang.reflect.Method remove = android.os.MessageQueue.class.getDeclaredMethod(
+                            "removeSyncBarrier", int.class);
+                    remove.setAccessible(true);
+                    remove.invoke(mq, ((Integer) barrier).intValue());
+                } catch (Throwable ignored) {}
+            }
+            setField(vriCls, vri, "mTraversalScheduled", Boolean.FALSE);
         } catch (Throwable ignored) {}
     }
 
