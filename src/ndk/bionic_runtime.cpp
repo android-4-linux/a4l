@@ -1794,6 +1794,24 @@ jint JNICALL w_AttachCurrentThread(JavaVM* vm, void** p_env, void* args) {
   if (p_env != nullptr) *p_env = wrapped;
   return JNI_OK;
 }
+
+// JavaVM DetachCurrentThread. A bionic thread that attached via w_AttachCurrentThread runs on its
+// bionic %fs, but ART's DetachCurrentThread reads the ART Thread* out of GLIBC TLS — so it SEGVs
+// under bionic %fs (seen as a crash in art::Runtime::DetachCurrentThread when a Chromium ThreadPool
+// worker exits after JNI work). Swap to the thread's paired glibc donor %fs for the real detach,
+// then restore. A native/ART thread (no bionic->glibc pairing) is already on glibc %fs — pass through.
+jint JNICALL w_DetachCurrentThread(JavaVM* vm) {
+  WrapVM* w = reinterpret_cast<WrapVM*>(vm);
+  const std::uintptr_t cur = ndk_get_fs();
+  const std::uintptr_t glibc = glibc_fs_for(cur);  // 0 => not a paired bionic thread
+  if (glibc != 0) {
+    ndk_set_fs(glibc);
+    const jint rc = w->real->functions->DetachCurrentThread(w->real);
+    ndk_set_fs(cur);
+    return rc;
+  }
+  return w->real->functions->DetachCurrentThread(w->real);
+}
 }  // namespace
 #endif  // __x86_64__
 
@@ -1858,6 +1876,7 @@ JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
   g_vm_tbl.GetEnv = w_GetEnv;
   g_vm_tbl.AttachCurrentThread = w_AttachCurrentThread;
   g_vm_tbl.AttachCurrentThreadAsDaemon = w_AttachCurrentThread;
+  g_vm_tbl.DetachCurrentThread = w_DetachCurrentThread;
   g_wrap_vm.functions = &g_vm_tbl;
   g_wrap_vm.real = real_vm;
   g_wrap_vm.wrap_env = reinterpret_cast<JNIEnv*>(&t_wrap_env);
