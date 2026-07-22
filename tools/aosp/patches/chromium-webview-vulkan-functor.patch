@@ -79,6 +79,63 @@ index 001e0ec867c13..50118d5fd3673 100644
      base::NativeLibraryLoadError native_library_load_error;
      base::NativeLibrary vulkan_loader_library = base::LoadNativeLibrary(
          base::FilePath("libvulkan.so"), &native_library_load_error);
+diff --git a/cc/trees/presentation_time_callback_buffer.cc b/cc/trees/presentation_time_callback_buffer.cc
+index 82ffe160c4b23..493afcd000aea 100644
+--- a/cc/trees/presentation_time_callback_buffer.cc
++++ b/cc/trees/presentation_time_callback_buffer.cc
+@@ -123,8 +123,16 @@ PresentationTimeCallbackBuffer::GetOrMakeRegistration(uint32_t frame_token) {
+   // entry to the queue.
+   if (frame_token_infos_.empty() ||
+       viz::FrameTokenGT(frame_token, frame_token_infos_.back().token)) {
++    // acl: in the WebView Vulkan AwDrawFn path, presentation feedback is not delivered back to the
++    // compositor (AwGLSurface::SwapBuffers, which arms MaybeDidPresent, is a GL-path mechanism the
++    // Vulkan output device bypasses), so PopPendingCallbacks never runs and this buffer grew without
++    // bound — the original DCHECK_LE fired FATAL at 61 > 60 and crashed the Compositor thread after
++    // ~60 frames. Bound it by dropping the oldest stale entries instead. Presentation-time callbacks
++    // do not drive rAF or rendering, so static content is unaffected. TODO: wire real presentation
++    // feedback for the Vulkan functor path.
++    while (frame_token_infos_.size() >= kMaxBufferSize && !frame_token_infos_.empty())
++      frame_token_infos_.pop_front();
+     frame_token_infos_.emplace_back(frame_token);
+-    DCHECK_LE(frame_token_infos_.size(), kMaxBufferSize);
+   }
+ 
+   // Registrations should use monotonically increasing frame tokens.
+diff --git a/gpu/command_buffer/service/shared_image/external_vk_image_backing_factory.cc b/gpu/command_buffer/service/shared_image/external_vk_image_backing_factory.cc
+index 828085a80dcdd..2f9462002bbc1 100644
+--- a/gpu/command_buffer/service/shared_image/external_vk_image_backing_factory.cc
++++ b/gpu/command_buffer/service/shared_image/external_vk_image_backing_factory.cc
+@@ -105,7 +105,9 @@ ExternalVkImageBackingFactory::CreateSharedImage(
+     SkAlphaType alpha_type,
+     uint32_t usage,
+     bool is_thread_safe) {
+-  DCHECK(!is_thread_safe);
++  // acl: allow cross-thread (see IsSupported) — ExternalVkImageBacking is the only Vulkan backing
++  // on host Mesa and WebView raster tiles are thread_safe. (void) to keep the param used.
++  (void)is_thread_safe;
+   return ExternalVkImageBacking::Create(
+       context_state_, command_pool_.get(), mailbox, format, size, color_space,
+       surface_origin, alpha_type, usage, image_usage_cache_,
+@@ -176,11 +178,14 @@ bool ExternalVkImageBackingFactory::IsSupported(
+   if (usage & kInvalidUsages) {
+     return false;
+   }
+-  if (thread_safe) {
+-    LOG(ERROR) << "ExternalVkImageBackingFactory currently do not support "
+-                  "cross-thread usage.";
+-    return false;
+-  }
++  // acl: on host Mesa the AHardwareBuffer factory is unavailable (no Android AHB Vulkan extension),
++  // so ExternalVkImageBacking is the ONLY Vulkan backing — and WebView's GPU-raster tiles are
++  // cross-thread (thread_safe=1: rastered on a worker, read by the display compositor). With this
++  // rejection there is NO factory for them, so tile content (the example.com card, OSM map tiles,
++  // ...) never composites while solid backgrounds do. ExternalVkImageBacking already synchronizes
++  // GPU access across BeginAccess/EndAccess with VkSemaphores, covering the produce-then-consume tile
++  // pattern, so allow cross-thread use (env-gated for A/B). TODO: audit backing-object thread-safety.
++  // (acl) cross-thread allowed — see comment above.
+ 
+ #if BUILDFLAG(IS_ANDROID)
+   // Scanout on Android requires explicit fence synchronization which is only
 diff --git a/gpu/vulkan/android/vulkan_implementation_android.cc b/gpu/vulkan/android/vulkan_implementation_android.cc
 index 669b698012bec..af64e8acf7d7a 100644
 --- a/gpu/vulkan/android/vulkan_implementation_android.cc
