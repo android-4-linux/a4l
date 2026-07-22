@@ -7,13 +7,30 @@ package android.net;
 
 // acl connectivity shim (see android.net.Network): the properties of the single default
 // network. Chromium's WebView (AndroidNetworkLibrary/DnsConfigServiceAndroid) reads DNS
-// config from here; acl models no per-link DNS (the host resolver is used natively), so
-// these report empty/none and Chromium falls back to its own resolution.
+// config from here to seed its built-in async resolver. acl models a single default
+// network mirroring the host, so report the host's resolv.conf nameservers — otherwise
+// the WebView's DnsConfig is empty ("Failed to read DnsConfig") and every hostname (e.g.
+// map tile servers) fails to resolve, leaving remote content blank.
 public final class LinkProperties {
     public LinkProperties() {}
 
     public java.util.List<java.net.InetAddress> getDnsServers() {
-        return new java.util.ArrayList<java.net.InetAddress>();
+        java.util.List<java.net.InetAddress> out = new java.util.ArrayList<java.net.InetAddress>();
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.FileReader("/etc/resolv.conf"))) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                line = line.trim();
+                if (line.startsWith("#") || !line.startsWith("nameserver")) continue;
+                String[] parts = line.split("\\s+");
+                if (parts.length < 2) continue;
+                try {
+                    // Numeric literal only — no DNS lookup (would recurse / need the servers).
+                    out.add(java.net.InetAddress.getByName(parts[1]));
+                } catch (Throwable ignored) {}
+            }
+        } catch (Throwable ignored) {}
+        return out;
     }
     public String getDomains() { return null; }
     public String getInterfaceName() { return null; }
