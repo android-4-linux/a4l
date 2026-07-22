@@ -128,7 +128,8 @@ def end_elem(pool, name):
     return _node(RES_XML_END_ELEM, struct.pack("<II", NO_ENTRY, pool.sid(name)))
 
 
-def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity"):
+def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity",
+               permissions=None):
     pool = Pool()
     uri = lambda: pool.sid(ANDROID_URI)          # noqa: E731
     a = lambda name, val: _attribute(pool, uri(), pool.sid(name), val)  # noqa: E731
@@ -144,6 +145,11 @@ def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity"):
         a("versionName", ("str", "1.2.3")),
         a("compileSdkVersion", ("int", 33)),
     ])
+    # <uses-permission android:name="..."/> — resolved by NAME (acl has no resource-id
+    # table); needed e.g. for android.permission.INTERNET so a WebView loads remote content.
+    for perm in (permissions or []):
+        body += start_elem(pool, "uses-permission", [a("name", ("str", perm))])
+        body += end_elem(pool, "uses-permission")
     body += start_elem(pool, "uses-sdk", [
         a("minSdkVersion", ("int", 24)),
         a("targetSdkVersion", ("int", 33)),
