@@ -92,6 +92,17 @@ public class MainActivity extends Activity {
                           + " winVis=" + lwv.getWindowVisibility() + " vis=" + lwv.getVisibility());
                 if (url.startsWith("http")) { Log.i(TAG, "loadUrl " + url); lwv.loadUrl(url); }
                 else lwv.loadDataWithBaseURL("https://openstreetmap.fr/", HTML, "text/html", "utf-8", null);
+                // State dump 5s after the load: did AwContents actually navigate?
+                new android.os.Handler(getMainLooper()).postDelayed(new Runnable() {
+                    @Override public void run() {
+                        Log.i(TAG, "STATE size=" + lwv.getWidth() + "x" + lwv.getHeight()
+                                  + " progress=" + lwv.getProgress()
+                                  + " url=" + lwv.getUrl()
+                                  + " origUrl=" + lwv.getOriginalUrl()
+                                  + " contentH=" + lwv.getContentHeight()
+                                  + " title=" + lwv.getTitle());
+                    }
+                }, 5000);
             }
         }, 1500);
 

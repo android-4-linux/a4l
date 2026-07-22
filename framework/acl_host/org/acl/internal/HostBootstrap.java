@@ -2196,6 +2196,12 @@ public final class HostBootstrap {
                     "dispatchAttachedToWindow", aiCls, int.class);
             dispatch.setAccessible(true);
             dispatch.invoke(decor, attachInfo, 0 /* View.VISIBLE */);
+            // AwContents (WebView) tracks window visibility via onWindowVisibilityChanged and DEFERS
+            // its navigation's network fetch until the window is visible — dispatchAttachedToWindow
+            // alone does not deliver that. Without it a WebView loadUrl sticks at progress=10
+            // (navigation started, request never dispatched). Dispatch VISIBLE to the decor tree.
+            try { decor.dispatchWindowVisibilityChanged(android.view.View.VISIBLE); }
+            catch (Throwable ignored) {}
             System.out.println("acl HostBootstrap: decor attached to window");
         } catch (Throwable t) {
             Throwable c = (t instanceof java.lang.reflect.InvocationTargetException
