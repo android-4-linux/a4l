@@ -27,6 +27,7 @@
 #include <pthread.h>
 #include <sys/mman.h>    // memfd_create, PROT_* (ASharedMemory_create/setProt)
 #include <sys/stat.h>    // fstat (ASharedMemory_getSize)
+#include <sys/timerfd.h> // timerfd_create/settime (AChoreographer frame clock)
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -374,6 +375,193 @@ ACL_EXPORT void acl_looper_bridge_pump(void) {
     void* outData = NULL;
     if (ALooper_pollOnce(0, &outFd, &outEvents, &outData) != ALOOPER_POLL_CALLBACK) return;
   }
+}
+
+// ── AChoreographer (android/choreographer.h) ─────────────────────────────────────────────────
+// The NDK Choreographer is a per-thread frame clock: a consumer (e.g. Chromium WebView's
+// RenderThread, whose MessagePumpAndroid pumps this same ALooper) calls AChoreographer_getInstance()
+// then posts frame/vsync callbacks that must fire ~once per display frame on that thread's ALooper.
+// Without it Chromium logs "Unable to load function AChoreographer_postVsyncCallback" and its
+// compositor has no vsync source, so it never produces frames (a WebView paints nothing). acl has
+// no per-thread hardware vsync at this layer, so drive the callbacks from a 60 Hz timerfd registered
+// on the thread's ALooper — enough to advance the consumer's compositor; acl's present loop then
+// composites the frames it produces. Provenance: NDK android/choreographer.h public contract
+// (developer.android.com, Apache-2.0). No GPL-3.0 sources.
+typedef struct AChoreographer AChoreographer;
+typedef struct AChoreographerFrameCallbackData AChoreographerFrameCallbackData;
+typedef void (*AChoreographer_frameCallback)(long frameTimeNanos, void* data);
+typedef void (*AChoreographer_frameCallback64)(int64_t frameTimeNanos, void* data);
+typedef void (*AChoreographer_vsyncCallback)(const AChoreographerFrameCallbackData* cbData, void* data);
+
+#define ACL_CHOREO_MAX_CBS 128
+enum { ACL_CB_FRAME = 0, ACL_CB_FRAME64 = 1, ACL_CB_VSYNC = 2 };
+typedef struct { int kind; void* fn; void* data; } AclFrameCb;
+
+struct AChoreographer {
+  ALooper* looper;
+  int timer_fd;
+  int armed;
+  pthread_mutex_t lock;
+  AclFrameCb pending[ACL_CHOREO_MAX_CBS];
+  int pending_count;
+  int64_t vsync_id;
+};
+// The data a vsync callback receives — one synthetic frame timeline (index 0).
+struct AChoreographerFrameCallbackData {
+  int64_t frame_time_ns;
+  int64_t vsync_id;
+  int64_t expected_present_ns;
+  int64_t deadline_ns;
+};
+
+static pthread_key_t g_choreo_key;
+static pthread_once_t g_choreo_once = PTHREAD_ONCE_INIT;
+
+static int64_t acl_now_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+static void acl_choreo_free(void* p) {
+  AChoreographer* c = (AChoreographer*)p;
+  if (c == NULL) return;
+  if (c->looper != NULL && c->timer_fd >= 0) ALooper_removeFd(c->looper, c->timer_fd);
+  if (c->timer_fd >= 0) close(c->timer_fd);
+  pthread_mutex_destroy(&c->lock);
+  free(c);
+}
+static void acl_choreo_key_init(void) { pthread_key_create(&g_choreo_key, acl_choreo_free); }
+
+static void acl_choreo_arm(AChoreographer* c, int64_t delay_ns) {
+  if (delay_ns < 1000000LL) delay_ns = 1000000LL;  // >=1ms
+  struct itimerspec its;
+  memset(&its, 0, sizeof(its));
+  its.it_value.tv_sec = delay_ns / 1000000000LL;
+  its.it_value.tv_nsec = delay_ns % 1000000000LL;
+  timerfd_settime(c->timer_fd, 0, &its, NULL);
+  c->armed = 1;
+}
+
+// timerfd fired: drain it, snapshot the pending callbacks, invoke each with the current frame time.
+static int acl_choreo_on_frame(int fd, int events, void* data) {
+  (void)events;
+  AChoreographer* c = (AChoreographer*)data;
+  uint64_t exp;
+  while (read(fd, &exp, sizeof(exp)) == (ssize_t)sizeof(exp)) { /* drain */ }
+  AclFrameCb snap[ACL_CHOREO_MAX_CBS];
+  int n;
+  pthread_mutex_lock(&c->lock);
+  n = c->pending_count;
+  memcpy(snap, c->pending, (size_t)n * sizeof(AclFrameCb));
+  c->pending_count = 0;
+  c->armed = 0;
+  pthread_mutex_unlock(&c->lock);
+  const int64_t now = acl_now_ns();
+  struct AChoreographerFrameCallbackData fcd = {
+      now, ++c->vsync_id, now + 16666667LL, now + 16666667LL};
+  // Invoke outside the lock — a callback re-posts (re-arms the timer) for the next frame.
+  for (int i = 0; i < n; i++) {
+    if (snap[i].fn == NULL) continue;
+    if (snap[i].kind == ACL_CB_VSYNC)
+      ((AChoreographer_vsyncCallback)snap[i].fn)(&fcd, snap[i].data);
+    else if (snap[i].kind == ACL_CB_FRAME64)
+      ((AChoreographer_frameCallback64)snap[i].fn)(now, snap[i].data);
+    else
+      ((AChoreographer_frameCallback)snap[i].fn)((long)now, snap[i].data);
+  }
+  return 1;  // keep the fd registered
+}
+
+ACL_EXPORT AChoreographer* AChoreographer_getInstance(void) {
+  pthread_once(&g_choreo_once, acl_choreo_key_init);
+  AChoreographer* c = (AChoreographer*)pthread_getspecific(g_choreo_key);
+  if (c != NULL) return c;
+  ALooper* looper = ALooper_forThread();
+  if (looper == NULL) {
+    ALOGE("AChoreographer_getInstance: no ALooper on this thread");
+    return NULL;
+  }
+  c = (AChoreographer*)calloc(1, sizeof(*c));
+  if (c == NULL) return NULL;
+  c->looper = looper;
+  c->timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+  pthread_mutex_init(&c->lock, NULL);
+  if (c->timer_fd < 0 ||
+      ALooper_addFd(looper, c->timer_fd, 0, ALOOPER_EVENT_INPUT, acl_choreo_on_frame, c) != 1) {
+    ALOGE("AChoreographer_getInstance: timerfd/addFd failed (%s)", strerror(errno));
+    acl_choreo_free(c);
+    return NULL;
+  }
+  pthread_setspecific(g_choreo_key, c);
+  return c;
+}
+
+static void acl_choreo_post(AChoreographer* c, int kind, void* fn, void* data, int64_t delay_ns) {
+  if (c == NULL || fn == NULL) return;
+  pthread_mutex_lock(&c->lock);
+  if (c->pending_count < ACL_CHOREO_MAX_CBS) {
+    c->pending[c->pending_count].kind = kind;
+    c->pending[c->pending_count].fn = fn;
+    c->pending[c->pending_count].data = data;
+    c->pending_count++;
+  }
+  if (!c->armed) acl_choreo_arm(c, delay_ns > 0 ? delay_ns : 16666667LL);
+  pthread_mutex_unlock(&c->lock);
+}
+
+ACL_EXPORT void AChoreographer_postFrameCallback(AChoreographer* c, AChoreographer_frameCallback cb,
+                                                 void* data) {
+  acl_choreo_post(c, ACL_CB_FRAME, (void*)cb, data, 0);
+}
+ACL_EXPORT void AChoreographer_postFrameCallbackDelayed(AChoreographer* c,
+                                                        AChoreographer_frameCallback cb, void* data,
+                                                        long delayMillis) {
+  acl_choreo_post(c, ACL_CB_FRAME, (void*)cb, data, (int64_t)delayMillis * 1000000LL);
+}
+ACL_EXPORT void AChoreographer_postFrameCallback64(AChoreographer* c,
+                                                   AChoreographer_frameCallback64 cb, void* data) {
+  acl_choreo_post(c, ACL_CB_FRAME64, (void*)cb, data, 0);
+}
+ACL_EXPORT void AChoreographer_postFrameCallbackDelayed64(AChoreographer* c,
+                                                          AChoreographer_frameCallback64 cb,
+                                                          void* data, uint32_t delayMillis) {
+  acl_choreo_post(c, ACL_CB_FRAME64, (void*)cb, data, (int64_t)delayMillis * 1000000LL);
+}
+ACL_EXPORT void AChoreographer_postVsyncCallback(AChoreographer* c,
+                                                 AChoreographer_vsyncCallback cb, void* data) {
+  acl_choreo_post(c, ACL_CB_VSYNC, (void*)cb, data, 0);
+}
+
+// AChoreographerFrameCallbackData accessors — one synthetic timeline, so `index` is ignored.
+ACL_EXPORT int64_t
+AChoreographerFrameCallbackData_getFrameTimeNanos(const AChoreographerFrameCallbackData* d) {
+  return d ? d->frame_time_ns : 0;
+}
+ACL_EXPORT size_t
+AChoreographerFrameCallbackData_getFrameTimelinesLength(const AChoreographerFrameCallbackData* d) {
+  (void)d;
+  return 1;
+}
+ACL_EXPORT size_t AChoreographerFrameCallbackData_getPreferredFrameTimelineIndex(
+    const AChoreographerFrameCallbackData* d) {
+  (void)d;
+  return 0;
+}
+ACL_EXPORT int64_t AChoreographerFrameCallbackData_getFrameTimelineVsyncId(
+    const AChoreographerFrameCallbackData* d, size_t index) {
+  (void)index;
+  return d ? d->vsync_id : 0;
+}
+ACL_EXPORT int64_t AChoreographerFrameCallbackData_getFrameTimelineExpectedPresentationTimeNanos(
+    const AChoreographerFrameCallbackData* d, size_t index) {
+  (void)index;
+  return d ? d->expected_present_ns : 0;
+}
+ACL_EXPORT int64_t AChoreographerFrameCallbackData_getFrameTimelineDeadlineNanos(
+    const AChoreographerFrameCallbackData* d, size_t index) {
+  (void)index;
+  return d ? d->deadline_ns : 0;
 }
 
 // ── Not implemented yet ──────────────────────────────────────────────────────────────────────
