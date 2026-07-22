@@ -107,6 +107,25 @@ public final class PresentDriver {
                 });
         }
 
+        // Bridge the NDK ALooper into this Java Looper (same as runGl). A bionic library on the main
+        // thread — notably Chromium WebView's MessagePumpForUI — schedules its tasks by writing an
+        // eventfd on the NDK ALooper, which acl reimplements SEPARATELY from the Java MessageQueue's
+        // native looper, so Looper.loop() never wakes for those tasks. Without this, WebView main-
+        // thread async completions (the ServiceWorker registration lookup, navigation URLLoader
+        // callbacks) never run and every navigation hangs at progress=10. Watch the ALooper's epoll
+        // fd and drain it when it signals; pump once now to flush anything queued during WebView init.
+        final int aloopFd = nGlAloopFd();
+        if (aloopFd >= 0) {
+            mq.addOnFileDescriptorEventListener(makeFd(aloopFd), 0x1 /*EVENT_INPUT*/ | 0x4 /*EVENT_ERROR*/,
+                new MessageQueue.OnFileDescriptorEventListener() {
+                    @Override public int onFileDescriptorEvents(FileDescriptor fd, int events) {
+                        nGlAloopPump();
+                        return EVENT_INPUT;
+                    }
+                });
+            nGlAloopPump();
+        }
+
         // Kick: schedule frame 0 (which requests a vsync) and deliver the first vsync so
         // doFrame — and thus the first composition + traversal — starts.
         postTraversal(choreo, postCallback, traversal[0]);
