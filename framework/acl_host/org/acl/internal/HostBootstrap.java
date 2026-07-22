@@ -2082,6 +2082,12 @@ public final class HostBootstrap {
             // ViewRootImpl.getConfiguration() (reached from getWindowInsets → View.getRootWindowInsets,
             // e.g. androidx DrawerLayout.onLayout) dereferences mContext.getResources(); seed it.
             try { setField(vriCls, vri, "mContext", ctx); } catch (Throwable ignored) {}
+            // ViewRootImpl.getDisplayId() dereferences mDisplay; the hollow ViewRootImpl leaves it
+            // null. A WebView loadUrl triggers chromium's ImeAdapterImpl.onConnectedToRenderProcess ->
+            // InputMethodManager.isActive() -> getFallbackInputMethodManagerIfNecessary() ->
+            // ViewRootImpl.getDisplayId() -> NPE on the null mDisplay, which chromium's jni_android
+            // CheckException turns into a FATAL abort (the WebView never loads). Seed the Display.
+            try { setField(vriCls, vri, "mDisplay", buildDisplay()); } catch (Throwable ignored) {}
             // getWindowInsets() reads mWindowAttributes.type; seed a default LayoutParams.
             try {
                 android.view.WindowManager.LayoutParams wa = new android.view.WindowManager.LayoutParams();
