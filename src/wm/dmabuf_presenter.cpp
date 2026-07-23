@@ -329,7 +329,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   void push_ime_state() noexcept {
     ti_.SetSurroundingText("", 0, 0);
     ti_.SetTextChangeCause(wl::ime::ChangeCause::kOther);
-    ti_.SetContentType(wl::ime::ContentHint::kNone, wl::ime::ContentPurpose::kNormal);
+    // content_hint: match a real GTK text field (gnome-text-editor sends kCompletion) — the last
+    // protocol difference from a client whose OSK the compositor DOES show. NONE(0) may read to
+    // gnome-shell as "no text entry intent".
+    ti_.SetContentType(wl::ime::ContentHint::kCompletion, wl::ime::ContentPurpose::kNormal);
     // A cursor rectangle (surface-local) is what an on-screen keyboard / candidate window anchors
     // to; gnome-shell's OSK stays hidden without one. Placeholder near the bottom-center until the
     // focused editor's real caret rect is plumbed through (TODO: from InputConnection/View).
