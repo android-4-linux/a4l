@@ -97,6 +97,71 @@ class NetworkManagerBackend final : public DbusBackend {
   }
   const char* name() const noexcept override { return "networkmanager"; }
 
+  // WifiManager/WifiInfo: the radio switch is NetworkManager's WirelessEnabled; the
+  // association details come from the first NM_DEVICE_TYPE_WIFI device's
+  // ActiveAccessPoint (SSID/BSSID/strength/frequency/bitrate).
+  AndroidWifiState wifi_snapshot() const override {
+    AndroidWifiState w;
+    const sdbus::InterfaceName nm{"org.freedesktop.NetworkManager"};
+    try {
+      w.enabled = proxy_->getProperty("WirelessEnabled").onInterface(nm).get<bool>();
+    } catch (const sdbus::Error&) {
+      return w;  // no wireless support on this daemon build
+    }
+    if (!w.enabled) return w;  // radio off: nothing else is meaningful
+
+    try {
+      std::vector<sdbus::ObjectPath> devices;
+      proxy_->callMethod("GetDevices").onInterface(nm).storeResultsTo(devices);
+      for (const auto& dpath : devices) {
+        auto dev = sdbus::createProxy(*conn_, sdbus::ServiceName{"org.freedesktop.NetworkManager"},
+                                      dpath);
+        std::uint32_t dtype = 0;
+        try {
+          dtype = dev->getProperty("DeviceType")
+                      .onInterface(sdbus::InterfaceName{"org.freedesktop.NetworkManager.Device"})
+                      .get<std::uint32_t>();
+        } catch (const sdbus::Error&) { continue; }
+        if (dtype != 2) continue;  // NM_DEVICE_TYPE_WIFI
+
+        sdbus::ObjectPath ap;
+        try {
+          ap = dev->getProperty("ActiveAccessPoint")
+                   .onInterface(
+                       sdbus::InterfaceName{"org.freedesktop.NetworkManager.Device.Wireless"})
+                   .get<sdbus::ObjectPath>();
+        } catch (const sdbus::Error&) { continue; }
+        if (ap.empty() || ap == "/") return w;  // radio on but not associated
+
+        auto apx = sdbus::createProxy(*conn_, sdbus::ServiceName{"org.freedesktop.NetworkManager"},
+                                      ap);
+        const sdbus::InterfaceName api{"org.freedesktop.NetworkManager.AccessPoint"};
+        try {
+          const std::vector<std::uint8_t> ssid =
+              apx->getProperty("Ssid").onInterface(api).get<std::vector<std::uint8_t>>();
+          w.ssid.assign(ssid.begin(), ssid.end());
+          w.bssid = apx->getProperty("HwAddress").onInterface(api).get<std::string>();
+          const std::uint8_t strength = apx->getProperty("Strength").onInterface(api).get<std::uint8_t>();
+          w.frequency_mhz =
+              static_cast<int>(apx->getProperty("Frequency").onInterface(api).get<std::uint32_t>());
+          const std::uint32_t maxbr =
+              apx->getProperty("MaxBitrate").onInterface(api).get<std::uint32_t>();
+          // NM reports signal quality as 0..100%; Android wants dBm. The conventional
+          // linear fit maps 0% -> -100 dBm and 100% -> -50 dBm.
+          w.rssi_dbm = static_cast<int>(strength) / 2 - 100;
+          w.link_speed_mbps = maxbr > 0 ? static_cast<int>(maxbr / 1000) : -1;  // kbit/s -> Mbps
+          w.connected = true;
+        } catch (const sdbus::Error& e) {
+          acl::log::w(kTag, "NetworkManager access-point read failed: {}", e.getMessage());
+        }
+        return w;
+      }
+    } catch (const sdbus::Error& e) {
+      acl::log::w(kTag, "NetworkManager wifi device enumeration failed: {}", e.getMessage());
+    }
+    return w;
+  }
+
  private:
   void refresh() {
     const sdbus::InterfaceName i{"org.freedesktop.NetworkManager"};

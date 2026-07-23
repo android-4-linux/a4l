@@ -922,6 +922,17 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("wifi".equals(name)) {
+                // acl's clean-room android.net.wifi.WifiManager (boot classpath, backed by svc/net →
+                // the host network daemon's wireless device). Reflective for the same reason as
+                // connectivity: HostBootstrap compiles against the framework classes.jar, whose
+                // android.net.wifi differs from acl's shim.
+                try {
+                    return Class.forName("android.net.wifi.WifiManager").getConstructor().newInstance();
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("bluetooth".equals(name)) {
                 // acl's clean-room android.bluetooth.BluetoothManager (boot classpath, backed by
                 // svc/bluetooth → BlueZ). Reflective for the same reason as connectivity.
@@ -1109,6 +1120,7 @@ public final class HostBootstrap {
             if ("android.hardware.display.DisplayManager".equals(serviceClass.getName())) return "display";
             // ConnectivityManager compared by name (off this compile classpath, see above).
             if ("android.net.ConnectivityManager".equals(serviceClass.getName())) return "connectivity";
+            if ("android.net.wifi.WifiManager".equals(serviceClass.getName())) return "wifi";
             if ("android.bluetooth.BluetoothManager".equals(serviceClass.getName())) return "bluetooth";
             if (serviceClass == android.os.storage.StorageManager.class) return "storage";
             if (serviceClass == android.os.UserManager.class) return "user";

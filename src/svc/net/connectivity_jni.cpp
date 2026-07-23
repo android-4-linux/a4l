@@ -43,7 +43,61 @@ jint JNICALL n_get_state(JNIEnv*, jclass) {
   return v;
 }
 
+// android.net.wifi.WifiManager.nWifiSnapshot(): the numeric Wi-Fi slice as one int[],
+// in the order the Java shim unpacks: [enabled(0/1), connected(0/1), rssi(dBm),
+// linkSpeed(Mbps), frequency(MHz)].
+jintArray JNICALL n_wifi_snapshot(JNIEnv* env, jclass) {
+  AndroidWifiState w;
+  if (const INetBackend* b = backend().get()) w = b->wifi_snapshot();
+  jint vals[5] = {w.enabled ? 1 : 0, w.connected ? 1 : 0, w.rssi_dbm, w.link_speed_mbps,
+                  w.frequency_mhz};
+  jintArray arr = env->NewIntArray(5);
+  if (arr != nullptr) env->SetIntArrayRegion(arr, 0, 5, vals);
+  return arr;
+}
+
+// WifiInfo.getSSID() / getBSSID() sources (empty string when not associated).
+jstring JNICALL n_wifi_ssid(JNIEnv* env, jclass) {
+  AndroidWifiState w;
+  if (const INetBackend* b = backend().get()) w = b->wifi_snapshot();
+  return env->NewStringUTF(w.ssid.c_str());
+}
+jstring JNICALL n_wifi_bssid(JNIEnv* env, jclass) {
+  AndroidWifiState w;
+  if (const INetBackend* b = backend().get()) w = b->wifi_snapshot();
+  return env->NewStringUTF(w.bssid.c_str());
+}
+
 }  // namespace
+
+void register_wifi_natives(JNIEnv* env) {
+  if (!backend()) backend() = make_net_backend();  // shared with connectivity
+
+  jclass cls = env->FindClass("android/net/wifi/WifiManager");
+  if (cls == nullptr) {
+    env->ExceptionClear();
+    log::w(kTag, "android.net.wifi.WifiManager not on the boot classpath; "
+                 "wifi natives not registered");
+    return;
+  }
+  const JNINativeMethod m[] = {
+      {const_cast<char*>("nWifiSnapshot"), const_cast<char*>("()[I"),
+       reinterpret_cast<void*>(&n_wifi_snapshot)},
+      {const_cast<char*>("nSsid"), const_cast<char*>("()Ljava/lang/String;"),
+       reinterpret_cast<void*>(&n_wifi_ssid)},
+      {const_cast<char*>("nBssid"), const_cast<char*>("()Ljava/lang/String;"),
+       reinterpret_cast<void*>(&n_wifi_bssid)},
+  };
+  if (env->RegisterNatives(cls, m, 3) != JNI_OK) {
+    env->ExceptionClear();
+    log::w(kTag, "RegisterNatives(WifiManager) failed");
+  } else {
+    const AndroidWifiState w = backend()->wifi_snapshot();
+    log::i(kTag, "wifi natives registered (backend: {}; enabled={} connected={} ssid=\"{}\")",
+           backend()->name(), w.enabled, w.connected, w.ssid);
+  }
+  env->DeleteLocalRef(cls);
+}
 
 void register_connectivity_natives(JNIEnv* env) {
   if (!backend()) backend() = make_net_backend();

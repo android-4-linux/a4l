@@ -26,5 +26,14 @@ int main() {
   std::printf("validated : %s   (NET_CAPABILITY_VALIDATED)\n", s.validated ? "yes" : "no");
   std::printf("metered   : %s   (!NET_CAPABILITY_NOT_METERED)\n", s.metered ? "yes" : "no");
   std::printf("transport : %s\n", transport(s.transport));
+  const acl::net::AndroidWifiState w = backend->wifi_snapshot();
+  std::printf("\n-- WifiManager (android.net.wifi) --\n");
+  std::printf("enabled   : %s   (isWifiEnabled())\n", w.enabled ? "yes" : "no");
+  std::printf("connected : %s   (associated with an AP)\n", w.connected ? "yes" : "no");
+  std::printf("ssid      : %s\n", w.ssid.empty() ? "(none)" : w.ssid.c_str());
+  std::printf("bssid     : %s\n", w.bssid.empty() ? "(none)" : w.bssid.c_str());
+  std::printf("rssi      : %d dBm\n", w.rssi_dbm);
+  std::printf("linkSpeed : %d Mbps\n", w.link_speed_mbps);
+  std::printf("frequency : %d MHz\n", w.frequency_mhz);
   return 0;
 }

@@ -14,6 +14,11 @@ namespace acl::net {
 // once at host-ART boot, after the boot classpath (with the acl net shims) is up.
 void register_connectivity_natives(JNIEnv* env);
 
+// RegisterNatives on the clean-room android.net.wifi.WifiManager shim (nWifiSnapshot /
+// nSsid / nBssid), sharing the same svc/net backend (and D-Bus connection) as
+// connectivity. Best-effort: on failure WifiManager falls back to "no Wi-Fi".
+void register_wifi_natives(JNIEnv* env);
+
 }  // namespace acl::net
 
 #endif  // ACL_SVC_NET_CONNECTIVITY_JNI_H

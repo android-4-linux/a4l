@@ -15,6 +15,7 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 
 namespace acl::net {
 
@@ -29,6 +30,21 @@ struct AndroidNetState {
   Transport transport = Transport::kNone;
 
   bool operator==(const AndroidNetState&) const noexcept = default;
+};
+
+// The Wi-Fi slice android.net.wifi.WifiManager / WifiInfo expose. Only a backend that
+// can see the wireless device fills this in (NetworkManager); the rest report "no
+// Wi-Fi", which is the truthful answer for a host with no wireless stack.
+struct AndroidWifiState {
+  bool enabled = false;        // WifiManager.isWifiEnabled() (the radio is on)
+  bool connected = false;      // associated with an access point
+  std::string ssid;            // WifiInfo.getSSID() (unquoted; empty when unknown)
+  std::string bssid;           // WifiInfo.getBSSID() (AP hardware address)
+  int rssi_dbm = -127;         // WifiInfo.getRssi() (dBm; -127 = unknown)
+  int link_speed_mbps = -1;    // WifiInfo.getLinkSpeed() (Mbps; -1 = unknown)
+  int frequency_mhz = 0;       // WifiInfo.getFrequency() (MHz)
+
+  bool operator==(const AndroidWifiState&) const noexcept = default;
 };
 
 // A backend owns a D-Bus proxy to one host daemon. snapshot() answers the
@@ -47,6 +63,11 @@ class INetBackend {
   // Register the change sink. Called with the new state whenever the daemon
   // reports a relevant change. At most one sink; a second call replaces it.
   virtual void set_sink(std::function<void(const AndroidNetState&)> on_change) = 0;
+
+  // Current Wi-Fi slice (WifiManager/WifiInfo). Default: no wireless device visible
+  // to this backend — a host with no Wi-Fi stack, which is the honest answer for
+  // networkd/ConnMan/Null. NetworkManager overrides it.
+  virtual AndroidWifiState wifi_snapshot() const { return {}; }
 };
 
 // Probe the system bus and construct the backend that owns it. Order honors the
