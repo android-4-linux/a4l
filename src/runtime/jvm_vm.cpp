@@ -3652,6 +3652,25 @@ class ArtVm final : public JniVm {
         log::i(kTag, "android.media.AudioSystem <clinit> getters bound (channel/sample-rate maxima, session id)");
       env->DeleteLocalRef(as_cls);
     }
+    // androidx.media3 / MediaSessionCompat build AudioAttributes from a legacy stream type
+    // (setPlaybackToLocal -> AudioAttributes.Builder.setLegacyStreamType), which consults
+    // AudioProductStrategy.getAudioProductStrategies(). That native lists the vendor audio-policy
+    // engine's product strategies; the host libandroid_runtime (no audio HAL / policy config) does
+    // not register it, so the UnsatisfiedLinkError takes the media session down with it. acl has no
+    // audio policy engine, so the truthful answer is "no strategies": report AudioSystem.SUCCESS and
+    // leave the caller's ArrayList empty. AudioAttributes then falls through to the platform's own
+    // legacy stream -> content-type mapping (its strategy branch is guarded by size() > 0).
+    if (jclass aps_cls = find_class_optional(env, "android/media/audiopolicy/AudioProductStrategy")) {
+      const JNINativeMethod m = {
+          const_cast<char*>("native_list_audio_product_strategies"),
+          const_cast<char*>("(Ljava/util/ArrayList;)I"),
+          reinterpret_cast<void*>(+[](JNIEnv*, jclass, jobject) -> jint { return 0; })};
+      if (env->RegisterNatives(aps_cls, &m, 1) == JNI_OK)
+        log::i(kTag, "AudioProductStrategy.native_list_audio_product_strategies -> acl empty "
+                     "(no audio policy engine; legacy stream mapping applies)");
+      env->DeleteLocalRef(aps_cls);
+    }
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
     // ExoPlayer/video_player call Surface.isValid()/release() on the output Surface (acl's ImageReader
     // producer Surface, mNativeObject = ReaderCtx). Surface(long) is pure-Java on acl, so these natives
