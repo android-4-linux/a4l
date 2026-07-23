@@ -711,6 +711,67 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
       env->DeleteLocalRef(ke);
     }
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  } else if (const auto* t = std::get_if<wm::TextInput>(&ev)) {
+    // IME text from the compositor: route to the focused view's InputConnection. preedit ->
+    // setComposingText (in-progress), a final commit -> commitText. The focused editor is resolved
+    // per event (findFocus, then onCreateInputConnection) so it tracks focus changes; a Compose
+    // AndroidComposeView returns the connection for its active TextField.
+    log::i(kTag, "IME {}: \"{}\"", t->preedit ? "preedit" : "committed", t->text);
+    jclass vcls = env->GetObjectClass(s->view);
+    jmethodID find_focus = vcls ? env->GetMethodID(vcls, "findFocus", "()Landroid/view/View;") : nullptr;
+    jobject focused = find_focus ? env->CallObjectMethod(s->view, find_focus) : nullptr;
+    jobject target = focused != nullptr ? focused : s->view;
+    jclass fcls = env->GetObjectClass(target);
+    jmethodID create_ic = fcls ? env->GetMethodID(
+        fcls, "onCreateInputConnection",
+        "(Landroid/view/inputmethod/EditorInfo;)Landroid/view/inputmethod/InputConnection;") : nullptr;
+    jclass ei_cls = env->FindClass("android/view/inputmethod/EditorInfo");
+    jmethodID ei_ctor = ei_cls ? env->GetMethodID(ei_cls, "<init>", "()V") : nullptr;
+    jobject ei = ei_ctor ? env->NewObject(ei_cls, ei_ctor) : nullptr;
+    jobject ic = (create_ic != nullptr && ei != nullptr) ? env->CallObjectMethod(target, create_ic, ei) : nullptr;
+    if (ic != nullptr) {
+      jclass ic_cls = env->GetObjectClass(ic);
+      jmethodID m = ic_cls ? env->GetMethodID(ic_cls, t->preedit ? "setComposingText" : "commitText",
+                                              "(Ljava/lang/CharSequence;I)Z") : nullptr;
+      jstring str = env->NewStringUTF(t->text.c_str());
+      if (m != nullptr) env->CallBooleanMethod(ic, m, str, static_cast<jint>(t->cursor));
+      if (str != nullptr) env->DeleteLocalRef(str);
+      if (ic_cls != nullptr) env->DeleteLocalRef(ic_cls);
+      env->DeleteLocalRef(ic);
+    }
+    if (ei != nullptr) env->DeleteLocalRef(ei);
+    if (ei_cls != nullptr) env->DeleteLocalRef(ei_cls);
+    if (fcls != nullptr) env->DeleteLocalRef(fcls);
+    if (focused != nullptr) env->DeleteLocalRef(focused);
+    if (vcls != nullptr) env->DeleteLocalRef(vcls);
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  } else if (const auto* d = std::get_if<wm::DeleteSurroundingText>(&ev)) {
+    log::i(kTag, "IME delete-surrounding: before={} after={}", d->before, d->after);
+    jclass vcls = env->GetObjectClass(s->view);
+    jmethodID find_focus = vcls ? env->GetMethodID(vcls, "findFocus", "()Landroid/view/View;") : nullptr;
+    jobject focused = find_focus ? env->CallObjectMethod(s->view, find_focus) : nullptr;
+    jobject target = focused != nullptr ? focused : s->view;
+    jclass fcls = env->GetObjectClass(target);
+    jmethodID create_ic = fcls ? env->GetMethodID(
+        fcls, "onCreateInputConnection",
+        "(Landroid/view/inputmethod/EditorInfo;)Landroid/view/inputmethod/InputConnection;") : nullptr;
+    jclass ei_cls = env->FindClass("android/view/inputmethod/EditorInfo");
+    jmethodID ei_ctor = ei_cls ? env->GetMethodID(ei_cls, "<init>", "()V") : nullptr;
+    jobject ei = ei_ctor ? env->NewObject(ei_cls, ei_ctor) : nullptr;
+    jobject ic = (create_ic != nullptr && ei != nullptr) ? env->CallObjectMethod(target, create_ic, ei) : nullptr;
+    if (ic != nullptr) {
+      jclass ic_cls = env->GetObjectClass(ic);
+      jmethodID m = ic_cls ? env->GetMethodID(ic_cls, "deleteSurroundingText", "(II)Z") : nullptr;
+      if (m != nullptr) env->CallBooleanMethod(ic, m, static_cast<jint>(d->before), static_cast<jint>(d->after));
+      if (ic_cls != nullptr) env->DeleteLocalRef(ic_cls);
+      env->DeleteLocalRef(ic);
+    }
+    if (ei != nullptr) env->DeleteLocalRef(ei);
+    if (ei_cls != nullptr) env->DeleteLocalRef(ei_cls);
+    if (fcls != nullptr) env->DeleteLocalRef(fcls);
+    if (focused != nullptr) env->DeleteLocalRef(focused);
+    if (vcls != nullptr) env->DeleteLocalRef(vcls);
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
   }
 }
 

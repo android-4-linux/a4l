@@ -2164,6 +2164,21 @@ public final class HostBootstrap {
                 imefcCtor.setAccessible(true);
                 setField(vriCls, vri, "mImeFocusController", imefcCtor.newInstance(vri));
             } catch (Throwable ignored) {}
+            // A text-input view (EditText) registers a stylus-handwriting area on attach:
+            // View.updateHandwritingArea -> getViewRootImpl().getHandwritingInitiator()
+            // .updateHandwritingAreasForView(this). The hollow ViewRootImpl's final mHandwritingInitiator
+            // is null (ctor-created, skipped) -> NPE on attach. Seed it (API 33+; absent on older
+            // frameworks -> caught): HandwritingInitiator(ViewConfiguration, InputMethodManager).
+            try {
+                Class<?> hiCls = Class.forName("android.view.HandwritingInitiator");
+                java.lang.reflect.Constructor<?> hiCtor = hiCls.getDeclaredConstructor(
+                        android.view.ViewConfiguration.class,
+                        android.view.inputmethod.InputMethodManager.class);
+                hiCtor.setAccessible(true);
+                Object imm = ctx.getSystemService(android.view.inputmethod.InputMethodManager.class);
+                setField(vriCls, vri, "mHandwritingInitiator",
+                        hiCtor.newInstance(android.view.ViewConfiguration.get(ctx), imm));
+            } catch (Throwable ignored) {}
             // SurfaceView.onAttachedToWindow calls getViewRootImpl().addSurfaceChangedCallback ->
             // mSurfaceChangedCallbacks.add, a final ArrayList the hollow ViewRootImpl leaves null.
             // Seed it so GLSurfaceView apps (halma, doodledudette) attach their decor.

@@ -309,23 +309,27 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     if (!ime_bound_ || ime_visible_ == visible) return;
     ime_visible_ = visible;
     if (visible) {
-      // zwp_text_input_v3: enable → (state) → commit, atomically. The facade defers the actual
-      // enable until the compositor has sent `enter` (surface focused) via want_active_, and re-
-      // issues it from OnEnter — where the presenter must re-push this state (see OnEnter). Enabling
-      // + a content type alone leaves GNOME's IME inert; surrounding text is what engages it.
+      // zwp_text_input_v3: enable → (state) → commit. The facade's Activate() only actually enables
+      // once the compositor has sent `enter` (surface focused); before that it just records intent
+      // (want_active_) and OnEnter issues the enable. set_content_type/set_surrounding_text are only
+      // legal on an ENABLED text_input, so only push state here when already entered — otherwise
+      // OnEnter pushes it. (Pushing before enable is a protocol violation the compositor rejects,
+      // which is why mutter never showed the OSK.)
       ti_.Activate();
-      push_ime_state();
+      if (ime_entered_) push_ime_state();
     } else {
       ti_.Deactivate();  // facade issues disable + commit
     }
     while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
     log::i("acl.wm.dmabuf", "IME {} (text-input-v3)", visible ? "show" : "hide");
   }
-  // Stage the text-input state and commit it. Called after every enable — the explicit Activate()
-  // and the implicit OnEnter re-enable (a v3 enable resets all state, so it must be re-sent).
+  // Stage the text-input state and commit it. Called ONLY when the text_input is enabled — after the
+  // OnEnter re-enable (a v3 enable resets all state, so it must be re-sent). Surrounding text +
+  // change cause are what make the compositor's IME (mutter's OSK) actually engage.
   void push_ime_state() noexcept {
-    ti_.SetContentType(wl::ime::ContentHint::kNone, wl::ime::ContentPurpose::kNormal);
     ti_.SetSurroundingText("", 0, 0);
+    ti_.SetTextChangeCause(wl::ime::ChangeCause::kOther);
+    ti_.SetContentType(wl::ime::ContentHint::kNone, wl::ime::ContentPurpose::kNormal);
     ti_.Commit();
   }
 
@@ -728,10 +732,13 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   // OnEnter: the surface just gained text-input focus and the facade re-issued enable (if we asked
   // to be active), which reset all state — so re-push it and commit, or the IME stays inert.
   void OnEnter() override {
-    log::i("acl.wm.dmabuf", "IME enter (surface focused){}", ime_visible_ ? " — re-pushing state" : "");
+    // The facade re-issued enable() (if want_active_) before this callback, which reset all state —
+    // so re-push it now that the text_input is enabled, or the IME stays inert.
+    ime_entered_ = true;
+    log::i("acl.wm.dmabuf", "IME enter (surface focused){}", ime_visible_ ? " — pushing state" : "");
     if (ime_visible_) { push_ime_state(); while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {} }
   }
-  void OnLeave() override {}
+  void OnLeave() override { ime_entered_ = false; log::i("acl.wm.dmabuf", "IME leave (surface unfocused)"); }
   void OnCommitString(std::string_view utf8) override {
     if (input_ != nullptr && *input_) (*input_)(TextInput{std::string(utf8), false, 1});
   }
@@ -987,7 +994,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   bool need_agl_bound_ = false;              // await agl_shell bound_ok before set_background
   double px_ = 0.0, py_ = 0.0;
   bool pointer_down_ = false;
-  bool want_ime_ = false, ime_bound_ = false, ime_visible_ = false;
+  bool want_ime_ = false, ime_bound_ = false, ime_visible_ = false, ime_entered_ = false;
   int w_ = 0, h_ = 0;
   bool busy_ = false;
   std::uint64_t last_present_ns_ = 0, refresh_ns_ = 0;  // wp_presentation vsync clock
