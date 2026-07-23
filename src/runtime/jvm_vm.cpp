@@ -665,6 +665,31 @@ JNIEnv* present_env(PresentSession* s) {
   return e;
 }
 
+// Sync the compositor's text-input to the currently-focused view. Called after each input event:
+// when a tap moves focus onto a text editor (EditText / Compose TextField, i.e. View
+// .onCheckIsTextEditor() == true) this is a FRESH enable — which is what makes the compositor show
+// its on-screen keyboard — and a disable when focus leaves text. This mirrors a real app's
+// InputMethodManager show/hide, driven by actual view focus (the AOSP IMM requestImeShow gate does
+// not function on acl's hollow ViewRootImpl, so acl drives it from focus directly).
+void present_sync_ime_focus(PresentSession* s) {
+  JNIEnv* env = present_env(s);
+  if (env == nullptr || s->presenter == nullptr || s->view == nullptr) return;
+  jclass vcls = env->GetObjectClass(s->view);
+  jmethodID find_focus = vcls ? env->GetMethodID(vcls, "findFocus", "()Landroid/view/View;") : nullptr;
+  jobject focused = find_focus ? env->CallObjectMethod(s->view, find_focus) : nullptr;
+  bool want = false;
+  if (focused != nullptr) {
+    jclass fcls = env->GetObjectClass(focused);
+    jmethodID is_editor = fcls ? env->GetMethodID(fcls, "onCheckIsTextEditor", "()Z") : nullptr;
+    if (is_editor != nullptr) want = env->CallBooleanMethod(focused, is_editor) == JNI_TRUE;
+    if (fcls != nullptr) env->DeleteLocalRef(fcls);
+    env->DeleteLocalRef(focused);
+  }
+  if (vcls != nullptr) env->DeleteLocalRef(vcls);
+  if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  s->presenter->set_ime_visible(want);  // no-ops if unchanged (dedup in the presenter)
+}
+
 // Deliver a compositor pointer/key event to the decor View (native side of MotionEvent/
 // KeyEvent). Runs synchronously inside presenter->dispatch() on the main thread.
 void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
@@ -701,6 +726,7 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
       env->DeleteLocalRef(me);
     }
     if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
+    present_sync_ime_focus(s);  // a tap that focused a text field -> show the OSK
   } else if (const auto* k = std::get_if<wm::KeyInput>(&ev)) {
     if (s->keyevent_cls == nullptr || s->ke_obtain == nullptr || s->dispatch_key == nullptr) return;
     const jint action = k->action == wm::KeyInput::Action::Down ? 0 : 1;
@@ -711,6 +737,7 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
       env->DeleteLocalRef(ke);
     }
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+    present_sync_ime_focus(s);  // a key (e.g. Tab) that moved focus onto/off a text field
   } else if (const auto* t = std::get_if<wm::TextInput>(&ev)) {
     // IME text from the compositor: route to the focused view's InputConnection. preedit ->
     // setComposingText (in-progress), a final commit -> commitText. The focused editor is resolved

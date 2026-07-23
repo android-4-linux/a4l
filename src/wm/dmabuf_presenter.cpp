@@ -330,6 +330,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     ti_.SetSurroundingText("", 0, 0);
     ti_.SetTextChangeCause(wl::ime::ChangeCause::kOther);
     ti_.SetContentType(wl::ime::ContentHint::kNone, wl::ime::ContentPurpose::kNormal);
+    // A cursor rectangle (surface-local) is what an on-screen keyboard / candidate window anchors
+    // to; gnome-shell's OSK stays hidden without one. Placeholder near the bottom-center until the
+    // focused editor's real caret rect is plumbed through (TODO: from InputConnection/View).
+    ti_.SetCursorRectangle(w_ / 2 - 2, h_ * 3 / 4, 4, 48);
     ti_.Commit();
   }
 
