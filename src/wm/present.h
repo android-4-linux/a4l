@@ -188,6 +188,16 @@ class IPresenter {
   virtual int next_buffer() const noexcept = 0;
   // The vsync-aligned frame time (ns; Choreographer.frameTimeNanos) for the next frame.
   virtual std::uint64_t frame_time_ns() const noexcept = 0;
+  // The most recent wp_presentation feedback: the real presentation-clock time the last frame lit
+  // up (ns), its refresh interval (ns), and the WP_PRESENTATION_FEEDBACK_KIND_* flags. For feeding
+  // TRUE present timing to an embedded client compositor (e.g. WebView's Viz, whose output device
+  // otherwise reports draw-time TimeTicks::Now() with a zero interval). Returns false until a frame
+  // has been presented on a CLOCK_MONOTONIC presentation clock (the base for Chromium's
+  // base::TimeTicks) — i.e. no usable feedback yet, or a foreign clock. Default false (GL/stub).
+  virtual bool last_present_feedback(std::uint64_t* present_ns, std::uint32_t* refresh_ns,
+                                     std::uint32_t* flags) const noexcept {
+    (void)present_ns; (void)refresh_ns; (void)flags; return false;
+  }
   // The compositor's advertised XRGB8888 DRM modifiers (for the GPU begin_frame tiled path).
   virtual const std::vector<std::uint64_t>& modifiers() const noexcept = 0;
 

@@ -5,6 +5,7 @@
 
 #include "ndk/webview_functor_vk.h"
 
+#include <cstdint>
 #include <cstdlib>
 #include <mutex>
 #include <string>
@@ -19,6 +20,7 @@ void (*g_on_sync)(int, void*) = nullptr;
 void (*g_init_vk)(int, void*) = nullptr;
 void (*g_draw_vk)(int, void*) = nullptr;
 void (*g_post_draw_vk)(int, void*) = nullptr;
+void (*g_set_present_timing)(std::int64_t, std::int64_t, std::uint32_t) = nullptr;  // optional
 bool g_ok = false;
 std::once_flag g_once;
 
@@ -37,6 +39,9 @@ void resolve() {
   g_init_vk = reinterpret_cast<void (*)(int, void*)>(rt->symbol(h, "acl_webview_functor_init_vk"));
   g_draw_vk = reinterpret_cast<void (*)(int, void*)>(rt->symbol(h, "acl_webview_functor_draw_vk"));
   g_post_draw_vk = reinterpret_cast<void (*)(int, void*)>(rt->symbol(h, "acl_webview_functor_post_draw_vk"));
+  // Optional (older plat_support builds lack it): pushes real wp_presentation timing into Chromium.
+  g_set_present_timing = reinterpret_cast<void (*)(std::int64_t, std::int64_t, std::uint32_t)>(
+      rt->symbol(h, "acl_webview_functor_set_present_timing"));
   g_ok = g_init_vk != nullptr && g_draw_vk != nullptr && g_post_draw_vk != nullptr;
   if (g_ok) acl::log::i(kTag, "WebView VK functor seam resolved");
   else acl::log::w(kTag, "WebView VK functor exports missing");
@@ -81,6 +86,22 @@ void acl_webview_functor_vk_draw(int functor, void* draw_vk_params) {
 void acl_webview_functor_vk_post_draw(int functor, void* post_draw_vk_params) {
   std::call_once(g_once, resolve);
   call_bionic(g_post_draw_vk, functor, post_draw_vk_params);
+}
+
+// Push the host compositor's real wp_presentation feedback to Chromium's Viz output device (true
+// present time + refresh interval + KIND flags), under this thread's bionic %fs. Called by acl's
+// present path each frame before the functor draw. No-op if the optional export is absent.
+void acl_webview_functor_vk_set_present_timing(std::int64_t present_ns, std::int64_t refresh_ns,
+                                               std::uint32_t flags) {
+  std::call_once(g_once, resolve);
+  auto* rt = acl::ndk::BionicRuntime::get();
+  if (rt == nullptr || g_set_present_timing == nullptr) return;
+  if (acl::ndk::BionicRuntime::current_thread_fs() == 0) {
+    std::string why;
+    if (rt->attach_current_thread(&why) == 0) return;
+  }
+  acl::ndk::BionicRuntime::RunScope scope(*rt);
+  g_set_present_timing(present_ns, refresh_ns, flags);
 }
 
 }  // extern "C"

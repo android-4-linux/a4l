@@ -518,6 +518,13 @@ struct PresentSession {
   jmethodID route_overlay_touch = nullptr;            // HostBootstrap.routeOverlayTouch(MotionEvent)Z
   std::uint64_t down_time = 0;
   std::uint64_t frames = 0;  // presented-frame count (progress evidence)
+  // Latest real wp_presentation feedback (present-clock ns / refresh ns / KIND flags), sampled on
+  // the present thread (nDispatch, where OnPresented lands) and read by the RenderThread to push
+  // into Chromium's WebView Viz output device — so its presentation-time callbacks / pacing get true
+  // vsync timing instead of draw-time TimeTicks::Now() + a zero interval. 0 = none yet.
+  std::atomic<std::uint64_t> pf_present_ns{0};
+  std::atomic<std::uint32_t> pf_refresh_ns{0};
+  std::atomic<std::uint32_t> pf_flags{0};
   int vsync_fd = -1;         // GL mode: timerfd clocking Choreographer vsync (Mesa owns commit)
   bool is_gl = false;        // GL mode: no Skia presenter / nTraverse; Mesa renders the toplevel
 };
@@ -573,6 +580,22 @@ struct RenderThread {
       // here — off the UI thread, so the UI keeps ticking the Choreographer/begin-frames.
       bool ok = false;
       PresentDmabuf f{};
+      // Forward the host compositor's real wp_presentation feedback (sampled on the present thread)
+      // into Chromium's WebView Viz output device on THIS thread, before the functor's draw_vk inside
+      // gpu_end runs its SwapBuffers/CallFeedback — so WebView pacing/presentation callbacks get true
+      // vsync timing instead of draw-time TimeTicks::Now() + a zero interval. WORK IN PROGRESS,
+      // opt-in via ACL_PRESENT_FEEDBACK (the Chromium consumer is gated on the same env): the push is
+      // proven to reach plat_support with real values, but enabling it currently correlates with a
+      // present-loop stall under investigation, so it is off by default. See webview-renderthread-fix.
+      static const bool acl_pf_enabled = std::getenv("ACL_PRESENT_FEEDBACK") != nullptr;
+      if (acl_pf_enabled) {
+        if (const std::uint64_t pn = s->pf_present_ns.load(std::memory_order_relaxed); pn != 0) {
+          acl_webview_functor_vk_set_present_timing(
+              static_cast<std::int64_t>(pn),
+              static_cast<std::int64_t>(s->pf_refresh_ns.load(std::memory_order_relaxed)),
+              s->pf_flags.load(std::memory_order_relaxed));
+        }
+      }
       if (s->gpu_begin != nullptr && s->gpu_begin(W, H) != 0 && s->gpu_end != nullptr) {
         ok = s->gpu_end(buf, &f);
       }
@@ -862,7 +885,17 @@ jint JNICALL PresentDriver_nRepeatFd(JNIEnv*, jclass, jlong sp) {
 jboolean JNICALL PresentDriver_nDispatch(JNIEnv*, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
   if (s == nullptr || !s->presenter) return JNI_FALSE;
-  return s->presenter->dispatch() ? JNI_TRUE : JNI_FALSE;  // runs input callbacks
+  const bool ok = s->presenter->dispatch();  // runs input callbacks; wp_presentation OnPresented lands here
+  // Sample the latest real presentation feedback (present thread == OnPresented thread) for the
+  // RenderThread to forward to Chromium's WebView compositor next frame.
+  std::uint64_t pn = 0;
+  std::uint32_t rn = 0, fl = 0;
+  if (s->presenter->last_present_feedback(&pn, &rn, &fl)) {
+    s->pf_present_ns.store(pn, std::memory_order_relaxed);
+    s->pf_refresh_ns.store(rn, std::memory_order_relaxed);
+    s->pf_flags.store(fl, std::memory_order_relaxed);
+  }
+  return ok ? JNI_TRUE : JNI_FALSE;
 }
 void JNICALL PresentDriver_nDispatchRepeat(JNIEnv*, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);

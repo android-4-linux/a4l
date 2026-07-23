@@ -79,3 +79,25 @@ Runtime (see `tools/run-apk.sh`): `ACL_WEBVIEW_VULKAN=1` auto-adds `--webview-dr
 --disable-vulkan-surface`. On a multi-ICD host, pin the loader to the GPU's ICD via
 `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json` (a non-matching ICD can crash
 `vkCreateInstance`).
+
+## `chromium-webview-present-feedback.patch` (WebView presentation timing)
+
+Applies to the **Chromium** checkout, alongside `chromium-webview-vulkan-functor.patch`. Feeds acl's
+real `wp_presentation` feedback into WebView's presentation feedback so its frame pacing /
+presentation-time callbacks see true vsync timing instead of the draw-time `TimeTicks::Now()` + a
+**zero interval** the Viz output device reports. One change:
+
+- `components/viz/service/display_embedder/skia_output_device.cc` — `SwapInfo::CallFeedback` resolves
+  `acl_webview_get_present_timing` from `libwebviewchromium_plat_support.so`
+  (`dlopen(RTLD_NOLOAD)` + `dlsym` — `RTLD_DEFAULT` does not reach it in acl's bionic namespace) and,
+  when it returns a non-zero present time, reports `PresentationFeedback(present_ns, refresh_ns,
+  flags)` instead of the draw-time fallback.
+
+acl side (present path): `dmabuf_presenter` exposes the last `wp_presentation` feedback via
+`IPresenter::last_present_feedback` (CLOCK_MONOTONIC only — matches `base::TimeTicks`); `jvm_vm`
+samples it on the present thread and, on the RenderThread before the functor draw, pushes it through
+`webview_functor_vk` → `acl_libwebviewchromium_plat_support.so` (`acl_webview_functor_set_present_timing`
+→ atomics read by the getter above). **Opt-in via `ACL_PRESENT_FEEDBACK`** — the gate is acl-side only
+(Chromium's bionic `getenv` does not see acl-injected env vars; the getter returning 0 when the feature
+is off is what keeps Chromium on its draw-time fallback). Confirmed end-to-end: Chromium reads acl's
+real timestamp + a ~4.167 ms (240 Hz) interval.

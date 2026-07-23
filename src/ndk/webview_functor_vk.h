@@ -5,6 +5,8 @@
 #ifndef ACL_NDK_WEBVIEW_FUNCTOR_VK_H
 #define ACL_NDK_WEBVIEW_FUNCTOR_VK_H
 
+#include <cstdint>
+
 // These run the bionic functor callbacks under the calling thread's bionic %fs (BionicRuntime::
 // RunScope), attaching the thread on first use. `params` is an opaque pointer to the caller-owned
 // AwDrawFn_{InitVk,DrawVk,PostDrawVk}Params struct (graphics_jni owns the draw_fn.h layout and fills
@@ -21,6 +23,11 @@ void acl_webview_functor_vk_sync(int functor, void* on_sync_params);
 void acl_webview_functor_vk_init(int functor, void* init_vk_params);
 void acl_webview_functor_vk_draw(int functor, void* draw_vk_params);
 void acl_webview_functor_vk_post_draw(int functor, void* post_draw_vk_params);
+// Push acl's real wp_presentation feedback (present-clock ns, refresh interval ns, KIND flags) into
+// Chromium's Viz output device so WebView presentation-time callbacks / pacing use true vsync timing
+// instead of draw-time TimeTicks::Now() + a zero interval. Call each frame before the functor draw.
+void acl_webview_functor_vk_set_present_timing(std::int64_t present_ns, std::int64_t refresh_ns,
+                                               std::uint32_t flags);
 }
 
 #endif  // ACL_NDK_WEBVIEW_FUNCTOR_VK_H

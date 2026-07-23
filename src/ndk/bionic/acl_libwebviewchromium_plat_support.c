@@ -13,6 +13,7 @@
 //     so Chromium rasters web content into acl's framebuffer (the render bridge).
 // The legacy DrawGLFunctor / GraphicsUtils tables stay null — modern WebView (ForT) uses AwDrawFn.
 #include <jni.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -138,6 +139,41 @@ __attribute__((visibility("default"))) void acl_webview_functor_destroy(int func
   if (g_functors[functor].cb.on_destroyed)
     g_functors[functor].cb.on_destroyed(functor, g_functors[functor].data);
   memset(&g_functors[functor], 0, sizeof(g_functors[functor]));
+}
+
+// ── present-timing relay (WebView presentation feedback) ─────────────────────────────────────────
+// acl's present path calls set_present_timing each frame with the host compositor's real
+// wp_presentation feedback (present-clock ns + refresh interval ns + WP_PRESENTATION_FEEDBACK_KIND_*
+// flags). Chromium's Viz output device (skia_output_device.cc CallFeedback) dlsym's
+// acl_webview_get_present_timing from THIS lib (same bionic namespace) and reports it, so WebView
+// pacing / presentation-time callbacks get true vsync timing instead of the draw-time
+// TimeTicks::Now() + zero interval. Stored here (not in the engine) so no engine export is needed —
+// libwebviewchromium.so's link strips/hides non-whitelisted symbols, but plat_support exports freely.
+// Cross-thread (acl's RenderThread writes, the Viz thread reads); C11 atomics keep it tear-free.
+static _Atomic int64_t g_pt_present_ns;
+static _Atomic int64_t g_pt_refresh_ns;
+static _Atomic uint32_t g_pt_flags;
+
+__attribute__((visibility("default"))) void acl_webview_functor_set_present_timing(
+    int64_t present_ns, int64_t refresh_ns, uint32_t flags) {
+  atomic_store_explicit(&g_pt_present_ns, present_ns, memory_order_relaxed);
+  atomic_store_explicit(&g_pt_refresh_ns, refresh_ns, memory_order_relaxed);
+  atomic_store_explicit(&g_pt_flags, flags, memory_order_relaxed);
+}
+
+// Chromium reads this in CallFeedback. Returns 1 with the last feedback once a frame has been
+// presented (present_ns > 0), else 0 (Chromium then keeps its draw-time fallback).
+__attribute__((visibility("default"))) int acl_webview_get_present_timing(int64_t* present_ns,
+                                                                          int64_t* refresh_ns,
+                                                                          uint32_t* flags) {
+  int64_t p = atomic_load_explicit(&g_pt_present_ns, memory_order_relaxed);
+  {
+  }
+  if (p <= 0) return 0;
+  if (present_ns != NULL) *present_ns = p;
+  if (refresh_ns != NULL) *refresh_ns = atomic_load_explicit(&g_pt_refresh_ns, memory_order_relaxed);
+  if (flags != NULL) *flags = atomic_load_explicit(&g_pt_flags, memory_order_relaxed);
+  return 1;
 }
 
 // ── JNI: register the three plat_support native groups ────────────────────────────────────────

@@ -1,0 +1,62 @@
+diff --git a/components/viz/service/display_embedder/skia_output_device.cc b/components/viz/service/display_embedder/skia_output_device.cc
+index 497396e88fb86..e2b7f2b563114 100644
+--- a/components/viz/service/display_embedder/skia_output_device.cc
++++ b/components/viz/service/display_embedder/skia_output_device.cc
+@@ -4,11 +4,14 @@
+ 
+ #include "components/viz/service/display_embedder/skia_output_device.h"
+ 
++#include <dlfcn.h>
++
+ #include <algorithm>
+ #include <utility>
+ 
+ #include "base/bind.h"
+ #include "base/check_op.h"
++#include "base/time/time.h"
+ #include "base/feature_list.h"
+ #include "base/notreached.h"
+ #include "base/task/task_features.h"
+@@ -327,6 +330,42 @@ void SkiaOutputDevice::SwapInfo::CallFeedback() {
+     if (params_.swap_response.result != gfx::SwapResult::SWAP_ACK)
+       flags = gfx::PresentationFeedback::Flags::kFailure;
+ 
++    // acl: pull the host compositor's real wp_presentation feedback (present-clock ns + refresh
++    // interval ns + WP_PRESENTATION_FEEDBACK_KIND_* flags) from acl's WebView plat_support glue and
++    // report THAT instead of the draw-time swap_start with a zero interval, so the WebView
++    // compositor's pacing / presentation-time callbacks see true vsync timing. The getter lives in
++    // libwebviewchromium_plat_support.so; grab its handle via dlopen(RTLD_NOLOAD) and resolve from it
++    // (RTLD_DEFAULT does not reach it in acl's bionic namespace). present_ns==0 -> not wired ->
++    // fall through to upstream. acl's presentation clock is CLOCK_MONOTONIC == TimeTicks.
++    // WORK IN PROGRESS, opt-in via ACL_PRESENT_FEEDBACK: the acl-side push is proven end-to-end
++    // (plat_support receives real values) and the getter resolves + is called here, but enabling it
++    // currently correlates with a present-loop stall under investigation, so it is gated off by
++    // default (inert == upstream draw-time fallback, no regression). See webview-renderthread-fix.
++    // Resolve acl's plat_support getter once. The master switch is acl-side (ACL_PRESENT_FEEDBACK,
++    // checked in acl's glibc getenv where it works): acl only publishes a non-zero present time when
++    // enabled, so an unset feature just returns 0 here and falls through to the draw-time fallback.
++    // Chromium's own getenv does NOT reliably see acl-injected env vars across the glibc/bionic
++    // boundary, so a Chromium-side env gate here would be dead — the getter's return value is the gate.
++    using AclGetPresentTiming = int (*)(int64_t*, int64_t*, uint32_t*);
++    static AclGetPresentTiming acl_get_present_timing = nullptr;
++    if (!acl_get_present_timing) {
++      if (void* h = dlopen("libwebviewchromium_plat_support.so", RTLD_NOLOAD | RTLD_NOW)) {
++        acl_get_present_timing = reinterpret_cast<AclGetPresentTiming>(
++            dlsym(h, "acl_webview_get_present_timing"));
++      }
++    }
++    if (acl_get_present_timing) {
++      int64_t present_ns = 0, refresh_ns = 0;
++      uint32_t kind_flags = 0;
++      if (acl_get_present_timing(&present_ns, &refresh_ns, &kind_flags) &&
++          present_ns > 0) {
++        std::move(feedback_).Run(gfx::PresentationFeedback(
++            base::TimeTicks() + base::Nanoseconds(present_ns),
++            base::Nanoseconds(refresh_ns), flags | kind_flags));
++        return;
++      }
++    }
++
+     std::move(feedback_).Run(
+         gfx::PresentationFeedback(params_.swap_response.timings.swap_start,
+                                   /*interval=*/base::TimeDelta(), flags));

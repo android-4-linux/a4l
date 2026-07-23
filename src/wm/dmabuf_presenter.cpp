@@ -656,6 +656,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   void OnPresented(const wl::PresentFeedback& fb) noexcept {
     last_present_ns_ = fb.present_ns;
     if (fb.refresh_ns != 0) refresh_ns_ = fb.refresh_ns;
+    last_flags_ = fb.flags;
   }
   void OnDiscarded(std::uint32_t) noexcept {}
   // xdg_surface handler dispatches configure here; the toplevel (ToplevelH) drives suspended/close
@@ -880,6 +881,20 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     return t;
   }
 
+  // Real wp_presentation feedback for the last committed frame — see IPresenter. Only exposed when
+  // the presentation clock is CLOCK_MONOTONIC (matching Chromium's base::TimeTicks); a foreign clock
+  // would hand the consumer nonsense timestamps. Read on the present thread (same as OnPresented).
+  bool last_present_feedback(std::uint64_t* present_ns, std::uint32_t* refresh_ns,
+                             std::uint32_t* flags) const noexcept override {
+    if (last_present_ns_ == 0) return false;  // nothing presented yet
+    const clockid_t clk = presentation_.Bound() ? presentation_.clock() : CLOCK_MONOTONIC;
+    if (clk != CLOCK_MONOTONIC) return false;
+    if (present_ns != nullptr) *present_ns = last_present_ns_;
+    if (refresh_ns != nullptr) *refresh_ns = static_cast<std::uint32_t>(refresh_ns_);
+    if (flags != nullptr) *flags = last_flags_;
+    return true;
+  }
+
   wl::DisplayHandle display_;
   wl::CRegistry registry_;
   wl::DmabufFeedback<Presenter> feedback_;
@@ -940,6 +955,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   int w_ = 0, h_ = 0;
   bool busy_ = false;
   std::uint64_t last_present_ns_ = 0, refresh_ns_ = 0;  // wp_presentation vsync clock
+  std::uint32_t last_flags_ = 0;                        // last WP_PRESENTATION_FEEDBACK_KIND_* flags
   std::uint64_t max_frames_ = 0, frame_index_ = 0, frame_callbacks_ = 0;
   bool configured_ = false, need_frame_ = false, closed_ = false;
   bool suspended_ = false;  // xdg_toplevel.suspended: surface occluded (locked/minimized) — pause present
