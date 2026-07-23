@@ -200,6 +200,21 @@ if [ -z "${ACL_NO_SYSTEM:-}" ] && command -v bwrap >/dev/null 2>&1; then
     if [ -n "${ACL_WEBVIEW_VULKAN:-}" ]; then
       case "$WV_ARGS" in *webview-draw-functor-uses-vulkan*) ;; *) WV_ARGS="$WV_ARGS --webview-draw-functor-uses-vulkan" ;; esac
       case "$WV_ARGS" in *disable-vulkan-surface*) ;; *) WV_ARGS="$WV_ARGS --disable-vulkan-surface" ;; esac
+      # Reduce the checkerboard/blank-tile churn during zoom/scroll (opt out with ACL_NO_TILE_TUNING):
+      #   --enable-low-res-tiling      with GPU raster cc disables low-res tiles, so a raster burst it
+      #                                can't keep up with shows blank; force the low-res fallback back on
+      #                                so those regions fill low-res -> sharp instead of blank.
+      #   --enable-gpu-rasterization   force GPU raster even if a conservative host-GPU capability check
+      #                                would leave it on the slower path.
+      # These are cosmetic only: the ~2s map-zoom checkerboard is network tile-fetch latency (Blink
+      # resource load), NOT an acl throughput limit — proven by cc sitting fully idle (0 raster / 0
+      # decode) for the whole ~2s stall while present runs at 240fps, and by 640x480 (1/8 the tiles)
+      # taking the identical time. A --force-gpu-mem-available-mb budget bump did NOT help (1024==2048,
+      # 4096 broke rendering). Low-res tiling just makes the wait fill low-res -> sharp instead of blank.
+      if [ -z "${ACL_NO_TILE_TUNING:-}" ]; then
+        case "$WV_ARGS" in *enable-low-res-tiling*) ;; *) WV_ARGS="$WV_ARGS --enable-low-res-tiling" ;; esac
+        case "$WV_ARGS" in *enable-gpu-rasterization*) ;; *) WV_ARGS="$WV_ARGS --enable-gpu-rasterization" ;; esac
+      fi
     fi
     if [ -n "$WV_ARGS" ]; then
       WVCL="$W/webview-command-line"

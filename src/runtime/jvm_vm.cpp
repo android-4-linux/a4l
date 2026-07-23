@@ -1621,10 +1621,27 @@ class JniVm : public Vm {
     if (jmethodID m = env_->GetStaticMethodID(boot, "setAppTheme", "(I)V"))
       env_->CallStaticVoidMethod(boot, m, static_cast<jint>(config_.application_theme));
     clear_exception();
-    if (jmethodID m = env_->GetStaticMethodID(boot, "setDisplay", "(III)V"))
-      env_->CallStaticVoidMethod(boot, m, static_cast<jint>(svc::window().display_width()),
-                                 static_cast<jint>(svc::window().display_height()),
-                                 static_cast<jint>(svc::window().density_dpi()));
+    if (jmethodID m = env_->GetStaticMethodID(boot, "setDisplay", "(III)V")) {
+      jint dw = static_cast<jint>(svc::window().display_width());
+      jint dh = static_cast<jint>(svc::window().display_height());
+      const jint ddpi = static_cast<jint>(svc::window().density_dpi());
+      // ACL_DISPLAY_SIZE=WxH overrides the advertised display (hence the window/surface) size — the
+      // app measures its content view to this, so the whole WebView/present path runs at WxH instead
+      // of fullscreen (small-window / automotive cases, and reduced-size testing). e.g. 640x480.
+      // NB: this does NOT speed up a network-bound WebView (map-tile zoom latency is Blink fetch time,
+      // measured independent of surface area), only the per-frame pixel/raster cost.
+      if (const char* e = std::getenv("ACL_DISPLAY_SIZE"); e != nullptr && *e != '\0') {
+        int ew = 0, eh = 0;
+        if (std::sscanf(e, "%dx%d", &ew, &eh) == 2 && ew > 0 && eh > 0) {
+          log::i(kTag, "ACL_DISPLAY_SIZE override: {}x{} (was {}x{})", ew, eh, dw, dh);
+          dw = ew;
+          dh = eh;
+        } else {
+          log::w(kTag, "ACL_DISPLAY_SIZE ignored (expected WxH, e.g. 640x480): '{}'", e);
+        }
+      }
+      env_->CallStaticVoidMethod(boot, m, dw, dh, ddpi);
+    }
     clear_exception();
 #if ACL_HAVE_SDBUS
     if (jmethodID m = env_->GetStaticMethodID(boot, "setColorScheme", "(I)V"))
