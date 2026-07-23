@@ -852,6 +852,21 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("uimode".equals(name)) {
+                // UiModeManager(Context) — its ctor resolves ServiceManager.getServiceOrThrow("uimode")
+                // (seeded → makeUiModeHandler). Kotlin/React Native apps do getSystemService(
+                // UI_MODE_SERVICE) then a non-null cast to UiModeManager; a null service crashes them
+                // (RN HostFunction: "null cannot be cast to non-null type android.app.UiModeManager").
+                // getCurrentModeType reports NORMAL; night mode follows the Configuration acl sets.
+                try {
+                    java.lang.reflect.Constructor<?> c = android.app.UiModeManager.class
+                            .getDeclaredConstructor(android.content.Context.class);
+                    c.setAccessible(true);
+                    return c.newInstance(this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("autofill".equals(name)) {
                 // AutofillManager(Context, IAutoFillManager) — no-Binder proxy (Compose's
                 // AndroidComposeView constructs an AndroidAutofill that requires a non-null one).
@@ -1054,6 +1069,10 @@ public final class HostBootstrap {
             if (serviceClass == android.location.LocationManager.class) return "location";
             if (serviceClass == android.view.accessibility.CaptioningManager.class) return "captioning";
             if (serviceClass == android.os.BatteryManager.class) return "batterymanager";
+            // Kotlin getSystemService(UiModeManager::class.java)!! (React Native reads UI_MODE_SERVICE)
+            // and getSystemService(WallpaperManager::class.java)!! (dynamic theming) — a null name NPEs.
+            if (serviceClass == android.app.UiModeManager.class) return "uimode";
+            if (serviceClass == android.app.WallpaperManager.class) return "wallpaper";
             if (serviceClass == android.telephony.TelephonyManager.class) return "phone";
             if (serviceClass == android.hardware.input.InputManager.class) return "input";
             // ViewRootImpl.<init> reads getSystemService(AudioManager.class) (navigation sound
@@ -2606,6 +2625,20 @@ public final class HostBootstrap {
                 });
     }
 
+    private static Object makeUiModeHandler(Class<?> iface) {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    // Desktop host: normal UI mode, not car/desk/tv/watch. (Automotive car-mode is a
+                    // separate concern — forcing UI_MODE_TYPE_CAR here would flip apps to car UI.) The
+                    // day/night uiMode is carried on the Configuration (setColorScheme/sNightMode), so
+                    // getNightMode and the rest default; enable/disableCarMode etc. no-op.
+                    if ("getCurrentModeType".equals(method.getName()))
+                        return android.content.res.Configuration.UI_MODE_TYPE_NORMAL;
+                    return defaultValue(method.getReturnType());
+                });
+    }
+
     // Read android.title / android.text out of a Notification's extras Bundle (reflectively —
     // HostBootstrap compiles against the framework classes.jar).
     private static String[] notificationTitleText(Object notification) {
@@ -2713,6 +2746,10 @@ public final class HostBootstrap {
         // (getWallpaperColors for dynamic theming); a no-op proxy (colors → null, a valid "no colors"
         // response) is enough. No wallpaper host — set/clear are dropped. Single desktop surface.
         svc.put("wallpaper", "android.app.IWallpaperManager");
+        // UiModeManager(Context) resolves ServiceManager.getServiceOrThrow("uimode") → IUiModeManager.
+        // getCurrentModeType → UI_MODE_TYPE_NORMAL (desktop host, not car/desk/tv); night mode follows
+        // the Configuration.uiMode acl already sets (setColorScheme). React Native / AppCompat read it.
+        svc.put("uimode", "android.app.IUiModeManager");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},
@@ -2727,7 +2764,8 @@ public final class HostBootstrap {
                                 ? makeNotificationHandler(iface)
                                 : "display".equals(name) ? makeDisplayHandler(iface)
                                 : "audio".equals(name) ? makeAudioHandler(iface)
-                                : "mount".equals(name) ? makeStorageHandler(iface) : noop(iface);
+                                : "mount".equals(name) ? makeStorageHandler(iface)
+                                : "uimode".equals(name) ? makeUiModeHandler(iface) : noop(iface);
                         final String descriptor = ifaceName;  // AIDL DESCRIPTOR == interface FQN
                         // Proxy IBinder (an interface) rather than new Binder() — the latter
                         // needs Binder natives. asInterface() calls queryLocalInterface and
