@@ -200,6 +200,7 @@ public final class HostBootstrap {
             System.err.println("acl HostBootstrap: ServiceManager seed failed: " + t);
         }
         seedTelephonyFrameworkInitializer();
+        seedMediaFrameworkInitializer();
         seedSqliteDefaults();
         seedContentService();
         seedVirtualInputDevice();
@@ -852,6 +853,17 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("media_session".equals(name)) {
+                // The real android.media.session.MediaSessionManager(Context) — public ctor. Its
+                // ISessionManager is the seeded makeSessionManagerHandler, so MediaSession /
+                // MediaSessionCompat construct successfully (the media-app entry point, and the
+                // automotive media path).
+                try {
+                    return new android.media.session.MediaSessionManager(this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("power".equals(name)) {
                 // PowerManager(Context, IPowerManager, IThermalService, Handler) — public ctor. Its
                 // IPowerManager is the seeded makePowerHandler (screen on, no battery saver, wake
@@ -1132,6 +1144,7 @@ public final class HostBootstrap {
             // and getSystemService(WallpaperManager::class.java)!! (dynamic theming) — a null name NPEs.
             if (serviceClass == android.app.UiModeManager.class) return "uimode";
             if (serviceClass == android.os.PowerManager.class) return "power";
+            if (serviceClass == android.media.session.MediaSessionManager.class) return "media_session";
             if (serviceClass == android.app.WallpaperManager.class) return "wallpaper";
             if (serviceClass == android.telephony.TelephonyManager.class) return "phone";
             if (serviceClass == android.hardware.input.InputManager.class) return "input";
@@ -2767,6 +2780,42 @@ public final class HostBootstrap {
                 });
     }
 
+    // ISessionManager: MediaSession.<init> does mBinder = manager.createSession(...) and then
+    // immediately mBinder.getController() to build its Token, so a defaulted null ISession NPEs
+    // every media app at construction. Hand back a no-op ISession whose getController() is a no-op
+    // ISessionController; the session's later setFlags/setMediaButtonReceiver/setPlaybackState
+    // calls are accepted and dropped (acl has no system media-session router yet, so a published
+    // session simply has no external subscribers).
+    private static Object makeSessionManagerHandler(Class<?> iface) {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    if ("createSession".equals(method.getName())) {
+                        try {
+                            return makeSessionHandler(Class.forName("android.media.session.ISession"));
+                        } catch (Throwable t) {
+                            return null;
+                        }
+                    }
+                    return defaultValue(method.getReturnType());
+                });
+    }
+
+    private static Object makeSessionHandler(Class<?> iface) {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    if ("getController".equals(method.getName())) {
+                        try {
+                            return noop(Class.forName("android.media.session.ISessionController"));
+                        } catch (Throwable t) {
+                            return null;
+                        }
+                    }
+                    return defaultValue(method.getReturnType());
+                });
+    }
+
     // IThermalService: the kernel thermal zones, via svc/power.
     private static Object makeThermalHandler(Class<?> iface) {
         return java.lang.reflect.Proxy.newProxyInstance(
@@ -2855,6 +2904,26 @@ public final class HostBootstrap {
         }
     }
 
+    // MediaSessionManager(Context) resolves ISessionManager via
+    // MediaFrameworkPlatformInitializer.getMediaServiceManager(), which the framework normally seeds
+    // during boot but acl does not — so it is null and the constructor NPEs, leaving
+    // getSystemService(MEDIA_SESSION_SERVICE) null and every MediaSession/MediaSessionCompat
+    // construction to NPE on it (the entry point for every media app, and the automotive media
+    // path). Seed a real MediaServiceManager: its per-service ServiceRegisterers resolve through the
+    // (no-Binder) ServiceManager, where "media_session" is seeded, so the manager builds and its
+    // createSession() reaches acl's no-op ISession. Idempotent (the setter throws if called twice).
+    private static void seedMediaFrameworkInitializer() {
+        try {
+            Class<?> mfpi = Class.forName("android.media.MediaFrameworkPlatformInitializer");
+            Class<?> msm = Class.forName("android.media.MediaServiceManager");
+            if (mfpi.getMethod("getMediaServiceManager").invoke(null) == null)
+                mfpi.getMethod("setMediaServiceManager", msm)
+                    .invoke(null, msm.getConstructor().newInstance());
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: media framework init seed skipped: " + t);
+        }
+    }
+
     // acl has no Binder (ADR-3): seed a no-op ServiceManager. getService(name) returns a
     // local IBinder whose queryLocalInterface hands back a no-op service interface, so
     // framework callers (ViewConfiguration → IWindowManager, getSystemService, …) get a stub
@@ -2907,6 +2976,9 @@ public final class HostBootstrap {
         // makePowerHandler answers the display-state queries truthfully for a desktop host (screen
         // on, no battery saver); wake-lock acquire/release no-op.
         svc.put("power", "android.os.IPowerManager");
+        // MediaSession routes through ISessionManager; makeSessionManagerHandler returns a no-op
+        // ISession (with a no-op ISessionController) so MediaSession construction completes.
+        svc.put("media_session", "android.media.session.ISessionManager");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},
@@ -2923,7 +2995,9 @@ public final class HostBootstrap {
                                 : "audio".equals(name) ? makeAudioHandler(iface)
                                 : "mount".equals(name) ? makeStorageHandler(iface)
                                 : "uimode".equals(name) ? makeUiModeHandler(iface)
-                                : "power".equals(name) ? makePowerHandler(iface) : noop(iface);
+                                : "power".equals(name) ? makePowerHandler(iface)
+                                : "media_session".equals(name) ? makeSessionManagerHandler(iface)
+                                : noop(iface);
                         final String descriptor = ifaceName;  // AIDL DESCRIPTOR == interface FQN
                         // Proxy IBinder (an interface) rather than new Binder() — the latter
                         // needs Binder natives. asInterface() calls queryLocalInterface and
