@@ -25,6 +25,11 @@ if have_jni
   # a synthetic fixed point. Needs JNI for the AclLocationManager seam; the GeoClue2 source is
   # gated on sdbus inside the module.
   subdir('location')
+  # svc/power: android.os.PowerManager / IThermalService over systemd-logind (session
+  # active/idle/lock + inhibitor wake locks), power-profiles-daemon (battery saver) and
+  # the kernel thermal zones. The D-Bus half is gated inside the module, so it also
+  # builds without sdbus (thermal sysfs + awake defaults).
+  subdir('power')
 endif
 
 # Automotive vehicle services (svc/car) compile in ONLY under the automotive

@@ -852,6 +852,24 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("power".equals(name)) {
+                // PowerManager(Context, IPowerManager, IThermalService, Handler) — public ctor. Its
+                // IPowerManager is the seeded makePowerHandler (screen on, no battery saver, wake
+                // locks no-op). Kotlin apps do getSystemService(POWER_SERVICE) as PowerManager, so a
+                // null service crashes them ("null cannot be cast to non-null type
+                // android.os.PowerManager" — Pandora's PandoraApp.onCreate).
+                try {
+                    Class<?> ipm = Class.forName("android.os.IPowerManager");
+                    Class<?> its = Class.forName("android.os.IThermalService");
+                    java.lang.reflect.Constructor<?> c = android.os.PowerManager.class
+                            .getDeclaredConstructor(android.content.Context.class, ipm, its,
+                                    android.os.Handler.class);
+                    c.setAccessible(true);
+                    return c.newInstance(this, makePowerHandler(ipm), makeThermalHandler(its), null);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("uimode".equals(name)) {
                 // UiModeManager(Context) — its ctor resolves ServiceManager.getServiceOrThrow("uimode")
                 // (seeded → makeUiModeHandler). Kotlin/React Native apps do getSystemService(
@@ -1101,6 +1119,7 @@ public final class HostBootstrap {
             // Kotlin getSystemService(UiModeManager::class.java)!! (React Native reads UI_MODE_SERVICE)
             // and getSystemService(WallpaperManager::class.java)!! (dynamic theming) — a null name NPEs.
             if (serviceClass == android.app.UiModeManager.class) return "uimode";
+            if (serviceClass == android.os.PowerManager.class) return "power";
             if (serviceClass == android.app.WallpaperManager.class) return "wallpaper";
             if (serviceClass == android.telephony.TelephonyManager.class) return "phone";
             if (serviceClass == android.hardware.input.InputManager.class) return "input";
@@ -1385,6 +1404,25 @@ public final class HostBootstrap {
                 android.content.pm.PackageManager.PackageInfoFlags flags)
                 throws android.content.pm.PackageManager.NameNotFoundException {
             return getPackageInfo(p, 0);
+        }
+        // Where the app was installed from. There is no installer/store on acl (the APK is run
+        // directly), so report an unknown source — what a sideloaded app sees — rather than letting
+        // the AOSP base class throw UnsupportedOperationException, which aborts Application.onCreate
+        // (Pandora's PandoraApp.onCreate queries this during startup).
+        @Override public android.content.pm.InstallSourceInfo getInstallSourceInfo(String p)
+                throws android.content.pm.PackageManager.NameNotFoundException {
+            if (p != null && !p.equals(pkg) && !"com.android.webview".equals(p))
+                throw new android.content.pm.PackageManager.NameNotFoundException(p);
+            return new android.content.pm.InstallSourceInfo(
+                    null /* initiatingPackageName */, null /* initiatingPackageSigningInfo */,
+                    null /* originatingPackageName */, null /* installingPackageName */);
+        }
+        @Override public String getInstallerPackageName(String p) { return null; }
+        // Kotlin callers dereference this with a non-null assertion, so a null (the stub default)
+        // crashes them. acl advertises no optional hardware features; return an empty array rather
+        // than null (hasSystemFeature() answers individual queries).
+        @Override public android.content.pm.FeatureInfo[] getSystemAvailableFeatures() {
+            return new android.content.pm.FeatureInfo[0];
         }
         private android.content.pm.PackageInfo ownPackageInfo() {
             android.content.pm.PackageInfo pi = new android.content.pm.PackageInfo();
@@ -2669,6 +2707,65 @@ public final class HostBootstrap {
                 });
     }
 
+    // Live logind inhibitor cookies for the wake locks the app currently holds, keyed by the
+    // IBinder token PowerManager.WakeLock passes to acquire/releaseWakeLock.
+    private static final java.util.Map<android.os.IBinder, Long> sWakeLocks =
+            java.util.Collections.synchronizedMap(new java.util.HashMap<>());
+
+    private static Object makePowerHandler(Class<?> iface) {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    // Backed by svc/power (systemd-logind session state + power-profiles), not
+                    // hardcoded: isInteractive follows the session being active/unlocked/non-idle,
+                    // isPowerSaveMode follows the host power profile.
+                    switch (method.getName()) {
+                        case "isInteractive":
+                        case "isDisplayInteractive":
+                            return PowerBridge.isInteractive();
+                        case "isPowerSaveMode":
+                            return PowerBridge.isPowerSaveMode();
+                        case "isDeviceIdleMode":
+                        case "isLightDeviceIdleMode":
+                            return PowerBridge.isDeviceIdleMode();
+                        // A held Android wake lock becomes a real logind inhibitor, so playback
+                        // genuinely keeps the host awake. acquireWakeLock(IBinder lock, int flags,
+                        // String tag, ...) / releaseWakeLock(IBinder lock, int flags).
+                        case "acquireWakeLock":
+                        case "acquireWakeLockWithUid": {
+                            android.os.IBinder tok = (a != null && a.length > 0
+                                    && a[0] instanceof android.os.IBinder) ? (android.os.IBinder) a[0] : null;
+                            int flags = (a != null && a.length > 1 && a[1] instanceof Integer)
+                                    ? (Integer) a[1] : 1 /* PARTIAL_WAKE_LOCK */;
+                            String tag = (a != null && a.length > 2 && a[2] instanceof String)
+                                    ? (String) a[2] : "";
+                            long cookie = PowerBridge.acquireWakeLock(flags, tag);
+                            if (tok != null && cookie != 0L) sWakeLocks.put(tok, cookie);
+                            return defaultValue(method.getReturnType());
+                        }
+                        case "releaseWakeLock": {
+                            android.os.IBinder tok = (a != null && a.length > 0
+                                    && a[0] instanceof android.os.IBinder) ? (android.os.IBinder) a[0] : null;
+                            Long cookie = tok != null ? sWakeLocks.remove(tok) : null;
+                            if (cookie != null) PowerBridge.releaseWakeLock(cookie);
+                            return defaultValue(method.getReturnType());
+                        }
+                        default: return defaultValue(method.getReturnType());
+                    }
+                });
+    }
+
+    // IThermalService: the kernel thermal zones, via svc/power.
+    private static Object makeThermalHandler(Class<?> iface) {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    if ("getCurrentThermalStatus".equals(method.getName()))
+                        return PowerBridge.thermalStatus();
+                    return defaultValue(method.getReturnType());  // listener register/unregister
+                });
+    }
+
     private static Object makeUiModeHandler(Class<?> iface) {
         return java.lang.reflect.Proxy.newProxyInstance(
                 iface.getClassLoader(), new Class<?>[]{iface},
@@ -2794,6 +2891,10 @@ public final class HostBootstrap {
         // getCurrentModeType → UI_MODE_TYPE_NORMAL (desktop host, not car/desk/tv); night mode follows
         // the Configuration.uiMode acl already sets (setColorScheme). React Native / AppCompat read it.
         svc.put("uimode", "android.app.IUiModeManager");
+        // PowerManager routes isInteractive()/isPowerSaveMode()/wake locks through IPowerManager.
+        // makePowerHandler answers the display-state queries truthfully for a desktop host (screen
+        // on, no battery saver); wake-lock acquire/release no-op.
+        svc.put("power", "android.os.IPowerManager");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},
@@ -2809,7 +2910,8 @@ public final class HostBootstrap {
                                 : "display".equals(name) ? makeDisplayHandler(iface)
                                 : "audio".equals(name) ? makeAudioHandler(iface)
                                 : "mount".equals(name) ? makeStorageHandler(iface)
-                                : "uimode".equals(name) ? makeUiModeHandler(iface) : noop(iface);
+                                : "uimode".equals(name) ? makeUiModeHandler(iface)
+                                : "power".equals(name) ? makePowerHandler(iface) : noop(iface);
                         final String descriptor = ifaceName;  // AIDL DESCRIPTOR == interface FQN
                         // Proxy IBinder (an interface) rather than new Binder() — the latter
                         // needs Binder natives. asInterface() calls queryLocalInterface and
