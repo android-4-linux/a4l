@@ -16,7 +16,7 @@
 #   on the boot classpath, not the app classpath, or every such reference is an Unresolved Reference
 #   that becomes a bare NoClassDefFoundError when called (this silently broke Dialog.setView). So we
 #   compile framework/acl_host once and split it into TWO dex jars:
-#     - boot jar (aclshims):  android/**  +  org/acl/internal/BluetoothBridge  (framework-facing;
+#     - boot jar (aclshims):  android/**  +  org/acl/internal/{BluetoothBridge,NsdBridge}
 #                             reference only framework classes + each other)  -> ACL_ART_BOOTCLASSPATH
 #     - app  jar (hostboot):  the rest of org/acl/internal/**  (HostBootstrap/PresentDriver, which
 #                             reference app-bundled androidx/Compose)          -> ACL_ART_HOST_BOOTSTRAP
@@ -82,8 +82,9 @@ mkdir -p "$W/hbcls" "$W/bootdex" "$W/appdex"
 
 # Split the compiled classes (see header): framework-facing -> boot jar, the rest -> app jar.
 BOOTCLS=$( { find "$W/hbcls/android" -name '*.class' 2>/dev/null
-             find "$W/hbcls/org/acl/internal" -name 'BluetoothBridge*.class' 2>/dev/null; } )
-APPCLS=$(find "$W/hbcls/org" -name '*.class' 2>/dev/null | grep -v '/BluetoothBridge')
+             find "$W/hbcls/org/acl/internal" -name 'BluetoothBridge*.class' 2>/dev/null; \
+             find "$W/hbcls/org/acl/internal" -name 'NsdBridge*.class' 2>/dev/null; } )
+APPCLS=$(find "$W/hbcls/org" -name '*.class' 2>/dev/null | grep -vE '/(BluetoothBridge|NsdBridge)')
 
 $D8 --min-api 24 --output "$W/bootdex" $BOOTCLS 2>&1 | tail -1
 $D8 --min-api 24 --output "$W/appdex"  $APPCLS  2>&1 | tail -1

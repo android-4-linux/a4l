@@ -14,6 +14,11 @@ if have_sdbus
   subdir('bluetooth')
   subdir('storage')
   subdir('appearance')
+  # svc/nsd: android.net.nsd.NsdManager over the host mDNS/DNS-SD daemon (Avahi) —
+  # browse / resolve / advertise. Needs both D-Bus and JNI.
+  if have_jni
+    subdir('nsd')
+  endif
 endif
 
 # svc/sensor: android.hardware.SensorManager over Linux IIO (sysfs) / synthetic. No D-Bus

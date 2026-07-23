@@ -35,6 +35,7 @@
 #include "svc/appearance/appearance.h"
 #include "svc/battery/battery_jni.h"
 #include "svc/power/power_jni.h"
+#include "svc/nsd/nsd_jni.h"
 #include "svc/bluetooth/bt_jni.h"
 #include "svc/location/location_jni.h"
 #include "svc/net/connectivity_jni.h"
@@ -3803,6 +3804,7 @@ class ArtVm final : public JniVm {
     // host power backend (org.freedesktop.UPower).
     acl::battery::register_battery_natives(env);
     acl::power::register_power_natives(env);
+    acl::nsd::register_nsd_natives(env);
     // Bind org.acl.internal.BluetoothBridge (android.bluetooth.* shims) to the svc/bluetooth
     // host BlueZ backend (org.bluez).
     acl::bt::register_bt_natives(env);

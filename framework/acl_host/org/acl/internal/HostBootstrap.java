@@ -934,6 +934,15 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("servicediscovery".equals(name)) {
+                // acl's clean-room android.net.nsd.NsdManager (boot classpath, backed by svc/nsd →
+                // the host mDNS/DNS-SD daemon). Reflective for the same reason as connectivity/wifi.
+                try {
+                    return Class.forName("android.net.nsd.NsdManager").getConstructor().newInstance();
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("wifi".equals(name)) {
                 // acl's clean-room android.net.wifi.WifiManager (boot classpath, backed by svc/net →
                 // the host network daemon's wireless device). Reflective for the same reason as
@@ -1133,6 +1142,7 @@ public final class HostBootstrap {
             // ConnectivityManager compared by name (off this compile classpath, see above).
             if ("android.net.ConnectivityManager".equals(serviceClass.getName())) return "connectivity";
             if ("android.net.wifi.WifiManager".equals(serviceClass.getName())) return "wifi";
+            if ("android.net.nsd.NsdManager".equals(serviceClass.getName())) return "servicediscovery";
             if ("android.bluetooth.BluetoothManager".equals(serviceClass.getName())) return "bluetooth";
             if (serviceClass == android.os.storage.StorageManager.class) return "storage";
             if (serviceClass == android.os.UserManager.class) return "user";
