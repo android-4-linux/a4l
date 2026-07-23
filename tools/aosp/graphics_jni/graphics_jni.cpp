@@ -280,6 +280,39 @@ void Bitmap_nativeErase(JNIEnv*, jclass, jlong ptr, jint color) {
   if (w != nullptr) w->bitmap.eraseColor(static_cast<SkColor>(color));
 }
 
+// Bitmap.copy(Config, isMutable) -> nativeCopy: allocate a new SkBitmap in the requested Config and
+// convert-copy the source pixels into it. Skia's readPixels does the color-type / alpha / color-
+// space conversion (e.g. ARGB_8888 -> RGB_565 or -> ALPHA_8); the common case is a same-config
+// deep copy for a mutable working buffer. density + premultiplied are re-applied by Bitmap.copy()
+// in Java on the returned object, so density=0 here matches nativeCreate.
+jobject Bitmap_nativeCopy(JNIEnv* env, jclass, jlong srcPtr, jint dstConfig, jboolean isMutable) {
+  auto* src = reinterpret_cast<AclBitmap*>(srcPtr);
+  if (src == nullptr) return nullptr;
+  const int width = src->bitmap.width();
+  const int height = src->bitmap.height();
+  const SkColorType ct = config_to_ct(dstConfig);
+  // Coerce the alpha type to one the destination color type allows (565 is always opaque; a
+  // single-channel ALPHA_8 can't be opaque) — otherwise SkImageInfo/tryAllocPixels rejects it.
+  SkAlphaType at = src->bitmap.alphaType();
+  if (ct == kRGB_565_SkColorType) at = kOpaque_SkAlphaType;
+  else if (ct == kAlpha_8_SkColorType && at == kOpaque_SkAlphaType) at = kPremul_SkAlphaType;
+  auto* w = new AclBitmap();
+  sk_sp<SkColorSpace> cs = src->bitmap.refColorSpace();
+  const SkImageInfo info =
+      SkImageInfo::Make(width, height, ct, at, cs ? cs : SkColorSpace::MakeSRGB());
+  if (!w->bitmap.tryAllocPixels(info)) {
+    delete w;
+    return nullptr;
+  }
+  if (!src->bitmap.readPixels(w->bitmap.pixmap(), 0, 0))
+    w->bitmap.eraseColor(SK_ColorTRANSPARENT);  // unsupported conversion -> transparent, not a crash
+  w->immutable = (isMutable == JNI_FALSE);
+  return env->NewObject(g_bitmap_class, g_bitmap_ctor, reinterpret_cast<jlong>(w), width,
+                        height, /*density=*/0, /*requestPremultiplied=*/JNI_TRUE,
+                        /*ninePatchChunk=*/static_cast<jbyteArray>(nullptr),
+                        /*ninePatchInsets=*/static_cast<jobject>(nullptr));
+}
+
 // Bitmap.compress(format, quality, OutputStream): encode the SkBitmap (PNG/JPEG/WEBP via the
 // linked Skia encoders) and write the bytes to the Java OutputStream. CompressFormat ordinals:
 // 0=JPEG, 1=PNG, 2=WEBP, 3=WEBP_LOSSY, 4=WEBP_LOSSLESS.
@@ -3042,6 +3075,7 @@ const JNINativeMethod kBitmap[] = {
      reinterpret_cast<void*>(Bitmap_nativeGetAllocationByteCount)},
     {"nativeSetHasAlpha", "(JZZ)V", reinterpret_cast<void*>(Bitmap_nativeSetHasAlpha)},
     {"nativeErase", "(JI)V", reinterpret_cast<void*>(Bitmap_nativeErase)},
+    {"nativeCopy", "(JIZ)Landroid/graphics/Bitmap;", reinterpret_cast<void*>(Bitmap_nativeCopy)},
     {"nativeCompress", "(JIILjava/io/OutputStream;[B)Z", reinterpret_cast<void*>(Bitmap_nativeCompress)},
     {"nativeIsPremultiplied", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeIsPremultiplied)},
     {"nativeHasAlpha", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeHasAlpha)},
