@@ -79,28 +79,6 @@ index 001e0ec867c13..50118d5fd3673 100644
      base::NativeLibraryLoadError native_library_load_error;
      base::NativeLibrary vulkan_loader_library = base::LoadNativeLibrary(
          base::FilePath("libvulkan.so"), &native_library_load_error);
-diff --git a/cc/trees/presentation_time_callback_buffer.cc b/cc/trees/presentation_time_callback_buffer.cc
-index 82ffe160c4b23..493afcd000aea 100644
---- a/cc/trees/presentation_time_callback_buffer.cc
-+++ b/cc/trees/presentation_time_callback_buffer.cc
-@@ -123,8 +123,16 @@ PresentationTimeCallbackBuffer::GetOrMakeRegistration(uint32_t frame_token) {
-   // entry to the queue.
-   if (frame_token_infos_.empty() ||
-       viz::FrameTokenGT(frame_token, frame_token_infos_.back().token)) {
-+    // acl: in the WebView Vulkan AwDrawFn path, presentation feedback is not delivered back to the
-+    // compositor (AwGLSurface::SwapBuffers, which arms MaybeDidPresent, is a GL-path mechanism the
-+    // Vulkan output device bypasses), so PopPendingCallbacks never runs and this buffer grew without
-+    // bound — the original DCHECK_LE fired FATAL at 61 > 60 and crashed the Compositor thread after
-+    // ~60 frames. Bound it by dropping the oldest stale entries instead. Presentation-time callbacks
-+    // do not drive rAF or rendering, so static content is unaffected. TODO: wire real presentation
-+    // feedback for the Vulkan functor path.
-+    while (frame_token_infos_.size() >= kMaxBufferSize && !frame_token_infos_.empty())
-+      frame_token_infos_.pop_front();
-     frame_token_infos_.emplace_back(frame_token);
--    DCHECK_LE(frame_token_infos_.size(), kMaxBufferSize);
-   }
- 
-   // Registrations should use monotonically increasing frame tokens.
 diff --git a/gpu/command_buffer/service/shared_image/external_vk_image_backing.cc b/gpu/command_buffer/service/shared_image/external_vk_image_backing.cc
 index f8db3498cbecf..6256ba69e6ade 100644
 --- a/gpu/command_buffer/service/shared_image/external_vk_image_backing.cc

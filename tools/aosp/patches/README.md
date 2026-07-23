@@ -41,7 +41,7 @@ rebuilt. The CPU-render path (S3b) is unaffected.
 Applies to the **Chromium** checkout (`/mnt/dev/chromium/src`, the `system_webview_apk` build), not
 AOSP. Lets Chromium's WebView `AwDrawFn` **Vulkan functor** composite directly into acl's
 Ganesh-Vulkan present frame (direct mode: viz + functor share acl's `VkDevice`, no AHardwareBuffer
-round-trip). Seven changes across the render, GPU-raster, shared-image, and shared-memory paths:
+round-trip). Six changes across the render, GPU-raster, shared-image, and shared-memory paths:
 
 - `aw_draw_fn_impl.cc` — `CreateDrawContext` derives the `SkColorType` from `params->format` instead
   of hardcoded `MakeN32Premul` (acl's present target is **BGRA**, the Wayland/DRM-native byte order;
@@ -68,12 +68,11 @@ round-trip). Seven changes across the render, GPU-raster, shared-image, and shar
   DCHECK never anticipated. The representation reads via the backing's own `context_state_` and the
   `VkImage` is device-level shareable, so it is safe. (Pairs with the factory change above; together
   they are what make tile pixels reach the composite.)
-- `cc/trees/presentation_time_callback_buffer.cc` — bound the callback buffer instead of the
-  `DCHECK_LE(size, kMaxBufferSize)` that fired **FATAL at 61 > 60** and killed the Compositor thread
-  after ~60 frames. In the Vulkan `AwDrawFn` path presentation feedback is never delivered back
-  (`AwGLSurface::SwapBuffers`, which arms it, is a GL-path mechanism the Vulkan output device
-  bypasses), so `PopPendingCallbacks` never runs and the buffer grew unbounded. Drop the oldest stale
-  entries; presentation-time callbacks don't drive rAF/rendering, so static content is unaffected.
+(An earlier `cc/trees/presentation_time_callback_buffer.cc` bound-workaround was **removed**: it
+guarded a `DCHECK_LE(size, kMaxBufferSize)` FATAL from a buffer that grew unbounded when the WebView
+was not swapping — a symptom of the pre-`on_sync` render path. With the `on_sync` frame-pull wired,
+the output device swaps and `PopPendingCallbacks` drains the buffer normally — measured peak size 4
+over 840 frames — so the workaround is no longer needed.)
 
 Runtime (see `tools/run-apk.sh`): `ACL_WEBVIEW_VULKAN=1` auto-adds `--webview-draw-functor-uses-vulkan
 --disable-vulkan-surface`. On a multi-ICD host, pin the loader to the GPU's ICD via
