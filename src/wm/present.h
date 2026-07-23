@@ -193,7 +193,12 @@ class IPresenter {
 
   // Present the produced dma-buf `frame` (rendered into next_buffer()'s image): build its
   // wl_buffer once, arm the next wl_surface.frame callback, attach + damage + commit + flush.
-  virtual bool submit(const gfx::DmabufFrame& frame) noexcept = 0;
+  // `slot` pins the ping-pong slot the frame was rendered into (from next_buffer()); pass it so the
+  // wl_buffer↔dma-buf pairing stays fixed. When producer and consumer are decoupled (deferred
+  // RenderThread), free_slot() at submit time can differ from the rendered slot, which — because each
+  // slot's wl_buffer is bound to the fd it was first built with — would present a stale buffer
+  // (flicker). -1 keeps the legacy free_slot() behavior for callers that submit in the same tick.
+  virtual bool submit(const gfx::DmabufFrame& frame, int slot = -1) noexcept = 0;
 
   // Keep the vsync loop alive when a frame is DROPPED (the traversal threw, or the GPU could
   // not begin/end a frame, so submit() didn't run). Re-arm the next wl_surface.frame callback

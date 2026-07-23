@@ -492,8 +492,13 @@ std::uint64_t present_now_ns() {
 }
 
 // Per-window native state for PresentDriver; its address is the jlong `s` handed to Java.
+struct RenderThread;  // per-window GPU render thread (deferred-present split); defined below
+
 struct PresentSession {
   std::unique_ptr<wm::IPresenter> presenter;
+  std::unique_ptr<RenderThread> rthread;  // owns all GrContext work when deferred (ACL_PRESENT_RT)
+  bool deferred = false;                  // ACL_PRESENT_RT: record on UI thread, render on rthread
+  bool rt_bootstrapped = false;           // first deferred frame renders sync to arm the vsync loop
   JavaVM* vm = nullptr;
   jobject view = nullptr;    // global ref to the decor View
   jobject canvas = nullptr;  // global ref to the RecordingCanvas over the GPU SkCanvas
@@ -515,6 +520,118 @@ struct PresentSession {
   std::uint64_t frames = 0;  // presented-frame count (progress evidence)
   int vsync_fd = -1;         // GL mode: timerfd clocking Choreographer vsync (Mesa owns commit)
   bool is_gl = false;        // GL mode: no Skia presenter / nTraverse; Mesa renders the toplevel
+};
+
+// Per-window RenderThread: owns ALL GrContext/Vulkan work (gpu_begin clear + present picture replay +
+// gpu_end flush/copy), so the present/UI thread does zero GrContext work — GrDirectContext is
+// single-threaded, and the device is created + used only on this thread. The WebView functor's
+// draw_vk (Chromium HardwareRenderer::Draw) therefore executes HERE, off the UI thread — the whole
+// point of the split. Step 2 runs it SYNCHRONOUSLY (present thread posts a frame, blocks for the
+// dma-buf); Step 3 will run it one frame behind so the UI thread never blocks (unblocking the WebView
+// producer/consumer pipeline). See webview-renderthread-fix.
+struct RenderThread {
+  PresentSession* s = nullptr;
+  std::thread th;
+  std::mutex mu;
+  std::condition_variable cv_job, cv_done;
+  int w = 0, h = 0, bufidx = 0;   // job params (set under mu before notify)
+  PresentDmabuf out{};            // last completed frame's dma-buf
+  int out_bufidx = 0;             // the ping-pong slot it was rendered into (pin submit to it)
+  bool out_ok = false;
+  bool has_job = false, in_progress = false, completed_new = false, quit = false;
+
+  void start(PresentSession* sess) {
+    s = sess;
+    th = std::thread([this] { loop(); });
+  }
+  void loop() {
+    // The WebView functor's draw_vk (bionic code) runs on this thread via call_bionic's RunScope,
+    // which needs a bionic TCB. Create it up front (this only mints the TCB; the running %fs stays
+    // glibc for Skia/Vulkan — RunScope swaps per functor call). Surfaces attach failures explicitly.
+    if (auto* rt = acl::ndk::BionicRuntime::get()) {
+      std::string why;
+      if (rt->attach_current_thread(&why) == 0)
+        acl::log::w(kTag, "RenderThread: bionic attach failed: {}", why);
+      else
+        acl::log::i(kTag, "RenderThread: attached to bionic");
+    } else {
+      acl::log::w(kTag, "RenderThread: BionicRuntime not available");
+    }
+    for (;;) {
+      int W, H, buf;
+      {
+        std::unique_lock<std::mutex> lk(mu);
+        cv_job.wait(lk, [this] { return has_job || quit; });
+        if (quit) return;
+        has_job = false;
+        in_progress = true;
+        W = w; H = h; buf = bufidx;
+      }
+      // All GrContext work on this thread: clear (+ lazy device/GrContext creation on first call),
+      // then replay the recorded present picture + flush + copy to dma-buf. The WebView functor's
+      // draw_vk (HardwareRenderer::Draw, which BLOCKS on the renderer's frame) runs inside gpu_end
+      // here — off the UI thread, so the UI keeps ticking the Choreographer/begin-frames.
+      bool ok = false;
+      PresentDmabuf f{};
+      if (s->gpu_begin != nullptr && s->gpu_begin(W, H) != 0 && s->gpu_end != nullptr) {
+        ok = s->gpu_end(buf, &f);
+      }
+      {
+        std::lock_guard<std::mutex> lk(mu);
+        out = f;
+        out_bufidx = buf;
+        out_ok = ok;
+        in_progress = false;
+        completed_new = true;
+      }
+      cv_done.notify_one();
+    }
+  }
+  // Post + block until the frame is rendered (used ONCE to bootstrap the vsync loop — keepalive is a
+  // no-op until the first real submit, so the first frame must render+submit synchronously).
+  bool render_sync(int W, int H, int buf, PresentDmabuf* f) {
+    post(W, H, buf);
+    std::unique_lock<std::mutex> lk(mu);
+    cv_done.wait(lk, [this] { return completed_new; });
+    completed_new = false;
+    if (f != nullptr) *f = out;
+    return out_ok;
+  }
+  // Is the RenderThread rendering (or about to)? The UI thread must NOT block on it — it skips the
+  // tick (keepalive) so the Looper/Choreographer keeps driving the renderer's begin-frames.
+  bool busy() {
+    std::lock_guard<std::mutex> lk(mu);
+    return has_job || in_progress;
+  }
+  // Non-blocking: hand back the last completed frame's dma-buf + the slot it was rendered into (once).
+  // Returns false if none new.
+  bool take_completed(PresentDmabuf* f, int* slot) {
+    std::lock_guard<std::mutex> lk(mu);
+    if (!completed_new) return false;
+    completed_new = false;
+    if (!out_ok) return false;
+    if (f != nullptr) *f = out;
+    if (slot != nullptr) *slot = out_bufidx;
+    return true;
+  }
+  // Non-blocking: start rendering the just-taken present picture into `buf`. Caller must have
+  // snapshotted the picture (acl_graphics_present_take_for_render) first and confirmed !busy().
+  void post(int W, int H, int buf) {
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      w = W; h = H; bufidx = buf;
+      has_job = true;
+    }
+    cv_job.notify_one();
+  }
+  void stop() {
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      quit = true;
+    }
+    cv_job.notify_one();
+    if (th.joinable()) th.join();
+  }
 };
 
 // The current thread's JNIEnv (input callbacks run on the main thread during nDispatch, but
@@ -656,26 +773,40 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env, jclass, jobject view, jint w, jin
     delete s;
     return 0;
   }
-  // Wrap the persistent GPU SkCanvas once (begin_frame clears it each tick, same handle).
-  const jlong ch = s->gpu_begin(w, h);
+  // Deferred present (UI-thread/RenderThread split): when ACL_PRESENT_RT is set, the present-root
+  // records into an SkPicture replayed on a dedicated RenderThread that owns all GrContext work, so
+  // the UI thread does none (GrDirectContext is single-threaded). Otherwise, the immediate path wraps
+  // the persistent GPU SkCanvas here (begin_frame clears it each tick, same handle) and the
+  // present-root RecordingCanvas draws straight onto it.
+  s->deferred = std::getenv("ACL_PRESENT_RT") != nullptr;
+  const jlong ch = s->deferred ? 1 : s->gpu_begin(w, h);  // deferred: device inits on the RT's 1st frame
   if (ch != 0) {
-    // Compose paints via Canvas.drawRenderNode, which requires an isHardwareAccelerated()
-    // RecordingCanvas — a plain Canvas throws. So back the frame with a "present-root" RenderNode:
-    // graphics_jni maps that node's RecordingCanvas onto the GPU SkCanvas (ch), so its draws land
-    // immediately AND Compose's RenderNode layers replay through it. Classic Views also draw fine
-    // (RecordingCanvas.drawRect -> BaseRecordingCanvas.nDraw* -> same immediate GPU path).
-    if (auto set_present =
-            reinterpret_cast<void (*)(jlong)>(::dlsym(RTLD_DEFAULT, "acl_graphics_set_present_canvas")))
+    if (s->deferred) {
+      // Enable deferral BEFORE the present-root beginRecording below so its RecordingCanvas records.
+      if (auto set_defer =
+              reinterpret_cast<void (*)(int)>(::dlsym(RTLD_DEFAULT, "acl_graphics_set_present_defer")))
+        set_defer(1);
+      s->rthread = std::make_unique<RenderThread>();
+      s->rthread->start(s);
+      log::i(kTag, "PresentDriver.nOpen: deferred present + RenderThread enabled (ACL_PRESENT_RT)");
+    } else if (auto set_present = reinterpret_cast<void (*)(jlong)>(
+                   ::dlsym(RTLD_DEFAULT, "acl_graphics_set_present_canvas"))) {
+      // Compose paints via Canvas.drawRenderNode, which requires an isHardwareAccelerated()
+      // RecordingCanvas — a plain Canvas throws. So back the frame with a "present-root" RenderNode:
+      // graphics_jni maps that node's RecordingCanvas onto the GPU SkCanvas (ch), so its draws land
+      // immediately AND Compose's RenderNode layers replay through it.
       set_present(ch);
+    }
     // Register acl's bionic-%fs RunScope wrappers for the WebView AwDrawFn Vulkan functor into
     // graphics_jni (webview_functor.cpp), so its SkDrawable can drive Chromium's init_vk/draw_vk/
     // post_draw_vk. Once per process; graphics_jni is loaded by here.
     if (static bool wv_hooked = false; !wv_hooked) {
-      if (auto set_hooks = reinterpret_cast<void (*)(void (*)(int, void*), void (*)(int, void*),
-                                                     void (*)(int, void*))>(
-              ::dlsym(RTLD_DEFAULT, "acl_graphics_set_webview_vk_hooks"))) {
-        set_hooks(&acl_webview_functor_vk_init, &acl_webview_functor_vk_draw,
-                  &acl_webview_functor_vk_post_draw);
+      if (auto set_hooks =
+              reinterpret_cast<void (*)(void (*)(int, void*), void (*)(int, void*),
+                                        void (*)(int, void*), void (*)(int, void*))>(
+                  ::dlsym(RTLD_DEFAULT, "acl_graphics_set_webview_vk_hooks"))) {
+        set_hooks(&acl_webview_functor_vk_sync, &acl_webview_functor_vk_init,
+                  &acl_webview_functor_vk_draw, &acl_webview_functor_vk_post_draw);
         wv_hooked = true;
       }
     }
@@ -750,6 +881,30 @@ void JNICALL PresentDriver_nMaybeDeliverVsync(JNIEnv* env, jclass, jlong sp) {
   if (diag < 8) { log::i(kTag, "PresentDriver.vsync: ready={} pending={}", rdy, pend); ++diag; }
   if (rdy && pend) s->deliver_vsync(env, static_cast<jlong>(s->presenter->frame_time_ns()));
 }
+// Build a gfx::DmabufFrame from a produced PresentDmabuf and present it; logs + bumps the presented-
+// frame count. Shared by the immediate path and the deferred RenderThread path. Returns false if the
+// dma-buf is invalid or submit failed (caller keepalives).
+static bool present_submit(PresentSession* s, const PresentDmabuf& f, int slot) {
+  if (f.fd < 0) return false;
+  gfx::DmabufFrame fr{};
+  fr.fd = f.fd;
+  fr.width = f.width;
+  fr.height = f.height;
+  fr.plane_count = f.plane_count;
+  for (std::uint32_t i = 0; i < f.plane_count && i < 4; ++i) {
+    fr.planes[i].offset = f.offsets[i];
+    fr.planes[i].stride = f.strides[i];
+  }
+  fr.modifier = f.modifier;
+  fr.drm_format = f.drm_format;
+  fr.modifier_tiled = f.modifier != 0;
+  if (!s->presenter->submit(fr, slot)) return false;
+  if (s->frames == 0 || s->frames % 60 == 0)
+    log::i(kTag, "PresentDriver: frame {} presented ({}x{}) — looper-driven", s->frames, f.width,
+           f.height);
+  ++s->frames;
+  return true;
+}
 void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
   if (s == nullptr || !s->presenter) return;
@@ -819,7 +974,23 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
       }
     }
   }
-  if (s->gpu_begin(s->w, s->h) == 0) {  // clear + re-arm
+  // Deferred one-frame-behind pipeline: if the RenderThread is still rendering the previous frame,
+  // skip this tick WITHOUT blocking — the Looper keeps ticking so the Choreographer drives the
+  // WebView renderer's begin-frames while the RT waits on it (the crux of the fix). When the RT is
+  // idle, present its just-completed frame, then record + post the next one below.
+  if (s->deferred) {
+    if (s->rthread->busy()) {
+      s->presenter->keepalive();
+      return;
+    }
+    PresentDmabuf done{};
+    int done_slot = -1;
+    if (s->rthread->take_completed(&done, &done_slot) && !present_submit(s, done, done_slot))
+      s->presenter->keepalive();
+  }
+  // Immediate mode clears + re-arms the GPU canvas on this thread; deferred mode does gpu_begin on the
+  // RenderThread (below), so the UI thread touches no GrContext.
+  if (!s->deferred && s->gpu_begin(s->w, s->h) == 0) {  // clear + re-arm
     log::w(kTag, "PresentDriver.nTraverse: gpu_begin=0");
     s->presenter->keepalive();  // no submit this frame — keep the vsync loop ticking
     return;
@@ -863,6 +1034,11 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   static auto force_record = reinterpret_cast<void (*)(int)>(
       ::dlsym(RTLD_DEFAULT, "acl_graphics_set_force_record"));
   if (force_record != nullptr) force_record(1);
+  // Deferred present (ACL_PRESENT_RT): (re)begin the present-root picture recording for this frame,
+  // just before View.draw records into s->canvas. No-op in the default immediate path.
+  static auto begin_record = reinterpret_cast<void (*)(int, int)>(
+      ::dlsym(RTLD_DEFAULT, "acl_graphics_present_begin_record"));
+  if (begin_record != nullptr) begin_record(s->w, s->h);
   if (s->m_draw != nullptr && s->canvas != nullptr) env->CallVoidMethod(s->view, s->m_draw, s->canvas);
   if (env->ExceptionCheck() == JNI_TRUE) {
     env->ExceptionDescribe(); env->ExceptionClear();
@@ -892,6 +1068,11 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   if (overlay_present != nullptr && s->canvas != nullptr)
     env->CallStaticVoidMethod(overlay_cls, overlay_present, s->canvas, s->w, s->h);
   if (force_record != nullptr) force_record(0);  // whole frame drawn; re-arm caching for the next
+  // Deferred present (ACL_PRESENT_RT): finalize the present-root picture (View.draw + overlays) so
+  // gpu_end can replay it onto the GPU canvas. No-op in the default immediate path.
+  static auto finish_record =
+      reinterpret_cast<void (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_present_finish_record"));
+  if (finish_record != nullptr) finish_record();
   if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
   if (ov_diag) {
     const std::uint64_t d = drawops ? drawops() - ops_pre_overlay : 0;
@@ -917,36 +1098,40 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     s->presenter->keepalive();  // no free ping-pong buffer — keep ticking until one releases
     return;
   }
+  if (s->deferred) {
+    // Snapshot the just-recorded picture and hand it to the RenderThread; it renders into `bufidx`
+    // (gpu_begin clear + replay + flush/copy, incl. the WebView functor) while this UI thread returns
+    // and keeps the Looper/Choreographer running. The result is presented next idle tick above.
+    static auto take_for_render =
+        reinterpret_cast<void (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_present_take_for_render"));
+    if (take_for_render != nullptr) take_for_render();
+    if (!s->rt_bootstrapped) {
+      // First frame: render synchronously and submit inline. keepalive() is a no-op until a frame has
+      // been shown (last_slot_<0), so the async path can't arm the vsync loop from cold — bootstrap it.
+      PresentDmabuf f0{};
+      if (s->rthread->render_sync(s->w, s->h, bufidx, &f0) && present_submit(s, f0, bufidx))
+        s->rt_bootstrapped = true;
+      else
+        s->presenter->keepalive();
+      return;
+    }
+    s->rthread->post(s->w, s->h, bufidx);
+    s->presenter->keepalive();  // the RT presents async — keep the vsync loop ticking so a later
+    return;                     // idle tick picks up the completed frame and submits it
+  }
   PresentDmabuf f{};
-  if (!s->gpu_end(bufidx, &f) || f.fd < 0) {
+  if (!s->gpu_end(bufidx, &f)) {  // immediate: replay-less flush/copy inline on this thread
     if (diag) log::w(kTag, "PresentDriver.nTraverse: gpu_end failed");
     s->presenter->keepalive();  // GPU end-frame failed — keep ticking, retry next frame
     return;
   }
-  gfx::DmabufFrame fr{};
-  fr.fd = f.fd;
-  fr.width = f.width;
-  fr.height = f.height;
-  fr.plane_count = f.plane_count;
-  for (std::uint32_t i = 0; i < f.plane_count && i < 4; ++i) {
-    fr.planes[i].offset = f.offsets[i];
-    fr.planes[i].stride = f.strides[i];
-  }
-  fr.modifier = f.modifier;
-  fr.drm_format = f.drm_format;
-  fr.modifier_tiled = f.modifier != 0;
-  if (s->presenter->submit(fr)) {
-    if (s->frames == 0 || s->frames % 60 == 0)
-      log::i(kTag, "PresentDriver: frame {} presented ({}x{}) — looper-driven, Compose composed",
-             s->frames, f.width, f.height);
-    ++s->frames;
-  } else {
+  if (!present_submit(s, f, bufidx))
     s->presenter->keepalive();  // submit failed (buffer build) — keep the vsync loop ticking
-  }
 }
 void JNICALL PresentDriver_nClose(JNIEnv* env, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
   if (s == nullptr) return;
+  if (s->rthread) { s->rthread->stop(); s->rthread.reset(); }  // join the GPU thread before teardown
   s->presenter.reset();  // tears down the surface + disconnects
   if (s->view != nullptr) env->DeleteGlobalRef(s->view);
   if (s->canvas != nullptr) env->DeleteGlobalRef(s->canvas);

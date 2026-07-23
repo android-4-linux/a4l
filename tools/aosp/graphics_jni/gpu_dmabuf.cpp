@@ -71,7 +71,9 @@ struct Target {
   bool allocated = false;
 };
 
-constexpr int kBuffers = 2;
+// 3 ping-pong dma-buf targets: the deferred RenderThread pipeline needs one displayed by the
+// compositor, one being rendered, and one in transit — 2 starves (buffer collisions -> flicker).
+constexpr int kBuffers = 3;
 
 struct Gpu {
   VkInstance instance = VK_NULL_HANDLE;
@@ -521,11 +523,16 @@ static void maybe_dump_frame() {
   std::fclose(f);
 }
 
+// Deferred-present replay: when the UI thread records the frame into an SkPicture (ACL_PRESENT_RT),
+// replay it onto the GPU canvas here, just before flush. No-op in the default immediate path.
+extern "C" void acl_graphics_present_replay_onto(void* sk_canvas);
+
 extern "C" bool acl_graphics_gpu_end_frame(int buffer_index, AclDmabuf* out) {
   if (out == nullptr || !g.ready || !g.opt) return false;
   if (buffer_index < 0 || buffer_index >= kBuffers) buffer_index = 0;
   Target& t = g.targets[buffer_index];
   if (!t.allocated && !make_target(t, g.w, g.h)) return false;
+  acl_graphics_present_replay_onto(g.opt->getCanvas());
   GrBackendSurfaceMutableState toSrc(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g.qfam);
   g.opt->flush(GrFlushInfo{}, &toSrc);
   g.gr->submit(/*syncCpu=*/true);

@@ -12,6 +12,12 @@
 extern "C" {
 // Returns 1 once the bionic functor VK exports are resolved (the plat_support lib is loaded), else 0.
 int acl_webview_functor_vk_ready();
+// on_sync drives Chromium's AwDrawFnImpl::OnSync -> RenderThreadManager::CommitFrameOnRT, the per-frame
+// pull that moves the produced ChildFrame from the UI-side queue to the RenderThread queue that
+// HardwareRenderer::Draw consumes. MUST run (on the RT) before draw_vk each frame, or the WebView draws
+// an empty child_frame_ (blank content). The GL path got this via hwui's on_sync/draw_gl; the Vulkan
+// present path must call it explicitly.
+void acl_webview_functor_vk_sync(int functor, void* on_sync_params);
 void acl_webview_functor_vk_init(int functor, void* init_vk_params);
 void acl_webview_functor_vk_draw(int functor, void* draw_vk_params);
 void acl_webview_functor_vk_post_draw(int functor, void* post_draw_vk_params);

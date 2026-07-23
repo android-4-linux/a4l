@@ -101,6 +101,24 @@ index 82ffe160c4b23..493afcd000aea 100644
    }
  
    // Registrations should use monotonically increasing frame tokens.
+diff --git a/gpu/command_buffer/service/shared_image/external_vk_image_backing.cc b/gpu/command_buffer/service/shared_image/external_vk_image_backing.cc
+index f8db3498cbecf..6256ba69e6ade 100644
+--- a/gpu/command_buffer/service/shared_image/external_vk_image_backing.cc
++++ b/gpu/command_buffer/service/shared_image/external_vk_image_backing.cc
+@@ -765,7 +765,12 @@ std::unique_ptr<SkiaImageRepresentation> ExternalVkImageBacking::ProduceSkia(
+     scoped_refptr<SharedContextState> context_state) {
+   // This backing type is only used when vulkan is enabled, so SkiaRenderer
+   // should also be using Vulkan.
+-  DCHECK_EQ(context_state_, context_state);
++  // acl: with the WebView display compositor on a separate thread (acl's RenderThread), raster and
++  // display use two SharedContextStates on the SAME acl-provided VkDevice, so the tile backing
++  // (created on the raster context) is produced for the display context here — a mismatch this DCHECK
++  // did not anticipate. The representation reads via the backing's own context_state_ and the VkImage
++  // is device-level shareable, so allow it. (void) keeps the param used. TODO: unify the contexts.
++  (void)context_state;
+   DCHECK(context_state->GrContextIsVulkan());
+   return std::make_unique<ExternalVkImageSkiaImageRepresentation>(manager, this,
+                                                                   tracker);
 diff --git a/gpu/command_buffer/service/shared_image/external_vk_image_backing_factory.cc b/gpu/command_buffer/service/shared_image/external_vk_image_backing_factory.cc
 index 828085a80dcdd..2f9462002bbc1 100644
 --- a/gpu/command_buffer/service/shared_image/external_vk_image_backing_factory.cc

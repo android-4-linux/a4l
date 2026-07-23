@@ -3078,6 +3078,107 @@ extern "C" std::uint64_t acl_graphics_profile_recstats() {
 
 extern "C" void acl_graphics_set_present_canvas(jlong c) { g_present_gpu_canvas = c; }
 
+// ── Deferred present (Step 1 of the UI-thread/RenderThread split) ─────────────────────────────
+// Normally the present-root RecordingCanvas draws IMMEDIATELY onto the GPU SkCanvas, so View.draw
+// does GrContext work on the present thread — which cannot be moved off it (GrDirectContext is
+// single-threaded). When deferral is on, the present-root instead records into an SkPicture on the
+// UI thread (no GrContext), and the picture is REPLAYED onto the GPU canvas at gpu_end (eventually on
+// a dedicated RenderThread). This is the enabler for the WebView producer/consumer thread split; see
+// webview-renderthread-fix. Env-gated (ACL_PRESENT_RT) so the immediate path stays the default.
+std::atomic<int> g_present_defer{0};
+SkPictureRecorder* g_present_recorder = nullptr;  // owns the present-root recording canvas (UI thread)
+SkCanvas* g_present_record_canvas = nullptr;      // stable across begin/finish/begin
+// Double-buffered picture handoff for the one-frame-behind RenderThread: the UI thread records into
+// `ready`; at post time (still UI thread) it snapshots ready->rendering; the RenderThread replays
+// `rendering`. Pictures from finishRecordingAsPicture are immutable, so the RT only reads immutable
+// data; the sk_sp swaps are guarded by g_present_pic_mu. (Single-thread Step 1/2 use the same path;
+// take is called right before replay there.)
+sk_sp<SkPicture> g_present_picture_ready;
+sk_sp<SkPicture> g_present_picture_held;       // one-frame-lag: the frame recorded LAST tick
+sk_sp<SkPicture> g_present_picture_rendering;
+// WebView functors can't be recorded into the picture: an SkDrawable is snapshotted via its onDraw
+// (a no-op for AclVkFunctorDrawable — only onSnapGpuDrawHandler does GPU work), so the GPU secondary-CB
+// path is lost. Instead capture each functor's transform+clip at record time and draw it DIRECTLY onto
+// the GPU canvas at replay (where the snap handler fires). Same ready/rendering double-buffer as the
+// picture.
+struct PresentFunctor {
+  int functor;
+  SkMatrix matrix;
+  SkIRect clip;
+};
+std::vector<PresentFunctor> g_present_functors_ready;
+std::vector<PresentFunctor> g_present_functors_held;
+std::vector<PresentFunctor> g_present_functors_rendering;
+std::mutex g_present_pic_mu;
+extern "C" bool acl_graphics_draw_webview_functor(void* sk_canvas, int functor);
+extern "C" void acl_graphics_set_present_defer(int on) {
+  g_present_defer.store(on, std::memory_order_relaxed);
+}
+// Called each frame before View.draw (UI thread): (re)begin recording. No-op unless deferring.
+extern "C" void acl_graphics_present_begin_record(int w, int h) {
+  if (!g_present_defer.load(std::memory_order_relaxed) || g_present_recorder == nullptr) return;
+  g_present_recorder->beginRecording(SkRect::MakeIWH(w > 0 ? w : 1, h > 0 ? h : 1));
+  std::lock_guard<std::mutex> lk(g_present_pic_mu);
+  g_present_functors_ready.clear();
+}
+// Capture a WebView functor's placement during View.draw (UI thread), so replay can draw it directly
+// onto the GPU canvas. `sk_canvas` is the present recorder canvas at the WebView's position.
+extern "C" void acl_graphics_present_record_functor(void* sk_canvas, int functor) {
+  auto* c = reinterpret_cast<SkCanvas*>(sk_canvas);
+  if (c == nullptr) return;
+  SkIRect clip = c->getDeviceClipBounds();
+  if (clip.isEmpty()) clip = SkIRect::MakeWH(c->imageInfo().width(), c->imageInfo().height());
+  std::lock_guard<std::mutex> lk(g_present_pic_mu);
+  // Dedup by functor handle: the view tree may be drawn more than once per frame (force-record +
+  // overlay passes), but each functor must be drawn exactly ONCE per replay — a second draw_vk before
+  // the first's post_draw_vk trips AwDrawFnImpl's !scoped_secondary_cb_draw_ DCHECK. Keep the latest.
+  for (PresentFunctor& pf : g_present_functors_ready) {
+    if (pf.functor == functor) {
+      pf.matrix = c->getTotalMatrix();
+      pf.clip = clip;
+      return;
+    }
+  }
+  g_present_functors_ready.push_back({functor, c->getTotalMatrix(), clip});
+}
+// Called each frame after overlays (UI thread): finalize the picture into `ready`.
+extern "C" void acl_graphics_present_finish_record() {
+  if (!g_present_defer.load(std::memory_order_relaxed) || g_present_recorder == nullptr) return;
+  sk_sp<SkPicture> pic = g_present_recorder->finishRecordingAsPicture();
+  std::lock_guard<std::mutex> lk(g_present_pic_mu);
+  g_present_picture_ready = std::move(pic);
+}
+// Snapshot ready->rendering, on the UI thread at RenderThread post time (Step 3), or just before
+// replay (Step 1/2 synchronous). Hands the current frame's immutable picture to the RT.
+extern "C" void acl_graphics_present_take_for_render() {
+  std::lock_guard<std::mutex> lk(g_present_pic_mu);
+  g_present_picture_rendering = g_present_picture_ready;
+  g_present_functors_rendering = g_present_functors_ready;
+}
+// Called from gpu_end_frame (RenderThread, before flush): replay the taken present picture, then draw
+// each WebView functor directly onto the GPU canvas (so its snap handler fires — see PresentFunctor).
+extern "C" void acl_graphics_present_replay_onto(void* sk_canvas) {
+  if (!g_present_defer.load(std::memory_order_relaxed)) return;
+  sk_sp<SkPicture> pic;
+  std::vector<PresentFunctor> functors;
+  {
+    std::lock_guard<std::mutex> lk(g_present_pic_mu);
+    pic = g_present_picture_rendering;
+    functors = g_present_functors_rendering;
+  }
+  auto* c = reinterpret_cast<SkCanvas*>(sk_canvas);
+  if (c == nullptr) return;
+  if (pic) c->drawPicture(pic);
+  for (const PresentFunctor& pf : functors) {
+    c->save();
+    c->resetMatrix();                          // device space for the clip
+    c->clipRect(SkRect::Make(pf.clip));
+    c->setMatrix(pf.matrix);                    // the WebView's transform at record time
+    acl_graphics_draw_webview_functor(c, pf.functor);  // fires onSnapGpuDrawHandler on the GPU canvas
+    c->restore();
+  }
+}
+
 bool is_recording_canvas(void* p) {
   std::lock_guard<std::mutex> lk(g_rec_mu);
   return g_recorders.find(reinterpret_cast<SkCanvas*>(p)) != g_recorders.end();
@@ -3152,7 +3253,21 @@ void draw_rendernode(SkCanvas* c, AclRenderNode* n) {
 // SkCanvas (immediate); any other node gets a fresh SkPictureRecorder (records into a picture).
 jlong RecordingCanvas_nCreate(jlong node, jint w, jint h) {
   auto* n = reinterpret_cast<AclRenderNode*>(node);
-  if (n != nullptr && n->is_present_root && g_present_gpu_canvas != 0) return g_present_gpu_canvas;
+  if (n != nullptr && n->is_present_root) {
+    // Deferred present: record into a picture (replayed at gpu_end). The recorder is created once
+    // and its canvas ptr is stable across begin/finish; nTraverse drives begin/finish each frame.
+    if (g_present_defer.load(std::memory_order_relaxed)) {
+      if (g_present_recorder == nullptr) {
+        g_present_recorder = new SkPictureRecorder();
+        g_present_record_canvas =
+            g_present_recorder->beginRecording(SkRect::MakeIWH(w > 0 ? w : 1, h > 0 ? h : 1));
+        std::lock_guard<std::mutex> lk(g_rec_mu);
+        g_recorders[g_present_record_canvas] = g_present_recorder;
+      }
+      return reinterpret_cast<jlong>(g_present_record_canvas);
+    }
+    if (g_present_gpu_canvas != 0) return g_present_gpu_canvas;
+  }
   g_rn_begins.fetch_add(1, std::memory_order_relaxed);
   auto* rec = new SkPictureRecorder();
   SkCanvas* c = rec->beginRecording(SkRect::MakeIWH(w > 0 ? w : 1, h > 0 ? h : 1));
@@ -3200,9 +3315,14 @@ void RecordingCanvas_nDrawRipple(jlong, jlong, jlong, jlong, jlong, jlong, jlong
 // (webview_functor.cpp): draw an SkDrawable whose Skia GPU flush hands Chromium the frame's secondary
 // command buffer to record into. No-op if the VK seam isn't wired (GL mode / hooks unset) — the WebView
 // area is then left unpainted rather than crashing.
-extern "C" bool acl_graphics_draw_webview_functor(void* sk_canvas, int functor);
+extern "C" void acl_graphics_present_record_functor(void* sk_canvas, int functor);
 void RecordingCanvas_nDrawWebViewFunctor(jlong canvas, jint functor) {
-  acl_graphics_draw_webview_functor(reinterpret_cast<void*>(canvas), static_cast<int>(functor));
+  // Deferred present: the functor SkDrawable would be lost in the picture snapshot (its onDraw is a
+  // no-op), so capture its placement now and draw it directly onto the GPU canvas at replay.
+  if (g_present_defer.load(std::memory_order_relaxed))
+    acl_graphics_present_record_functor(reinterpret_cast<void*>(canvas), static_cast<int>(functor));
+  else
+    acl_graphics_draw_webview_functor(reinterpret_cast<void*>(canvas), static_cast<int>(functor));
 }
 // nPunchHole (SurfaceView transparency) is @FastNative on BaseRecordingCanvas -> keep env/jclass.
 void BaseRecordingCanvas_nPunchHole(JNIEnv*, jclass, jlong, jfloat, jfloat, jfloat, jfloat, jfloat, jfloat) {}

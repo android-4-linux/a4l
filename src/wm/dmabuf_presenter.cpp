@@ -290,10 +290,13 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   // Present the produced dma-buf into its free ping-pong slot: build the wl_buffer once, arm
   // the next wl_surface.frame tick, attach + damage + commit + flush. Mirrors one iteration of
   // present_loop_dynamic, minus the poll (the Looper owns the wait).
-  bool submit(const gfx::DmabufFrame& frame) noexcept override {
+  bool submit(const gfx::DmabufFrame& frame, int slot = -1) noexcept override {
     if (frame.fd < 0) return false;
-    const int s = free_slot();
-    if (s < 0) return false;
+    // Pin to the slot the frame was rendered into so the wl_buffer↔dma-buf pairing is fixed (each
+    // slot's wl_buffer is permanently bound to its first fd). If it is somehow still held by the
+    // compositor, drop the frame rather than present a busy buffer.
+    const int s = (slot >= 0 && slot < kSlots) ? slot : free_slot();
+    if (s < 0 || slots_[s].busy) return false;
     if (!slots_[s].built && !build_slot(s, frame)) return false;
     if (frame_index_ == 0)
       log::i(kTag, "dmabuf present(A): {}x{} {} modifier=0x{:x} {} plane(s), {} buffers",
@@ -870,7 +873,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
 
   // Ping-pong buffers for the animated loop. kSlots must match the producer's dma-buf
   // image count (gpu_dmabuf kBuffers). Each BufferH has a stable address (array member).
-  static constexpr int kSlots = 2;
+  // 3 (triple-buffer): the deferred RenderThread pipeline needs a third slot in transit or 2 starves.
+  static constexpr int kSlots = 3;
   struct Slot {
     BufferH handler;
     bool busy = false;

@@ -15,6 +15,7 @@
 namespace {
 constexpr const char* kTag = "acl.webview.vk";
 
+void (*g_on_sync)(int, void*) = nullptr;
 void (*g_init_vk)(int, void*) = nullptr;
 void (*g_draw_vk)(int, void*) = nullptr;
 void (*g_post_draw_vk)(int, void*) = nullptr;
@@ -32,6 +33,7 @@ void resolve() {
   std::string err;
   void* h = rt->load((std::string(sysroot) + "/libwebviewchromium_plat_support.so").c_str(), &err);
   if (h == nullptr) { acl::log::w(kTag, "load plat_support failed: {}", err); return; }
+  g_on_sync = reinterpret_cast<void (*)(int, void*)>(rt->symbol(h, "acl_webview_functor_on_sync"));
   g_init_vk = reinterpret_cast<void (*)(int, void*)>(rt->symbol(h, "acl_webview_functor_init_vk"));
   g_draw_vk = reinterpret_cast<void (*)(int, void*)>(rt->symbol(h, "acl_webview_functor_draw_vk"));
   g_post_draw_vk = reinterpret_cast<void (*)(int, void*)>(rt->symbol(h, "acl_webview_functor_post_draw_vk"));
@@ -59,6 +61,11 @@ extern "C" {
 int acl_webview_functor_vk_ready() {
   std::call_once(g_once, resolve);
   return g_ok ? 1 : 0;
+}
+
+void acl_webview_functor_vk_sync(int functor, void* on_sync_params) {
+  std::call_once(g_once, resolve);
+  call_bionic(g_on_sync, functor, on_sync_params);
 }
 
 void acl_webview_functor_vk_init(int functor, void* init_vk_params) {

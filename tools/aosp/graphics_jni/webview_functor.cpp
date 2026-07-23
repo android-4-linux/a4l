@@ -45,6 +45,11 @@ struct AwDrawFn_InitVkParams {
   VkPhysicalDeviceFeatures2* device_features_2;
 };
 
+struct AwDrawFn_OnSyncParams {
+  int version;
+  bool apply_force_dark;
+};
+
 struct AwDrawFn_DrawVkParams {
   int version;
   int width;
@@ -78,6 +83,7 @@ struct AwDrawFn_PostDrawVkParams {
 
 // The acl bionic-%fs RunScope wrappers (src/ndk/webview_functor_vk.cpp), registered at boot by
 // jvm_vm via acl_graphics_set_webview_vk_hooks. Null until then.
+void (*g_on_sync)(int, void*) = nullptr;
 void (*g_init_vk)(int, void*) = nullptr;
 void (*g_draw_vk)(int, void*) = nullptr;
 void (*g_post_draw_vk)(int, void*) = nullptr;
@@ -158,6 +164,15 @@ class AclVkFunctorHandler : public SkDrawable::GpuDrawHandler {
     if (!info.getVkDrawableInfo(&vk)) return;
     if (!ensure_init_vk(functor_) || g_draw_vk == nullptr) return;
 
+    // Sync BEFORE draw: AwDrawFnImpl::OnSync -> RenderThreadManager::CommitFrameOnRT pulls the produced
+    // ChildFrame from the UI queue to the RenderThread queue that HardwareRenderer::Draw (inside
+    // draw_vk) consumes. Without this the RT draws an empty child_frame_ -> blank web content. hwui
+    // drove this via on_sync/draw_gl; the Vulkan present path must call it here, on the RT, per frame.
+    if (g_on_sync != nullptr) {
+      AwDrawFn_OnSyncParams sp{kAwDrawFnVersion, /*apply_force_dark=*/false};
+      g_on_sync(functor_, &sp);
+    }
+
     AwDrawFn_DrawVkParams p{};
     p.version = kAwDrawFnVersion;
     p.width = info_.width();
@@ -224,9 +239,11 @@ class AclVkFunctorDrawable : public SkDrawable {
 
 // Registered at boot by jvm_vm (which holds the acl-side RunScope wrappers). Wiring acl->graphics_jni
 // like acl_graphics_set_present_canvas.
-extern "C" void acl_graphics_set_webview_vk_hooks(void (*init_vk)(int, void*),
+extern "C" void acl_graphics_set_webview_vk_hooks(void (*on_sync)(int, void*),
+                                                  void (*init_vk)(int, void*),
                                                   void (*draw_vk)(int, void*),
                                                   void (*post_draw_vk)(int, void*)) {
+  g_on_sync = on_sync;
   g_init_vk = init_vk;
   g_draw_vk = draw_vk;
   g_post_draw_vk = post_draw_vk;

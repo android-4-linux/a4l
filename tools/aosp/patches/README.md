@@ -41,7 +41,7 @@ rebuilt. The CPU-render path (S3b) is unaffected.
 Applies to the **Chromium** checkout (`/mnt/dev/chromium/src`, the `system_webview_apk` build), not
 AOSP. Lets Chromium's WebView `AwDrawFn` **Vulkan functor** composite directly into acl's
 Ganesh-Vulkan present frame (direct mode: viz + functor share acl's `VkDevice`, no AHardwareBuffer
-round-trip). Four changes:
+round-trip). Seven changes across the render, GPU-raster, shared-image, and shared-memory paths:
 
 - `aw_draw_fn_impl.cc` — `CreateDrawContext` derives the `SkColorType` from `params->format` instead
   of hardcoded `MakeN32Premul` (acl's present target is **BGRA**, the Wayland/DRM-native byte order;
@@ -54,6 +54,26 @@ round-trip). Four changes:
   (`VK_KHR_surface`/`VK_KHR_android_surface`) become optional (required only when `using_surface`);
   acl renders offscreen and host Mesa exposes no Android WSI. Pair with `--disable-vulkan-surface`.
 - `third_party/ashmem/ashmem-dev.c` — memfd-backed `ASharedMemory` (host has no `/dev/ashmem`).
+- `gpu/command_buffer/service/shared_image/external_vk_image_backing_factory.cc` — `IsSupported`/
+  `CreateSharedImage` allow **cross-thread** (`thread_safe`) images. On host Mesa the AHardwareBuffer
+  factory is unavailable, so `ExternalVkImageBacking` is the *only* Vulkan backing — and WebView's
+  GPU-raster tiles are cross-thread (rastered on a worker, read by the display compositor). The
+  upstream rejection left tile content with no factory, so map tiles / page content never composited
+  while solid backgrounds did. The backing already syncs GPU access with `VkSemaphore`s across
+  Begin/EndAccess, covering the produce-then-consume tile pattern.
+- `gpu/command_buffer/service/shared_image/external_vk_image_backing.cc` — `ProduceSkia` relaxes the
+  `DCHECK_EQ(context_state_, context_state)`. With the display compositor on acl's separate
+  RenderThread, raster and display use two `SharedContextState`s on the **same** acl `VkDevice`, so a
+  tile backing created on the raster context is produced for the display context here — a mismatch the
+  DCHECK never anticipated. The representation reads via the backing's own `context_state_` and the
+  `VkImage` is device-level shareable, so it is safe. (Pairs with the factory change above; together
+  they are what make tile pixels reach the composite.)
+- `cc/trees/presentation_time_callback_buffer.cc` — bound the callback buffer instead of the
+  `DCHECK_LE(size, kMaxBufferSize)` that fired **FATAL at 61 > 60** and killed the Compositor thread
+  after ~60 frames. In the Vulkan `AwDrawFn` path presentation feedback is never delivered back
+  (`AwGLSurface::SwapBuffers`, which arms it, is a GL-path mechanism the Vulkan output device
+  bypasses), so `PopPendingCallbacks` never runs and the buffer grew unbounded. Drop the oldest stale
+  entries; presentation-time callbacks don't drive rAF/rendering, so static content is unaffected.
 
 Runtime (see `tools/run-apk.sh`): `ACL_WEBVIEW_VULKAN=1` auto-adds `--webview-draw-functor-uses-vulkan
 --disable-vulkan-surface`. On a multi-ICD host, pin the loader to the GPU's ICD via
