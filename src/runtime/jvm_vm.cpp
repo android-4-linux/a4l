@@ -787,7 +787,7 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env, jclass, jobject view, jint w, jin
 
   const wm::InputCallback input = [s](const wm::InputEvent& ev) { present_deliver_input(s, ev); };
   s->presenter = wm::presenter_open(w, h, t.empty() ? "acl" : t, a.empty() ? "org.acl.app" : a,
-                                    input, /*want_ime=*/false);
+                                    input, /*want_ime=*/true);
   if (!s->presenter) {
     log::w(kTag, "PresentDriver.nOpen: presenter_open failed");
     if (s->view != nullptr) env->DeleteGlobalRef(s->view);
@@ -877,6 +877,12 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env, jclass, jobject view, jint w, jin
 jint JNICALL PresentDriver_nFd(JNIEnv*, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
   return (s != nullptr && s->presenter) ? s->presenter->fd() : -1;
+}
+// IME show/hide from HostBootstrap's InputMethodManager interception (a focused text field). Runs
+// on the looper/present thread (approach A), so it can drive the presenter's text-input directly.
+void JNICALL PresentDriver_nSetImeVisible(JNIEnv*, jclass, jlong sp, jboolean visible) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s != nullptr && s->presenter) s->presenter->set_ime_visible(visible == JNI_TRUE);
 }
 jint JNICALL PresentDriver_nRepeatFd(JNIEnv*, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
@@ -1396,6 +1402,8 @@ void register_present_driver_natives(JNIEnv* env) {
        const_cast<char*>("(Landroid/view/View;IILjava/lang/String;Ljava/lang/String;)J"),
        reinterpret_cast<void*>(PresentDriver_nOpen)},
       {const_cast<char*>("nFd"), const_cast<char*>("(J)I"), reinterpret_cast<void*>(PresentDriver_nFd)},
+      {const_cast<char*>("nSetImeVisible"), const_cast<char*>("(JZ)V"),
+       reinterpret_cast<void*>(PresentDriver_nSetImeVisible)},
       {const_cast<char*>("nRepeatFd"), const_cast<char*>("(J)I"),
        reinterpret_cast<void*>(PresentDriver_nRepeatFd)},
       {const_cast<char*>("nDispatch"), const_cast<char*>("(J)Z"),

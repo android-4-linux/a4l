@@ -34,6 +34,7 @@ public final class PresentDriver {
     // the wm presenter, the GPU begin/end-frame entry points, and the input plumbing.
     private static native long nOpen(View decor, int w, int h, String title, String appId);
     private static native int nFd(long s);              // Wayland connection fd
+    private static native void nSetImeVisible(long s, boolean visible); // show/hide compositor text-input
     private static native int nRepeatFd(long s);         // wl_keyboard repeat timerfd (-1 if none)
     private static native boolean nDispatch(long s);      // drain wl events; false once closed
     private static native void nDispatchRepeat(long s);   // service one key-repeat tick
@@ -57,6 +58,18 @@ public final class PresentDriver {
 
     private static final int CALLBACK_TRAVERSAL = 3;  // Choreographer.CALLBACK_TRAVERSAL (@hide)
 
+    // The current window's native session, for HostBootstrap's InputMethodManager show/hide
+    // interception (a focused text field). Set once the presenter opens, cleared on close. The
+    // present loop runs on the app's main looper, and InputMethodManager.showSoftInput is called on
+    // that same thread, so nSetImeVisible reaches the presenter's text-input on the present thread.
+    static volatile long sSession = 0L;
+
+    /** Show/hide the compositor's on-screen keyboard for the current window (no-op if none open). */
+    public static void setImeVisible(boolean visible) {
+        final long s = sSession;
+        if (s != 0L) nSetImeVisible(s, visible);
+    }
+
     /**
      * Present {@code decor} on the current (main) thread. Blocks until the window closes.
      */
@@ -66,6 +79,7 @@ public final class PresentDriver {
             android.util.Log.w("acl.present", "PresentDriver: nOpen failed (no compositor?)");
             return;
         }
+        sSession = s;  // expose to setImeVisible (InputMethodManager show/hide)
         final Looper looper = Looper.myLooper();
         if (looper == null) { nClose(s); return; }
         final MessageQueue mq = looper.getQueue();
@@ -134,6 +148,7 @@ public final class PresentDriver {
         try {
             Looper.loop();
         } finally {
+            sSession = 0L;  // stop routing IME show/hide to a session about to be freed
             nClose(s);
         }
     }

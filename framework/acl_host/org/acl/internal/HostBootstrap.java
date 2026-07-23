@@ -948,11 +948,40 @@ public final class HostBootstrap {
                 // a Proxy-stubbed IInputMethodManager (all IPCs return false/0/null) into the real ctor,
                 // so getDelegate() is non-null and IME calls no-op. Reflective: createStubInstance is
                 // private static.
+                // acl ALSO routes the real show/hide: wrap the stub's IInputMethodManager so
+                // showSoftInput/hideSoftInput drive the compositor's text-input (text-input-v3) via
+                // PresentDriver.setImeVisible, giving Compose/View text fields a real on-screen
+                // keyboard. Both the direct showSoftInput(view) path and Compose's WindowInsets
+                // requestImeShow → showSoftInput path funnel through mService.showSoftInput, so this
+                // one hook catches both. Every other IPC still no-ops through the original stub.
                 try {
                     java.lang.reflect.Method m = android.view.inputmethod.InputMethodManager.class
                             .getDeclaredMethod("createStubInstance", int.class, android.os.Looper.class);
                     m.setAccessible(true);
-                    return m.invoke(null, 0 /* Display.DEFAULT_DISPLAY */, android.os.Looper.getMainLooper());
+                    Object imm = m.invoke(null, 0 /* Display.DEFAULT_DISPLAY */,
+                            android.os.Looper.getMainLooper());
+                    try {
+                        Class<?> iimm = Class.forName("com.android.internal.view.IInputMethodManager");
+                        java.lang.reflect.Field svcF = android.view.inputmethod.InputMethodManager.class
+                                .getDeclaredField("mService");
+                        svcF.setAccessible(true);
+                        final Object orig = svcF.get(imm);
+                        Object wrapped = java.lang.reflect.Proxy.newProxyInstance(
+                                iimm.getClassLoader(), new Class<?>[]{iimm},
+                                (p, method, a) -> {
+                                    final String mn = method.getName();
+                                    if (mn.startsWith("showSoftInput")) PresentDriver.setImeVisible(true);
+                                    else if (mn.startsWith("hideSoftInput")) PresentDriver.setImeVisible(false);
+                                    // Delegate to the original stub for the return value / its state.
+                                    try {
+                                        return method.invoke(orig, a);
+                                    } catch (java.lang.reflect.InvocationTargetException e) {
+                                        throw e.getCause();
+                                    }
+                                });
+                        svcF.set(imm, wrapped);  // final field; setAccessible bypasses (as elsewhere)
+                    } catch (Throwable ignored) {}
+                    return imm;
                 } catch (Throwable t) {
                     return null;
                 }

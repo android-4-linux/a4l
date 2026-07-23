@@ -232,6 +232,11 @@ class IPresenter {
   virtual void* gl_surface() noexcept { return nullptr; }  // toplevel wl_surface* Mesa renders into
   virtual void arm_present() noexcept {}                   // request wp_presentation feedback for the next commit
   virtual bool wait_configured(int timeout_ms) noexcept { return true; }  // pump until first configure
+
+  // IME: show/hide the compositor's text-input (zwp_text_input_v3) on the toplevel, driven by the
+  // app's android.view.InputMethodManager show/hide (a focused text field). Default no-op for
+  // presenters without a text-input binding. Called on the present/looper thread (approach A).
+  virtual void set_ime_visible(bool /*visible*/) noexcept {}
 };
 
 // Connect to the compositor and create a titled xdg_toplevel, returning a presenter ready for

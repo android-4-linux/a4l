@@ -292,11 +292,41 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     want_ime_ = want_ime;
     max_frames_ = 0;
     if (!setup(title, app_id)) return false;
-    if (ime_bound_) {
-      ti_.SetContentType(wl::ime::ContentHint::kNone, wl::ime::ContentPurpose::kNormal);
-      ti_.Activate();
-    }
+    // Text-input starts INACTIVE: the compositor keyboard is shown only when the app focuses a text
+    // field (InputMethodManager.showSoftInput → set_ime_visible(true)), not always-on. ime_bound_
+    // stays set so set_ime_visible can Activate/Deactivate the bound text_input on demand.
+    // ACL_IME_FORCE_SHOW: diagnostic — force text-input active at open, to isolate the Wayland side
+    // (does the compositor show an OSK on text-input-v3 enable?) from the Android IMM focus gate.
+    if (const char* f = std::getenv("ACL_IME_FORCE_SHOW"); f != nullptr && *f != '\0')
+      set_ime_visible(true);
     return true;
+  }
+
+  // IME show/hide from the app's InputMethodManager (approach A: called on the present/looper
+  // thread, same thread as the wl dispatch — no cross-thread wl_proxy access). Activate() enables
+  // the text_input + commits (content type/surrounding text staged); Deactivate() disables it.
+  void set_ime_visible(bool visible) noexcept override {
+    if (!ime_bound_ || ime_visible_ == visible) return;
+    ime_visible_ = visible;
+    if (visible) {
+      // zwp_text_input_v3: enable → (state) → commit, atomically. The facade defers the actual
+      // enable until the compositor has sent `enter` (surface focused) via want_active_, and re-
+      // issues it from OnEnter — where the presenter must re-push this state (see OnEnter). Enabling
+      // + a content type alone leaves GNOME's IME inert; surrounding text is what engages it.
+      ti_.Activate();
+      push_ime_state();
+    } else {
+      ti_.Deactivate();  // facade issues disable + commit
+    }
+    while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
+    log::i("acl.wm.dmabuf", "IME {} (text-input-v3)", visible ? "show" : "hide");
+  }
+  // Stage the text-input state and commit it. Called after every enable — the explicit Activate()
+  // and the implicit OnEnter re-enable (a v3 enable resets all state, so it must be re-sent).
+  void push_ime_state() noexcept {
+    ti_.SetContentType(wl::ime::ContentHint::kNone, wl::ime::ContentPurpose::kNormal);
+    ti_.SetSurroundingText("", 0, 0);
+    ti_.Commit();
   }
 
   int fd() noexcept override { return wl_display_get_fd(display_.Get()); }
@@ -494,6 +524,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       ti_.Record(ti_name_, ti_ver_);
       ime_bound_ = ti_.Bind(registry_, this, seat_.Get()->GetProxy());
       if (!ime_bound_) log::w(kTag, "dmabuf present: text-input bind failed");
+      else log::i(kTag, "dmabuf present: text-input-v3 bound (IME ready)");
     }
     // v4+ has per-format modifier feedback; v1–v3 use the legacy format list.
     if (feedback_.BoundVersion() >= 4) (void)feedback_.StartDefault(display_.Get());
@@ -694,7 +725,12 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   }
 
   // wl::ime::TextInputListener — the compositor's IME (text-input-v3).
-  void OnEnter() override {}
+  // OnEnter: the surface just gained text-input focus and the facade re-issued enable (if we asked
+  // to be active), which reset all state — so re-push it and commit, or the IME stays inert.
+  void OnEnter() override {
+    log::i("acl.wm.dmabuf", "IME enter (surface focused){}", ime_visible_ ? " — re-pushing state" : "");
+    if (ime_visible_) { push_ime_state(); while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {} }
+  }
   void OnLeave() override {}
   void OnCommitString(std::string_view utf8) override {
     if (input_ != nullptr && *input_) (*input_)(TextInput{std::string(utf8), false, 1});
@@ -951,7 +987,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   bool need_agl_bound_ = false;              // await agl_shell bound_ok before set_background
   double px_ = 0.0, py_ = 0.0;
   bool pointer_down_ = false;
-  bool want_ime_ = false, ime_bound_ = false;
+  bool want_ime_ = false, ime_bound_ = false, ime_visible_ = false;
   int w_ = 0, h_ = 0;
   bool busy_ = false;
   std::uint64_t last_present_ns_ = 0, refresh_ns_ = 0;  // wp_presentation vsync clock
