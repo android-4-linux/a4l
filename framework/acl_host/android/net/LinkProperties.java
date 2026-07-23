@@ -32,6 +32,50 @@ public final class LinkProperties {
         } catch (Throwable ignored) {}
         return out;
     }
+    /**
+     * The host's HTTP proxy, or null when it has none (the common desktop case, and the
+     * truthful answer — apps then connect directly, exactly as host programs do).
+     *
+     * <p>Read from the standard proxy environment (http_proxy, falling back to
+     * https_proxy, with no_proxy as the exclusion list) — the convention every Linux
+     * program honors and which a launched app inherits. A desktop-only proxy set
+     * solely in GNOME's gsettings and never exported to the environment is not seen
+     * here; that is a known fidelity gap rather than a fabricated value.
+     */
+    public ProxyInfo getHttpProxy() {
+        String spec = System.getenv("http_proxy");
+        if (spec == null || spec.isEmpty()) spec = System.getenv("https_proxy");
+        if (spec == null || spec.isEmpty()) spec = System.getenv("HTTP_PROXY");
+        if (spec == null || spec.isEmpty()) return null;
+        try {
+            // Accept both "host:port" and a full "http://user:pass@host:port/" URL.
+            String s = spec.trim();
+            int scheme = s.indexOf("://");
+            if (scheme >= 0) s = s.substring(scheme + 3);
+            int slash = s.indexOf('/');
+            if (slash >= 0) s = s.substring(0, slash);
+            int at = s.lastIndexOf('@');
+            if (at >= 0) s = s.substring(at + 1);          // strip credentials
+            int colon = s.lastIndexOf(':');
+            String h = colon > 0 ? s.substring(0, colon) : s;
+            int p = colon > 0 ? Integer.parseInt(s.substring(colon + 1)) : 80;
+            if (h.isEmpty() || p <= 0) return null;
+
+            String no = System.getenv("no_proxy");
+            if (no == null || no.isEmpty()) no = System.getenv("NO_PROXY");
+            java.util.List<String> excl = new java.util.ArrayList<String>();
+            if (no != null) {
+                for (String e : no.split(",")) {
+                    String t = e.trim();
+                    if (!t.isEmpty()) excl.add(t);
+                }
+            }
+            return ProxyInfo.buildDirectProxy(h, p, excl);
+        } catch (Throwable ignored) {
+            return null;  // malformed proxy spec: behave as if unset
+        }
+    }
+
     public String getDomains() { return null; }
     public String getInterfaceName() { return null; }
     public boolean isPrivateDnsActive() { return false; }

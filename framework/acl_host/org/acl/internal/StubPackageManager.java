@@ -6,6 +6,13 @@
 package org.acl.internal;
 @SuppressWarnings({"unchecked","rawtypes","deprecation"})
 public class StubPackageManager extends android.content.pm.PackageManager {
+  // NOTE: the query*/getInstalled*/getShared* APIs return an EMPTY list when nothing
+  // matches -- that is the platform contract, and callers iterate the result without a
+  // null check (androidx MediaButtonReceiver.getMediaButtonReceiverComponent does
+  // queryBroadcastReceivers(...).size(), which NPEs on null and takes MediaSessionCompat
+  // -- and so every media app -- down with it). Single-object lookups (resolveActivity,
+  // resolveService, getPackageInfo) DO return null/throw when absent, matching the
+  // platform.
   public android.content.pm.PackageInfo getPackageInfo(android.content.pm.VersionedPackage p0, int p1) throws android.content.pm.PackageManager.NameNotFoundException { return null; }
   public android.content.pm.PackageInfo getPackageInfo(java.lang.String p0, int p1) throws android.content.pm.PackageManager.NameNotFoundException { return null; }
   public int checkPermission(java.lang.String p0, java.lang.String p1) { return 0; }
@@ -25,16 +32,16 @@ public class StubPackageManager extends android.content.pm.PackageManager {
   public boolean arePermissionsIndividuallyControlled() { return false; }
   public boolean isWirelessConsentModeEnabled() { return false; }
   public android.content.pm.PermissionGroupInfo getPermissionGroupInfo(java.lang.String p0, int p1) throws android.content.pm.PackageManager.NameNotFoundException { return null; }
-  public java.util.List getAllPermissionGroups(int p0) { return null; }
+  public java.util.List getAllPermissionGroups(int p0) { return java.util.Collections.emptyList(); }
   public android.content.pm.ApplicationInfo getApplicationInfo(java.lang.String p0, int p1) throws android.content.pm.PackageManager.NameNotFoundException { return null; }
   public android.content.pm.ApplicationInfo getApplicationInfoAsUser(java.lang.String p0, int p1, int p2) throws android.content.pm.PackageManager.NameNotFoundException { return null; }
   public android.content.pm.ActivityInfo getActivityInfo(android.content.ComponentName p0, int p1) throws android.content.pm.PackageManager.NameNotFoundException { return null; }
   public android.content.pm.ActivityInfo getReceiverInfo(android.content.ComponentName p0, int p1) throws android.content.pm.PackageManager.NameNotFoundException { return null; }
   public android.content.pm.ServiceInfo getServiceInfo(android.content.ComponentName p0, int p1) throws android.content.pm.PackageManager.NameNotFoundException { return null; }
   public android.content.pm.ProviderInfo getProviderInfo(android.content.ComponentName p0, int p1) throws android.content.pm.PackageManager.NameNotFoundException { return null; }
-  public java.util.List getInstalledPackages(int p0) { return null; }
-  public java.util.List getPackagesHoldingPermissions(java.lang.String[] p0, int p1) { return null; }
-  public java.util.List getInstalledPackagesAsUser(int p0, int p1) { return null; }
+  public java.util.List getInstalledPackages(int p0) { return java.util.Collections.emptyList(); }
+  public java.util.List getPackagesHoldingPermissions(java.lang.String[] p0, int p1) { return java.util.Collections.emptyList(); }
+  public java.util.List getInstalledPackagesAsUser(int p0, int p1) { return java.util.Collections.emptyList(); }
   public boolean isPermissionRevokedByPolicy(java.lang.String p0, java.lang.String p1) { return false; }
   public boolean addPermission(android.content.pm.PermissionInfo p0) { return false; }
   public boolean addPermissionAsync(android.content.pm.PermissionInfo p0) { return false; }
@@ -50,9 +57,9 @@ public class StubPackageManager extends android.content.pm.PackageManager {
   public java.lang.String getNameForUid(int p0) { return null; }
   public java.lang.String[] getNamesForUids(int[] p0) { return null; }
   public int getUidForSharedUser(java.lang.String p0) throws android.content.pm.PackageManager.NameNotFoundException { return 0; }
-  public java.util.List getInstalledApplications(int p0) { return null; }
-  public java.util.List getInstalledApplicationsAsUser(int p0, int p1) { return null; }
-  public java.util.List getInstantApps() { return null; }
+  public java.util.List getInstalledApplications(int p0) { return java.util.Collections.emptyList(); }
+  public java.util.List getInstalledApplicationsAsUser(int p0, int p1) { return java.util.Collections.emptyList(); }
+  public java.util.List getInstantApps() { return java.util.Collections.emptyList(); }
   public android.graphics.drawable.Drawable getInstantAppIcon(java.lang.String p0) { return null; }
   public boolean isInstantApp() { return false; }
   public boolean isInstantApp(java.lang.String p0) { return false; }
@@ -63,8 +70,8 @@ public class StubPackageManager extends android.content.pm.PackageManager {
   public void updateInstantAppCookie(byte[] p0) {  }
   public boolean setInstantAppCookie(byte[] p0) { return false; }
   public java.lang.String[] getSystemSharedLibraryNames() { return null; }
-  public java.util.List getSharedLibraries(int p0) { return null; }
-  public java.util.List getSharedLibrariesAsUser(int p0, int p1) { return null; }
+  public java.util.List getSharedLibraries(int p0) { return java.util.Collections.emptyList(); }
+  public java.util.List getSharedLibrariesAsUser(int p0, int p1) { return java.util.Collections.emptyList(); }
   public java.lang.String getServicesSystemSharedLibraryPackageName() { return null; }
   public java.lang.String getSharedSystemSharedLibraryPackageName() { return null; }
   public android.content.pm.ChangedPackages getChangedPackages(int p0) { return null; }
@@ -73,22 +80,22 @@ public class StubPackageManager extends android.content.pm.PackageManager {
   public boolean hasSystemFeature(java.lang.String p0, int p1) { return false; }
   public android.content.pm.ResolveInfo resolveActivity(android.content.Intent p0, int p1) { return null; }
   public android.content.pm.ResolveInfo resolveActivityAsUser(android.content.Intent p0, int p1, int p2) { return null; }
-  public java.util.List queryIntentActivities(android.content.Intent p0, int p1) { return null; }
-  public java.util.List queryIntentActivitiesAsUser(android.content.Intent p0, int p1, int p2) { return null; }
-  public java.util.List queryIntentActivityOptions(android.content.ComponentName p0, android.content.Intent[] p1, android.content.Intent p2, int p3) { return null; }
-  public java.util.List queryBroadcastReceivers(android.content.Intent p0, int p1) { return null; }
-  public java.util.List queryBroadcastReceiversAsUser(android.content.Intent p0, int p1, int p2) { return null; }
+  public java.util.List queryIntentActivities(android.content.Intent p0, int p1) { return java.util.Collections.emptyList(); }
+  public java.util.List queryIntentActivitiesAsUser(android.content.Intent p0, int p1, int p2) { return java.util.Collections.emptyList(); }
+  public java.util.List queryIntentActivityOptions(android.content.ComponentName p0, android.content.Intent[] p1, android.content.Intent p2, int p3) { return java.util.Collections.emptyList(); }
+  public java.util.List queryBroadcastReceivers(android.content.Intent p0, int p1) { return java.util.Collections.emptyList(); }
+  public java.util.List queryBroadcastReceiversAsUser(android.content.Intent p0, int p1, int p2) { return java.util.Collections.emptyList(); }
   public android.content.pm.ResolveInfo resolveService(android.content.Intent p0, int p1) { return null; }
   public android.content.pm.ResolveInfo resolveServiceAsUser(android.content.Intent p0, int p1, int p2) { return null; }
-  public java.util.List queryIntentServices(android.content.Intent p0, int p1) { return null; }
-  public java.util.List queryIntentServicesAsUser(android.content.Intent p0, int p1, int p2) { return null; }
-  public java.util.List queryIntentContentProvidersAsUser(android.content.Intent p0, int p1, int p2) { return null; }
-  public java.util.List queryIntentContentProviders(android.content.Intent p0, int p1) { return null; }
+  public java.util.List queryIntentServices(android.content.Intent p0, int p1) { return java.util.Collections.emptyList(); }
+  public java.util.List queryIntentServicesAsUser(android.content.Intent p0, int p1, int p2) { return java.util.Collections.emptyList(); }
+  public java.util.List queryIntentContentProvidersAsUser(android.content.Intent p0, int p1, int p2) { return java.util.Collections.emptyList(); }
+  public java.util.List queryIntentContentProviders(android.content.Intent p0, int p1) { return java.util.Collections.emptyList(); }
   public android.content.pm.ProviderInfo resolveContentProvider(java.lang.String p0, int p1) { return null; }
   public android.content.pm.ProviderInfo resolveContentProviderAsUser(java.lang.String p0, int p1, int p2) { return null; }
-  public java.util.List queryContentProviders(java.lang.String p0, int p1, int p2) { return null; }
+  public java.util.List queryContentProviders(java.lang.String p0, int p1, int p2) { return java.util.Collections.emptyList(); }
   public android.content.pm.InstrumentationInfo getInstrumentationInfo(android.content.ComponentName p0, int p1) throws android.content.pm.PackageManager.NameNotFoundException { return null; }
-  public java.util.List queryInstrumentation(java.lang.String p0, int p1) { return null; }
+  public java.util.List queryInstrumentation(java.lang.String p0, int p1) { return java.util.Collections.emptyList(); }
   public android.graphics.drawable.Drawable getDrawable(java.lang.String p0, int p1, android.content.pm.ApplicationInfo p2) { return null; }
   public android.graphics.drawable.Drawable getActivityIcon(android.content.ComponentName p0) throws android.content.pm.PackageManager.NameNotFoundException { return null; }
   public android.graphics.drawable.Drawable getActivityIcon(android.content.Intent p0) throws android.content.pm.PackageManager.NameNotFoundException { return null; }
@@ -123,8 +130,8 @@ public class StubPackageManager extends android.content.pm.PackageManager {
   public void verifyIntentFilter(int p0, int p1, java.util.List p2) {  }
   public int getIntentVerificationStatusAsUser(java.lang.String p0, int p1) { return 0; }
   public boolean updateIntentVerificationStatusAsUser(java.lang.String p0, int p1, int p2) { return false; }
-  public java.util.List getIntentFilterVerifications(java.lang.String p0) { return null; }
-  public java.util.List getAllIntentFilters(java.lang.String p0) { return null; }
+  public java.util.List getIntentFilterVerifications(java.lang.String p0) { return java.util.Collections.emptyList(); }
+  public java.util.List getAllIntentFilters(java.lang.String p0) { return java.util.Collections.emptyList(); }
   public java.lang.String getDefaultBrowserPackageNameAsUser(int p0) { return null; }
   public boolean setDefaultBrowserPackageNameAsUser(java.lang.String p0, int p1) { return false; }
   public void setInstallerPackageName(java.lang.String p0, java.lang.String p1) {  }
@@ -140,7 +147,7 @@ public class StubPackageManager extends android.content.pm.PackageManager {
   public void getPackageSizeInfoAsUser(java.lang.String p0, int p1, android.content.pm.IPackageStatsObserver p2) {  }
   public void addPackageToPreferred(java.lang.String p0) {  }
   public void removePackageFromPreferred(java.lang.String p0) {  }
-  public java.util.List getPreferredPackages(int p0) { return null; }
+  public java.util.List getPreferredPackages(int p0) { return java.util.Collections.emptyList(); }
   public void addPreferredActivity(android.content.IntentFilter p0, int p1, android.content.ComponentName[] p2, android.content.ComponentName p3) {  }
   public void replacePreferredActivity(android.content.IntentFilter p0, int p1, android.content.ComponentName[] p2, android.content.ComponentName p3) {  }
   public void clearPackagePreferredActivities(java.lang.String p0) {  }
@@ -167,10 +174,10 @@ public class StubPackageManager extends android.content.pm.PackageManager {
   public void unregisterMoveCallback(android.content.pm.PackageManager.MoveCallback p0) {  }
   public int movePackage(java.lang.String p0, android.os.storage.VolumeInfo p1) { return 0; }
   public android.os.storage.VolumeInfo getPackageCurrentVolume(android.content.pm.ApplicationInfo p0) { return null; }
-  public java.util.List getPackageCandidateVolumes(android.content.pm.ApplicationInfo p0) { return null; }
+  public java.util.List getPackageCandidateVolumes(android.content.pm.ApplicationInfo p0) { return java.util.Collections.emptyList(); }
   public int movePrimaryStorage(android.os.storage.VolumeInfo p0) { return 0; }
   public android.os.storage.VolumeInfo getPrimaryStorageCurrentVolume() { return null; }
-  public java.util.List getPrimaryStorageCandidateVolumes() { return null; }
+  public java.util.List getPrimaryStorageCandidateVolumes() { return java.util.Collections.emptyList(); }
   public android.content.pm.VerifierDeviceIdentity getVerifierDeviceIdentity() { return null; }
   public boolean isUpgrade() { return false; }
   public android.content.pm.PackageInstaller getPackageInstaller() { return null; }
