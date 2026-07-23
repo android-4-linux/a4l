@@ -871,7 +871,10 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env, jclass, jobject view, jint w, jin
     return out;
   };
   const std::string t = to_utf8(title);
-  const std::string a = to_utf8(appId);
+  std::string a = to_utf8(appId);
+  // ACL_APP_ID overrides the xdg_toplevel app_id — diagnostic for whether gnome-shell gates its OSK
+  // on the focused window being a tracked application (a real .desktop app_id) vs acl's package.
+  if (const char* e = std::getenv("ACL_APP_ID"); e != nullptr && *e != '\0') a = e;
 
   const wm::InputCallback input = [s](const wm::InputEvent& ev) { present_deliver_input(s, ev); };
   s->presenter = wm::presenter_open(w, h, t.empty() ? "acl" : t, a.empty() ? "org.acl.app" : a,
