@@ -834,6 +834,24 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("wallpaper".equals(name)) {
+                // WallpaperManager(IWallpaperManager, Context, Handler). Apps read getWallpaperColors()
+                // during Application.onCreate for dynamic (Material-You-style) theming; a null service
+                // NPEs and aborts onCreate, which cascades (e.g. a later getDatabasePath on a
+                // half-initialized Context). Back it with a no-op IWallpaperManager: the ctor's
+                // initGlobals() stores it in the static Globals, so getWallpaperColors() → null (a
+                // valid "no colors" response) instead of NPEing. No wallpaper host — set/clear drop.
+                try {
+                    Class<?> iwm = Class.forName("android.app.IWallpaperManager");
+                    java.lang.reflect.Constructor<?> c = android.app.WallpaperManager.class
+                            .getDeclaredConstructor(iwm, android.content.Context.class,
+                                    android.os.Handler.class);
+                    c.setAccessible(true);
+                    return c.newInstance(noop(iwm), this, null);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("autofill".equals(name)) {
                 // AutofillManager(Context, IAutoFillManager) — no-Binder proxy (Compose's
                 // AndroidComposeView constructs an AndroidAutofill that requires a non-null one).
@@ -2691,6 +2709,10 @@ public final class HostBootstrap {
         // (multiprocess=false, no updates) is enough — acl installs the provider directly (see
         // installWebViewProvider), so the update-service is only queried for these secondary flags.
         svc.put("webviewupdate", "android.webkit.IWebViewUpdateService");
+        // WallpaperManager.Globals resolves ServiceManager.getService("wallpaper") → IWallpaperManager
+        // (getWallpaperColors for dynamic theming); a no-op proxy (colors → null, a valid "no colors"
+        // response) is enough. No wallpaper host — set/clear are dropped. Single desktop surface.
+        svc.put("wallpaper", "android.app.IWallpaperManager");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},
