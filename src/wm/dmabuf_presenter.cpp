@@ -104,6 +104,39 @@ class FrameH : public CWlCallback<FrameH> {
 class BufferParamsH
     : public dmabuf::CZwpLinuxBufferParamsV1<BufferParamsH> {};
 
+// xdg_toplevel handler. xdg_toplevel.configure carries a `states` array; the wcs XdgToplevelHandler
+// decodes the v1/v2 states but deliberately omits `suspended` (xdg-shell v6) — which is exactly the
+// "surface is not ordinarily visible, avoid rendering" signal acl wants to pause the present loop
+// when the toplevel is occluded (screen locked, minimized, workspace switched). A compositor
+// withholds wl_surface.frame ticks while occluded, so the loop already gates; `suspended` makes it
+// explicit (skip rendering invisible frames even on compositors that keep ticking) and lets us re-arm
+// promptly on resume. So drive the toplevel off the generated CXdgToplevel and parse `suspended`
+// here, updating the presenter's flags by pointer (no Presenter dependency — defined before it).
+constexpr std::uint32_t kXdgToplevelStateSuspended = 9;  // xdg_toplevel.state.suspended (xdg-shell v6)
+class ToplevelH : public CXdgToplevel<ToplevelH> {
+ public:
+  bool* suspended = nullptr;   // -> presenter's suspended_ (gates ready()/present)
+  bool* need_frame = nullptr;  // -> presenter's need_frame_ (re-armed on resume)
+  bool* closed = nullptr;      // -> presenter's closed_
+  void OnConfigure(std::int32_t /*w*/, std::int32_t /*h*/, wl_array* states) override {
+    bool sus = false;  // fixed-size surface: width/height ignored (acl drives its own size)
+    if (states != nullptr && states->data != nullptr) {
+      const auto* v = static_cast<const std::uint32_t*>(states->data);
+      for (std::size_t i = 0, n = states->size / sizeof(std::uint32_t); i < n; ++i)
+        if (v[i] == kXdgToplevelStateSuspended) sus = true;
+    }
+    const bool was = (suspended != nullptr && *suspended);
+    if (was != sus)
+      log::i(kTag, "xdg_toplevel {}", sus ? "suspended (occluded) — pausing present"
+                                          : "resumed — re-arming present");
+    if (suspended != nullptr) *suspended = sus;
+    if (was && !sus && need_frame != nullptr) *need_frame = true;  // resume -> produce next frame
+  }
+  void OnClose() override { if (closed != nullptr) *closed = true; }
+  void OnConfigureBounds(std::int32_t, std::int32_t) override {}
+  void OnWmCapabilities(wl_array*) override {}
+};
+
 namespace agl = agl_shell::client;
 namespace ivi = ivi_application::client;
 namespace fsh = fullscreen_shell_unstable_v1::client;
@@ -282,7 +315,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     return !closed_;
   }
   bool ready() const noexcept override {
-    return configured_ && need_frame_ && free_slot() >= 0;
+    // !suspended_: the compositor marked the toplevel not-visible (xdg_toplevel.suspended) — skip
+    // producing frames it will not show. (It also withholds frame callbacks, so need_frame_ stays
+    // false; this is the explicit belt-and-suspenders + the resume path re-arms need_frame_.)
+    return configured_ && !suspended_ && need_frame_ && free_slot() >= 0;
   }
   int next_buffer() const noexcept override { return free_slot(); }
   const std::vector<std::uint64_t>& modifiers() const noexcept override { return mods_; }
@@ -519,7 +555,9 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     if (!wl::SetupHandler(xdg_toplevel_, wl::construct<xdg_toplevel_traits,
                           xdg_surface_traits::Op::GetToplevel>(*xdg_surface_.Get())))
       return false;
-    xdg_toplevel_.Get()->app_ = this;
+    xdg_toplevel_.Get()->suspended = &suspended_;
+    xdg_toplevel_.Get()->need_frame = &need_frame_;
+    xdg_toplevel_.Get()->closed = &closed_;
     xdg_toplevel_.Get()->SetTitle(title_.c_str());
     xdg_toplevel_.Get()->SetAppId(app_id_.c_str());
     return true;
@@ -620,10 +658,9 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     if (fb.refresh_ns != 0) refresh_ns_ = fb.refresh_ns;
   }
   void OnDiscarded(std::uint32_t) noexcept {}
-  // xdg handlers (the wcs XdgSurface/XdgToplevel handlers dispatch to these).
+  // xdg_surface handler dispatches configure here; the toplevel (ToplevelH) drives suspended/close
+  // directly via the flag pointers wired in create_xdg_role.
   void OnXdgSurfaceConfigure(std::uint32_t) noexcept { configured_ = true; need_frame_ = true; }
-  void OnToplevelConfigure(std::int32_t, std::int32_t) noexcept {}
-  void OnToplevelClose() noexcept { closed_ = true; }
 
   // wl_pointer → app input (native side of a MotionEvent): left button = touch Down/Up,
   // motion while pressed = Move.
@@ -732,7 +769,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
 
   bool present_loop() noexcept {
     while (!closed_) {
-      if (configured_ && need_frame_ &&
+      if (configured_ && !suspended_ && need_frame_ &&
           (max_frames_ == 0 || frame_index_ < max_frames_)) {
         need_frame_ = false;
         // Request the next frame-callback tick, then attach + commit the frame.
@@ -772,7 +809,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   // release or re-tick). end_frame fence-waits for the GPU copy before Commit.
   bool present_loop_dynamic() noexcept {
     while (!closed_) {
-      if (configured_ && need_frame_ && free_slot() >= 0 &&
+      if (configured_ && !suspended_ && need_frame_ && free_slot() >= 0 &&
           (max_frames_ == 0 || frame_index_ < max_frames_)) {
         const int s = free_slot();
         need_frame_ = false;
@@ -859,7 +896,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   wl::WlPtr<wl::XdgWmBaseHandler> xdg_wm_base_;
   wl::WlPtr<SurfaceH> surface_;
   wl::WlPtr<wl::XdgSurfaceHandler<Presenter>> xdg_surface_;
-  wl::WlPtr<wl::XdgToplevelHandler<Presenter>> xdg_toplevel_;
+  wl::WlPtr<ToplevelH> xdg_toplevel_;
   // Alternate shells (ACL_WL_SHELL): only the selected one is bound. wl_output targets the
   // agl background/panel and the fullscreen present.
   wl::WlPtr<AglShellH> agl_;
@@ -905,6 +942,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   std::uint64_t last_present_ns_ = 0, refresh_ns_ = 0;  // wp_presentation vsync clock
   std::uint64_t max_frames_ = 0, frame_index_ = 0, frame_callbacks_ = 0;
   bool configured_ = false, need_frame_ = false, closed_ = false;
+  bool suspended_ = false;  // xdg_toplevel.suspended: surface occluded (locked/minimized) — pause present
 };
 
 }  // namespace
