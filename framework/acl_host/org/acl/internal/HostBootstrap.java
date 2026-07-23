@@ -1626,6 +1626,17 @@ public final class HostBootstrap {
         }
     }
 
+    /** Best-effort MIME for an ACL_INTENT_VIEW_FILE path (extension-based); null if unknown. */
+    private static String guessViewMime(String path) {
+        String p = path.toLowerCase(java.util.Locale.ROOT);
+        if (p.endsWith(".epub")) return "application/epub+zip";
+        if (p.endsWith(".pdf")) return "application/pdf";
+        if (p.endsWith(".txt")) return "text/plain";
+        if (p.endsWith(".fb2")) return "application/x-fictionbook+xml";
+        if (p.endsWith(".html") || p.endsWith(".htm")) return "text/html";
+        return null;
+    }
+
     // Lightweight Activity attach: a real Activity is normally attach()'d by ActivityThread
     // (mActivityInfo, mWindow=PhoneWindow, mApplication, …) before onCreate. We can't stand up
     // ActivityThread, so seed the minimum onCreate/setContentView need via reflection: a
@@ -1677,9 +1688,28 @@ public final class HostBootstrap {
         }
         // The launch Intent — getIntent() is read in onCreate (a null mIntent NPEs). Give it the
         // launcher component so getIntent().getComponent() also resolves (not just getComponentName()).
+        // ACL_INTENT_VIEW_FILE overrides ACTION_MAIN with an ACTION_VIEW at a file:// URI, so an
+        // activity whose real content (e.g. a reader's book WebView) is reachable only via a VIEW
+        // intent can be driven straight there without the library/import UI. The app's manifest
+        // VIEW intent-filter (file:// + mime) matches; onCreate reads getIntent().getData()/getType().
+        // acl sets mIntent directly (no ActivityManager IPC), so no FileUriExposedException fires, and
+        // getContentResolver().openInputStream(file://) is plain FileInputStream (no provider needed).
         try {
-            android.content.Intent launch = new android.content.Intent(android.content.Intent.ACTION_MAIN)
-                    .addCategory(android.content.Intent.CATEGORY_LAUNCHER);
+            android.content.Intent launch;
+            String viewFile = System.getenv("ACL_INTENT_VIEW_FILE");
+            if (viewFile != null && !viewFile.isEmpty()) {
+                android.net.Uri data = android.net.Uri.fromFile(new java.io.File(viewFile));
+                String type = System.getenv("ACL_INTENT_VIEW_TYPE");
+                if (type == null || type.isEmpty()) type = guessViewMime(viewFile);
+                launch = new android.content.Intent(android.content.Intent.ACTION_VIEW)
+                        .addCategory(android.content.Intent.CATEGORY_DEFAULT);
+                if (type != null) launch.setDataAndType(data, type); else launch.setData(data);
+                launch.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                System.err.println("acl HostBootstrap: ACTION_VIEW intent -> " + data + " (" + type + ")");
+            } else {
+                launch = new android.content.Intent(android.content.Intent.ACTION_MAIN)
+                        .addCategory(android.content.Intent.CATEGORY_LAUNCHER);
+            }
             if (cn != null) launch.setComponent(cn);
             setField(android.app.Activity.class, a, "mIntent", launch);
         } catch (Throwable ignored) {
@@ -2073,6 +2103,14 @@ public final class HostBootstrap {
             // Seed it so GLSurfaceView apps (halma, doodledudette) attach their decor.
             try {
                 setField(vriCls, vri, "mSurfaceChangedCallbacks", new java.util.ArrayList<>());
+            } catch (Throwable ignored) {}
+            // Chromium's WindowAndroid.<init> (API-33 path) calls ViewRootImpl
+            // .addOnBufferTransformHintChangedListener -> mTransformHintListeners.contains(), a
+            // final ArrayList (added in Android 13) the hollow ViewRootImpl leaves null -> NPE in
+            // AwContents.<init>, so a WebView hosted in a Compose AndroidView (e.g. Areada's book
+            // reader) never initializes. Seed it (field absent on pre-T frameworks -> caught).
+            try {
+                setField(vriCls, vri, "mTransformHintListeners", new java.util.ArrayList<>());
             } catch (Throwable ignored) {}
             // A classic (XML-inflated / fragment) View hierarchy drives the real ViewRootImpl during
             // attach + traversal, unlike Compose (which draws through its own layers). These fields are
