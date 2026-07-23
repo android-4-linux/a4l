@@ -6,6 +6,7 @@
 // main() through the runtime seam. The ART/JVM backends report Unavailable until
 // they land (R-1 / ADR-0001); `--vm=null` exercises the full plumbing today.
 
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -94,6 +95,20 @@ bool match_opt(std::string_view arg, std::string_view key, std::string& value) {
     return true;
   }
   return false;
+}
+
+// Android ends an app by killing its process (Runtime.halt / SIGKILL), never by tearing down the ART
+// VM. A graceful DestroyJavaVM (vm->shutdown()) — or a normal exit() running atexit / static dtors —
+// races the still-live in-process native threads (Chromium's ThreadPool): as the VM/process winds
+// down they call AttachCurrentThread, which returns JNI_ERR, and Chromium's CHECK_EQ(JNI_OK) aborts
+// (base/android/jni_android.cc) -> SIGTRAP, which ART's fault handler then reenters ("HandleUnexpected
+// Signal reentered") and HANGS. So end a run the Android way: skip the VM teardown and hard-exit the
+// process (the OS reclaims everything), both on normal completion (end_run) and on a termination
+// signal (acl_on_kill_signal, installed once the app is running).
+void acl_on_kill_signal(int /*sig*/) { std::_Exit(0); }  // async-signal-safe: just the exit syscall
+[[noreturn]] void end_run(int code) {
+  std::fflush(nullptr);  // flush app stdout/stderr (safe here — not a signal context)
+  std::_Exit(code);
 }
 
 int cmd_run(const std::vector<std::string>& args) {
@@ -379,6 +394,13 @@ int cmd_run(const std::vector<std::string>& args) {
     return kRuntimeError;
   }
 
+  // The VM (and possibly in-process native runtimes like Chromium's WebView) is now live. Terminate
+  // the process directly on a kill signal rather than letting the default action / any handler race
+  // those native threads into a JNI-on-a-dying-VM crash (see end_run). ART leaves SIGTERM/SIGINT at
+  // their defaults, so this only overrides "terminate" with "terminate now, cleanly".
+  std::signal(SIGTERM, acl_on_kill_signal);
+  std::signal(SIGINT, acl_on_kill_signal);
+
   if (!service_class.empty()) {
     // Automotive media path: host a MediaBrowserService (no Views, no launcher).
     if (r::Error e = vm->call_media_browser(service_class)) {
@@ -410,13 +432,11 @@ int cmd_run(const std::vector<std::string>& args) {
     if (e) {
       acl::log::e(kTag, "launch {} failed: [{}] {}", main_class,
                      r::status_name(e.status), e.message);
-      vm->shutdown();
-      return kRuntimeError;
+      end_run(kRuntimeError);  // app may have spun up WebView/native threads — no DestroyJavaVM
     }
   }
 
-  vm->shutdown();
-  return kOk;
+  end_run(kOk);  // Android-style process exit (no DestroyJavaVM race with native threads)
 }
 
 void dump_methods(const char* kind, const std::vector<acl::dex::DexMethod>& ms) {

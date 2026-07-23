@@ -381,10 +381,16 @@ void ensure_gl_donor_pool() {
 // Thread), assigned once and kept for the thread's life. Same parked-forever pattern as the GL
 // donors. Known limitation: ART reads this thread's stack bounds from the DONOR's pthread, not the
 // bionic thread's -- fine for short JNI up-calls; a GC that scans the stack mid-call could miss roots.
-constexpr int kAttachDonorPool = 16;
+// Chromium's single-process WebView keeps many threads attached at once (ThreadPool workers + GPU/
+// Viz/IO/compositor) and churns them over a session, so the pool is sized for peak CONCURRENCY (not
+// total) and a slot is RECLAIMED when its thread detaches (release_attach_donor_by_fs, called from
+// w_DetachCurrentThread). A monotonic pool of 16 exhausted mid-run: w_AttachCurrentThread then
+// returned JNI_ERR and Chromium's CHECK_EQ(JNI_OK, ret) aborted (SIGTRAP -> ART's fault handler
+// reenters -> hang), intermittently at startup or later. See docs/ndk-scope.md.
+constexpr int kAttachDonorPool = 64;
 std::atomic<std::uintptr_t> g_attach_donor_pool[kAttachDonorPool];
+std::atomic<bool> g_attach_donor_claimed[kAttachDonorPool];  // false = free; reclaimed on detach
 std::atomic<int> g_attach_donor_published{0};
-std::atomic<int> g_attach_donor_next{0};
 void* attach_fs_donor(void* arg) {
   const int i = static_cast<int>(reinterpret_cast<intptr_t>(arg));
   g_attach_donor_pool[i].store(get_fs(), std::memory_order_release);
@@ -395,18 +401,28 @@ void* attach_fs_donor(void* arg) {
 void ensure_attach_donor_pool() {
   static std::atomic<bool> done{false};
   if (done.exchange(true)) return;
+  pthread_attr_t attr;
+  const bool have_attr = pthread_attr_init(&attr) == 0;
+  if (have_attr) pthread_attr_setstacksize(&attr, 1u << 20);  // 1 MiB: donor only parks; bound VMA at 64x
   for (int i = 0; i < kAttachDonorPool; ++i) {
     pthread_t t;
-    if (pthread_create(&t, nullptr, attach_fs_donor, reinterpret_cast<void*>(intptr_t(i))) == 0)
+    if (pthread_create(&t, have_attr ? &attr : nullptr, attach_fs_donor,
+                       reinterpret_cast<void*>(intptr_t(i))) == 0)
       pthread_detach(t);
   }
+  if (have_attr) pthread_attr_destroy(&attr);
   for (int k = 0; k < 20000 && g_attach_donor_published.load(std::memory_order_acquire) < kAttachDonorPool; ++k)
     usleep(100);
 }
-// Claim the next free donor slot, or -1 if the pool is exhausted.
+// Claim a free donor slot (reclaimed after detach), or -1 if all published donors are in use.
 int claim_attach_donor() {
-  const int i = g_attach_donor_next.fetch_add(1, std::memory_order_acq_rel);
-  return i < g_attach_donor_published.load(std::memory_order_acquire) ? i : -1;
+  const int pub = g_attach_donor_published.load(std::memory_order_acquire);
+  for (int i = 0; i < pub && i < kAttachDonorPool; ++i) {
+    bool expected = false;
+    if (g_attach_donor_claimed[i].compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+      return i;
+  }
+  return -1;
 }
 
 // A borrowing bionic thread's REAL stack, recorded per donor slot so the interposed
@@ -418,6 +434,20 @@ struct BorrowerStack {
   std::uintptr_t size = 0;
 };
 BorrowerStack g_borrower_stacks[kAttachDonorPool];
+
+// Reclaim the donor whose published %fs is `glibc_fs` when its borrowing thread detaches, so a later
+// attach can reuse the slot (bounds the pool by peak concurrency, not total attaches). TLS-free
+// (atomics only) — safe to call under bionic %fs from w_DetachCurrentThread.
+void release_attach_donor_by_fs(std::uintptr_t glibc_fs) {
+  const int pub = g_attach_donor_published.load(std::memory_order_acquire);
+  for (int i = 0; i < pub && i < kAttachDonorPool; ++i) {
+    if (g_attach_donor_pool[i].load(std::memory_order_acquire) == glibc_fs) {
+      g_borrower_stacks[i].donor_fs.store(0, std::memory_order_release);  // stack no longer borrowed
+      g_attach_donor_claimed[i].store(false, std::memory_order_release);  // publish last: slot now free
+      return;
+    }
+  }
+}
 
 static bool is_hex(char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
 static unsigned hexv(char c) { return c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10; }
@@ -1808,6 +1838,12 @@ jint JNICALL w_DetachCurrentThread(JavaVM* vm) {
     ndk_set_fs(glibc);
     const jint rc = w->real->functions->DetachCurrentThread(w->real);
     ndk_set_fs(cur);
+    // Reclaim this thread's pairing + donor slot so a later bionic thread can reuse them (Chromium's
+    // ThreadPool churns more threads over a session than the pool holds; without this the pool leaks
+    // monotonically and a later AttachCurrentThread fails -> Chromium CHECK aborts). Drop the pairing
+    // first (per unregister_fs_pair's ordering), then free the donor. On the detaching (owning) thread.
+    unregister_fs_pair(cur);
+    release_attach_donor_by_fs(glibc);
     return rc;
   }
   return w->real->functions->DetachCurrentThread(w->real);
