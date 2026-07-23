@@ -16,6 +16,11 @@ public class ConnectivityManager {
     public static final int TYPE_WIFI = 1;
     public static final int TYPE_ETHERNET = 9;
 
+    // Data Saver (restrict-background) policy states.
+    public static final int RESTRICT_BACKGROUND_STATUS_DISABLED = 1;
+    public static final int RESTRICT_BACKGROUND_STATUS_WHITELISTED = 2;
+    public static final int RESTRICT_BACKGROUND_STATUS_ENABLED = 3;
+
     // Registered callbacks; acl delivers the current state on registration and
     // (future) live changes when the svc/net sink is wired to JNI dispatch.
     private final CopyOnWriteArrayList<NetworkCallback> callbacks = new CopyOnWriteArrayList<>();
@@ -39,6 +44,14 @@ public class ConnectivityManager {
 
     public boolean isActiveNetworkMetered() {
         return (nGetState() & 0x4) != 0;
+    }
+
+    // Data Saver: a desktop/embedded host has no per-app background-data restriction, so background
+    // data is always unrestricted. Apps gate background sync/prefetch on this during startup — a
+    // missing method is a NoSuchMethodError that aborts Application.onCreate (and with it the app's
+    // dependency-injection graph), which is how it surfaced (Pandora's PandoraApp.onCreate).
+    public int getRestrictBackgroundStatus() {
+        return RESTRICT_BACKGROUND_STATUS_DISABLED;
     }
 
     // acl models a single default network; report its info for any live Network. Chromium's
