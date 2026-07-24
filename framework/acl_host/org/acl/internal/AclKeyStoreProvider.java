@@ -12,15 +12,25 @@ import java.io.DataOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.security.Key;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.KeyPairGeneratorSpi;
 import java.security.KeyStore;
 import java.security.KeyStoreSpi;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
 import java.security.Provider;
+import java.security.PublicKey;
 import java.security.SecureRandom;
+import java.security.Signature;
 import java.security.UnrecoverableKeyException;
 import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.security.spec.AlgorithmParameterSpec;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.Collections;
 import java.util.Date;
 import java.util.Enumeration;
@@ -58,6 +68,10 @@ public final class AclKeyStoreProvider extends Provider {
         put("KeyGenerator.HmacSHA256", HmacSha256KeyGenSpi.class.getName());
         put("KeyGenerator.HmacSHA384", HmacSha384KeyGenSpi.class.getName());
         put("KeyGenerator.HmacSHA512", HmacSha512KeyGenSpi.class.getName());
+        // Asymmetric key generation. The private key + a self-signed cert are persisted; getKey
+        // returns the private key (Signature/KeyAgreement use it), getCertificate the public cert.
+        put("KeyPairGenerator.EC", EcKeyPairGenSpi.class.getName());
+        put("KeyPairGenerator.RSA", RsaKeyPairGenSpi.class.getName());
     }
 
     /** Register the provider once, before any app touches KeyStore.getInstance("AndroidKeyStore"). */
@@ -100,16 +114,57 @@ public final class AclKeyStoreProvider extends Provider {
             return null;
         }
     }
-    static Key deserialize(byte[] blob) {
+    // Blob format v1 kind=2 (keypair): [byte 1][byte 2][UTF keyAlgo][int][PKCS8 private][int][cert DER].
+    static byte[] serializeKeyPair(String keyAlgo, PrivateKey priv, X509Certificate cert) {
+        try {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            DataOutputStream out = new DataOutputStream(bos);
+            out.writeByte(1);
+            out.writeByte(2);  // keypair
+            out.writeUTF(keyAlgo);
+            byte[] pkcs8 = priv.getEncoded();
+            out.writeInt(pkcs8.length);
+            out.write(pkcs8);
+            byte[] der = cert.getEncoded();
+            out.writeInt(der.length);
+            out.write(der);
+            out.flush();
+            return bos.toByteArray();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    // A deserialized entry: a SecretKey, or a (PrivateKey + self-signed cert) pair.
+    static final class Entry {
+        Key key;                 // SecretKey (kind 1) or PrivateKey (kind 2)
+        X509Certificate cert;    // null for a secret key
+    }
+    static Entry deserialize(byte[] blob) {
         try {
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(blob));
             int ver = in.readByte();
             int kind = in.readByte();
-            if (ver != 1 || kind != 1) return null;
+            if (ver != 1) return null;
             String algo = in.readUTF();
-            byte[] enc = new byte[in.readInt()];
-            in.readFully(enc);
-            return new SecretKeySpec(enc, algo);
+            Entry e = new Entry();
+            if (kind == 1) {
+                byte[] enc = new byte[in.readInt()];
+                in.readFully(enc);
+                e.key = new SecretKeySpec(enc, algo);
+                return e;
+            }
+            if (kind == 2) {
+                byte[] pkcs8 = new byte[in.readInt()];
+                in.readFully(pkcs8);
+                e.key = KeyFactory.getInstance(algo).generatePrivate(new PKCS8EncodedKeySpec(pkcs8));
+                byte[] der = new byte[in.readInt()];
+                in.readFully(der);
+                e.cert = (X509Certificate) CertificateFactory.getInstance("X.509")
+                        .generateCertificate(new ByteArrayInputStream(der));
+                return e;
+            }
+            return null;
         } catch (Exception e) {
             return null;
         }
@@ -131,12 +186,21 @@ public final class AclKeyStoreProvider extends Provider {
                 throws UnrecoverableKeyException {
             byte[] blob = KeystoreBridge.load(appPkg(), alias);
             if (blob == null) return null;
-            Key k = deserialize(blob);
-            if (k == null) throw new UnrecoverableKeyException("acl keystore: corrupt entry " + alias);
-            return k;
+            Entry e = deserialize(blob);
+            if (e == null || e.key == null)
+                throw new UnrecoverableKeyException("acl keystore: corrupt entry " + alias);
+            return e.key;
         }
-        @Override public Certificate engineGetCertificate(String alias) { return null; }
-        @Override public Certificate[] engineGetCertificateChain(String alias) { return null; }
+        @Override public Certificate engineGetCertificate(String alias) {
+            byte[] blob = KeystoreBridge.load(appPkg(), alias);
+            if (blob == null) return null;
+            Entry e = deserialize(blob);
+            return e != null ? e.cert : null;  // null for a symmetric entry
+        }
+        @Override public Certificate[] engineGetCertificateChain(String alias) {
+            Certificate c = engineGetCertificate(alias);
+            return c != null ? new Certificate[]{c} : null;
+        }
         @Override public String engineGetCertificateAlias(Certificate cert) { return null; }
         @Override public Date engineGetCreationDate(String alias) {
             return engineContainsAlias(alias) ? new Date(0) : null;
@@ -144,10 +208,15 @@ public final class AclKeyStoreProvider extends Provider {
 
         @Override public void engineSetKeyEntry(String alias, Key key, char[] password,
                                                 Certificate[] chain) throws KeyStoreException {
-            if (!(key instanceof SecretKey)) {
-                throw new KeyStoreException("acl keystore: only symmetric keys supported so far");
+            byte[] blob = null;
+            if (key instanceof SecretKey) {
+                blob = serializeSecret((SecretKey) key);
+            } else if (key instanceof PrivateKey && chain != null && chain.length > 0
+                    && chain[0] instanceof X509Certificate) {
+                blob = serializeKeyPair(key.getAlgorithm(), (PrivateKey) key, (X509Certificate) chain[0]);
+            } else {
+                throw new KeyStoreException("acl keystore: unsupported key entry for " + alias);
             }
-            byte[] blob = serializeSecret((SecretKey) key);
             if (blob == null || !KeystoreBridge.store(appPkg(), alias, blob)) {
                 throw new KeyStoreException("acl keystore: could not persist " + alias);
             }
@@ -227,5 +296,132 @@ public final class AclKeyStoreProvider extends Provider {
                 throw new IllegalStateException("acl keystore: no KeyGenerator for " + algorithm, e);
             }
         }
+    }
+
+    // --- KeyPairGenerator.{EC,RSA} under provider "AndroidKeyStore" ---------------------------
+    // Generate a real keypair with the default provider, wrap it in a self-signed cert, and persist
+    // (private + cert) under the alias. getKey returns the private key; getCertificate the cert.
+    public static final class EcKeyPairGenSpi extends KeyPairGenSpi {
+        public EcKeyPairGenSpi() { super("EC", "SHA256withECDSA", OID_ECDSA_SHA256, false); }
+    }
+    public static final class RsaKeyPairGenSpi extends KeyPairGenSpi {
+        public RsaKeyPairGenSpi() { super("RSA", "SHA256withRSA", OID_RSA_SHA256, true); }
+    }
+
+    public static class KeyPairGenSpi extends KeyPairGeneratorSpi {
+        private final String keyAlgo, sigAlgo;
+        private final byte[] sigOid;
+        private final boolean sigParamsNull;  // RSA sig AlgorithmIdentifier carries an explicit NULL
+        private String alias;
+        private int keySize;
+        private SecureRandom random;
+
+        KeyPairGenSpi(String keyAlgo, String sigAlgo, byte[] sigOid, boolean sigParamsNull) {
+            this.keyAlgo = keyAlgo; this.sigAlgo = sigAlgo; this.sigOid = sigOid;
+            this.sigParamsNull = sigParamsNull;
+            this.keySize = keyAlgo.equals("RSA") ? 2048 : 256;
+        }
+
+        @Override public void initialize(int keysize, SecureRandom random) {
+            this.keySize = keysize; this.random = random;
+        }
+        @Override public void initialize(AlgorithmParameterSpec params, SecureRandom random) {
+            this.random = random;
+            if (params == null) return;
+            try {
+                Object a = params.getClass().getMethod("getKeystoreAlias").invoke(params);
+                if (a != null) alias = a.toString();
+            } catch (Throwable ignored) {}
+            try {
+                Object ks = params.getClass().getMethod("getKeySize").invoke(params);
+                if (ks instanceof Integer && (Integer) ks > 0) keySize = (Integer) ks;
+            } catch (Throwable ignored) {}
+        }
+
+        @Override public KeyPair generateKeyPair() {
+            try {
+                KeyPairGenerator kpg = KeyPairGenerator.getInstance(keyAlgo);  // default provider
+                if (random != null) kpg.initialize(keySize, random); else kpg.initialize(keySize);
+                KeyPair kp = kpg.generateKeyPair();
+                if (alias != null) {
+                    X509Certificate cert =
+                        selfSignedCert(kp, sigAlgo, sigOid, sigParamsNull, alias);
+                    byte[] blob = serializeKeyPair(keyAlgo, kp.getPrivate(), cert);
+                    if (blob != null) KeystoreBridge.store(appPkg(), alias, blob);
+                }
+                return kp;
+            } catch (Exception e) {
+                throw new IllegalStateException("acl keystore: keypair generation failed for "
+                        + keyAlgo, e);
+            }
+        }
+    }
+
+    // ---- Minimal self-signed X.509 (v1) certificate builder ----------------------------------
+    // No X.509 cert BUILDER is available (the repackaged BouncyCastle ships crypto only, no bcpkix;
+    // core-oj has no sun.security.x509 here), and keystore2 — which mints the cert on a device — is
+    // absent. So encode a minimal v1 self-signed cert by hand: SubjectPublicKeyInfo is the public
+    // key's own DER encoding, TBS is signed with the private key, and CertificateFactory parses the
+    // result back (which validates the structure). CN=alias, valid 1970..2049.
+    static final byte[] OID_ECDSA_SHA256 = {0x2A, (byte) 0x86, 0x48, (byte) 0xCE, 0x3D, 0x04, 0x03, 0x02};
+    static final byte[] OID_RSA_SHA256 = {0x2A, (byte) 0x86, 0x48, (byte) 0x86, (byte) 0xF7, 0x0D, 0x01, 0x01, 0x0B};
+    static final byte[] OID_CN = {0x55, 0x04, 0x03};  // 2.5.4.3
+
+    static X509Certificate selfSignedCert(KeyPair kp, String sigAlgo, byte[] sigOid,
+                                          boolean sigParamsNull, String cn) throws Exception {
+        byte[] spki = kp.getPublic().getEncoded();               // SubjectPublicKeyInfo (raw DER)
+        byte[] algId = algorithmIdentifier(sigOid, sigParamsNull);
+        byte[] name = derName(cn);
+        byte[] validity = der(0x30, concat(
+                der(0x17, "700101000000Z".getBytes("US-ASCII")),  // UTCTime notBefore
+                der(0x17, "491231235959Z".getBytes("US-ASCII"))));// UTCTime notAfter (=> 2049)
+        byte[] serial = der(0x02, new byte[]{0x01});
+        byte[] tbs = der(0x30, concat(serial, algId, name, validity, name, spki));
+
+        Signature sig = Signature.getInstance(sigAlgo);
+        sig.initSign(kp.getPrivate());
+        sig.update(tbs);
+        byte[] sigValue = der(0x03, concat(new byte[]{0x00}, sig.sign()));  // BIT STRING (0 unused bits)
+
+        byte[] cert = der(0x30, concat(tbs, algId, sigValue));
+        return (X509Certificate) CertificateFactory.getInstance("X.509")
+                .generateCertificate(new ByteArrayInputStream(cert));
+    }
+
+    // AlgorithmIdentifier ::= SEQUENCE { algorithm OID, parameters ANY OPTIONAL }.
+    static byte[] algorithmIdentifier(byte[] oid, boolean paramsNull) {
+        byte[] o = der(0x06, oid);
+        return der(0x30, paramsNull ? concat(o, der(0x05, new byte[0])) : o);  // 0x05 = NULL
+    }
+    // Name = SEQUENCE OF SET OF SEQUENCE { CN-OID, UTF8String cn }.
+    static byte[] derName(String cn) throws Exception {
+        byte[] rdn = der(0x30, concat(der(0x06, OID_CN), der(0x0C, cn.getBytes("UTF-8"))));
+        return der(0x30, der(0x31, rdn));  // SEQUENCE( SET( rdn ) )
+    }
+    // DER tag-length-value. Handles lengths that need the long form (>= 128).
+    static byte[] der(int tag, byte[] content) {
+        int n = content.length;
+        byte[] len;
+        if (n < 0x80) {
+            len = new byte[]{(byte) n};
+        } else {
+            int bytes = (n < 0x100) ? 1 : (n < 0x10000) ? 2 : (n < 0x1000000) ? 3 : 4;
+            len = new byte[1 + bytes];
+            len[0] = (byte) (0x80 | bytes);
+            for (int i = 0; i < bytes; i++) len[bytes - i] = (byte) (n >> (8 * i));
+        }
+        byte[] out = new byte[1 + len.length + n];
+        out[0] = (byte) tag;
+        System.arraycopy(len, 0, out, 1, len.length);
+        System.arraycopy(content, 0, out, 1 + len.length, n);
+        return out;
+    }
+    static byte[] concat(byte[]... parts) {
+        int n = 0;
+        for (byte[] p : parts) n += p.length;
+        byte[] out = new byte[n];
+        int o = 0;
+        for (byte[] p : parts) { System.arraycopy(p, 0, out, o, p.length); o += p.length; }
+        return out;
     }
 }
