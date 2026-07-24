@@ -3461,6 +3461,234 @@ void draw_rendernode(SkCanvas* c, AclRenderNode* n) {
   }
 }
 
+// ── SurfaceTexture + TextureView hardware layer (ADR-4: hwui dropped, render stack re-owned) ─────
+// android.graphics.SurfaceTexture is a producer/consumer image stream; a TextureView composites its
+// latest frame through a "texture layer". acl has no GLConsumer / BufferQueue+GL_TEXTURE_EXTERNAL_OES
+// pipeline — in the re-owned render model a produced frame is an ordinary SkImage: the producer sets
+// `pending`, updateTexImage latches pending->current, and the TextureLayer draws `current` into the
+// display list as a resolve-at-replay SkDrawable (exactly like AclRenderNodeDrawable, so the layer
+// shows its LATEST frame at present time, not a stale record-time copy). Clean-room: SurfaceTexture /
+// TextureView SDK semantics only; no AOSP GLConsumer, no the predecessor. The producer half (Surface.lockCanvas /
+// GL / MediaCodec feeding set_frame) is staged separately; until it exists a TextureView draws blank
+// but never crashes the View traversal (the reason a bare UnsatisfiedLinkError here took the whole
+// draw down).
+struct AclSurfaceTexture {
+  std::mutex mu;
+  sk_sp<SkImage> pending;       // most-recent produced frame (producer thread; Stage 2 seam)
+  sk_sp<SkImage> current;       // latched frame (updateTexImage: pending -> current)
+  int def_w = 0, def_h = 0;     // setDefaultBufferSize
+  jlong timestamp = 0;          // ns of the latched frame
+  int tex_name = 0;             // GL texture name (nativeInit/attachToGLContext; GL path staged)
+  bool detached = false;        // detachFromGLContext state
+  bool released = false;
+  jobject weak_self = nullptr;  // global ref to WeakReference<SurfaceTexture> (frame-available; staged)
+
+  // Producer seam (Stage 2): hand the stream a freshly produced frame.
+  void set_frame(sk_sp<SkImage> img, jlong ts) {
+    std::lock_guard<std::mutex> lk(mu);
+    pending = std::move(img);
+    timestamp = ts;
+  }
+  // Consumer: latch the newest produced frame (updateTexImage / TextureLayer.update).
+  void latch() {
+    std::lock_guard<std::mutex> lk(mu);
+    if (pending) { current = pending; }
+  }
+  sk_sp<SkImage> snapshot() {
+    std::lock_guard<std::mutex> lk(mu);
+    return current;
+  }
+};
+
+// A TextureView's hardware layer: binds a SurfaceTexture + the layer's size/alpha. Java wraps the
+// handle in a VirtualRefBasePtr (inc/decStrong), so it MUST be a VirtualLightRefBase or the wrapper
+// dereferences a bad vtable and SIGSEGVs — the same trap as HardwareRendererObserver. It is freed by
+// the wrapper's final decStrong, so nothing here deletes it.
+struct AclTextureLayer : public VirtualLightRefBase {
+  AclSurfaceTexture* st = nullptr;  // NOT owned (the SurfaceTexture outlives the layer, held Java-side)
+  int width = 0, height = 0;
+  float alpha = 1.0f;
+};
+
+inline AclSurfaceTexture* stex(jlong h) { return reinterpret_cast<AclSurfaceTexture*>(h); }
+inline AclTextureLayer* tlayer(jlong h) { return reinterpret_cast<AclTextureLayer*>(h); }
+
+// SurfaceTexture.mSurfaceTexture (long) — where nativeInit stashes the AclSurfaceTexture*.
+jfieldID g_st_field = nullptr;
+AclSurfaceTexture* st_from(JNIEnv* env, jobject thiz) {
+  if (g_st_field == nullptr || thiz == nullptr) return nullptr;
+  return reinterpret_cast<AclSurfaceTexture*>(env->GetLongField(thiz, g_st_field));
+}
+
+// DIAG (acl_graphics_profile): SurfaceTextures created; texture-layer draws with a frame vs blank.
+std::atomic<std::uint64_t> g_st_created{0}, g_tl_frames{0}, g_tl_blanks{0};
+
+// Draw a texture layer's latest frame at the canvas origin, scaled to the layer's WxH (the canvas is
+// already positioned + clipped at the TextureView by the enclosing View.draw). Null frame -> nothing.
+void draw_texture_layer_immediate(SkCanvas* c, AclTextureLayer* l) {
+  if (c == nullptr || l == nullptr || l->st == nullptr) return;
+  sk_sp<SkImage> img = l->st->snapshot();
+  if (!img) { g_tl_blanks.fetch_add(1, std::memory_order_relaxed); return; }
+  g_tl_frames.fetch_add(1, std::memory_order_relaxed);
+  const float w = l->width > 0 ? static_cast<float>(l->width) : static_cast<float>(img->width());
+  const float h = l->height > 0 ? static_cast<float>(l->height) : static_cast<float>(img->height());
+  SkPaint p;
+  p.setAlphaf(l->alpha);
+  c->drawImageRect(img.get(),
+                   SkRect::MakeWH(static_cast<float>(img->width()), static_cast<float>(img->height())),
+                   SkRect::MakeWH(w, h), SkSamplingOptions(SkFilterMode::kLinear),
+                   l->alpha < 1.0f ? &p : nullptr, SkCanvas::kFast_SrcRectConstraint);
+}
+
+// Resolve-at-replay drawable: reads the layer's CURRENT frame at replay time, so a producing
+// TextureView shows its latest content (mirrors AclRenderNodeDrawable). Holds a ref on the layer so
+// it can't be freed by a Java-side decStrong between record and replay.
+class AclTextureLayerDrawable : public SkDrawable {
+ public:
+  AclTextureLayerDrawable(AclTextureLayer* l, SkRect bounds) : layer_(l), bounds_(bounds) {
+    if (layer_ != nullptr) layer_->incStrong(this);
+  }
+  ~AclTextureLayerDrawable() override {
+    if (layer_ != nullptr) layer_->decStrong(this);
+  }
+ protected:
+  SkRect onGetBounds() override { return bounds_; }
+  void onDraw(SkCanvas* c) override { draw_texture_layer_immediate(c, layer_); }
+ private:
+  AclTextureLayer* layer_;
+  SkRect bounds_;
+};
+
+// Draw a texture layer onto `c`: deferred (resolve-at-replay) onto a recording canvas, immediate onto
+// the GPU/present canvas — same discipline as draw_rendernode.
+void draw_texture_layer(SkCanvas* c, jlong layer) {
+  auto* l = tlayer(layer);
+  if (c == nullptr || l == nullptr) return;
+  const SkRect bounds = SkRect::MakeWH(l->width > 0 ? static_cast<float>(l->width) : 1.0f,
+                                       l->height > 0 ? static_cast<float>(l->height) : 1.0f);
+  if (is_recording_canvas(c)) {
+    auto d = sk_make_sp<AclTextureLayerDrawable>(l, bounds);
+    c->drawDrawable(d.get());
+  } else {
+    draw_texture_layer_immediate(c, l);
+  }
+}
+
+// android.graphics.SurfaceTexture natives (instance methods; regular JNI, none @CriticalNative).
+void SurfaceTexture_nativeInit(JNIEnv* env, jobject thiz, jboolean isDetached, jint texName,
+                               jboolean /*singleBuffer*/, jobject weakSelf) {
+  auto* st = new AclSurfaceTexture();
+  st->detached = (isDetached == JNI_TRUE);
+  st->tex_name = texName;
+  st->weak_self = weakSelf != nullptr ? env->NewGlobalRef(weakSelf) : nullptr;
+  if (g_st_field != nullptr) env->SetLongField(thiz, g_st_field, reinterpret_cast<jlong>(st));
+  g_st_created.fetch_add(1, std::memory_order_relaxed);
+}
+void SurfaceTexture_nativeFinalize(JNIEnv* env, jobject thiz) {
+  auto* st = st_from(env, thiz);
+  if (st == nullptr) return;
+  if (st->weak_self != nullptr) env->DeleteGlobalRef(st->weak_self);
+  delete st;
+  if (g_st_field != nullptr) env->SetLongField(thiz, g_st_field, 0);
+}
+void SurfaceTexture_nativeGetTransformMatrix(JNIEnv* env, jobject, jfloatArray mtx) {
+  // Identity 4x4 (column-major): acl's SkImage frame is already upright — unlike a GL BufferQueue,
+  // whose OES transform flips Y and crops. Apps multiply this into their texture coords.
+  static const float ident[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+  if (mtx != nullptr && env->GetArrayLength(mtx) >= 16) env->SetFloatArrayRegion(mtx, 0, 16, ident);
+}
+jlong SurfaceTexture_nativeGetTimestamp(JNIEnv* env, jobject thiz) {
+  auto* st = st_from(env, thiz);
+  return st != nullptr ? st->timestamp : 0;
+}
+jint SurfaceTexture_nativeGetDataSpace(JNIEnv*, jobject) { return 0; }  // DataSpace.DATASPACE_UNKNOWN
+void SurfaceTexture_nativeSetDefaultBufferSize(JNIEnv* env, jobject thiz, jint w, jint h) {
+  auto* st = st_from(env, thiz);
+  if (st != nullptr) { st->def_w = w; st->def_h = h; }
+}
+void SurfaceTexture_nativeUpdateTexImage(JNIEnv* env, jobject thiz) {
+  auto* st = st_from(env, thiz);
+  if (st != nullptr) st->latch();
+}
+void SurfaceTexture_nativeReleaseTexImage(JNIEnv*, jobject) {}
+jint SurfaceTexture_nativeDetachFromGLContext(JNIEnv* env, jobject thiz) {
+  auto* st = st_from(env, thiz);
+  if (st != nullptr) st->detached = true;
+  return 0;  // NO_ERROR
+}
+jint SurfaceTexture_nativeAttachToGLContext(JNIEnv* env, jobject thiz, jint texName) {
+  auto* st = st_from(env, thiz);
+  if (st != nullptr) { st->detached = false; st->tex_name = texName; }
+  return 0;
+}
+void SurfaceTexture_nativeRelease(JNIEnv* env, jobject thiz) {
+  auto* st = st_from(env, thiz);
+  if (st == nullptr) return;
+  std::lock_guard<std::mutex> lk(st->mu);
+  st->released = true;
+  st->pending = nullptr;
+  st->current = nullptr;
+}
+jboolean SurfaceTexture_nativeIsReleased(JNIEnv* env, jobject thiz) {
+  auto* st = st_from(env, thiz);
+  return (st != nullptr && st->released) ? JNI_TRUE : JNI_FALSE;
+}
+
+// android.graphics.TextureLayer natives (static; layerUpdater is the AclTextureLayer handle).
+jboolean TextureLayer_nPrepare(JNIEnv*, jclass, jlong layer, jint w, jint h, jboolean /*opaque*/) {
+  auto* l = tlayer(layer);
+  if (l != nullptr) { l->width = w; l->height = h; }
+  return JNI_TRUE;  // "layer changed" — cheap; acl re-records the layer draw every frame anyway
+}
+void TextureLayer_nSetLayerPaint(JNIEnv*, jclass, jlong layer, jlong paint) {
+  auto* l = tlayer(layer);
+  if (l == nullptr) return;
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  l->alpha = ap != nullptr ? ap->paint.getAlphaf() : 1.0f;
+}
+void TextureLayer_nSetTransform(JNIEnv*, jclass, jlong, jlong) {}  // TextureView.setTransform: staged
+void TextureLayer_nSetSurfaceTexture(JNIEnv* env, jclass, jlong layer, jobject stObj) {
+  auto* l = tlayer(layer);
+  if (l != nullptr) l->st = stObj != nullptr ? st_from(env, stObj) : nullptr;
+}
+void TextureLayer_nUpdateSurfaceTexture(JNIEnv*, jclass, jlong layer) {
+  auto* l = tlayer(layer);
+  if (l != nullptr && l->st != nullptr) l->st->latch();
+}
+
+// android.graphics.HardwareRenderer layer natives (static; nativeProxy ignored — acl has no RT proxy).
+jlong HardwareRenderer_nCreateTextureLayer(JNIEnv*, jclass, jlong /*proxy*/) {
+  return reinterpret_cast<jlong>(new AclTextureLayer());  // TextureLayer.<init> incStrongs via VirtualRefBasePtr
+}
+void HardwareRenderer_nBuildLayer(JNIEnv*, jclass, jlong, jlong) {}
+jboolean HardwareRenderer_nCopyLayerInto(JNIEnv*, jclass, jlong, jlong, jlong) { return JNI_FALSE; }
+void HardwareRenderer_nPushLayerUpdate(JNIEnv*, jclass, jlong, jlong layer) {
+  auto* l = tlayer(layer);
+  if (l != nullptr && l->st != nullptr) l->st->latch();
+}
+void HardwareRenderer_nCancelLayerUpdate(JNIEnv*, jclass, jlong, jlong) {}
+void HardwareRenderer_nDetachSurfaceTexture(JNIEnv*, jclass, jlong, jlong layer) {
+  auto* l = tlayer(layer);
+  if (l != nullptr) l->st = nullptr;
+}
+
+// android.view.TextureView natives — the producer side of a TextureView's own SurfaceTexture. The
+// "native window" is the producer end of the SAME stream (Surface(SurfaceTexture) / GL / lockCanvas
+// feed frames in), so mNativeWindow just references the AclSurfaceTexture (NOT owned — the
+// SurfaceTexture owns it via mSurfaceTexture/nativeFinalize). Stored so getTextureLayer completes and
+// TextureView.lockCanvas can find the stream (the software producer is Stage 2 — nLockCanvas is a
+// truthful "can't lock yet" for now, so lockCanvas() returns null rather than crashing the traversal).
+jfieldID g_tv_window_field = nullptr;  // TextureView.mNativeWindow (long)
+void TextureView_nCreateNativeWindow(JNIEnv* env, jobject thiz, jobject stObj) {
+  AclSurfaceTexture* st = stObj != nullptr ? st_from(env, stObj) : nullptr;
+  if (g_tv_window_field != nullptr) env->SetLongField(thiz, g_tv_window_field, reinterpret_cast<jlong>(st));
+}
+void TextureView_nDestroyNativeWindow(JNIEnv* env, jobject thiz) {
+  if (g_tv_window_field != nullptr) env->SetLongField(thiz, g_tv_window_field, 0);
+}
+jboolean TextureView_nLockCanvas(JNIEnv*, jclass, jlong, jobject, jobject) { return JNI_FALSE; }
+void TextureView_nUnlockCanvasAndPost(JNIEnv*, jclass, jlong, jobject) {}
+
 // NOTE: every RecordingCanvas native is @CriticalNative — the JVM calls it with the raw C ABI and
 // passes ONLY the declared Java args (NO JNIEnv*, NO jclass). These signatures must therefore start
 // at the first Java parameter, or the args land two registers off. (BaseRecordingCanvas natives are
@@ -3518,7 +3746,13 @@ void RecordingCanvas_nDrawRenderNode(jlong canvas, jlong node) {
   draw_rendernode(canvas_sk(canvas), reinterpret_cast<AclRenderNode*>(node));
 }
 void RecordingCanvas_nEnableZ(jlong, jboolean) {}
-void RecordingCanvas_nDrawTextureLayer(jlong, jlong) {}
+// RecordingCanvas.drawTextureLayer(layer): composite a TextureView's SurfaceTexture frame into the
+// display list (@CriticalNative — canvas, layer only). Draws the layer's latest frame, or nothing
+// until a producer feeds one (Stage 2) — either way the traversal completes.
+void RecordingCanvas_nDrawTextureLayer(jlong canvas, jlong layer) {
+  tick_draw();
+  draw_texture_layer(canvas_sk(canvas), layer);
+}
 jint RecordingCanvas_nGetMaximumTextureWidth() { return 8192; }
 jint RecordingCanvas_nGetMaximumTextureHeight() { return 8192; }
 // RecordingCanvas' hardware-only draws take animatable CanvasProperty handles (ripple/reveal) or a
@@ -4433,6 +4667,40 @@ const JNINativeMethod kHardwareRenderer[] = {
     {"nSetRtAnimationsEnabled", "(Z)V", reinterpret_cast<void*>(HardwareRenderer_nSetRtAnimationsEnabled)},
     // ViewRootImpl.<init> -> HighContrastTextManager sets this (a static debug toggle); no-op.
     {"nSetHighContrastText", "(Z)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jboolean) {})},
+    // TextureView hardware-layer path (see AclTextureLayer): create/update/detach a texture layer.
+    {"nCreateTextureLayer", "(J)J", reinterpret_cast<void*>(HardwareRenderer_nCreateTextureLayer)},
+    {"nBuildLayer", "(JJ)V", reinterpret_cast<void*>(HardwareRenderer_nBuildLayer)},
+    {"nCopyLayerInto", "(JJJ)Z", reinterpret_cast<void*>(HardwareRenderer_nCopyLayerInto)},
+    {"nPushLayerUpdate", "(JJ)V", reinterpret_cast<void*>(HardwareRenderer_nPushLayerUpdate)},
+    {"nCancelLayerUpdate", "(JJ)V", reinterpret_cast<void*>(HardwareRenderer_nCancelLayerUpdate)},
+    {"nDetachSurfaceTexture", "(JJ)V", reinterpret_cast<void*>(HardwareRenderer_nDetachSurfaceTexture)},
+};
+const JNINativeMethod kSurfaceTexture[] = {
+    {"nativeInit", "(ZIZLjava/lang/ref/WeakReference;)V", reinterpret_cast<void*>(SurfaceTexture_nativeInit)},
+    {"nativeFinalize", "()V", reinterpret_cast<void*>(SurfaceTexture_nativeFinalize)},
+    {"nativeGetTransformMatrix", "([F)V", reinterpret_cast<void*>(SurfaceTexture_nativeGetTransformMatrix)},
+    {"nativeGetTimestamp", "()J", reinterpret_cast<void*>(SurfaceTexture_nativeGetTimestamp)},
+    {"nativeGetDataSpace", "()I", reinterpret_cast<void*>(SurfaceTexture_nativeGetDataSpace)},
+    {"nativeSetDefaultBufferSize", "(II)V", reinterpret_cast<void*>(SurfaceTexture_nativeSetDefaultBufferSize)},
+    {"nativeUpdateTexImage", "()V", reinterpret_cast<void*>(SurfaceTexture_nativeUpdateTexImage)},
+    {"nativeReleaseTexImage", "()V", reinterpret_cast<void*>(SurfaceTexture_nativeReleaseTexImage)},
+    {"nativeDetachFromGLContext", "()I", reinterpret_cast<void*>(SurfaceTexture_nativeDetachFromGLContext)},
+    {"nativeAttachToGLContext", "(I)I", reinterpret_cast<void*>(SurfaceTexture_nativeAttachToGLContext)},
+    {"nativeRelease", "()V", reinterpret_cast<void*>(SurfaceTexture_nativeRelease)},
+    {"nativeIsReleased", "()Z", reinterpret_cast<void*>(SurfaceTexture_nativeIsReleased)},
+};
+const JNINativeMethod kTextureLayer[] = {
+    {"nPrepare", "(JIIZ)Z", reinterpret_cast<void*>(TextureLayer_nPrepare)},
+    {"nSetLayerPaint", "(JJ)V", reinterpret_cast<void*>(TextureLayer_nSetLayerPaint)},
+    {"nSetTransform", "(JJ)V", reinterpret_cast<void*>(TextureLayer_nSetTransform)},
+    {"nSetSurfaceTexture", "(JLandroid/graphics/SurfaceTexture;)V", reinterpret_cast<void*>(TextureLayer_nSetSurfaceTexture)},
+    {"nUpdateSurfaceTexture", "(J)V", reinterpret_cast<void*>(TextureLayer_nUpdateSurfaceTexture)},
+};
+const JNINativeMethod kTextureView[] = {
+    {"nCreateNativeWindow", "(Landroid/graphics/SurfaceTexture;)V", reinterpret_cast<void*>(TextureView_nCreateNativeWindow)},
+    {"nDestroyNativeWindow", "()V", reinterpret_cast<void*>(TextureView_nDestroyNativeWindow)},
+    {"nLockCanvas", "(JLandroid/graphics/Canvas;Landroid/graphics/Rect;)Z", reinterpret_cast<void*>(TextureView_nLockCanvas)},
+    {"nUnlockCanvasAndPost", "(JLandroid/graphics/Canvas;)V", reinterpret_cast<void*>(TextureView_nUnlockCanvasAndPost)},
 };
 const JNINativeMethod kDisplayEventReceiver[] = {
     {"nativeInit", "(Ljava/lang/ref/WeakReference;Landroid/os/MessageQueue;II)J", reinterpret_cast<void*>(DisplayEventReceiver_nativeInit)},
@@ -4736,6 +5004,26 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   ok = reg(env, "android/graphics/fonts/Font", kFont, n(kFont)) && ok;
   ok = reg(env, "android/graphics/Interpolator", kInterpolator, n(kInterpolator)) && ok;
   ok = reg(env, "android/graphics/HardwareRenderer", kHardwareRenderer, n(kHardwareRenderer)) && ok;
+  // SurfaceTexture / TextureView hardware-layer path. Best-effort (a missing native here must not
+  // gate the whole graphics floor): register the natives and cache mSurfaceTexture. Absent -> a
+  // TextureView in the tree throws UnsatisfiedLinkError and takes the View.draw traversal down.
+  if (jclass st = env->FindClass("android/graphics/SurfaceTexture")) {
+    g_st_field = env->GetFieldID(st, "mSurfaceTexture", "J");
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    reg(env, "android/graphics/SurfaceTexture", kSurfaceTexture, n(kSurfaceTexture));
+    env->DeleteLocalRef(st);
+  } else {
+    env->ExceptionClear();
+  }
+  reg(env, "android/graphics/TextureLayer", kTextureLayer, n(kTextureLayer));
+  if (jclass tv = env->FindClass("android/view/TextureView")) {
+    g_tv_window_field = env->GetFieldID(tv, "mNativeWindow", "J");
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    reg(env, "android/view/TextureView", kTextureView, n(kTextureView));
+    env->DeleteLocalRef(tv);
+  } else {
+    env->ExceptionClear();
+  }
   ok = reg(env, "android/view/DisplayEventReceiver", kDisplayEventReceiver, n(kDisplayEventReceiver)) && ok;
   ok = reg(env, "com/android/internal/util/VirtualRefBasePtr", kVirtualRefBasePtr, n(kVirtualRefBasePtr)) && ok;
   ok = reg(env, "android/util/PathParser", kPathParser, n(kPathParser)) && ok;
