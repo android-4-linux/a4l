@@ -202,6 +202,10 @@ public final class HostBootstrap {
         seedTelephonyFrameworkInitializer();
         seedMediaFrameworkInitializer();
         seedSqliteDefaults();
+        // Register the AndroidKeyStore JCE provider before app code runs: apps do
+        // KeyStore.getInstance("AndroidKeyStore") / KeyGenerator.getInstance(_, "AndroidKeyStore")
+        // during startup (Telegram's FingerprintController), which NPE/throw with no provider.
+        AclKeyStoreProvider.install();
         seedContentService();
         seedVirtualInputDevice();
     }
