@@ -57,6 +57,7 @@
 #include "SkGradientShader.h"
 #include "SkPathEffect.h"
 #include "SkDashPathEffect.h"
+#include "SkCornerPathEffect.h"
 #include "SkRuntimeEffect.h"
 #include "SkImage.h"
 #include "SkImageInfo.h"
@@ -362,6 +363,24 @@ void Bitmap_nativeErase(JNIEnv*, jclass, jlong ptr, jint color) {
 // space conversion (e.g. ARGB_8888 -> RGB_565 or -> ALPHA_8); the common case is a same-config
 // deep copy for a mutable working buffer. density + premultiplied are re-applied by Bitmap.copy()
 // in Java on the returned object, so density=0 here matches nativeCreate.
+// Bitmap.nativeComputeColorSpace(nativeBitmap) -> android.graphics.ColorSpace. acl's bitmaps are
+// sRGB; return ColorSpace.get(ColorSpace.Named.SRGB) rather than reconstructing one from the
+// SkColorSpace. Telegram computes this on its theme-loading thread; the missing native killed that
+// thread and stalled the UI. Returns null on any resolution failure (Bitmap.getColorSpace tolerates
+// a null from a recycled/odd bitmap).
+jobject Bitmap_nativeComputeColorSpace(JNIEnv* env, jclass, jlong /*bitmapHandle*/) {
+  jclass csCls = env->FindClass("android/graphics/ColorSpace");
+  jclass namedCls = env->FindClass("android/graphics/ColorSpace$Named");
+  if (csCls == nullptr || namedCls == nullptr) { env->ExceptionClear(); return nullptr; }
+  jfieldID srgbF = env->GetStaticFieldID(namedCls, "SRGB", "Landroid/graphics/ColorSpace$Named;");
+  jmethodID getM = env->GetStaticMethodID(
+      csCls, "get", "(Landroid/graphics/ColorSpace$Named;)Landroid/graphics/ColorSpace;");
+  if (srgbF == nullptr || getM == nullptr) { env->ExceptionClear(); return nullptr; }
+  jobject srgb = env->GetStaticObjectField(namedCls, srgbF);
+  jobject result = env->CallStaticObjectMethod(csCls, getM, srgb);
+  if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+  return result;
+}
 jobject Bitmap_nativeCopy(JNIEnv* env, jclass, jlong srcPtr, jint dstConfig, jboolean isMutable) {
   auto* src = reinterpret_cast<AclBitmap*>(srcPtr);
   if (src == nullptr) return nullptr;
@@ -3215,6 +3234,8 @@ const JNINativeMethod kBitmap[] = {
     {"nativeSetHasAlpha", "(JZZ)V", reinterpret_cast<void*>(Bitmap_nativeSetHasAlpha)},
     {"nativeErase", "(JI)V", reinterpret_cast<void*>(Bitmap_nativeErase)},
     {"nativeCopy", "(JIZ)Landroid/graphics/Bitmap;", reinterpret_cast<void*>(Bitmap_nativeCopy)},
+    {"nativeComputeColorSpace", "(J)Landroid/graphics/ColorSpace;",
+     reinterpret_cast<void*>(Bitmap_nativeComputeColorSpace)},
     {"nativeCompress", "(JIILjava/io/OutputStream;[B)Z", reinterpret_cast<void*>(Bitmap_nativeCompress)},
     {"nativeIsPremultiplied", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeIsPremultiplied)},
     {"nativeHasAlpha", "(J)Z", reinterpret_cast<void*>(Bitmap_nativeHasAlpha)},
@@ -3588,6 +3609,13 @@ jlong DashPathEffect_nativeCreate(JNIEnv* env, jclass, jfloatArray intervals, jf
 void PathEffect_nativeDestructor(JNIEnv*, jclass, jlong ptr) {
   SkSafeUnref(reinterpret_cast<SkPathEffect*>(ptr));
 }
+// android.graphics.CornerPathEffect -> SkCornerPathEffect (rounds path corners by `radius`).
+// Telegram builds rounded UI shapes with it in LaunchActivity.onCreate; without it the native
+// throws UnsatisfiedLinkError and onCreate fails. Same PathEffect base owns/frees the handle.
+jlong CornerPathEffect_nativeCreate(JNIEnv*, jclass, jfloat radius) {
+  sk_sp<SkPathEffect> e = SkCornerPathEffect::Make(radius);
+  return reinterpret_cast<jlong>(e.release());  // may be null (radius<=0); Java tolerates 0
+}
 
 // android.graphics.Color HSV conversions. The host libandroid_runtime does not register the
 // graphics JNI, so Color.HSVToColor/RGBToHSV (e.g. an app picking a random stroke color) throws
@@ -3613,6 +3641,9 @@ const JNINativeMethod kColor[] = {
 };
 const JNINativeMethod kDashPathEffect[] = {
     {"nativeCreate", "([FF)J", reinterpret_cast<void*>(DashPathEffect_nativeCreate)},
+};
+const JNINativeMethod kCornerPathEffect[] = {
+    {"nativeCreate", "(F)J", reinterpret_cast<void*>(CornerPathEffect_nativeCreate)},
 };
 const JNINativeMethod kPathEffect[] = {
     {"nativeDestructor", "(J)V", reinterpret_cast<void*>(PathEffect_nativeDestructor)},
@@ -4660,6 +4691,7 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   reg(env, "android/graphics/CanvasProperty", kCanvasProperty, n(kCanvasProperty));
   reg(env, "android/graphics/animation/RenderNodeAnimator", kRenderNodeAnimator, n(kRenderNodeAnimator));
   reg(env, "android/graphics/DashPathEffect", kDashPathEffect, n(kDashPathEffect));
+  reg(env, "android/graphics/CornerPathEffect", kCornerPathEffect, n(kCornerPathEffect));
   reg(env, "android/graphics/PathEffect", kPathEffect, n(kPathEffect));
   reg(env, "android/graphics/Color", kColor, n(kColor));
   // Text measurement + line breaking (Compose's text layout). Best-effort: without these,
