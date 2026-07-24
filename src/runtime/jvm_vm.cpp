@@ -3467,6 +3467,12 @@ class ArtVm final : public JniVm {
     if (const char* img = std::getenv("ACL_ART_BOOT_IMAGE");
         img != nullptr && *img != '\0') {
       option_strings.push_back(std::string("-Ximage:") + img);
+    } else if (const char* jit = std::getenv("ACL_ART_JIT"); jit != nullptr && *jit != '\0') {
+      // Imageless but JIT-compiled. -Xint is stronger than the imageless constraint requires:
+      // the JIT compiles hot methods in memory at runtime and needs no boot image (that is
+      // dex2oat's job, not the JIT's). Interpreter-only costs roughly an order of magnitude,
+      // which a heavy app (React Native class loading, Compose) shows as an unresponsive UI.
+      option_strings.push_back("-Xusejit:true");
     } else {
       option_strings.push_back("-Xint");  // imageless: interpret; no runtime dex2oat
     }
