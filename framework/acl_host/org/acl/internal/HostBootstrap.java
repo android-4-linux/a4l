@@ -1404,6 +1404,14 @@ public final class HostBootstrap {
         @Override public boolean deleteDatabase(String name) {
             return getDatabasePath(name).delete();
         }
+        // ContextWrapper.databaseList() delegates to mBase, which is null here, so it NPEs. F-Droid's
+        // ContentProviderMigrator.needsMigration() calls it during DB pre-population; the NPE is
+        // uncaught and its crash reporter tears the process down before the UI. List the databases/
+        // dir that getDatabasePath() writes into; empty (never null) when nothing has been created.
+        @Override public String[] databaseList() {
+            String[] names = new java.io.File(dataRoot(), "databases").list();
+            return names != null ? names : new String[0];
+        }
         // The app classloader (HostBootstrap is injected on the app classpath, so its loader
         // sees the app classes) — resource/XML inflation resolves app classes through this.
         @Override public ClassLoader getClassLoader() {
@@ -1472,6 +1480,38 @@ public final class HostBootstrap {
         // answers the request with GRANTED), it just has to be a non-throwing, non-null name.
         @Override public String getPermissionControllerPackageName() {
             return "com.android.permissioncontroller";
+        }
+        // StubPackageManager returns null here, and callers dereference it: F-Droid's
+        // SessionInstallManager ctor calls getPackageInstaller().getMySessions() during startup, the
+        // NPE is uncaught, and its crash reporter kills the process before the UI. acl cannot install
+        // APKs, so hand back a real PackageInstaller wrapping an IPackageInstaller proxy that reports
+        // no sessions (getMySessions/getAllSessions -> empty). Built by reflection: IPackageInstaller
+        // is a hidden AIDL interface and PackageInstaller has no no-arg constructor. Best-effort --
+        // on any failure fall back to the old null, i.e. no worse than before.
+        private android.content.pm.PackageInstaller pkgInstaller;
+        private boolean pkgInstallerTried;
+        @Override public synchronized android.content.pm.PackageInstaller getPackageInstaller() {
+            if (pkgInstallerTried) return pkgInstaller;
+            pkgInstallerTried = true;
+            try {
+                Class<?> ipiCls = Class.forName("android.content.pm.IPackageInstaller");
+                final Object emptySlice = Class.forName("android.content.pm.ParceledListSlice")
+                        .getMethod("emptyList").invoke(null);
+                Object ipi = java.lang.reflect.Proxy.newProxyInstance(
+                        ipiCls.getClassLoader(), new Class<?>[]{ipiCls},
+                        (p, method, a) -> {
+                            String n = method.getName();
+                            if ("getMySessions".equals(n) || "getAllSessions".equals(n)) return emptySlice;
+                            if ("asBinder".equals(n)) return null;
+                            return defaultValue(method.getReturnType());
+                        });
+                pkgInstaller = android.content.pm.PackageInstaller.class
+                        .getConstructor(ipiCls, String.class, String.class, int.class)
+                        .newInstance(ipi, pkg, null, 0);
+            } catch (Throwable t) {
+                android.util.Log.w("acl", "getPackageInstaller stub failed (" + t + "); returning null");
+            }
+            return pkgInstaller;
         }
         // Kotlin callers dereference this with a non-null assertion, so a null (the stub default)
         // crashes them. acl advertises no optional hardware features; return an empty array rather
