@@ -87,6 +87,19 @@ cp -f "$BLIBLOG" "$SYS/liblog.so"
 cp -f "$LDANDROID" "$SYS/ld-android.so"
 cp -f "$BLIBCXX" "$SYS/libc++.so"
 cp -f "$BLIBZ" "$SYS/libz.so"    # real bionic zlib; app libs (crashlytics/webp) NEED it
+# libOpenSLES.so: Android's OpenSL ES audio. App native libs DT_NEEDED it (Telegram's
+# libtmessages.49.so) and the whole lib fails to load if it's absent, taking the app down. acl has
+# no audio HAL to back the real one (it needs AudioFlinger/Binder); the NDK's stub .so carries the
+# full symbol set (slCreateEngine + the SL_IID_* interface IDs) with NO dependencies, so it
+# satisfies the loader. slCreateEngine is a bare return, i.e. OpenSL audio is a no-op — apps init it
+# lazily for playback/voice and reach their UI regardless. Best-effort.
+OPENSLES="$AOSP/out/soong/ndk/platforms/android-current/arch-x86_64/usr/lib64/libOpenSLES.so"
+if [ -e "$OPENSLES" ]; then
+  cp -f "$OPENSLES" "$SYS/libOpenSLES.so"
+  say "   libOpenSLES.so <- NDK stub (audio no-op)"
+else
+  say "   libOpenSLES.so: NDK stub not found under \$AOSP — apps NEEDing OpenSL ES stay blocked"
+fi
 if [ -n "$BLIBSTDCXX" ] && [ -e "$BLIBSTDCXX" ]; then
   cp -f "$BLIBSTDCXX" "$SYS/libstdc++.so"   # NDK gnustl-era C++ ABI stub; old libGDX games NEED it
   say "   libstdc++.so <- $BLIBSTDCXX"
