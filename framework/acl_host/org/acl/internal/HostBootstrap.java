@@ -1128,6 +1128,25 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("appops".equals(name)) {
+                // AppOpsManager(Context, IAppOpsService). Settings.canDrawOverlays() ->
+                // AppOpsManager.checkOpNoThrow -> IAppOpsService.checkOperation; a null service NPEs
+                // (Telegram's onStart -> GroupCallPip.updateVisibility -> canDrawOverlays). Back it
+                // with a proxy: checkOperation etc. return MODE_ALLOWED, which is 0 == the default int,
+                // so defaultValue answers every op-mode query as allowed (a desktop app may draw
+                // overlays / note ops freely). noteOp/startOp likewise default; no per-op policy here.
+                try {
+                    Class<?> iao = Class.forName("com.android.internal.app.IAppOpsService");
+                    Object svc = java.lang.reflect.Proxy.newProxyInstance(iao.getClassLoader(),
+                            new Class<?>[]{iao}, (p, m, a) -> defaultValue(m.getReturnType()));
+                    java.lang.reflect.Constructor<?> c = android.app.AppOpsManager.class
+                            .getDeclaredConstructor(android.content.Context.class, iao);
+                    c.setAccessible(true);
+                    return c.newInstance(this, svc);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("phone".equals(name)) {
                 // TelephonyManager(Context): Chromium's AndroidNetworkLibrary /
                 // NetworkChangeNotifierAutoDetect classify the connection via TelephonyManager
@@ -1204,6 +1223,7 @@ public final class HostBootstrap {
             if ("android.bluetooth.BluetoothManager".equals(serviceClass.getName())) return "bluetooth";
             if (serviceClass == android.os.storage.StorageManager.class) return "storage";
             if (serviceClass == android.os.UserManager.class) return "user";
+            if (serviceClass == android.app.AppOpsManager.class) return "appops";
             if (serviceClass == android.hardware.SensorManager.class) return "sensor";
             if (serviceClass == android.location.LocationManager.class) return "location";
             if (serviceClass == android.view.accessibility.CaptioningManager.class) return "captioning";
