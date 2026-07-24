@@ -888,7 +888,13 @@ public final class HostBootstrap {
                             .getDeclaredConstructor(android.content.Context.class, ipm, its,
                                     android.os.Handler.class);
                     c.setAccessible(true);
-                    return c.newInstance(this, makePowerHandler(ipm), makeThermalHandler(its), null);
+                    // The 4th arg (Handler) MUST be non-null: PowerManager.WakeLock.acquire() uses
+                    // the outer PowerManager's mHandler unconditionally (removeCallbacks/postDelayed
+                    // for its auto-release timer). A null there NPE'd every wake-lock acquire --
+                    // WorkManager acquires one for foreground work, so F-Droid's RepoUpdateWorker
+                    // died and its repo list never populated. Give it the main-looper Handler.
+                    android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+                    return c.newInstance(this, makePowerHandler(ipm), makeThermalHandler(its), h);
                 } catch (Throwable t) {
                     return null;
                 }
