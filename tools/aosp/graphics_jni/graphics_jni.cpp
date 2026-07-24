@@ -120,6 +120,83 @@ struct AclRenderNode : public SkRefCnt {
   bool is_present_root = false;
 };
 
+// ── Native handle guard ──────────────────────────────────────────────────────
+// The framework stores every native object as a bare jlong in a Java field, so a native can
+// be handed a pointer acl never minted and has no way to tell from the value alone. Two ways
+// that happens here, both observed as SIGSEGV:
+//   * an ART boot image pre-initializes boot classes and bakes their static state, including
+//     native pointers minted inside dex2oat that mean nothing at run time
+//     (Typeface_nativeGetStyle -> SkTypeface::fontStyle(), from a preinitialized
+//     android.graphics.Typeface.<init>);
+//   * a framework path acl does not intercept constructs the Java object itself and leaves a
+//     stale or foreign long behind (android.graphics.fonts.Font.getStyle, fault 0x800000008).
+// A null check does not catch either: the value is non-zero garbage. So acl records every
+// handle it mints and validates membership before dereferencing — an unrecognized handle
+// degrades to a documented default instead of taking the process down.
+//
+// The count field mirrors the object's own ref count: typeface_ref() hands the SAME pointer
+// back with an extra Skia ref, so two live Java Typefaces can share one address and the first
+// free must not invalidate the handle the second still holds.
+enum class HandleKind : std::uint8_t { kTypeface, kFont, kFontFamily };
+
+class HandleTable {
+ public:
+  static void add(const void* p, HandleKind k) {
+    if (p == nullptr) return;
+    std::lock_guard<std::mutex> lock(mutex());
+    Entry& e = map()[p];
+    e.kind = k;
+    ++e.count;
+  }
+  static void forget(const void* p) {
+    if (p == nullptr) return;
+    std::lock_guard<std::mutex> lock(mutex());
+    auto it = map().find(p);
+    if (it == map().end()) return;
+    if (--it->second.count <= 0) map().erase(it);
+  }
+  static bool holds(const void* p, HandleKind k) {
+    if (p == nullptr) return false;
+    std::lock_guard<std::mutex> lock(mutex());
+    auto it = map().find(p);
+    return it != map().end() && it->second.kind == k;
+  }
+
+ private:
+  struct Entry { HandleKind kind = HandleKind::kTypeface; int count = 0; };
+  static std::mutex& mutex() { static std::mutex m; return m; }
+  static std::unordered_map<const void*, Entry>& map() {
+    static std::unordered_map<const void*, Entry>* m = new std::unordered_map<const void*, Entry>();
+    return *m;  // leaked deliberately: natives can run after static destructors on teardown
+  }
+};
+
+// Mint: register a freshly produced handle and return it as the jlong the framework stores.
+template <class T>
+jlong handle_mint(T* p, HandleKind k) {
+  HandleTable::add(p, k);
+  return reinterpret_cast<jlong>(p);
+}
+
+// Consume: nullptr unless this is a live handle acl minted of exactly this kind. Set
+// ACL_GRAPHICS_HANDLE_DEBUG=1 to see rejects — a silent default can otherwise hide a real gap
+// (a framework path acl should be intercepting but is not).
+template <class T>
+T* handle_checked(jlong h, HandleKind k, const char* who) {
+  auto* p = reinterpret_cast<T*>(static_cast<std::uintptr_t>(h));
+  if (HandleTable::holds(p, k)) return p;
+  if (h != 0) {
+    static const bool debug = [] {
+      const char* v = std::getenv("ACL_GRAPHICS_HANDLE_DEBUG");
+      return v != nullptr && *v != '\0' && *v != '0';
+    }();
+    if (debug)
+      std::fprintf(stderr, "[acl.graphics] %s: rejected foreign handle %p\n", who,
+                   reinterpret_cast<void*>(static_cast<std::uintptr_t>(h)));
+  }
+  return nullptr;
+}
+
 // A shared default typeface for text, resolved once. The AOSP host Skia default SkFontMgr
 // only exposes Skia's TEST fonts (ahem.ttf etc.), which lack real Latin glyphs, so load a
 // real font file: ACL_GRAPHICS_FONT if set (point it at Android's Roboto-Regular.ttf),
@@ -153,7 +230,7 @@ extern "C" jlong acl_typeface_from_path(const char* path) {
   if (path == nullptr || *path == '\0') return 0;
   sk_sp<SkTypeface> tf = SkTypeface::MakeFromFile(path);
   if (!tf) return 0;
-  return reinterpret_cast<jlong>(tf.release());
+  return handle_mint(tf.release(), HandleKind::kTypeface);
 }
 
 jclass g_bitmap_class = nullptr;    // global ref, for nativeCreate -> NewObject
@@ -1403,7 +1480,14 @@ jfloat Paint_nGetTextScaleX(jlong p) { ACLP(p); return ap ? ap->font.getScaleX()
 void Paint_nSetTextScaleX(jlong p, jfloat s) { ACLP(p); if (ap) ap->font.setScaleX(s); }
 jfloat Paint_nGetTextSkewX(jlong p) { ACLP(p); return ap ? ap->font.getSkewX() : 0; }
 void Paint_nSetTextSkewX(jlong p, jfloat s) { ACLP(p); if (ap) ap->font.setSkewX(s); }
-void Paint_nSetTypeface(jlong p, jlong tf) { ACLP(p); if (ap) ap->font.setTypeface(sk_ref_sp(reinterpret_cast<SkTypeface*>(tf))); }
+// A foreign typeface here would not crash until Skia shaped text with it, far from the cause,
+// so fall back to the bundled default rather than storing an unvalidated pointer in the Paint.
+void Paint_nSetTypeface(jlong p, jlong tf) {
+  ACLP(p);
+  if (!ap) return;
+  auto* t = handle_checked<SkTypeface>(tf, HandleKind::kTypeface, "Paint.nSetTypeface");
+  ap->font.setTypeface(t != nullptr ? sk_ref_sp(t) : default_typeface());
+}
 jint Paint_nGetTextAlign(jlong p) { ACLP(p); return ap ? ap->textAlign : 0; }
 void Paint_nSetTextAlign(jlong p, jint a) { ACLP(p); if (ap) ap->textAlign = a; }
 jfloat Paint_nGetLetterSpacing(jlong p) { ACLP(p); return ap ? ap->letterSpacing : 0; }
@@ -2401,17 +2485,42 @@ void Region_scale(JNIEnv* env, jobject o, jfloat scale, jobject dst) {
 struct AclFont { sk_sp<SkTypeface> tf; int weight = 400; bool italic = false; };
 struct AclFontFamily { std::vector<sk_sp<SkTypeface>> fonts; };
 
-void free_typeface(void* p) { SkSafeUnref(reinterpret_cast<SkTypeface*>(p)); }
-void free_font(void* p) { delete reinterpret_cast<AclFont*>(p); }
-void free_fontfamily(void* p) { delete reinterpret_cast<AclFontFamily*>(p); }
+// The release funcs run from the framework's NativeAllocationRegistry, i.e. on a handle the
+// framework believes is live. Validate anyway and drop the registration first, so a foreign or
+// double-freed pointer is ignored rather than unref'd/deleted.
+void free_typeface(void* p) {
+  if (!HandleTable::holds(p, HandleKind::kTypeface)) return;
+  HandleTable::forget(p);
+  SkSafeUnref(reinterpret_cast<SkTypeface*>(p));
+}
+void free_font(void* p) {
+  if (!HandleTable::holds(p, HandleKind::kFont)) return;
+  HandleTable::forget(p);
+  delete reinterpret_cast<AclFont*>(p);
+}
+void free_fontfamily(void* p) {
+  if (!HandleTable::holds(p, HandleKind::kFontFamily)) return;
+  HandleTable::forget(p);
+  delete reinterpret_cast<AclFontFamily*>(p);
+}
 
 // android.graphics.fonts.Font$Builder
-jlong FontBuilder_nInitBuilder(JNIEnv*, jclass) { return reinterpret_cast<jlong>(new AclFont()); }
-void FontBuilder_nAddAxis(JNIEnv*, jclass, jlong, jint, jfloat) {}
+//
+// ABI: the natives below follow whatever the framework declares. The font classes annotate most
+// of their natives @CriticalNative, which means ART passes ONLY the declared arguments — no
+// JNIEnv*, no jclass. Declaring such a native the normal way makes every argument land one or
+// two registers off, so the "handle" read is whatever happened to be in that register (a stack
+// address, an interior pointer) and dereferencing it is undefined. That is exactly what crashed
+// Typeface.nativeGetStyle and Font.nGetPackedStyle. @FastNative, by contrast, keeps the normal
+// signature. Cross-check against frameworks/base/graphics/java/android/graphics/{Typeface,
+// fonts/Font,fonts/FontFamily}.java before adding or changing one here.
+jlong FontBuilder_nInitBuilder(JNIEnv*, jclass) { return handle_mint(new AclFont(), HandleKind::kFont); }
+void FontBuilder_nAddAxis(jlong, jint, jfloat) {}  // @CriticalNative
 jlong FontBuilder_nBuild(JNIEnv* env, jclass, jlong builder, jobject buffer, jstring path,
                         jstring /*localeList*/, jint weight, jboolean italic, jint ttc) {
-  auto* f = reinterpret_cast<AclFont*>(builder);
-  if (f == nullptr) f = new AclFont();
+  auto* f = handle_checked<AclFont>(builder, HandleKind::kFont, "Font$Builder.nBuild");
+  const bool fresh = f == nullptr;  // no usable builder handle — build a Font from scratch
+  if (fresh) f = new AclFont();
   sk_sp<SkTypeface> tf;
   if (path != nullptr) {
     const char* s = env->GetStringUTFChars(path, nullptr);
@@ -2425,59 +2534,69 @@ jlong FontBuilder_nBuild(JNIEnv* env, jclass, jlong builder, jobject buffer, jst
   }
   if (!tf) tf = default_typeface();
   f->tf = tf; f->weight = weight; f->italic = italic;
-  return reinterpret_cast<jlong>(f);
+  return fresh ? handle_mint(f, HandleKind::kFont) : reinterpret_cast<jlong>(f);
 }
-jlong FontBuilder_nGetReleaseNativeFont(JNIEnv*, jclass) { return reinterpret_cast<jlong>(&free_font); }
+jlong FontBuilder_nGetReleaseNativeFont() { return reinterpret_cast<jlong>(&free_font); }  // @CriticalNative
+// @FastNative — normal signature.
 jlong FontBuilder_nClone(JNIEnv*, jclass, jlong fontPtr, jlong, jint weight, jboolean italic, jint) {
-  auto* src = reinterpret_cast<AclFont*>(fontPtr);
+  auto* src = handle_checked<AclFont>(fontPtr, HandleKind::kFont, "Font$Builder.nClone");
   auto* f = new AclFont();
   f->tf = src != nullptr ? src->tf : default_typeface();
   f->weight = weight; f->italic = italic;
-  return reinterpret_cast<jlong>(f);
+  return handle_mint(f, HandleKind::kFont);
 }
 // android.graphics.fonts.FontFamily$Builder
-jlong FontFamilyBuilder_nInitBuilder(JNIEnv*, jclass) { return reinterpret_cast<jlong>(new AclFontFamily()); }
-void FontFamilyBuilder_nAddFont(JNIEnv*, jclass, jlong builder, jlong fontPtr) {
-  auto* fam = reinterpret_cast<AclFontFamily*>(builder);
-  auto* f = reinterpret_cast<AclFont*>(fontPtr);
+jlong FontFamilyBuilder_nInitBuilder(JNIEnv*, jclass) {
+  return handle_mint(new AclFontFamily(), HandleKind::kFontFamily);
+}
+void FontFamilyBuilder_nAddFont(jlong builder, jlong fontPtr) {  // @CriticalNative
+  auto* fam = handle_checked<AclFontFamily>(builder, HandleKind::kFontFamily, "FontFamily$Builder.nAddFont");
+  auto* f = handle_checked<AclFont>(fontPtr, HandleKind::kFont, "FontFamily$Builder.nAddFont");
   if (fam != nullptr && f != nullptr) fam->fonts.push_back(f->tf);
 }
 jlong FontFamilyBuilder_nBuild(JNIEnv*, jclass, jlong builder, jstring, jint, jboolean) { return builder; }
-jlong FontFamilyBuilder_nGetReleaseNativeFamily(JNIEnv*, jclass) { return reinterpret_cast<jlong>(&free_fontfamily); }
+jlong FontFamilyBuilder_nGetReleaseNativeFamily() { return reinterpret_cast<jlong>(&free_fontfamily); }  // @CriticalNative
 // android.graphics.fonts.FontFamily
-jint FontFamily_nGetFontSize(JNIEnv*, jclass, jlong fam) {
-  auto* f = reinterpret_cast<AclFontFamily*>(fam); return f != nullptr ? static_cast<jint>(f->fonts.size()) : 0;
+jint FontFamily_nGetFontSize(jlong fam) {  // @CriticalNative
+  auto* f = handle_checked<AclFontFamily>(fam, HandleKind::kFontFamily, "FontFamily.nGetFontSize");
+  return f != nullptr ? static_cast<jint>(f->fonts.size()) : 0;
 }
-jlong FontFamily_nGetFont(JNIEnv*, jclass, jlong fam, jint i) {
-  auto* f = reinterpret_cast<AclFontFamily*>(fam);
+jlong FontFamily_nGetFont(jlong fam, jint i) {  // @CriticalNative
+  auto* f = handle_checked<AclFontFamily>(fam, HandleKind::kFontFamily, "FontFamily.nGetFont");
   if (f == nullptr || i < 0 || i >= static_cast<jint>(f->fonts.size())) return 0;
   auto* out = new AclFont(); out->tf = f->fonts[i];
-  return reinterpret_cast<jlong>(out);
+  return handle_mint(out, HandleKind::kFont);
 }
-jstring FontFamily_nGetLangTags(JNIEnv* env, jclass, jlong) { return env->NewStringUTF(""); }
-jint FontFamily_nGetVariant(JNIEnv*, jclass, jlong) { return 0; }
+jstring FontFamily_nGetLangTags(JNIEnv* env, jclass, jlong) { return env->NewStringUTF(""); }  // @FastNative
+jint FontFamily_nGetVariant(jlong) { return 0; }  // @CriticalNative
 // android.graphics.fonts.Font (the immutable Font; native instance is an AclFont*).
-jlong Font_nGetReleaseNativeFont(JNIEnv*, jclass) { return reinterpret_cast<jlong>(&free_font); }
-jlong Font_nCloneFont(JNIEnv*, jclass, jlong p) {
-  auto* s = reinterpret_cast<AclFont*>(p); auto* f = new AclFont();
+jlong Font_nGetReleaseNativeFont() { return reinterpret_cast<jlong>(&free_font); }  // @CriticalNative
+jlong Font_nCloneFont(jlong p) {  // @CriticalNative
+  auto* s = handle_checked<AclFont>(p, HandleKind::kFont, "Font.nCloneFont");
+  auto* f = new AclFont();
   if (s != nullptr) { f->tf = s->tf; f->weight = s->weight; f->italic = s->italic; }
-  return reinterpret_cast<jlong>(f);
+  return handle_mint(f, HandleKind::kFont);
 }
-jint Font_nGetPackedStyle(JNIEnv*, jclass, jlong p) {
-  auto* f = reinterpret_cast<AclFont*>(p);
-  if (f == nullptr) return 400;
+// The Font.getStyle() path — @CriticalNative, and one of the two observed SIGSEGVs.
+jint Font_nGetPackedStyle(jlong p) {
+  auto* f = handle_checked<AclFont>(p, HandleKind::kFont, "Font.nGetPackedStyle");
+  if (f == nullptr) return 400;  // FontStyle.FONT_WEIGHT_NORMAL, upright
   return (f->weight & 0xFFFF) | (f->italic ? (1 << 16) : 0);
 }
-jint Font_nGetIndex(JNIEnv*, jclass, jlong) { return 0; }
-jint Font_nGetAxisCount(JNIEnv*, jclass, jlong) { return 0; }
-jlong Font_nGetAxisInfo(JNIEnv*, jclass, jlong, jint) { return 0; }
-jstring Font_nGetFontPath(JNIEnv* env, jclass, jlong) { return env->NewStringUTF(""); }
-jstring Font_nGetLocaleList(JNIEnv* env, jclass, jlong) { return env->NewStringUTF(""); }
-jint Font_nGetSourceId(JNIEnv*, jclass, jlong) { return 0; }
-jlong Font_nGetMinikinFontPtr(JNIEnv*, jclass, jlong p) { return p; }
-jlongArray Font_nGetAvailableFontSet(JNIEnv*, jclass) { return nullptr; }
-jobject Font_nNewByteBuffer(JNIEnv*, jclass, jlong) { return nullptr; }
-jlong Font_nGetBufferAddress(JNIEnv*, jclass, jlong) { return 0; }
+jint Font_nGetIndex(jlong) { return 0; }               // @CriticalNative
+jint Font_nGetAxisCount(jlong) { return 0; }           // @CriticalNative
+jlong Font_nGetAxisInfo(jlong, jint) { return 0; }     // @CriticalNative
+jstring Font_nGetFontPath(JNIEnv* env, jclass, jlong) { return env->NewStringUTF(""); }    // @FastNative
+jstring Font_nGetLocaleList(JNIEnv* env, jclass, jlong) { return env->NewStringUTF(""); }  // @FastNative
+jint Font_nGetSourceId(jlong) { return 0; }            // @CriticalNative
+jlong Font_nGetMinikinFontPtr(jlong p) {               // @CriticalNative
+  // acl has no minikin; the AclFont doubles as the "minikin font". Hand back only a handle we
+  // minted, so a foreign long cannot be laundered into one that later passes validation.
+  return handle_checked<AclFont>(p, HandleKind::kFont, "Font.nGetMinikinFontPtr") != nullptr ? p : 0;
+}
+jlongArray Font_nGetAvailableFontSet(JNIEnv*, jclass) { return nullptr; }  // @FastNative
+jobject Font_nNewByteBuffer(JNIEnv*, jclass, jlong) { return nullptr; }    // @FastNative
+jlong Font_nGetBufferAddress(jlong) { return 0; }                          // @CriticalNative
 jfloat Font_nGetGlyphBounds(JNIEnv*, jclass, jlong, jint, jlong, jobject) { return 0; }
 jfloat Font_nGetFontMetrics(JNIEnv*, jclass, jlong, jlong, jobject) { return 0; }
 
@@ -2487,35 +2606,55 @@ jint sk_typeface_style(const SkFontStyle& s) {
   const bool italic = s.slant() != SkFontStyle::kUpright_Slant;
   return (bold ? 1 : 0) | (italic ? 2 : 0);  // NORMAL=0, BOLD=1, ITALIC=2, BOLD_ITALIC=3
 }
+// Derive a new Typeface handle from an existing one. The extra Skia ref gets its own
+// registration (same address, count+1) so the two Java Typefaces are freed independently.
 jlong typeface_ref(SkTypeface* t) {
-  if (t != nullptr) { SkSafeRef(t); return reinterpret_cast<jlong>(t); }
-  return reinterpret_cast<jlong>(default_typeface().release());
+  if (t != nullptr) { SkSafeRef(t); return handle_mint(t, HandleKind::kTypeface); }
+  return handle_mint(default_typeface().release(), HandleKind::kTypeface);
 }
-jlong Typeface_nativeGetReleaseFunc(JNIEnv*, jclass) { return reinterpret_cast<jlong>(&free_typeface); }
+// The jlong-taking natives all resolve their argument through this, never a raw cast.
+SkTypeface* typeface_arg(jlong ni, const char* who) {
+  return handle_checked<SkTypeface>(ni, HandleKind::kTypeface, who);
+}
+jlong Typeface_nativeGetReleaseFunc() { return reinterpret_cast<jlong>(&free_typeface); }  // @CriticalNative
 jlong Typeface_nativeCreateFromArray(JNIEnv* env, jclass, jlongArray families, jlong, jint, jint) {
   sk_sp<SkTypeface> tf;
   if (families != nullptr && env->GetArrayLength(families) > 0) {
     jlong first = 0; env->GetLongArrayRegion(families, 0, 1, &first);
-    if (auto* fam = reinterpret_cast<AclFontFamily*>(first); fam != nullptr && !fam->fonts.empty())
+    if (auto* fam = handle_checked<AclFontFamily>(first, HandleKind::kFontFamily,
+                                                  "Typeface.nativeCreateFromArray");
+        fam != nullptr && !fam->fonts.empty())
       tf = fam->fonts[0];
   }
   if (!tf) tf = default_typeface();
-  return reinterpret_cast<jlong>(tf.release());
+  return handle_mint(tf.release(), HandleKind::kTypeface);
 }
-jlong Typeface_nativeCreateFromTypeface(JNIEnv*, jclass, jlong ni, jint) { return typeface_ref(reinterpret_cast<SkTypeface*>(ni)); }
-jlong Typeface_nativeCreateFromTypefaceWithExactStyle(JNIEnv*, jclass, jlong ni, jint, jboolean) { return typeface_ref(reinterpret_cast<SkTypeface*>(ni)); }
-jlong Typeface_nativeCreateFromTypefaceWithVariation(JNIEnv*, jclass, jlong ni, jobject) { return typeface_ref(reinterpret_cast<SkTypeface*>(ni)); }
-jlong Typeface_nativeCreateWeightAlias(JNIEnv*, jclass, jlong ni, jint) { return typeface_ref(reinterpret_cast<SkTypeface*>(ni)); }
+jlong Typeface_nativeCreateFromTypeface(JNIEnv*, jclass, jlong ni, jint) {
+  return typeface_ref(typeface_arg(ni, "Typeface.nativeCreateFromTypeface"));
+}
+jlong Typeface_nativeCreateFromTypefaceWithExactStyle(JNIEnv*, jclass, jlong ni, jint, jboolean) {
+  return typeface_ref(typeface_arg(ni, "Typeface.nativeCreateFromTypefaceWithExactStyle"));
+}
+jlong Typeface_nativeCreateFromTypefaceWithVariation(JNIEnv*, jclass, jlong ni, jobject) {
+  return typeface_ref(typeface_arg(ni, "Typeface.nativeCreateFromTypefaceWithVariation"));
+}
+jlong Typeface_nativeCreateWeightAlias(JNIEnv*, jclass, jlong ni, jint) {
+  return typeface_ref(typeface_arg(ni, "Typeface.nativeCreateWeightAlias"));
+}
 jintArray Typeface_nativeGetSupportedAxes(JNIEnv*, jclass, jlong) { return nullptr; }
-void Typeface_nativeSetDefault(JNIEnv*, jclass, jlong) {}
-jint Typeface_nativeGetStyle(JNIEnv*, jclass, jlong ni) {
-  auto* t = reinterpret_cast<SkTypeface*>(ni); return t != nullptr ? sk_typeface_style(t->fontStyle()) : 0;
+void Typeface_nativeSetDefault(jlong) {}  // @CriticalNative
+// Typeface.<init> calls this on every Typeface — @CriticalNative, and the first observed SIGSEGV.
+// Unknown handle => Typeface.NORMAL.
+jint Typeface_nativeGetStyle(jlong ni) {
+  auto* t = typeface_arg(ni, "Typeface.nativeGetStyle");
+  return t != nullptr ? sk_typeface_style(t->fontStyle()) : 0;
 }
-jint Typeface_nativeGetWeight(JNIEnv*, jclass, jlong ni) {
-  auto* t = reinterpret_cast<SkTypeface*>(ni); return t != nullptr ? t->fontStyle().weight() : 400;
+jint Typeface_nativeGetWeight(jlong ni) {  // @CriticalNative
+  auto* t = typeface_arg(ni, "Typeface.nativeGetWeight");
+  return t != nullptr ? t->fontStyle().weight() : 400;
 }
-jint Typeface_nativeGetFamilySize(JNIEnv*, jclass, jlong) { return 0; }
-jlong Typeface_nativeGetFamily(JNIEnv*, jclass, jlong, jint) { return 0; }
+jint Typeface_nativeGetFamilySize(jlong) { return 0; }        // @CriticalNative
+jlong Typeface_nativeGetFamily(jlong, jint) { return 0; }     // @CriticalNative
 void Typeface_nativeRegisterGenericFamily(JNIEnv*, jclass, jstring, jlong) {}
 jint Typeface_nativeWriteTypefaces(JNIEnv*, jclass, jobject, jlongArray) { return 0; }
 jlongArray Typeface_nativeReadTypefaces(JNIEnv*, jclass, jobject) { return nullptr; }
@@ -2527,7 +2666,7 @@ void Typeface_nativeForceSetStaticFinalField(JNIEnv* env, jclass clazz, jstring 
     env->ReleaseStringUTFChars(name, s);
   }
 }
-void Typeface_nativeAddFontCollections(JNIEnv*, jclass, jlong) {}
+void Typeface_nativeAddFontCollections(jlong) {}  // @CriticalNative
 void Typeface_nativeWarmUpCache(JNIEnv*, jclass, jstring) {}
 
 // android.graphics.HardwareRenderer — acl dropped hwui (ADR-4); RT-animation and other

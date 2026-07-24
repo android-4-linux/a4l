@@ -16,16 +16,15 @@
 # run time. run-apk.sh therefore keeps aclshims.jar at a stable path
 # (build/framework/artjars/) and picks this image up automatically once it exists.
 #
-# KNOWN BLOCKER (why run-apk.sh does not use this by default): with the framework AOT-compiled,
-# acl's replacement android.graphics natives crash --
-#   SIGSEGV in Typeface_nativeGetStyle -> SkTypeface::fontStyle(), called from
-#   boot-framework-minus-apex.oat android.graphics.Typeface.<init>
-# The image pre-initializes boot classes and bakes their static state, including native pointers
-# minted inside dex2oat, which are meaningless at run time; acl's natives reinterpret_cast the
-# stored long without being able to validate it. Preloading nothing (--image-classes with an empty
-# list) is rejected by dex2oat, so the fix needs a curated image-classes list that excludes
-# android.graphics, or acl-side revalidation of the native handles. Until then set
-# ACL_USE_BOOT_IMAGE=1 to opt in for experiments.
+# FIXED: the Typeface_nativeGetStyle SIGSEGV that used to block the full image was not the image
+# baking in stale pointers -- acl declared the font natives with the normal JNI signature while the
+# framework annotates them @CriticalNative, so every argument was read from the wrong register. With
+# the signatures corrected (and handles validated) in graphics_jni.cpp, the FULL image runs clean:
+# octalsuntime 1320 present frames in 45s vs 180 interpreted, ~7.3x.
+#
+# Still opt-in (ACL_USE_BOOT_IMAGE=1) for a different, unexplained reason: WebView apps that run
+# fine imageless produce no frames under the full image (openmaps: 420 frames imageless, 0 with the
+# image, no crash and no exception logged). Non-WebView apps are unaffected.
 #
 # Usage:   tools/build-boot-image.sh [output-dir]      (default: build/framework/artjars)
 # Env:     ACL_ART_HOME  (required) host ART build out/host/linux-x86
@@ -65,13 +64,14 @@ for spec in \
 done
 # ART accepts a boot image that covers a PREFIX of the bootclasspath; the rest is loaded from dex
 # as usual. The apex core jars above are exactly that prefix, and they hold the java.* code every
-# app hammers -- while android.graphics (whose natives acl replaces, and whose image-preinitialized
-# state is what crashes Typeface) lives in the framework jars that follow. So by default the image
-# covers CORE ONLY: most of the interpretation cost is removed without pre-initializing any
-# framework graphics state.
+# app hammers. The image covers CORE ONLY by default (~1.6x), which is the safe choice for every
+# app including WebView ones.
 #
-# ACL_BOOT_IMAGE_FULL=1 includes the framework jars too (currently crashes in Typeface -- see the
-# header). The unique-name symlinks exist because all six framework modules build to a file called
+# ACL_BOOT_IMAGE_FULL=1 includes the framework jars too and is much faster (~7.3x) now that the
+# font-native ABI is fixed -- use it for non-WebView apps; see the header for the WebView caveat.
+# It also needs a smaller heap than core-only does (ACL_ART_HEAP_MB=128; ART reserves 2x -Xmx for
+# region space and the larger image leaves less room).
+# The unique-name symlinks exist because all six framework modules build to a file called
 # javalib.jar and would otherwise collide as boot-javalib.art components.
 if [ -n "${ACL_BOOT_IMAGE_FULL:-}" ]; then
   BCPLINKS="$OUT/bcp"

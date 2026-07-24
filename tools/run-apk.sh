@@ -120,11 +120,10 @@ fi
 # aclshims.jar joins the BOOT classpath so framework-minus-apex resolves the android.* shims.
 BOOT="$BOOT:$ACLSHIMS"
 
-# A boot image built for exactly this bootclasspath (tools/build-boot-image.sh) would let ART run
-# the framework AOT-compiled instead of interpreting it (-Xint). OPT-IN ONLY (ACL_USE_BOOT_IMAGE=1):
-# with AOT framework code, acl's replacement android.graphics natives currently SIGSEGV
-# (Typeface_nativeGetStyle on a native pointer the image baked in at dex2oat time). See the header
-# of tools/build-boot-image.sh.
+# A boot image built for exactly this bootclasspath (tools/build-boot-image.sh) lets ART run the
+# framework AOT-compiled instead of interpreting it (-Xint): ~1.6x with the core-only image, ~7.3x
+# with the full one. OPT-IN ONLY (ACL_USE_BOOT_IMAGE=1) — the Typeface SIGSEGV that used to block it
+# is fixed, but WebView apps still render nothing under the FULL image. See build-boot-image.sh.
 if [ -n "${ACL_USE_BOOT_IMAGE:-}" ] && [ -z "${ACL_ART_BOOT_IMAGE:-}" ] \
    && [ -f "$JARDIR/x86_64/boot.art" ] && [ "$JARDIR/x86_64/boot.art" -nt "$ACLSHIMS" ]; then
   export ACL_ART_BOOT_IMAGE="$JARDIR/boot.art"
