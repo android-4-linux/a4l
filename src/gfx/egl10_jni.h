@@ -33,6 +33,14 @@ struct AclEgl10Hooks {
   // `attribs` is an EGL_NONE-terminated list or nullptr.
   EGLSurface (*create_window_surface)(JNIEnv* env, jobject surface, EGLConfig config,
                                       const EGLint* attribs, void* user) = nullptr;
+  // _eglCreateWindowSurfaceTexture(display, config, android.graphics.SurfaceTexture, attribs): the
+  // producer end of a TextureView's SurfaceTexture. Back it with an OFFSCREEN, dma-buf-exporting GL
+  // window (gbm), so the app's GLThread renders + swaps into a buffer acl owns — instead of a
+  // wl_surface (a TextureView is composited into the view tree, not a subsurface). The produced
+  // frame is routed to the SurfaceTexture consumer for the TextureLayer to draw. EGL_NO_SURFACE on
+  // failure. `attribs` is an EGL_NONE-terminated list or nullptr.
+  EGLSurface (*create_surfacetexture_surface)(JNIEnv* env, jobject surface_texture, EGLConfig config,
+                                              const EGLint* attribs, void* user) = nullptr;
   void* user = nullptr;
 };
 

@@ -190,11 +190,20 @@ void _eglCreatePixmapSurface(JNIEnv* e, jobject, jobject, jobject, jobject, jobj
   if (jclass c = e->FindClass("java/lang/UnsupportedOperationException"); c != nullptr)
     e->ThrowNew(c, "eglCreatePixmapSurface");
 }
-jlong _eglCreateWindowSurfaceTexture(JNIEnv* e, jobject, jobject, jobject, jobject, jintArray) {
-  // SurfaceTexture-backed EGL (TextureView) — not on the GLSurfaceView path.
-  if (jclass c = e->FindClass("java/lang/UnsupportedOperationException"); c != nullptr)
-    e->ThrowNew(c, "eglCreateWindowSurfaceTexture");
-  return 0;
+jlong _eglCreateWindowSurfaceTexture(JNIEnv* e, jobject, jobject display, jobject config,
+                                     jobject surface_texture, jintArray attrib_list) {
+  // SurfaceTexture-backed EGL (TextureView): the app's GLThread renders into an offscreen,
+  // dma-buf-exporting GL window that acl owns; produced frames feed the SurfaceTexture consumer.
+  if (display == nullptr || config == nullptr) { throw_iae(e, "eglCreateWindowSurfaceTexture"); return 0; }
+  if (surface_texture == nullptr) { throw_iae(e, "eglCreateWindowSurfaceTexture: null SurfaceTexture"); return 0; }
+  if (g_hooks.create_surfacetexture_surface == nullptr) {
+    log::w(kTag, "eglCreateWindowSurfaceTexture: no acl SurfaceTexture->GL hook");
+    return reinterpret_cast<jlong>(EGL_NO_SURFACE);
+  }
+  const std::vector<EGLint> a = attribs_of(e, attrib_list);
+  EGLSurface s = g_hooks.create_surfacetexture_surface(e, surface_texture, get_config(e, config),
+                                                       a.data(), g_hooks.user);
+  return reinterpret_cast<jlong>(s);
 }
 jboolean _eglMakeCurrent(JNIEnv* e, jobject, jobject display, jobject draw, jobject read, jobject context) {
   return to_jbool(eglMakeCurrent(get_display(e, display), get_surface(e, draw),

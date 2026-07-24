@@ -137,6 +137,25 @@ struct GlPresentSession {
   bool ready = false;
 };
 GlPresentSession g_gl_session;
+// The headless gbm GL device: acl's fallback for GL that isn't a GLSurfaceView on the toplevel
+// wl_surface — the checkGL20 probe, and the offscreen producer for a TextureView's SurfaceTexture.
+// Lazily created on first use (non-GL apps pay nothing) and shared, so the app's context (from
+// get_display) and its SurfaceTexture window are on the SAME EGLDisplay (else eglMakeCurrent
+// EGL_BAD_MATCH). Never destroyed (process-lifetime).
+gfx::GlDevice* acl_fallback_gbm_device() {
+  static std::unique_ptr<gfx::GlDevice> dev = [] {
+    std::string err;
+    auto d = gfx::GlDevice::CreateGbm(&err);
+    if (!d) log::w(kTag, "egl10: fallback gbm GL device unavailable: {}", err);
+    return d;
+  }();
+  return dev.get();
+}
+// Offscreen GL windows backing TextureView SurfaceTextures (the producer surfaces from
+// eglCreateWindowSurfaceTexture). Kept alive for the process; the app's GLThread renders + swaps
+// into them. Guarded because create/destroy run on app GLThreads.
+std::mutex g_st_gl_mtx;
+std::vector<std::unique_ptr<gfx::GlWindow>> g_st_gl_windows;
 // The VM boot thread == the app main/UI thread. eglGetDisplay from HERE is the throwaway
 // AndroidGraphics.checkGL20 probe (during onCreate, before present); it must NOT block for the
 // wayland device (that only comes after onCreate) — only the app's separate GLThread blocks.
@@ -4341,12 +4360,7 @@ class ArtVm final : public JniVm {
         return static_cast<EGLDisplay>(g_gl_session.device->egl_display());
       }
       // Headless gbm fallback: the checkGL20 probe, or an app that uses EGL without a GLSurfaceView.
-      static std::unique_ptr<gfx::GlDevice> gbm = [] {
-        std::string err;
-        auto d = gfx::GlDevice::CreateGbm(&err);
-        if (!d) log::w(kTag, "egl10: fallback GL device unavailable: {}", err);
-        return d;
-      }();
+      gfx::GlDevice* gbm = acl_fallback_gbm_device();
       return gbm ? static_cast<EGLDisplay>(gbm->egl_display()) : EGL_NO_DISPLAY;
     };
     hooks.create_window_surface = [](JNIEnv*, jobject, EGLConfig config, const EGLint*, void*) -> EGLSurface {
@@ -4369,6 +4383,29 @@ class ArtVm final : public JniVm {
       auto* egl = static_cast<EGLSurface>(win->egl_surface());
       g_gl_session.window = std::move(win);  // keep the wl_egl_window alive
       log::i(kTag, "egl10: eglCreateWindowSurface -> GL window on acl's toplevel wl_surface");
+      return egl;
+    };
+    hooks.create_surfacetexture_surface = [](JNIEnv*, jobject, EGLConfig config, const EGLint*,
+                                             void*) -> EGLSurface {
+      // A TextureView's SurfaceTexture producer: an OFFSCREEN gbm GL window (dma-buf exporting) on
+      // the fallback device — the SAME device the app's GLThread got its EGLDisplay/context from, so
+      // eglMakeCurrent matches. Sized to the toplevel (the TextureView is ~fullscreen in practice;
+      // exact per-SurfaceTexture sizing + feeding the produced dma-buf to the consumer is the next
+      // stage). Renders nowhere visible yet, but lets the app's GLThread init + run so its
+      // onSurfaceTextureAvailable handshake completes and the View.draw traversal is not blocked.
+      gfx::GlDevice* dev = acl_fallback_gbm_device();
+      if (dev == nullptr) { log::w(kTag, "egl10: SurfaceTexture GL surface: no gbm device"); return EGL_NO_SURFACE; }
+      const int w = g_gl_session.w > 0 ? g_gl_session.w : 1080;
+      const int h = g_gl_session.h > 0 ? g_gl_session.h : 1920;
+      std::string err;
+      auto win = dev->make_window(w, h, nullptr, {}, &err, config);
+      if (!win) { log::w(kTag, "egl10: SurfaceTexture GL make_window failed: {}", err); return EGL_NO_SURFACE; }
+      auto* egl = static_cast<EGLSurface>(win->egl_surface());
+      {
+        std::lock_guard<std::mutex> lk(g_st_gl_mtx);
+        g_st_gl_windows.push_back(std::move(win));
+      }
+      log::i(kTag, "egl10: eglCreateWindowSurfaceTexture -> offscreen gbm GL window {}x{}", w, h);
       return egl;
     };
     if (gfx::register_egl10(env, hooks) == JNI_OK)
