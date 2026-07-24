@@ -63,36 +63,72 @@ CORECLASSES=$(first "$ROOT"/out/host/common/obj/JAVA_LIBRARIES/core-libart-hostd
 [ -n "${FWCLASSES:-}" ] || die_skip "framework-minus-apex classes.jar not built (m framework-minus-apex)"
 
 # Framework BOOT jars (PRODUCT_BOOT_JARS, system), in order; framework-minus-apex is the anchor.
+# Every framework module builds to <module>_intermediates/javalib.jar, i.e. they ALL share the
+# basename "javalib.jar". dex2oat's boot image is multi-image (--single-image is rejected for a
+# primary boot image on host) and names each component after that basename, so they would all
+# collide on boot-javalib.art and overwrite each other. Expose each jar under a unique name via a
+# stable symlink and use THAT as the bootclasspath entry, so image components are unique and the
+# baked dex locations match at run time.
+BCPLINKS="$ACLROOT/build/framework/artjars/bcp"
+mkdir -p "$BCPLINKS"
 BOOT=""
 for m in framework-minus-apex framework-graphics ext telephony-common voip-common ims-common; do
   j=$(first "$ROOT"/out/target/product/*/obj/JAVA_LIBRARIES/${m}_intermediates/javalib.jar)
-  [ -n "$j" ] && BOOT="${BOOT:+$BOOT:}$j"
+  if [ -n "$j" ]; then
+    ln -sfn "$j" "$BCPLINKS/${m}.jar"
+    BOOT="${BOOT:+$BOOT:}$BCPLINKS/${m}.jar"
+  fi
 done
 [ -n "$BOOT" ] || die_skip "framework boot jars not built (m framework-minus-apex framework-graphics ...)"
 FRES=$(first "$ROOT"/out/target/product/*/system/framework/framework-res.apk)
 
 W=$(mktemp -d "${TMPDIR:-/tmp}/acl-run-apk-XXXXXX")
 trap 'rm -rf "$W"' EXIT
-mkdir -p "$W/hbcls" "$W/bootdex" "$W/appdex"
 
-# Compile all of framework/acl_host once (against the real framework + core), at --release 8 so the
-# host javac's newer class-file version is accepted by this ART's d8.
-"$JAVAC" -cp "$FWCLASSES${CORECLASSES:+:$CORECLASSES}" --release 8 -d "$W/hbcls" \
-  $(find "$ACLROOT/framework/acl_host" -name '*.java') 2>&1 | head
+# The two dex jars live at a STABLE path, not in $W: a dex2oat boot image bakes in the dex
+# *locations* of every bootclasspath entry, so aclshims.jar must sit at the same path when the
+# image is built (tools/build-boot-image.sh) and when the app runs, or ART rejects the image
+# ("Image component ... does not match a boot class path component") and silently falls back to
+# imageless -Xint. Rebuilt only when a framework/acl_host source is newer than the jar.
+JARDIR="$ACLROOT/build/framework/artjars"
+ACLSHIMS="$JARDIR/aclshims.jar"
+HOSTBOOT="$JARDIR/hostboot.jar"
+mkdir -p "$JARDIR"
+NEWEST=$(find "$ACLROOT/framework/acl_host" -name '*.java' -newer "$ACLSHIMS" -print -quit 2>/dev/null)
+if [ ! -f "$ACLSHIMS" ] || [ ! -f "$HOSTBOOT" ] || [ -n "$NEWEST" ]; then
+  rm -rf "$W/hbcls" "$W/bootdex" "$W/appdex"; mkdir -p "$W/hbcls" "$W/bootdex" "$W/appdex"
+  # Compile all of framework/acl_host once (against the real framework + core), at --release 8 so
+  # the host javac's newer class-file version is accepted by this ART's d8.
+  "$JAVAC" -cp "$FWCLASSES${CORECLASSES:+:$CORECLASSES}" --release 8 -d "$W/hbcls" \
+    $(find "$ACLROOT/framework/acl_host" -name '*.java') 2>&1 | head
 
-# Split the compiled classes (see header): framework-facing -> boot jar, the rest -> app jar.
-BOOTCLS=$( { find "$W/hbcls/android" -name '*.class' 2>/dev/null
-             find "$W/hbcls/org/acl/internal" -name 'BluetoothBridge*.class' 2>/dev/null; \
-             find "$W/hbcls/org/acl/internal" -name 'NsdBridge*.class' 2>/dev/null; } )
-APPCLS=$(find "$W/hbcls/org" -name '*.class' 2>/dev/null | grep -vE '/(BluetoothBridge|NsdBridge)')
+  # Split the compiled classes (see header): framework-facing -> boot jar, the rest -> app jar.
+  BOOTCLS=$( { find "$W/hbcls/android" -name '*.class' 2>/dev/null
+               find "$W/hbcls/org/acl/internal" -name 'BluetoothBridge*.class' 2>/dev/null; \
+               find "$W/hbcls/org/acl/internal" -name 'NsdBridge*.class' 2>/dev/null; } )
+  APPCLS=$(find "$W/hbcls/org" -name '*.class' 2>/dev/null | grep -vE '/(BluetoothBridge|NsdBridge)')
 
-$D8 --min-api 24 --output "$W/bootdex" $BOOTCLS 2>&1 | tail -1
-$D8 --min-api 24 --output "$W/appdex"  $APPCLS  2>&1 | tail -1
-( cd "$W/bootdex" && zip -X -0 -q "$W/aclshims.jar" classes*.dex )
-( cd "$W/appdex"  && zip -X -0 -q "$W/hostboot.jar" classes*.dex )
+  $D8 --min-api 24 --output "$W/bootdex" $BOOTCLS 2>&1 | tail -1
+  $D8 --min-api 24 --output "$W/appdex"  $APPCLS  2>&1 | tail -1
+  rm -f "$ACLSHIMS" "$HOSTBOOT"
+  ( cd "$W/bootdex" && zip -X -0 -q "$ACLSHIMS" classes*.dex )
+  ( cd "$W/appdex"  && zip -X -0 -q "$HOSTBOOT" classes*.dex )
+  # The jars changed, so any previously built boot image no longer matches them.
+  rm -rf "$JARDIR/x86_64" 2>/dev/null
+fi
 
 # aclshims.jar joins the BOOT classpath so framework-minus-apex resolves the android.* shims.
-BOOT="$BOOT:$W/aclshims.jar"
+BOOT="$BOOT:$ACLSHIMS"
+
+# A boot image built for exactly this bootclasspath (tools/build-boot-image.sh) would let ART run
+# the framework AOT-compiled instead of interpreting it (-Xint). OPT-IN ONLY (ACL_USE_BOOT_IMAGE=1):
+# with AOT framework code, acl's replacement android.graphics natives currently SIGSEGV
+# (Typeface_nativeGetStyle on a native pointer the image baked in at dex2oat time). See the header
+# of tools/build-boot-image.sh.
+if [ -n "${ACL_USE_BOOT_IMAGE:-}" ] && [ -z "${ACL_ART_BOOT_IMAGE:-}" ] \
+   && [ -f "$JARDIR/x86_64/boot.art" ] && [ "$JARDIR/x86_64/boot.art" -nt "$ACLSHIMS" ]; then
+  export ACL_ART_BOOT_IMAGE="$JARDIR/boot.art"
+fi
 
 # The bionic bridge (ADR-5): an app's lib/<abi>/*.so are bionic-ABI, so they load only through
 # acl's in-process bionic linker. Stage the runtime (linker + sysroot incl. acl's libandroid.so +
@@ -120,7 +156,7 @@ RUNNER=(env
   ACL_ART_BOOTCLASSPATH="$BOOT"
   ACL_ART_NATIVE=1
   "${BIONIC_ARGS[@]}"
-  ACL_ART_HOST_BOOTSTRAP="$W/hostboot.jar")
+  ACL_ART_HOST_BOOTSTRAP="$HOSTBOOT")
 # Where System.loadLibrary finds acl's supplemental native libs (libsoundpool.so etc.). ART's
 # boot-classloader loader resolves via both java.library.path (ACL_ART_LIBPATH) and the dynamic
 # linker path, so set both.
