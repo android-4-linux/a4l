@@ -1476,7 +1476,76 @@ public final class HostBootstrap {
             pi.applicationInfo = getApplicationInfo(pkg, 0);
             pi.versionName = "1.0";
             try { pi.setLongVersionCode(1L); } catch (Throwable ignored) { pi.versionCode = 1; }
+            // The app's <uses-permission> names, with every one marked granted. Granting at
+            // checkSelfPermission() is NOT enough: permission libraries first verify the permission
+            // is DECLARED, by reading getPackageInfo(GET_PERMISSIONS).requestedPermissions. A null
+            // there reads as "not in the manifest", which is a hard denial no runtime grant can undo
+            // -- Expo's PermissionsService does exactly
+            //   getPackageInfo(pkg, GET_PERMISSIONS).requestedPermissions?.contains(perm) ?: false
+            // and castlab's first screen fails with "Missing MEDIA_LIBRARY permissions" and spins
+            // forever on its loading indicator.
+            String[] perms = requestedPermissions();
+            if (perms.length > 0) {
+                pi.requestedPermissions = perms;
+                int[] flags = new int[perms.length];
+                for (int i = 0; i < flags.length; i++)
+                    flags[i] = android.content.pm.PackageInfo.REQUESTED_PERMISSION_GRANTED;
+                pi.requestedPermissionsFlags = flags;
+            }
             return pi;
+        }
+
+        // Parsed once from AndroidManifest.xml; acl grants every permission (checkSelfPermission
+        // returns GRANTED), so this only has to report what the app asked for.
+        private static String[] sPerms;
+        private static synchronized String[] requestedPermissions() {
+            if (sPerms != null) return sPerms;
+            android.content.Context base = sAppContext;
+            // Do NOT cache before the app context exists, or the empty answer sticks forever and
+            // every later query reports "no permissions declared".
+            if (base == null) return new String[0];
+            java.util.List<String> out = new java.util.ArrayList<String>();
+            android.content.res.XmlResourceParser xml = null;
+            try {
+                // Pin to the APP's apk. openXmlResourceParser(name) returns the FIRST match across
+                // every apk in the AssetManager, and acl adds others (framework-res, the vendored
+                // WebView apk) -- by the time permissions are queried the first "AndroidManifest.xml"
+                // was WebView's, which is how this parse reported 4 unrelated permissions for an app
+                // whose manifest declares 22. findCookieForPath selects the right one.
+                android.content.res.AssetManager am = base.getResources().getAssets();
+                int cookie = 0;
+                String apk = base.getApplicationInfo() != null
+                        ? base.getApplicationInfo().sourceDir : null;
+                if (apk != null) {
+                    try {
+                        java.lang.reflect.Method m =
+                                am.getClass().getMethod("findCookieForPath", String.class);
+                        Object c = m.invoke(am, apk);
+                        if (c instanceof Integer) cookie = ((Integer) c).intValue();
+                    } catch (Throwable ignored) { }
+                }
+                xml = cookie > 0 ? am.openXmlResourceParser(cookie, "AndroidManifest.xml")
+                                 : am.openXmlResourceParser("AndroidManifest.xml");
+                final String NS = "http://schemas.android.com/apk/res/android";
+                for (int ev = xml.getEventType();
+                     ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
+                    if (ev == android.content.res.XmlResourceParser.START_TAG
+                            && ("uses-permission".equals(xml.getName())
+                                || "uses-permission-sdk-23".equals(xml.getName()))) {
+                        String name = xml.getAttributeValue(NS, "name");
+                        if (name != null && !out.contains(name)) out.add(name);
+                    }
+                }
+            } catch (Throwable t) {
+                android.util.Log.w("acl", "requestedPermissions: manifest parse failed (" + t
+                        + "); reporting none");
+            } finally {
+                if (xml != null) try { xml.close(); } catch (Throwable ignored) { }
+            }
+            sPerms = out.toArray(new String[0]);
+            android.util.Log.i("acl", "requestedPermissions: " + sPerms.length
+                    + " declared in the app manifest (all reported granted)");
+            return sPerms;
         }
         // A non-null ProviderInfo carrying the provider's <meta-data> (installContentProviders parsed
         // it). androidx.startup calls this on its own InitializationProvider to discover Initializers;
