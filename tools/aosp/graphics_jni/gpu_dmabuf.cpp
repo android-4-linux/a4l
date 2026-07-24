@@ -507,6 +507,18 @@ static void maybe_dump_frame() {
   std::vector<std::uint32_t> px(static_cast<std::size_t>(w) * h);
   SkImageInfo info = SkImageInfo::Make(w, h, kBGRA_8888_SkColorType, kUnpremul_SkAlphaType);
   if (!g.opt->readPixels(info, px.data(), static_cast<std::size_t>(w) * 4, 0, 0)) return;
+  // The PPM below is RGB-only, which hides the failure mode this dump is usually chasing: the
+  // surface is cleared to SK_ColorTRANSPARENT, so a frame with perfect color but ZERO alpha dumps
+  // as a flawless image and composites as an invisible (blank) window. Report alpha separately.
+  {
+    std::size_t opaque = 0, clear = 0, partial = 0;
+    for (std::uint32_t p : px) {
+      const std::uint8_t a = static_cast<std::uint8_t>((p >> 24) & 0xff);
+      if (a == 0) ++clear; else if (a == 0xff) ++opaque; else ++partial;
+    }
+    std::fprintf(stderr, "[acl.gpu] frame alpha: opaque=%zu clear=%zu partial=%zu (%dx%d)\n", opaque,
+                 clear, partial, w, h);
+  }
   FILE* f = std::fopen(path, "wb");
   if (f == nullptr) return;
   std::fprintf(f, "P6\n%d %d\n255\n", w, h);

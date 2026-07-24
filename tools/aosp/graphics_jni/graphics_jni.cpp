@@ -3288,9 +3288,25 @@ extern "C" void acl_graphics_set_present_defer(int on) {
   g_present_defer.store(on, std::memory_order_relaxed);
 }
 // Called each frame before View.draw (UI thread): (re)begin recording. No-op unless deferring.
+// ACL_PRESENT_DEFER_DEBUG=1 traces the deferred handoff (record -> take -> replay). The failure it
+// exists for is a white window with content clearly being drawn, where the question is which stage
+// drops it: nothing recorded, recorded but not handed over, or handed over but not replayed.
+bool present_defer_debug() {
+  static const bool on = [] {
+    const char* v = std::getenv("ACL_PRESENT_DEFER_DEBUG");
+    return v != nullptr && *v != '\0' && *v != '0';
+  }();
+  return on;
+}
 extern "C" void acl_graphics_present_begin_record(int w, int h) {
   if (!g_present_defer.load(std::memory_order_relaxed) || g_present_recorder == nullptr) return;
-  g_present_recorder->beginRecording(SkRect::MakeIWH(w > 0 ? w : 1, h > 0 ? h : 1));
+  SkCanvas* c = g_present_recorder->beginRecording(SkRect::MakeIWH(w > 0 ? w : 1, h > 0 ? h : 1));
+  // The cached canvas pointer is handed to Java once (nCreate) and reused every frame. If
+  // beginRecording ever returns a DIFFERENT canvas, Java records into a canvas nobody finishes and
+  // the window goes white -- so assert the assumption rather than trusting it.
+  if (c != g_present_record_canvas && present_defer_debug())
+    std::fprintf(stderr, "[acl.present] begin_record: canvas moved %p -> %p (Java holds the old one)\n",
+                 static_cast<void*>(g_present_record_canvas), static_cast<void*>(c));
   std::lock_guard<std::mutex> lk(g_present_pic_mu);
   g_present_functors_ready.clear();
 }
@@ -3318,6 +3334,9 @@ extern "C" void acl_graphics_present_record_functor(void* sk_canvas, int functor
 extern "C" void acl_graphics_present_finish_record() {
   if (!g_present_defer.load(std::memory_order_relaxed) || g_present_recorder == nullptr) return;
   sk_sp<SkPicture> pic = g_present_recorder->finishRecordingAsPicture();
+  if (present_defer_debug())
+    std::fprintf(stderr, "[acl.present] finish_record: picture=%p ops=%d\n",
+                 static_cast<void*>(pic.get()), pic ? pic->approximateOpCount(true) : -1);
   std::lock_guard<std::mutex> lk(g_present_pic_mu);
   g_present_picture_ready = std::move(pic);
 }
@@ -3340,6 +3359,10 @@ extern "C" void acl_graphics_present_replay_onto(void* sk_canvas) {
     functors = g_present_functors_rendering;
   }
   auto* c = reinterpret_cast<SkCanvas*>(sk_canvas);
+  if (present_defer_debug())
+    std::fprintf(stderr, "[acl.present] replay_onto: canvas=%p picture=%p ops=%d functors=%zu\n",
+                 static_cast<void*>(c), static_cast<void*>(pic.get()),
+                 pic ? pic->approximateOpCount(true) : -1, functors.size());
   if (c == nullptr) return;
   if (pic) c->drawPicture(pic);
   for (const PresentFunctor& pf : functors) {

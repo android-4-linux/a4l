@@ -1086,6 +1086,14 @@ static bool present_submit(PresentSession* s, const PresentDmabuf& f, int slot) 
   fr.drm_format = f.drm_format;
   fr.modifier_tiled = f.modifier != 0;
   if (!s->presenter->submit(fr, slot)) return false;
+  // ACL_PRESENT_DEFER_DEBUG=1: log EVERY submit with its buffer slot. The periodic log below only
+  // fires on frame 0 and every 60th, which reads as "only frame 0 was presented" for any app that
+  // presents slowly -- exactly the apps being diagnosed.
+  static const bool submit_debug = [] {
+    const char* v = std::getenv("ACL_PRESENT_DEFER_DEBUG");
+    return v != nullptr && *v != '\0' && *v != '0';
+  }();
+  if (submit_debug) log::i(kTag, "present_submit: frame {} slot {} fd {}", s->frames, slot, f.fd);
   if (s->frames == 0 || s->frames % 60 == 0)
     log::i(kTag, "PresentDriver: frame {} presented ({}x{}) — looper-driven", s->frames, f.width,
            f.height);
