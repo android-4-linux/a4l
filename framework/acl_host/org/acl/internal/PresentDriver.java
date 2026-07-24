@@ -35,6 +35,15 @@ public final class PresentDriver {
     private static native long nOpen(View decor, int w, int h, String title, String appId);
     private static native int nFd(long s);              // Wayland connection fd
     private static native void nSetImeVisible(long s, boolean visible); // show/hide compositor text-input
+    private static native void nSetContentView(long s, View decor);      // swap presented decor (activity transition)
+
+    /** Swap the presented decor to a newly-launched Activity's (internal splash -> main transition). */
+    public static boolean setContentView(View decor) {
+        final long s = sSession;
+        if (s == 0L || decor == null) return false;
+        nSetContentView(s, decor);
+        return true;
+    }
     private static native int nRepeatFd(long s);         // wl_keyboard repeat timerfd (-1 if none)
     private static native boolean nDispatch(long s);      // drain wl events; false once closed
     private static native void nDispatchRepeat(long s);   // service one key-repeat tick

@@ -1108,6 +1108,19 @@ void JNICALL PresentDriver_nSetImeVisible(JNIEnv*, jclass, jlong sp, jboolean vi
   auto* s = reinterpret_cast<PresentSession*>(sp);
   if (s != nullptr && s->presenter) s->presenter->set_ime_visible(visible == JNI_TRUE);
 }
+// Swap the presented decor to a newly-launched Activity's (splash -> Main). The present loop
+// traverses s->view every frame; replace that global ref and the next frame draws the new decor.
+// The traversal method IDs (measure/layout/draw/dispatch*) are declared on android.view.View, so
+// they stay valid for any decor and need not be re-resolved. Runs on the present/main thread (an
+// internal startActivity is dispatched there), so no cross-thread hazard with nTraverse.
+void JNICALL PresentDriver_nSetContentView(JNIEnv* env, jclass, jlong sp, jobject view) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s == nullptr || view == nullptr) return;
+  jobject old = s->view;
+  s->view = env->NewGlobalRef(view);
+  if (old != nullptr) env->DeleteGlobalRef(old);
+  log::i(kTag, "PresentDriver.nSetContentView: decor swapped (activity transition)");
+}
 jint JNICALL PresentDriver_nRepeatFd(JNIEnv*, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
   return (s != nullptr && s->presenter) ? s->presenter->repeat_fd() : -1;
@@ -1668,6 +1681,8 @@ void register_present_driver_natives(JNIEnv* env) {
       {const_cast<char*>("nFd"), const_cast<char*>("(J)I"), reinterpret_cast<void*>(PresentDriver_nFd)},
       {const_cast<char*>("nSetImeVisible"), const_cast<char*>("(JZ)V"),
        reinterpret_cast<void*>(PresentDriver_nSetImeVisible)},
+      {const_cast<char*>("nSetContentView"), const_cast<char*>("(JLandroid/view/View;)V"),
+       reinterpret_cast<void*>(PresentDriver_nSetContentView)},
       {const_cast<char*>("nRepeatFd"), const_cast<char*>("(J)I"),
        reinterpret_cast<void*>(PresentDriver_nRepeatFd)},
       {const_cast<char*>("nDispatch"), const_cast<char*>("(J)Z"),
@@ -3669,10 +3684,12 @@ class ArtVm final : public JniVm {
     for (const std::string& opt : config_.options) option_strings.push_back(opt);
     // JVMTI exception-naming diagnostic (ACL_JVMTI_DIAG): load the JVMTI plugin so GetEnv() can
     // attach an Exception hook that names boot-classloader NoClassDefFoundErrors.
-    // ACL_STALL_DIAG (the Java-stack sampler) needs the same plugin.
+    // ACL_STALL_DIAG (the Java-stack sampler), ACL_TRACE_EXIT and ACL_SUPPRESS_EXIT all need the
+    // same plugin — without it install_jvmti_diag can't attach and they silently no-op.
     const bool jvmti_diag = [] {
-      for (const char* v : {std::getenv("ACL_JVMTI_DIAG"), std::getenv("ACL_STALL_DIAG")})
-        if (v != nullptr && *v != '\0') return true;
+      for (const char* v : {std::getenv("ACL_JVMTI_DIAG"), std::getenv("ACL_STALL_DIAG"),
+                            std::getenv("ACL_TRACE_EXIT"), std::getenv("ACL_SUPPRESS_EXIT")})
+        if (v != nullptr && *v != '\0' && *v != '0') return true;
       return false;
     }();
     if (jvmti_diag) {
