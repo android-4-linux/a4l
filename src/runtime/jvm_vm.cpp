@@ -14,6 +14,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -4375,7 +4377,7 @@ class ArtVm final : public JniVm {
     // lib's undefined gl* then bind to them, and they're the same GL that gfx/gl_egl (the
     // EGLImpl context) uses. Best-effort: if absent, the vendor dlopen below fails loudly.
     ::dlopen("libEGL.so.1", RTLD_NOW | RTLD_GLOBAL);
-    ::dlopen("libGLESv2.so.2", RTLD_NOW | RTLD_GLOBAL);
+    void* mesa_gles = ::dlopen("libGLESv2.so.2", RTLD_NOW | RTLD_GLOBAL);
     ::dlopen("libGLESv1_CM.so.1", RTLD_NOW | RTLD_GLOBAL);  // GLImpl's GLES1 (GL10) symbols
     // RTLD_LAZY (not NOW): GLImpl's glgen table references the full GLES1 OES surface
     // (glDrawTexfOES, glColorPointerBounds, …) that desktop Mesa doesn't export, but a GL20 app
@@ -4398,6 +4400,21 @@ class ArtVm final : public JniVm {
       return;
     }
     log::i(kTag, "acl gles: android.opengl.GLES20/GLES30 natives registered on host Mesa libGLESv2");
+    // GL-context %fs-bridging: fill the gles lib's routing bridge with the REAL host Mesa gl*
+    // pointers from the Mesa handle (a plain dlsym would find the RTLD_GLOBAL wrappers and recurse).
+    // The wrappers (acl_gles_route.c) route each gl* to the app's native-GL donor %fs when the thread
+    // is donor-routed, so a mixed Java-EGL/native-GL app's Java GL shares the native GL's context.
+    if (mesa_gles != nullptr) {
+      auto* bridge = static_cast<void**>(::dlsym(h, "acl_gles_bridge"));
+      auto* names = static_cast<const char* const*>(::dlsym(h, "acl_gles_bridge_names"));
+      auto* count = static_cast<int*>(::dlsym(h, "acl_gles_bridge_count"));
+      if (bridge != nullptr && names != nullptr && count != nullptr) {
+        int filled = 0;
+        for (int i = 0; i < *count; ++i)
+          if ((bridge[i] = ::dlsym(mesa_gles, names[i])) != nullptr) ++filled;
+        log::i(kTag, "acl gles: GL route bridge filled {}/{} gl* (donor-%fs bridging)", filled, *count);
+      }
+    }
   }
 
   // GLSurfaceView Stage 2a: register com.google.android.gles_jni.EGLImpl on host Mesa libEGL,

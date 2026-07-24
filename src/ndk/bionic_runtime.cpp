@@ -1065,8 +1065,19 @@ extern "C" void acl_gl_run_on_donor(void (*fn)(void*), void* arg) {
   if (g_gl_pick_donor == nullptr) { fn(arg); return; }
   std::uintptr_t glibc;
   asm volatile("rdfsbase %0" : "=r"(glibc));
-  const std::uintptr_t bionic = bionic_fs_for(glibc);
-  if (bionic == 0) { fn(arg); return; }  // thread not attached to bionic yet -> can't route
+  std::uintptr_t bionic = bionic_fs_for(glibc);
+  if (bionic == 0) {
+    // The app's Java GL setup (loadTexture) runs BEFORE this thread first calls a bionic native
+    // (Intro.onDrawFrame), which is what would normally attach it. Attach it NOW so it has a bionic
+    // %fs + donor; the later down-call reuses this same bionic TCB (bionic_fs_for), so native GL
+    // lands on the SAME donor.
+    if (BionicRuntime* rt = BionicRuntime::get()) {
+      std::string why;
+      rt->attach_current_thread(&why);
+      bionic = bionic_fs_for(glibc);
+    }
+  }
+  if (bionic == 0) { fn(arg); return; }  // still not attachable -> can't route
   asm volatile("wrfsbase %0" ::"r"(bionic));  // key pick_donor by the bionic %fs
   const std::uintptr_t donor = reinterpret_cast<std::uintptr_t (*)()>(g_gl_pick_donor)();
   asm volatile("wrfsbase %0" ::"r"(donor));   // Mesa's per-thread TLS home for native GL

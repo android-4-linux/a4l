@@ -16,6 +16,8 @@
 
 #include <vector>
 
+#include <sys/syscall.h>
+#include <unistd.h>
 #include "log/log.h"
 
 namespace acl::gfx {

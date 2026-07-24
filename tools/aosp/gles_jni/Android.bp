@@ -16,6 +16,7 @@ cc_library_shared {
         "com_google_android_gles_jni_GLImpl.cpp", // verbatim AOSP glgen (GL10/GL11, GLES1)
         "gles_shim.cpp",                          // acl: registerNativeMethods shim + register_acl_gles
         "android_opengl_GLUtils.cpp",             // acl: GLUtils.native_texImage2D (Bitmap -> texture)
+        "acl_gles_route.c",                       // acl: generated GLES2 donor-%fs routing wrappers
     ],
     local_include_dirs: [
         "shim",  // acl minimal android_runtime/AndroidRuntime.h + utils/misc.h stand-ins
@@ -42,6 +43,10 @@ cc_library_shared {
     // actually invoked (a GL20 app never does); acl dlopens with RTLD_LAZY to match.
     ldflags: [
         "-Wl,-z,lazy",
+        // Bind this lib's OWN gl* references (the glgen call sites) to its LOCAL wrappers first,
+        // instead of the RTLD_GLOBAL host Mesa symbols loaded before it — so the donor-%fs routing
+        // wrappers actually interpose. Undefined gl* (no local wrapper) still bind to Mesa.
+        "-Wl,-Bsymbolic-functions",
     ],
     cflags: [
         "-DGL_GLEXT_PROTOTYPES",  // declare the GLES1 OES prototypes GLImpl.cpp calls (AOSP does)

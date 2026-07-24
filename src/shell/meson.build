@@ -23,5 +23,13 @@ acl_exe = executable(
   link_with : module_libs,
   dependencies : [fmt_dep, jni_dep],   # fmt via log/log.h; jni links libjvm when present
   cpp_args : shell_cpp_args,
+  # Export the GL-context donor-%fs bridging seam so the dlopen'd libacl_gles_jni's gl* wrappers +
+  # GLUtils (mixed Java-EGL/native-GL apps) can reach it. Per-symbol so the rest of the executable's
+  # symbols stay unexported (no broad interposition surface).
+  link_args : [
+    '-Wl,--export-dynamic-symbol=acl_gl_run_on_donor',
+    '-Wl,--export-dynamic-symbol=acl_gl_donor_route_get',
+    '-Wl,--export-dynamic-symbol=acl_gl_donor_route_set',
+  ],
   install : true,
 )
