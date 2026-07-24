@@ -598,7 +598,17 @@ public final class HostBootstrap {
         @Override public android.os.Looper getMainLooper() {
             return android.os.Looper.getMainLooper();
         }
-        @Override public android.content.pm.ApplicationInfo getApplicationInfo() {
+        // Built once and shared, like ContextImpl's (which returns LoadedApk's single instance).
+        // This MUST be cached: View.getLayoutDirection() reads
+        // getContext().getApplicationInfo().targetSdkVersion on every call, View.isLayoutRtl()
+        // calls that, and TextView.onDraw() calls isLayoutRtl() -- so an uncached build ran a full
+        // AndroidManifest.xml parse (plus File/dataDir work) once per text view per frame. Measured
+        // on castlab (React Native): the UI thread spent its time in parseManifestMetaData under
+        // ReactTextView.onDraw and managed 44 traversals in 70s.
+        private android.content.pm.ApplicationInfo appInfo;
+
+        @Override public synchronized android.content.pm.ApplicationInfo getApplicationInfo() {
+            if (appInfo != null) return appInfo;
             android.content.pm.ApplicationInfo ai = new android.content.pm.ApplicationInfo();
             ai.packageName = pkg;
             ai.processName = pkg;   // single-process; WorkManager compares against this
@@ -620,6 +630,7 @@ public final class HostBootstrap {
             // metaData.containsKey/getBoolean on it, so a NULL metaData is an NPE before the app's
             // own code runs. Populate from AndroidManifest.xml; never leave it null.
             ai.metaData = parseManifestMetaData();
+            appInfo = ai;
             return ai;
         }
 
