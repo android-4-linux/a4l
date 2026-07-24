@@ -35,6 +35,10 @@ if have_jni
   # the kernel thermal zones. The D-Bus half is gated inside the module, so it also
   # builds without sdbus (thermal sysfs + awake defaults).
   subdir('power')
+  # svc/keystore: java.security.KeyStore("AndroidKeyStore") key MATERIAL persisted in the login
+  # keyring via the freedesktop Secret Service (libsecret). Gated on ACL_HAVE_SECRET inside the
+  # module; without libsecret it is the in-memory Null backend. Needs JNI for the KeystoreBridge seam.
+  subdir('keystore')
 endif
 
 # Automotive vehicle services (svc/car) compile in ONLY under the automotive

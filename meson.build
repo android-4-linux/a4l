@@ -247,6 +247,16 @@ if have_sdbus
   message('svc/net D-Bus connectivity backend enabled (sdbus-c++ ' + sdbus_dep.version() + ', mode=' + net_backend + ')')
 endif
 
+# svc/keystore: android.security.keystore AndroidKeyStore over the freedesktop Secret Service
+# (libsecret -> gnome-keyring / KWallet, LGPL-2.1 dynamic = policy-OK). Key MATERIAL persists in the
+# login keyring (encrypted at rest, keyring-unlock as the user-auth gate); the crypto itself runs
+# in-process via conscrypt. GObject/glib based (not sdbus). Absent -> in-memory Null backend.
+secret_dep = dependency('libsecret-1', required : false)
+have_secret = secret_dep.found()
+if have_secret
+  message('svc/keystore Secret Service backend enabled (libsecret ' + secret_dep.version() + ')')
+endif
+
 conf = configuration_data()
 conf.set('ACL_VERSION', '"' + meson.project_version() + '"')
 conf.set10('ACL_PROFILE_AUTOMOTIVE', profile_automotive)
@@ -259,6 +269,7 @@ conf.set10('ACL_HAVE_SKIA', have_skia)
 conf.set10('ACL_HAVE_VULKAN', have_vulkan)
 conf.set10('ACL_HAVE_GL', have_gl)
 conf.set10('ACL_HAVE_SDBUS', have_sdbus)
+conf.set10('ACL_HAVE_SECRET', have_secret)
 # Connectivity backend build mode: auto (compile all, probe the bus) | networkd |
 # networkmanager | connman | null. Backends whose macro is 0 are compiled out.
 conf.set10('ACL_NET_NETWORKD', have_sdbus and (net_backend == 'auto' or net_backend == 'networkd'))
