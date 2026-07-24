@@ -128,6 +128,13 @@ BOOT="$BOOT:$ACLSHIMS"
 if [ -n "${ACL_USE_BOOT_IMAGE:-}" ] && [ -z "${ACL_ART_BOOT_IMAGE:-}" ] \
    && [ -f "$JARDIR/x86_64/boot.art" ] && [ "$JARDIR/x86_64/boot.art" -nt "$ACLSHIMS" ]; then
   export ACL_ART_BOOT_IMAGE="$JARDIR/boot.art"
+  # With the image mapped, ART can no longer also reserve its default 512MB region-space heap
+  # ("Failed anonymous mmap(... 537133056 ...): Cannot allocate memory" ->
+  # "Check failed: region_space_mem_map.IsValid()"), so cap the heap unless the caller set one.
+  case "${ACL_ART_OPTS:-}" in
+    *-Xmx*) ;;
+    *) export ACL_ART_OPTS="${ACL_ART_OPTS:+$ACL_ART_OPTS }-Xmx${ACL_ART_HEAP_MB:-256}m" ;;
+  esac
 fi
 
 # The bionic bridge (ADR-5): an app's lib/<abi>/*.so are bionic-ABI, so they load only through

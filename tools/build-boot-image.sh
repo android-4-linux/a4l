@@ -63,18 +63,28 @@ for spec in \
   [ -f "$j" ] || die_skip "missing apex boot jar $j"
   BCP+=("$j")
 done
-# Same unique-name symlinks run-apk.sh puts on the bootclasspath (see there): all six framework
-# modules build to a file called javalib.jar, which would collide as boot-javalib.art components.
-BCPLINKS="$OUT/bcp"
-mkdir -p "$BCPLINKS"
-for m in framework-minus-apex framework-graphics ext telephony-common voip-common ims-common; do
-  j=$(first "$ROOT"/out/target/product/*/obj/JAVA_LIBRARIES/${m}_intermediates/javalib.jar)
-  if [ -n "$j" ]; then
-    ln -sfn "$j" "$BCPLINKS/${m}.jar"
-    BCP+=("$BCPLINKS/${m}.jar")
-  fi
-done
-BCP+=("$ACLSHIMS")
+# ART accepts a boot image that covers a PREFIX of the bootclasspath; the rest is loaded from dex
+# as usual. The apex core jars above are exactly that prefix, and they hold the java.* code every
+# app hammers -- while android.graphics (whose natives acl replaces, and whose image-preinitialized
+# state is what crashes Typeface) lives in the framework jars that follow. So by default the image
+# covers CORE ONLY: most of the interpretation cost is removed without pre-initializing any
+# framework graphics state.
+#
+# ACL_BOOT_IMAGE_FULL=1 includes the framework jars too (currently crashes in Typeface -- see the
+# header). The unique-name symlinks exist because all six framework modules build to a file called
+# javalib.jar and would otherwise collide as boot-javalib.art components.
+if [ -n "${ACL_BOOT_IMAGE_FULL:-}" ]; then
+  BCPLINKS="$OUT/bcp"
+  mkdir -p "$BCPLINKS"
+  for m in framework-minus-apex framework-graphics ext telephony-common voip-common ims-common; do
+    j=$(first "$ROOT"/out/target/product/*/obj/JAVA_LIBRARIES/${m}_intermediates/javalib.jar)
+    if [ -n "$j" ]; then
+      ln -sfn "$j" "$BCPLINKS/${m}.jar"
+      BCP+=("$BCPLINKS/${m}.jar")
+    fi
+  done
+  BCP+=("$ACLSHIMS")
+fi
 
 # dex2oat wants each dex file and its location; acl runs from these same absolute paths, so
 # location == file for every entry.
@@ -85,6 +95,11 @@ BCP_JOINED=$(IFS=:; printf '%s' "${BCP[*]}")
 # ART resolves -Ximage:<dir>/boot.art as <dir>/<instruction-set>/boot.art, so the image must be
 # emitted into the ISA subdirectory (this mirrors AOSP's own framework/x86_64/ layout) while
 # ACL_ART_BOOT_IMAGE keeps pointing at the un-suffixed location.
+# The image must not sit where ART wants its (512MB) region-space heap, or startup aborts with
+# "Failed to allocate pages for alloc space (main space (region space))" /
+# "Check failed: region_space_mem_map.IsValid()". 0x70000000 (the usual target base) collides on
+# this host; keep the image low and leave the upper range free for the heap.
+IMAGE_BASE="${ACL_IMAGE_BASE:-0x20000000}"
 ISA=x86_64
 IMGDIR="$OUT/$ISA"
 mkdir -p "$IMGDIR"
@@ -105,7 +120,7 @@ set -x
   --compiler-filter=speed \
   --image="$IMGDIR/boot.art" \
   --oat-file="$IMGDIR/boot.oat" \
-  --base=0x70000000 \
+  --base="$IMAGE_BASE" \
   --runtime-arg -Xms64m --runtime-arg -Xmx512m \
   --runtime-arg -Xbootclasspath:"$BCP_JOINED" \
   --runtime-arg -Xbootclasspath-locations:"$BCP_JOINED" \
