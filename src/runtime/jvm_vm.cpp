@@ -395,6 +395,7 @@ void JNICALL acl_jvmti_breakpoint(jvmtiEnv* jvmti, JNIEnv*, jthread thread, jmet
     constexpr jint kMax = 32;
     jvmtiFrameInfo frames[kMax];
     jint depth = 0;
+    bool from_uncaught = false;
     if (jvmti->GetStackTrace(thread, 0, kMax, frames, &depth) == JVMTI_ERROR_NONE) {
       log::i(kTag, "JVMTI-TRACE: exit caller stack ({} frames):", depth);
       for (jint f = 0; f < depth; ++f) {
@@ -402,10 +403,29 @@ void JNICALL acl_jvmti_breakpoint(jvmtiEnv* jvmti, JNIEnv*, jthread thread, jmet
         jvmti->GetMethodName(frames[f].method, &fn, nullptr, nullptr);
         if (jvmti->GetMethodDeclaringClass(frames[f].method, &fc) == JVMTI_ERROR_NONE && fc != nullptr)
           jvmti->GetClassSignature(fc, &fd, nullptr);
+        // An exit dispatched from an uncaught-exception handler is a crash-handler self-kill: many
+        // apps (Pandora's StatsUncaughtExceptionHandler) install a default handler that
+        // System.exit(0)s on ANY uncaught background exception, so one analytics-SDK exception in a
+        // worker takes the whole process down before the UI. That is the pattern ACL_SUPPRESS_EXIT
+        // neutralizes -- NOT a deliberate quit (a Quit button's exit has no uncaughtException frame).
+        if (fn != nullptr && std::strcmp(fn, "uncaughtException") == 0) from_uncaught = true;
         log::i(kTag, "JVMTI-TRACE:   #{} {}{}", f, fd ? fd : "?", fn ? fn : "?");
         if (fn) jvmti->Deallocate(reinterpret_cast<unsigned char*>(fn));
         if (fd) jvmti->Deallocate(reinterpret_cast<unsigned char*>(fd));
       }
+    }
+    // ACL_SUPPRESS_EXIT: abort a crash-handler self-kill by forcing Runtime.exit/halt to return
+    // early (the process keeps running; the offending worker thread just dies with its exception
+    // logged). Opt-in and scoped to uncaught-handler exits so ordinary System.exit() still works.
+    static const bool suppress = [] {
+      const char* v = std::getenv("ACL_SUPPRESS_EXIT");
+      return v != nullptr && *v != '\0' && *v != '0';
+    }();
+    if (suppress && from_uncaught) {
+      if (jvmti->ForceEarlyReturnVoid(thread) == JVMTI_ERROR_NONE)
+        log::w(kTag, "JVMTI: suppressed crash-handler System.exit (ACL_SUPPRESS_EXIT); process continues");
+      else
+        log::w(kTag, "JVMTI: ForceEarlyReturnVoid failed — exit not suppressed");
     }
   }
   if (mname) jvmti->Deallocate(reinterpret_cast<unsigned char*>(mname));
@@ -498,10 +518,19 @@ void install_jvmti_diag(JavaVM* vm) {
   const bool trace = [] { const char* v = std::getenv("ACL_JVMTI_TRACE"); return v != nullptr && *v != '\0'; }();
   // ACL_TRACE_EXIT: break on Runtime.exit/halt and dump the caller's Java stack, to name whoever
   // cleanly System.exit()s during startup (ART logs the status, not the caller).
-  const bool trace_exit = [] { const char* v = std::getenv("ACL_TRACE_EXIT"); return v != nullptr && *v != '\0'; }();
+  // ACL_SUPPRESS_EXIT: additionally abort crash-handler self-kills (exit from an uncaught-exception
+  // handler) via ForceEarlyReturnVoid, so one background analytics-SDK exception can't take the
+  // whole process down before the UI. Both use the same Runtime.exit/halt breakpoints.
+  const bool trace_exit = [] {
+    for (const char* v : {std::getenv("ACL_TRACE_EXIT"), std::getenv("ACL_SUPPRESS_EXIT")})
+      if (v != nullptr && *v != '\0' && *v != '0') return true;
+    return false;
+  }();
+  const bool suppress_exit = [] { const char* v = std::getenv("ACL_SUPPRESS_EXIT"); return v != nullptr && *v != '\0' && *v != '0'; }();
   jvmtiCapabilities caps{};
   caps.can_generate_exception_events = 1;
   if (trace || trace_exit) { caps.can_generate_breakpoint_events = 1; }
+  if (suppress_exit) { caps.can_force_early_return = 1; }
   jvmti->AddCapabilities(&caps);
   jvmtiEventCallbacks cbs{};
   cbs.Exception = &acl_jvmti_exception;
@@ -529,7 +558,8 @@ void install_jvmti_diag(JavaVM* vm) {
           }
           env->ExceptionClear();
         }
-        log::i(kTag, "JVMTI: exit tracing enabled ({} breakpoints on Runtime.exit/halt)", set);
+        log::i(kTag, "JVMTI: exit {} enabled ({} breakpoints on Runtime.exit/halt)",
+               suppress_exit ? "suppression" : "tracing", set);
         env->DeleteLocalRef(rt);
       }
     }
