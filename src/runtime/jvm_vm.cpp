@@ -415,6 +415,56 @@ void JNICALL acl_jvmti_class_prepare(jvmtiEnv* jvmti, JNIEnv*, jthread, jclass k
   jvmti->Deallocate(reinterpret_cast<unsigned char*>(sig));
 }
 
+// ── Java-stack sampler (ACL_STALL_DIAG=<seconds>) ─────────────────────────────────────────────
+// When an app renders nothing, the question is always "what is the UI thread actually doing?".
+// eu-stack cannot answer it: acl runs ART interpreted, so every native stack is an unreadable
+// tower of art::interpreter::ExecuteSwitchImplCpp frames with no Java identity. SIGQUIT cannot
+// either — acl embeds ART with JNI_CreateJavaVM, so ART's SignalCatcher/thread-dump is never
+// wired up. This samples the "main" thread's JAVA stack from a watchdog thread every N seconds
+// and logs it, which names the method the UI thread is spending its time in.
+void jvmti_stack_sampler(JavaVM* vm, jvmtiEnv* jvmti, int period_s) {
+  JNIEnv* env = nullptr;
+  JavaVMAttachArgs args{JNI_VERSION_1_6, const_cast<char*>("acl-stall-diag"), nullptr};
+  if (vm->AttachCurrentThreadAsDaemon(reinterpret_cast<void**>(&env), &args) != JNI_OK) return;
+  // Deep enough to reach the bottom of a real UI stack: a React Native draw nests one
+  // ReactViewGroup per JS view, so 24 frames did not even leave the view tree.
+  constexpr jint kMaxFrames = 160;
+  for (;;) {
+    std::this_thread::sleep_for(std::chrono::seconds(period_s));
+    jint count = 0;
+    jthread* threads = nullptr;
+    if (jvmti->GetAllThreads(&count, &threads) != JVMTI_ERROR_NONE || threads == nullptr) continue;
+    for (jint i = 0; i < count; ++i) {
+      jvmtiThreadInfo info{};
+      if (jvmti->GetThreadInfo(threads[i], &info) != JVMTI_ERROR_NONE) continue;
+      const bool is_main = info.name != nullptr && std::strcmp(info.name, "main") == 0;
+      if (info.name != nullptr) jvmti->Deallocate(reinterpret_cast<unsigned char*>(info.name));
+      if (!is_main) continue;
+      jvmtiFrameInfo frames[kMaxFrames];
+      jint depth = 0;
+      if (jvmti->GetStackTrace(threads[i], 0, kMaxFrames, frames, &depth) != JVMTI_ERROR_NONE)
+        break;
+      log::i(kTag, "stall-diag: main thread Java stack ({} frames)", depth);
+      for (jint f = 0; f < depth; ++f) {
+        char *mname = nullptr, *dsig = nullptr;
+        jclass decl = nullptr;
+        jvmti->GetMethodName(frames[f].method, &mname, nullptr, nullptr);
+        if (jvmti->GetMethodDeclaringClass(frames[f].method, &decl) == JVMTI_ERROR_NONE &&
+            decl != nullptr)
+          jvmti->GetClassSignature(decl, &dsig, nullptr);
+        log::i(kTag, "stall-diag:   #{} {}{}", f, dsig != nullptr ? dsig : "?",
+               mname != nullptr ? mname : "?");
+        if (mname != nullptr) jvmti->Deallocate(reinterpret_cast<unsigned char*>(mname));
+        if (dsig != nullptr) jvmti->Deallocate(reinterpret_cast<unsigned char*>(dsig));
+        if (decl != nullptr) env->DeleteLocalRef(decl);
+      }
+      break;
+    }
+    for (jint i = 0; i < count; ++i) env->DeleteLocalRef(threads[i]);
+    jvmti->Deallocate(reinterpret_cast<unsigned char*>(threads));
+  }
+}
+
 // Attach a JVMTI env to the running VM and enable the Exception event. Best-effort; needs the
 // JVMTI plugin loaded (-Xplugin) — GetEnv(JVMTI_VERSION) returns JNI_EVERSION otherwise.
 void install_jvmti_diag(JavaVM* vm) {
@@ -439,6 +489,11 @@ void install_jvmti_diag(JavaVM* vm) {
     log::i(kTag, "JVMTI: Flutter startup tracing enabled (ACL_JVMTI_TRACE)");
   }
   log::i(kTag, "JVMTI: exception naming enabled (ACL_JVMTI_DIAG)");
+  if (const char* s = std::getenv("ACL_STALL_DIAG"); s != nullptr && *s != '\0') {
+    const int period = std::max(1, std::atoi(s));
+    std::thread(jvmti_stack_sampler, vm, jvmti, period).detach();
+    log::i(kTag, "JVMTI: main-thread Java stack sampler every {}s (ACL_STALL_DIAG)", period);
+  }
 }
 
 // acl graphics font seam: dlsym'd from libacl_graphics_jni (load_acl_graphics) — builds an
@@ -1134,11 +1189,26 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     const jint mh = env->CallIntMethod(s->view, s->m_gmh);
     env->CallVoidMethod(s->view, s->m_layout, 0, 0, mw, mh);
     if (diag) log::i(kTag, "PresentDriver.nTraverse: measured {}x{}", mw, mh);
-    // DIAG (ACL_VIEWTREE_DIAG): one-shot decor-tree dump after the first layout, to pin an
-    // input-routing gap to view bounds vs. tree structure.
-    static bool vtree_dumped = false;
-    if (!vtree_dumped && std::getenv("ACL_VIEWTREE_DIAG") != nullptr) {
-      vtree_dumped = true;
+    // DIAG (ACL_VIEWTREE_DIAG): decor-tree dump after layout, to pin a blank frame or an
+    // input-routing gap to view bounds vs. tree structure. The value is the traversal interval:
+    // unset/1 dumps once after the first layout, N>1 dumps every N traversals (up to 6 dumps).
+    // A single early dump is misleading for apps that populate the tree asynchronously -- React
+    // Native mounts its views well after the first layout, so the one-shot dump shows an empty
+    // ReactSurfaceView no matter what the app eventually renders.
+    // Counted in TRAVERSALS, not frames: an app that never completes a frame (the case this
+    // exists to diagnose) leaves s->frames pinned while traversals keep running.
+    static const int vtree_every = [] {
+      const char* v = std::getenv("ACL_VIEWTREE_DIAG");
+      if (v == nullptr || *v == '\0') return 0;
+      const int n = std::atoi(v);
+      return n > 1 ? n : 1;
+    }();
+    static long vtree_seen = 0;
+    static int vtree_dumps = 0;
+    if (vtree_every > 0 && vtree_dumps < 6 && (++vtree_seen % vtree_every) == 0) {
+      ++vtree_dumps;
+      log::i(kTag, "PresentDriver.nTraverse: view tree after {} traversals (frame {})", vtree_seen,
+             s->frames);
       if (jclass hb = env->FindClass("org/acl/internal/HostBootstrap")) {
         if (jmethodID d = env->GetStaticMethodID(hb, "dumpViewTree", "(Landroid/view/View;I)V"))
           env->CallStaticVoidMethod(hb, d, s->view, 0);
@@ -1163,9 +1233,21 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   // reference the OLD children, so a navigated-to or settled screen (forkyz's Settings/Help, a
   // Dialog/Popup) paints blank. Re-recording the whole tree every frame keeps it fresh. acl already
   // re-draws every frame, so this trades CPU for correct rendering; the present-root is exempt.
+  //
+  // ACL_FORCE_RECORD=0 turns it off. It is not free: it invalidates EVERY RenderNode every frame
+  // (RenderNode_nIsValid returns false), so View.updateDisplayListIfDirty re-records the whole
+  // tree. A Compose app's layer tree is shallow, but a React Native tree is one ReactViewGroup per
+  // JS view -- castlab draws ~110 levels deep, each with a BorderDrawable background, and
+  // re-recording all of it every frame in the ART interpreter is what pins that app at ~1.7s per
+  // traversal (a white window that never settles).
   static auto force_record = reinterpret_cast<void (*)(int)>(
       ::dlsym(RTLD_DEFAULT, "acl_graphics_set_force_record"));
-  if (force_record != nullptr) force_record(1);
+  static const bool force_record_on = [] {
+    const char* v = std::getenv("ACL_FORCE_RECORD");
+    return v == nullptr || *v == '\0' || v[0] != '0';
+  }();
+  if (force_record != nullptr) force_record(force_record_on ? 1 : 0);
+  const auto draw_t0 = std::chrono::steady_clock::now();
   // Deferred present (ACL_PRESENT_RT): (re)begin the present-root picture recording for this frame,
   // just before View.draw records into s->canvas. No-op in the default immediate path.
   static auto begin_record = reinterpret_cast<void (*)(int, int)>(
@@ -1219,9 +1301,14 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   static auto recstats = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_recstats"));
   if (diag) {
     const std::uint64_t rs = recstats ? recstats() : 0;
-    log::i(kTag, "PresentDriver.nTraverse: drawn ({} draw ops this frame, {} RenderNodes created; "
-                 "rec begins={} finishes={} replays={})",
-           drawops ? drawops() - ops_before : 0, rnodes ? rnodes() : 0,
+    // Draw wall time separates "the tree is expensive to record" from "the loop is not ticking":
+    // both look like a frozen window, and only the first is acl's re-record cost.
+    const auto draw_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - draw_t0)
+                             .count();
+    log::i(kTag, "PresentDriver.nTraverse: drawn in {}ms ({} draw ops this frame, {} RenderNodes "
+                 "created; rec begins={} finishes={} replays={})",
+           draw_ms, drawops ? drawops() - ops_before : 0, rnodes ? rnodes() : 0,
            (rs >> 40) & 0xfffff, (rs >> 20) & 0xfffff, rs & 0xfffff);
   }
   const int bufidx = s->presenter->next_buffer();
@@ -3498,7 +3585,12 @@ class ArtVm final : public JniVm {
     for (const std::string& opt : config_.options) option_strings.push_back(opt);
     // JVMTI exception-naming diagnostic (ACL_JVMTI_DIAG): load the JVMTI plugin so GetEnv() can
     // attach an Exception hook that names boot-classloader NoClassDefFoundErrors.
-    const bool jvmti_diag = [] { const char* v = std::getenv("ACL_JVMTI_DIAG"); return v != nullptr && *v != '\0'; }();
+    // ACL_STALL_DIAG (the Java-stack sampler) needs the same plugin.
+    const bool jvmti_diag = [] {
+      for (const char* v : {std::getenv("ACL_JVMTI_DIAG"), std::getenv("ACL_STALL_DIAG")})
+        if (v != nullptr && *v != '\0') return true;
+      return false;
+    }();
     if (jvmti_diag) {
       option_strings.push_back("-Xplugin:libopenjdkjvmti.so");  // non-debug — must match libartbase.so
       option_strings.push_back("-XjdwpProvider:none");
