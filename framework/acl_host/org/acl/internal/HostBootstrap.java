@@ -1473,6 +1473,27 @@ public final class HostBootstrap {
             if (sWebViewPackageInfo != null && "com.android.webview".equals(p)) return sWebViewPackageInfo;
             throw new android.content.pm.PackageManager.NameNotFoundException(p);
         }
+        // StubPackageManager returns null, and callers do getApplicationLabel(...).toString(): Urban
+        // Airship's UAirship.getAppName() does exactly that on its takeOff worker. The NPE kills that
+        // worker, so UAirship never signals takeOff -- and Pandora's main thread, blocked in
+        // UAirship.waitForTakeOff() inside PandoraApp.onCreate, hangs forever and no Activity launches.
+        // Resolve the real android:label when the ApplicationInfo carries it, else the package name;
+        // never null.
+        @Override public CharSequence getApplicationLabel(android.content.pm.ApplicationInfo info) {
+            if (info != null) {
+                if (info.nonLocalizedLabel != null) return info.nonLocalizedLabel;
+                if (info.labelRes != 0) {
+                    try {
+                        CharSequence l = sAppContext != null
+                                ? sAppContext.getResources().getText(info.labelRes) : null;
+                        if (l != null) return l;
+                    } catch (Throwable ignored) { }
+                }
+                if (info.name != null) return info.name;
+                if (info.packageName != null) return info.packageName;
+            }
+            return pkg;
+        }
         @Override public android.content.pm.PackageInfo getPackageInfo(String p,
                 android.content.pm.PackageManager.PackageInfoFlags flags)
                 throws android.content.pm.PackageManager.NameNotFoundException {

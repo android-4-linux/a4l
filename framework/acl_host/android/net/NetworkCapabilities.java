@@ -31,6 +31,14 @@ public final class NetworkCapabilities {
     public boolean hasCapability(int capability) {
         return (capabilities & (1 << capability)) != 0;
     }
+    // Link bandwidth estimates (Kbps). Apps read these for network-quality decisions -- Pandora's
+    // PandoraApp.onCreate calls getLinkUpstreamBandwidthKbps(), and a missing method threw
+    // NoSuchMethodError that aborted onCreate. acl has no per-link bandwidth estimate from the host,
+    // so report LINK_BANDWIDTH_UNSPECIFIED (0), which is exactly what AOSP returns when unknown.
+    public int getLinkUpstreamBandwidthKbps() { return 0; }
+    public int getLinkDownstreamBandwidthKbps() { return 0; }
+    // Signal strength is likewise unknown; AOSP's sentinel is SIGNAL_STRENGTH_UNSPECIFIED.
+    public int getSignalStrength() { return Integer.MIN_VALUE; }
 
     // Build from ConnectivityManager's packed native state word (see ConnectivityManager).
     static NetworkCapabilities fromPacked(int st) {
