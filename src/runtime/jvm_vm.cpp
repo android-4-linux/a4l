@@ -380,12 +380,34 @@ void JNICALL acl_jvmti_exception(jvmtiEnv* jvmti, JNIEnv* jni, jthread, jmethodI
 // ACL_JVMTI_TRACE: breakpoint-log key Flutter-embedding startup methods to see how far the engine
 // gets (does executeDartEntrypoint run?). Breakpoints only fire for the named methods, so this is
 // cheap (unlike global MethodEntry). Set from a ClassPrepare hook as the classes load.
-void JNICALL acl_jvmti_breakpoint(jvmtiEnv* jvmti, JNIEnv*, jthread, jmethodID method, jlocation) {
+void JNICALL acl_jvmti_breakpoint(jvmtiEnv* jvmti, JNIEnv*, jthread thread, jmethodID method,
+                                  jlocation) {
   char* mname = nullptr; char* dsig = nullptr; jclass decl = nullptr;
   jvmti->GetMethodName(method, &mname, nullptr, nullptr);
   if (jvmti->GetMethodDeclaringClass(method, &decl) == JVMTI_ERROR_NONE && decl != nullptr)
     jvmti->GetClassSignature(decl, &dsig, nullptr);
   log::i(kTag, "JVMTI-TRACE: entered {}.{}", dsig ? dsig : "?", mname ? mname : "?");
+  // For Runtime.exit/halt (ACL_TRACE_EXIT), dump WHO is exiting — a clean System.exit(0) during
+  // startup is otherwise anonymous (ART logs the status, not the caller).
+  const bool is_exit = mname != nullptr && (std::strcmp(mname, "exit") == 0 ||
+                                            std::strcmp(mname, "halt") == 0);
+  if (is_exit) {
+    constexpr jint kMax = 32;
+    jvmtiFrameInfo frames[kMax];
+    jint depth = 0;
+    if (jvmti->GetStackTrace(thread, 0, kMax, frames, &depth) == JVMTI_ERROR_NONE) {
+      log::i(kTag, "JVMTI-TRACE: exit caller stack ({} frames):", depth);
+      for (jint f = 0; f < depth; ++f) {
+        char* fn = nullptr; char* fd = nullptr; jclass fc = nullptr;
+        jvmti->GetMethodName(frames[f].method, &fn, nullptr, nullptr);
+        if (jvmti->GetMethodDeclaringClass(frames[f].method, &fc) == JVMTI_ERROR_NONE && fc != nullptr)
+          jvmti->GetClassSignature(fc, &fd, nullptr);
+        log::i(kTag, "JVMTI-TRACE:   #{} {}{}", f, fd ? fd : "?", fn ? fn : "?");
+        if (fn) jvmti->Deallocate(reinterpret_cast<unsigned char*>(fn));
+        if (fd) jvmti->Deallocate(reinterpret_cast<unsigned char*>(fd));
+      }
+    }
+  }
   if (mname) jvmti->Deallocate(reinterpret_cast<unsigned char*>(mname));
   if (dsig) jvmti->Deallocate(reinterpret_cast<unsigned char*>(dsig));
 }
@@ -474,19 +496,43 @@ void install_jvmti_diag(JavaVM* vm) {
     return;
   }
   const bool trace = [] { const char* v = std::getenv("ACL_JVMTI_TRACE"); return v != nullptr && *v != '\0'; }();
+  // ACL_TRACE_EXIT: break on Runtime.exit/halt and dump the caller's Java stack, to name whoever
+  // cleanly System.exit()s during startup (ART logs the status, not the caller).
+  const bool trace_exit = [] { const char* v = std::getenv("ACL_TRACE_EXIT"); return v != nullptr && *v != '\0'; }();
   jvmtiCapabilities caps{};
   caps.can_generate_exception_events = 1;
-  if (trace) { caps.can_generate_breakpoint_events = 1; }
+  if (trace || trace_exit) { caps.can_generate_breakpoint_events = 1; }
   jvmti->AddCapabilities(&caps);
   jvmtiEventCallbacks cbs{};
   cbs.Exception = &acl_jvmti_exception;
-  if (trace) { cbs.Breakpoint = &acl_jvmti_breakpoint; cbs.ClassPrepare = &acl_jvmti_class_prepare; }
+  if (trace) { cbs.ClassPrepare = &acl_jvmti_class_prepare; }
+  if (trace || trace_exit) { cbs.Breakpoint = &acl_jvmti_breakpoint; }
   jvmti->SetEventCallbacks(&cbs, sizeof(cbs));
   jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_EXCEPTION, nullptr);
   if (trace) {
     jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_CLASS_PREPARE, nullptr);
     jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_BREAKPOINT, nullptr);
     log::i(kTag, "JVMTI: Flutter startup tracing enabled (ACL_JVMTI_TRACE)");
+  }
+  if (trace_exit) {
+    jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_BREAKPOINT, nullptr);
+    // java.lang.Runtime is already loaded (VM init), so class_prepare won't fire for it — set the
+    // breakpoints directly. System.exit -> Runtime.exit -> Runtime.halt.
+    jvmtiEnv* je = jvmti;
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK && env != nullptr) {
+      if (jclass rt = env->FindClass("java/lang/Runtime")) {
+        int set = 0;
+        for (const char* m : {"exit", "halt"}) {
+          if (jmethodID mid = env->GetMethodID(rt, m, "(I)V")) {
+            if (je->SetBreakpoint(mid, 0) == JVMTI_ERROR_NONE) ++set;
+          }
+          env->ExceptionClear();
+        }
+        log::i(kTag, "JVMTI: exit tracing enabled ({} breakpoints on Runtime.exit/halt)", set);
+        env->DeleteLocalRef(rt);
+      }
+    }
   }
   log::i(kTag, "JVMTI: exception naming enabled (ACL_JVMTI_DIAG)");
   if (const char* s = std::getenv("ACL_STALL_DIAG"); s != nullptr && *s != '\0') {
