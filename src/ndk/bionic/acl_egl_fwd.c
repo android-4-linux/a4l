@@ -63,6 +63,14 @@ asm(
     "  ret\n"
 );
 
+// eglGetNativeClientBufferANDROID: the engine's impeller ProcTable dlsyms this from libEGL.so to turn
+// an AHardwareBuffer* into an EGLClientBuffer for eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID). On acl
+// the AHardwareBuffer* IS the client buffer our create-image M2 shim expects, so return it directly.
+// Pure passthrough (no Mesa, no %fs bridge). Provenance: EGL_ANDROID_get_native_client_buffer. No GPL-3.0 sources.
+__attribute__((visibility("default"))) void* eglGetNativeClientBufferANDROID(const void* buffer) {
+  return (void*)buffer;
+}
+
 asm(
     ".text\n"
     ".globl eglChooseConfig\n"
@@ -606,11 +614,3 @@ asm(
     "  pop %rbp\n"
     "  ret\n"
 );
-
-// eglGetNativeClientBufferANDROID: the engine's impeller ProcTable dlsyms this from libEGL.so to turn
-// an AHardwareBuffer* into an EGLClientBuffer for eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID). On acl
-// the AHardwareBuffer* IS the client buffer our create-image M2 shim expects, so return it directly.
-// Pure passthrough (no Mesa, no %fs bridge). Provenance: EGL_ANDROID_get_native_client_buffer. No GPL-3.0 sources.
-__attribute__((visibility("default"))) void* eglGetNativeClientBufferANDROID(const void* buffer) {
-  return (void*)buffer;
-}
