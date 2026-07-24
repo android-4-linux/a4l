@@ -79,6 +79,16 @@ for m in framework-minus-apex framework-graphics ext telephony-common voip-commo
     BOOT="${BOOT:+$BOOT:}$BCPLINKS/${m}.jar"
   fi
 done
+# framework-mediaprovider: the com.android.mediaprovider apex's exported framework. android.provider
+# .MediaStore and its nested classes ($Images$Media, $Files, $Audio, ...) live HERE, not in
+# framework-minus-apex, so any app touching the gallery/media store hits NoClassDefFoundError on
+# MediaStore without it (Telegram's LaunchActivity.onCreate, castlab's expo-media-library, F-Droid).
+# Its dex jar is under the soong intermediates tree, not the JAVA_LIBRARIES dir the loop scans.
+MPJAR=$(first "$ROOT"/out/soong/.intermediates/packages/providers/MediaProvider/apex/framework/framework-mediaprovider/*/dex/framework-mediaprovider.jar)
+if [ -n "$MPJAR" ]; then
+  ln -sfn "$MPJAR" "$BCPLINKS/framework-mediaprovider.jar"
+  BOOT="${BOOT:+$BOOT:}$BCPLINKS/framework-mediaprovider.jar"
+fi
 [ -n "$BOOT" ] || die_skip "framework boot jars not built (m framework-minus-apex framework-graphics ...)"
 FRES=$(first "$ROOT"/out/target/product/*/system/framework/framework-res.apk)
 
