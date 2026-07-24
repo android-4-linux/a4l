@@ -41,6 +41,11 @@ struct AclEgl10Hooks {
   // failure. `attribs` is an EGL_NONE-terminated list or nullptr.
   EGLSurface (*create_surfacetexture_surface)(JNIEnv* env, jobject surface_texture, EGLConfig config,
                                               const EGLint* attribs, void* user) = nullptr;
+  // eglSwapBuffers(surface): if `surface` is a SurfaceTexture producer window (from
+  // create_surfacetexture_surface), read the just-rendered frame back and route it to the
+  // SurfaceTexture consumer, then swap — return true (handled). Return false for any other surface
+  // so the caller does an ordinary eglSwapBuffers.
+  bool (*swap_surfacetexture)(void* egl_surface, void* user) = nullptr;
   void* user = nullptr;
 };
 

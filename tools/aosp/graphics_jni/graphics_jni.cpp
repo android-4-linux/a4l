@@ -3574,6 +3574,36 @@ void draw_texture_layer(SkCanvas* c, jlong layer) {
   }
 }
 
+// ── Producer feed: the runtime routes an app's GLThread-rendered TextureView frame here ──────────
+// A SurfaceTexture's producer (eglCreateWindowSurfaceTexture -> an offscreen GL window) hands each
+// rendered frame's pixels to acl-side, which calls this with the AclSurfaceTexture handle (read from
+// SurfaceTexture.mSurfaceTexture). Software path: a CPU-copied raster SkImage (immutable, built on
+// the producer thread) latched as `current`, so the TextureLayer drawable draws it at the next
+// present. `rgba` is tightly packed, top-down RGBA_8888. Called from acl runtime via dlsym.
+extern "C" void acl_graphics_surfacetexture_set_pixels(jlong st_handle, const void* rgba, int w,
+                                                       int h, int stride) {
+  auto* st = reinterpret_cast<AclSurfaceTexture*>(st_handle);
+  if (st == nullptr || rgba == nullptr || w <= 0 || h <= 0) return;
+  const SkImageInfo info = SkImageInfo::Make(w, h, kRGBA_8888_SkColorType, kOpaque_SkAlphaType);
+  const SkPixmap pm(info, rgba, stride > 0 ? static_cast<size_t>(stride) : info.minRowBytes());
+  sk_sp<SkImage> img = SkImage::MakeRasterCopy(pm);
+  if (!img) return;
+  std::lock_guard<std::mutex> lk(st->mu);
+  st->current = std::move(img);  // present thread reads it via snapshot()
+}
+// The SurfaceTexture's default buffer size (TextureView set it to the view's WxH before the app's
+// GLThread created the producer surface), so acl can size the offscreen GL window to match — no
+// aspect distortion. false if unset. Called from acl runtime via dlsym.
+extern "C" bool acl_graphics_surfacetexture_default_size(jlong st_handle, int* w, int* h) {
+  auto* st = reinterpret_cast<AclSurfaceTexture*>(st_handle);
+  if (st == nullptr) return false;
+  std::lock_guard<std::mutex> lk(st->mu);
+  if (st->def_w <= 0 || st->def_h <= 0) return false;
+  if (w != nullptr) *w = st->def_w;
+  if (h != nullptr) *h = st->def_h;
+  return true;
+}
+
 // android.graphics.SurfaceTexture natives (instance methods; regular JNI, none @CriticalNative).
 void SurfaceTexture_nativeInit(JNIEnv* env, jobject thiz, jboolean isDetached, jint texName,
                                jboolean /*singleBuffer*/, jobject weakSelf) {

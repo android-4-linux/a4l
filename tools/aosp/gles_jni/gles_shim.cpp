@@ -13,6 +13,8 @@
 extern int register_android_opengl_jni_GLES20(JNIEnv* env);
 extern int register_android_opengl_jni_GLES30(JNIEnv* env);
 extern int register_com_google_android_gles_jni_GLImpl(JNIEnv* env);
+// acl: android.opengl.GLUtils (Bitmap -> glTexImage2D). See android_opengl_GLUtils.cpp.
+extern "C" int register_android_opengl_GLUtils(JNIEnv* env);
 
 namespace android {
 int AndroidRuntime::registerNativeMethods(JNIEnv* env, const char* className,
@@ -31,5 +33,7 @@ extern "C" int register_acl_gles(JNIEnv* env) {
   if (register_android_opengl_jni_GLES20(env) != 0) return JNI_ERR;
   if (register_android_opengl_jni_GLES30(env) != 0) return JNI_ERR;
   if (register_com_google_android_gles_jni_GLImpl(env) != 0) return JNI_ERR;
+  // Best-effort: GLUtils is absent on some framework subsets; don't fail the whole GLES floor for it.
+  register_android_opengl_GLUtils(env);
   return 0;
 }

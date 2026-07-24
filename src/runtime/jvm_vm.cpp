@@ -14,6 +14,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <string>
@@ -152,10 +153,69 @@ gfx::GlDevice* acl_fallback_gbm_device() {
   return dev.get();
 }
 // Offscreen GL windows backing TextureView SurfaceTextures (the producer surfaces from
-// eglCreateWindowSurfaceTexture). Kept alive for the process; the app's GLThread renders + swaps
-// into them. Guarded because create/destroy run on app GLThreads.
+// eglCreateWindowSurfaceTexture), keyed by EGLSurface so the swap hook can find the window +
+// consumer for a given surface. Kept alive for the process; the app's GLThread renders + swaps
+// into them. Guarded because create/swap run on app GLThreads.
+struct StProducer {
+  std::unique_ptr<gfx::GlWindow> window;
+  jlong st_handle = 0;                // AclSurfaceTexture* (SurfaceTexture.mSurfaceTexture) to feed
+  std::vector<std::uint8_t> readback;  // reused RGBA readback scratch
+};
 std::mutex g_st_gl_mtx;
-std::vector<std::unique_ptr<gfx::GlWindow>> g_st_gl_windows;
+std::map<void*, StProducer> g_st_gl_producers;  // EGLSurface -> producer
+// graphics_jni feed seam (dlsym'd once; the graphics lib is dlopen'd, resolved via RTLD_DEFAULT).
+using StSetPixelsFn = void (*)(jlong, const void*, int, int, int);
+using StDefaultSizeFn = bool (*)(jlong, int*, int*);
+StSetPixelsFn st_set_pixels() {
+  static auto f = reinterpret_cast<StSetPixelsFn>(::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_set_pixels"));
+  return f;
+}
+StDefaultSizeFn st_default_size() {
+  static auto f = reinterpret_cast<StDefaultSizeFn>(::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_default_size"));
+  return f;
+}
+// SurfaceTexture.mSurfaceTexture (the AclSurfaceTexture* the graphics_jni natives stashed).
+jlong st_handle_of(JNIEnv* env, jobject surface_texture) {
+  if (surface_texture == nullptr) return 0;
+  static jfieldID fid = nullptr;
+  if (fid == nullptr) {
+    if (jclass c = env->FindClass("android/graphics/SurfaceTexture")) {
+      fid = env->GetFieldID(c, "mSurfaceTexture", "J");
+      env->DeleteLocalRef(c);
+    }
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  }
+  return fid != nullptr ? env->GetLongField(surface_texture, fid) : 0;
+}
+// Read back a SurfaceTexture producer window's just-rendered frame and feed it to the consumer, then
+// swap the gbm surface. Returns true if `egl_surface` is a producer (handled), false otherwise. Runs
+// on whatever thread swaps: the app's Java GLThread (EGL10 path) or a GL donor thread (native EGL
+// path) — in both the app's GL context is current on the caller, so glReadPixels reads the finished
+// back buffer. The GlWindow::swap does the gbm lock/release dance Mesa's raw swap would skip.
+bool st_readback_and_swap(void* egl_surface) {
+  gfx::GlWindow* win = nullptr;
+  std::vector<std::uint8_t>* buf = nullptr;
+  jlong st = 0;
+  {
+    std::lock_guard<std::mutex> lk(g_st_gl_mtx);
+    auto it = g_st_gl_producers.find(egl_surface);
+    if (it == g_st_gl_producers.end()) return false;
+    win = it->second.window.get();
+    buf = &it->second.readback;
+    st = it->second.st_handle;
+  }
+  std::string err;
+  auto feed = st_set_pixels();
+  if (win != nullptr && st != 0 && feed != nullptr && win->read_rgba(buf, &err) && !buf->empty()) {
+    feed(st, buf->data(), win->width(), win->height(), win->width() * 4);
+    static bool once = false;
+    if (!once) { once = true; log::i(kTag, "SurfaceTexture: producer feed live ({}x{})", win->width(), win->height()); }
+  } else if (!err.empty()) {
+    log::w(kTag, "egl: SurfaceTexture readback failed: {}", err);
+  }
+  if (win != nullptr) win->swap(nullptr, &err);
+  return true;
+}
 // The VM boot thread == the app main/UI thread. eglGetDisplay from HERE is the throwaway
 // AndroidGraphics.checkGL20 probe (during onCreate, before present); it must NOT block for the
 // wayland device (that only comes after onCreate) — only the app's separate GLThread blocks.
@@ -4385,28 +4445,33 @@ class ArtVm final : public JniVm {
       log::i(kTag, "egl10: eglCreateWindowSurface -> GL window on acl's toplevel wl_surface");
       return egl;
     };
-    hooks.create_surfacetexture_surface = [](JNIEnv*, jobject, EGLConfig config, const EGLint*,
-                                             void*) -> EGLSurface {
-      // A TextureView's SurfaceTexture producer: an OFFSCREEN gbm GL window (dma-buf exporting) on
-      // the fallback device — the SAME device the app's GLThread got its EGLDisplay/context from, so
-      // eglMakeCurrent matches. Sized to the toplevel (the TextureView is ~fullscreen in practice;
-      // exact per-SurfaceTexture sizing + feeding the produced dma-buf to the consumer is the next
-      // stage). Renders nowhere visible yet, but lets the app's GLThread init + run so its
-      // onSurfaceTextureAvailable handshake completes and the View.draw traversal is not blocked.
+    hooks.create_surfacetexture_surface = [](JNIEnv* env, jobject surface_texture, EGLConfig config,
+                                             const EGLint*, void*) -> EGLSurface {
+      // A TextureView's SurfaceTexture producer: an OFFSCREEN gbm GL window on the fallback device —
+      // the SAME device the app's GLThread got its EGLDisplay/context from, so eglMakeCurrent
+      // matches. Sized to the SurfaceTexture's default buffer size (= the TextureView's WxH, so no
+      // aspect distortion), falling back to the toplevel. The app's GLThread renders + swaps into it;
+      // the swap hook reads each frame back and feeds the SurfaceTexture consumer.
       gfx::GlDevice* dev = acl_fallback_gbm_device();
       if (dev == nullptr) { log::w(kTag, "egl10: SurfaceTexture GL surface: no gbm device"); return EGL_NO_SURFACE; }
-      const int w = g_gl_session.w > 0 ? g_gl_session.w : 1080;
-      const int h = g_gl_session.h > 0 ? g_gl_session.h : 1920;
+      const jlong st = st_handle_of(env, surface_texture);
+      int w = g_gl_session.w > 0 ? g_gl_session.w : 1080;
+      int h = g_gl_session.h > 0 ? g_gl_session.h : 1920;
+      if (auto sz = st_default_size(); sz != nullptr && st != 0) { int dw = 0, dh = 0; if (sz(st, &dw, &dh) && dw > 0 && dh > 0) { w = dw; h = dh; } }
       std::string err;
       auto win = dev->make_window(w, h, nullptr, {}, &err, config);
       if (!win) { log::w(kTag, "egl10: SurfaceTexture GL make_window failed: {}", err); return EGL_NO_SURFACE; }
       auto* egl = static_cast<EGLSurface>(win->egl_surface());
       {
         std::lock_guard<std::mutex> lk(g_st_gl_mtx);
-        g_st_gl_windows.push_back(std::move(win));
+        g_st_gl_producers[egl] = StProducer{std::move(win), st, {}};
       }
-      log::i(kTag, "egl10: eglCreateWindowSurfaceTexture -> offscreen gbm GL window {}x{}", w, h);
+      log::i(kTag, "egl10: eglCreateWindowSurfaceTexture -> offscreen gbm GL window {}x{} (st={:#x} egl={})",
+             w, h, static_cast<std::uintptr_t>(st), egl);
       return egl;
+    };
+    hooks.swap_surfacetexture = [](void* egl_surface, void*) -> bool {
+      return st_readback_and_swap(egl_surface);  // Java EGL10 swap path
     };
     if (gfx::register_egl10(env, hooks) == JNI_OK)
       log::i(kTag, "egl10: EGLImpl registered (GLThread context + window-surface path live)");
@@ -4476,6 +4541,13 @@ class ArtVm final : public JniVm {
     nhooks.window_size = [](void*, int* w, int* h) {  // captureless + lock-free: safe under bionic %fs
       if (w) *w = g_gl_session.w;
       if (h) *h = g_gl_session.h;
+    };
+    // Native EGL swap of a SurfaceTexture producer (Telegram's IntroActivity renders + swaps in
+    // native code via the bionic libEGL forwarders, not Java EGL10): read the frame back + feed the
+    // consumer, same as the Java path. Returns true if handled (the bridge shim then skips Mesa's
+    // raw swap — the GlWindow already swapped with the gbm lock/release Mesa's raw swap would omit).
+    nhooks.swap_surface = [](void* egl_surface, void*) -> bool {
+      return st_readback_and_swap(egl_surface);
     };
     // Flutter external textures: the engine imports an app/producer AHardwareBuffer as an EGLImage
     // via eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID, ahb), which host Mesa can't consume. Point the

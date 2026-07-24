@@ -15,6 +15,7 @@ cc_library_shared {
         "android_opengl_GLES30.cpp",             // verbatim AOSP glgen
         "com_google_android_gles_jni_GLImpl.cpp", // verbatim AOSP glgen (GL10/GL11, GLES1)
         "gles_shim.cpp",                          // acl: registerNativeMethods shim + register_acl_gles
+        "android_opengl_GLUtils.cpp",             // acl: GLUtils.native_texImage2D (Bitmap -> texture)
     ],
     local_include_dirs: [
         "shim",  // acl minimal android_runtime/AndroidRuntime.h + utils/misc.h stand-ins
@@ -26,6 +27,9 @@ cc_library_shared {
     ],
     shared_libs: [
         "libnativehelper",  // jniGetNioBufferFields / BaseArray / BaseArrayOffset, jniThrowException
+    ],
+    host_ldlibs: [
+        "-ldl",  // dlsym(acl_read_bitmap) in android_opengl_GLUtils.cpp
     ],
     // The gl* symbols the passthrough calls are left UNDEFINED here (the AOSP host sysroot
     // has no Mesa libGLESv2) and bind at dlopen time to the system libGLESv2 that acl's own

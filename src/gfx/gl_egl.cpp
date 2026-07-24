@@ -132,6 +132,29 @@ bool GlWindow::make_current(std::string* error) {
   return true;
 }
 
+bool GlWindow::read_rgba(std::vector<std::uint8_t>* out, std::string* error) {
+  if (out == nullptr || width_ <= 0 || height_ <= 0) {
+    if (error) *error = "read_rgba: no surface";
+    return false;
+  }
+  const std::size_t row = static_cast<std::size_t>(width_) * 4;
+  const std::size_t bytes = row * static_cast<std::size_t>(height_);
+  std::vector<std::uint8_t> tmp(bytes);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glReadPixels(0, 0, width_, height_, GL_RGBA, GL_UNSIGNED_BYTE, tmp.data());
+  if (glGetError() != GL_NO_ERROR) {
+    if (error) *error = "glReadPixels failed";
+    return false;
+  }
+  // glReadPixels returns bottom-up rows; flip to top-down so a raster SkImage is upright.
+  out->resize(bytes);
+  for (int y = 0; y < height_; ++y) {
+    std::memcpy(out->data() + static_cast<std::size_t>(y) * row,
+                tmp.data() + static_cast<std::size_t>(height_ - 1 - y) * row, row);
+  }
+  return true;
+}
+
 // ── Wayland backend ───────────────────────────────────────────────────────────
 namespace {
 class WaylandGlWindow final : public GlWindow {
@@ -234,10 +257,19 @@ class GbmGlWindow final : public GlWindow {
     if (surf_ != nullptr) gbm_surface_destroy(surf_);
   }
 
-  bool init(int w, int h, const std::vector<std::uint64_t>& modifiers, std::string* error) {
+  bool init(int w, int h, const std::vector<std::uint64_t>& modifiers, void* egl_config,
+            std::string* error) {
     if (!make_gbm_surface(w, h, modifiers)) { if (error) *error = "gbm_surface_create failed"; return false; }
-    EGLSurface s = eglCreateWindowSurface(static_cast<EGLDisplay>(dpy_), static_cast<EGLConfig>(cfg_),
-                                          reinterpret_cast<EGLNativeWindowType>(surf_), nullptr);
+    // Prefer the CALLER's config (the app's chosen EGLConfig) so a surface made here is compatible
+    // with the app's context at eglMakeCurrent (else EGL_BAD_MATCH silently kills the app's render
+    // loop). Fall back to the device config if the app config can't back a gbm window surface.
+    EGLSurface s = EGL_NO_SURFACE;
+    if (egl_config != nullptr)
+      s = eglCreateWindowSurface(static_cast<EGLDisplay>(dpy_), static_cast<EGLConfig>(egl_config),
+                                 reinterpret_cast<EGLNativeWindowType>(surf_), nullptr);
+    if (s == EGL_NO_SURFACE)
+      s = eglCreateWindowSurface(static_cast<EGLDisplay>(dpy_), static_cast<EGLConfig>(cfg_),
+                                 reinterpret_cast<EGLNativeWindowType>(surf_), nullptr);
     if (s == EGL_NO_SURFACE) { if (error) *error = with_egl("eglCreateWindowSurface(gbm) failed"); return false; }
     egl_ = s;
     width_ = w;
@@ -365,10 +397,11 @@ class GbmGlDevice final : public GlDevice {
 
   std::unique_ptr<GlWindow> make_window(int width, int height, void* /*native_surface*/,
                                         const std::vector<std::uint64_t>& modifiers,
-                                        std::string* error, void* /*egl_config*/) override {
-    // gbm needs its own visual-matched config (the gbm format); the app config doesn't apply.
+                                        std::string* error, void* egl_config) override {
+    // Prefer the app's config so the surface is eglMakeCurrent-compatible with the app's context
+    // (init falls back to the device's gbm-visual-matched config if the app config can't back one).
     auto win = std::make_unique<GbmGlWindow>(dpy_, ctx_, cfg_, gbm_);
-    if (!win->init(width, height, modifiers, error)) return nullptr;
+    if (!win->init(width, height, modifiers, egl_config, error)) return nullptr;
     return win;
   }
 

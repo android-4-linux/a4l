@@ -660,6 +660,20 @@ void* acl_native_egl_create_window_surface(void*, void* config, void*, const voi
              ? g_native_gl_hooks.create_window_surface(g_native_gl_hooks.user, config)
              : nullptr;
 }
+// Mesa's real eglSwapBuffers, saved before the bridge slot is redirected to the shim below.
+void* g_mesa_egl_swap = nullptr;
+// eglSwapBuffers override: if `surface` is a TextureView SurfaceTexture producer window, the runtime
+// reads it back + feeds the consumer + swaps (via the GlWindow) and returns true; otherwise forward
+// to Mesa's real eglSwapBuffers. Runs on a GL donor thread under the donor (glibc) %fs, so both the
+// hook's glReadPixels and the direct Mesa call are %fs-correct with the app's context current.
+unsigned int acl_native_egl_swap_buffers(void* dpy, void* surface) {
+  if (g_native_gl_hooks.swap_surface != nullptr &&
+      g_native_gl_hooks.swap_surface(surface, g_native_gl_hooks.user))
+    return 1u;  // EGL_TRUE
+  return g_mesa_egl_swap != nullptr
+             ? reinterpret_cast<unsigned int (*)(void*, void*)>(g_mesa_egl_swap)(dpy, surface)
+             : 0u;
+}
 
 // dlopen host Mesa, resolve the ABI-ordered symbols into two bridges, and write their addresses into
 // the loaded bionic forwarder libs. `rt` is used only to reach the already-loaded forwarder libs via
@@ -743,6 +757,12 @@ void install_gl_forwarders(BionicRuntime* rt) {
         egl_b.fns[i] = reinterpret_cast<void*>(&acl_native_egl_get_display);
       else if (std::strcmp(kEglForwardSyms[i], "eglCreateWindowSurface") == 0)
         egl_b.fns[i] = reinterpret_cast<void*>(&acl_native_egl_create_window_surface);
+      // Intercept native eglSwapBuffers to read back + feed SurfaceTexture producers (Telegram's
+      // native intro renderer). Save Mesa's real fn so the shim forwards non-producer surfaces.
+      else if (std::strcmp(kEglForwardSyms[i], "eglSwapBuffers") == 0) {
+        g_mesa_egl_swap = egl_b.fns[i];
+        egl_b.fns[i] = reinterpret_cast<void*>(&acl_native_egl_swap_buffers);
+      }
     }
     // Let ANativeWindow_getWidth/Height (in the loaded libandroid.so) report the live session size.
     // The callback is captureless and TLS-free, safe to invoke from libandroid under bionic %fs.

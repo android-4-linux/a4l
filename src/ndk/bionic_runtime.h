@@ -35,6 +35,10 @@ struct NativeGlHooks {
   // (host Mesa can't consume the Android target). Set by the runtime to gfx::egl_image_from_ahb;
   // `ahb` is the AHardwareBuffer*, `real` is host Mesa's eglCreateImageKHR. Runs under a donor %fs.
   void* (*egl_image_from_ahb)(void* dpy, const void* ahb, const int* attribs, void* real) = nullptr;
+  // eglSwapBuffers(surface): if `egl_surface` is a TextureView SurfaceTexture producer window, read
+  // the just-rendered frame back + feed it to the consumer + swap (via the GlWindow), and return
+  // true. False for any other surface, so the bridge shim forwards to Mesa's real eglSwapBuffers.
+  bool (*swap_surface)(void* egl_surface, void* user) = nullptr;
   void* user = nullptr;
 };
 // Register the hooks (idempotent; last wins). Called by the runtime at EGL setup. Also wires the

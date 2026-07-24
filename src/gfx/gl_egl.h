@@ -72,6 +72,12 @@ class GlWindow {
   // the gbm_surface. Cheap no-op when unchanged.
   virtual bool resize(int width, int height, std::string* error) = 0;
 
+  // Read the just-rendered frame back as tightly-packed, top-down RGBA_8888 (the software producer
+  // path for a TextureView's SurfaceTexture). Must be called with THIS window's context current and
+  // after the app's draw but before the next swap (reads the GL back buffer). `out` is resized to
+  // width*height*4. Backend-independent (plain glReadPixels + a vertical flip).
+  bool read_rgba(std::vector<std::uint8_t>* out, std::string* error);
+
  protected:
   GlWindow(GlBackend backend, void* egl_display, void* egl_context, void* egl_config)
       : backend_(backend), dpy_(egl_display), ctx_(egl_context), cfg_(egl_config) {}
