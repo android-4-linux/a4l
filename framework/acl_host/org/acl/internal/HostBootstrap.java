@@ -664,7 +664,7 @@ public final class HostBootstrap {
                         if ("application".equals(tag)) {
                             inApp = true;
                         } else if (inApp && "meta-data".equals(tag)) {
-                            putMetaData(b, xml);
+                            putMetaData(b, xml, getResources());
                         }
                     } else if (ev == android.content.res.XmlResourceParser.END_TAG
                             && "application".equals(xml.getName())) {
@@ -680,13 +680,26 @@ public final class HostBootstrap {
             return b;
         }
 
-        private static void putMetaData(android.os.Bundle b, android.content.res.XmlResourceParser x) {
+        private static void putMetaData(android.os.Bundle b, android.content.res.XmlResourceParser x,
+                                        android.content.res.Resources res) {
             final String NS = "http://schemas.android.com/apk/res/android";
             String name = x.getAttributeValue(NS, "name");
             if (name == null) return;
             // android:resource wins over android:value (the framework treats it as an int res id).
             int resId = x.getAttributeResourceValue(NS, "resource", 0);
             if (resId != 0) { b.putInt(name, resId); return; }
+            // A reference-valued android:value (android:value="@integer/google_play_services_version")
+            // comes back from getAttributeValue as null/"@id", not the resolved value, so acl used to
+            // drop it -- and a missing com.google.android.gms.version makes GoogleApiAvailability throw
+            // GooglePlayServicesMissingManifestValueException (a hard config error, not the graceful
+            // SERVICE_MISSING), which crashed Pandora's Cast module in Main.onCreate. Resolve the
+            // reference to its real typed value.
+            int valResId = res != null ? x.getAttributeResourceValue(NS, "value", 0) : 0;
+            if (valResId != 0) {
+                try { b.putInt(name, res.getInteger(valResId)); return; } catch (Throwable ignore) {}
+                try { b.putBoolean(name, res.getBoolean(valResId)); return; } catch (Throwable ignore) {}
+                try { b.putString(name, res.getString(valResId)); return; } catch (Throwable ignore) {}
+            }
             // XmlResourceParser exposes no typed-value kind, so find the android:value attribute and
             // recover the type from its resolved string (binary XML already resolved any ref), with
             // a boolean/int probe for a pure-typed value that has no string form.
@@ -1847,7 +1860,7 @@ public final class HostBootstrap {
                                     Boolean.toString(xml.getAttributeBooleanValue(NS, "grantUriPermissions", false))});
                         }
                     } else if (cur != null && "meta-data".equals(tag)) {
-                        AppContext.putMetaData(curMeta, xml);
+                        AppContext.putMetaData(curMeta, xml, base.getResources());
                     }
                 } else if (ev == android.content.res.XmlResourceParser.END_TAG
                         && "provider".equals(xml.getName())) {
@@ -2109,6 +2122,57 @@ public final class HostBootstrap {
         }
     }
 
+    // Launch an Activity of THIS app internally and make it the presented decor. Many apps run a
+    // splash/router Activity that immediately startActivity()s the real main Activity and finish()es
+    // (Pandora: LauncherActivity -> com.pandora.android.Main). acl launches only the first Activity
+    // natively; NoopInstrumentation suppresses the rest (it exists to drop EXTERNAL launches acl
+    // can't host), so the app would stall on its splash. Mirror jvm_vm's native launch here for an
+    // OWN-package component: instantiate -> attach -> onCreate/onStart/onResume -> attach the decor
+    // and swap it into the present window. Returns true if it launched and presented.
+    static boolean launchInternalActivity(android.content.Intent intent) {
+        android.content.ComponentName cmp = intent != null ? intent.getComponent() : null;
+        if (cmp == null || sAppContext == null) return false;
+        try {
+            Class<?> cls = sAppContext.getClassLoader().loadClass(cmp.getClassName());
+            if (!android.app.Activity.class.isAssignableFrom(cls)) return false;
+            android.app.Activity a = (android.app.Activity) cls.getConstructor().newInstance();
+            attachActivity(a, sAppContext);
+            try { setField(android.app.Activity.class, a, "mIntent", intent); } catch (Throwable ignored) {}
+            invokeActivityLifecycle(a, "onCreate", android.os.Bundle.class, null);
+            invokeActivityLifecycle(a, "onStart", null, null);
+            invokeActivityLifecycle(a, "onResume", null, null);
+            ensureResumed(a);
+            android.view.Window w = a.getWindow();
+            android.view.View decor = w != null ? w.getDecorView() : null;
+            if (decor == null) { android.util.Log.w("acl", "launchInternalActivity: no decor for " + cmp.getClassName()); return false; }
+            attachDecorToWindow(decor);
+            boolean shown = PresentDriver.setContentView(decor);
+            android.util.Log.i("acl", "launchInternalActivity: " + cmp.getClassName() + (shown ? " presented" : " launched (no present)"));
+            return shown;
+        } catch (Throwable t) {
+            Throwable cause = (t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null)
+                    ? t.getCause() : t;
+            android.util.Log.w("acl", "launchInternalActivity " + cmp.getClassName() + " failed: " + cause);
+            for (StackTraceElement e : cause.getStackTrace()) {
+                if (e.getClassName().startsWith("com.pandora") || e.getClassName().startsWith("android.")
+                        || e.getClassName().startsWith("androidx.")) {
+                    android.util.Log.w("acl", "    at " + e);
+                }
+            }
+            return false;
+        }
+    }
+    // Invoke a protected Activity lifecycle method (declared on android.app.Activity) reflectively;
+    // Method.invoke virtual-dispatches to the app's override. onCreate takes a Bundle, the rest none.
+    private static void invokeActivityLifecycle(android.app.Activity a, String name,
+                                                Class<?> argType, Object arg) throws Exception {
+        java.lang.reflect.Method m = argType != null
+                ? android.app.Activity.class.getDeclaredMethod(name, argType)
+                : android.app.Activity.class.getDeclaredMethod(name);
+        m.setAccessible(true);
+        if (argType != null) m.invoke(a, arg); else m.invoke(a);
+    }
+
     // Attach the decor view tree to a window before the measure/layout/draw pass — real
     // Android does this via ViewRootImpl.setView(). We construct a ViewRootImpl (it builds a
     // valid View.AttachInfo with a Handler/Choreographer/Display) and dispatch attach directly,
@@ -2194,7 +2258,19 @@ public final class HostBootstrap {
     // returning null makes startActivityForResult a no-op — no result is delivered and the app
     // survives the tap instead of NPE-ing on the missing ApplicationThread/ActivityManager.
     static final class NoopInstrumentation extends android.app.Instrumentation {
+        // An intent targeting THIS app's own component is internal navigation (a splash routing to
+        // the main Activity) -- launch it and present it, don't drop it. Everything else (ACTION_VIEW
+        // to a browser, another package) acl can't host, so suppress. Returns true if handled.
+        private boolean routeInternal(android.content.Intent intent) {
+            if (intent == null || sAppContext == null) return false;
+            android.content.ComponentName cmp = intent.getComponent();
+            String pkg = sAppContext.getPackageName();
+            boolean ownComponent = cmp != null && pkg != null && pkg.equals(cmp.getPackageName());
+            if (!ownComponent) return false;
+            return launchInternalActivity(intent);
+        }
         private android.app.Instrumentation.ActivityResult suppress(android.content.Intent intent) {
+            if (routeInternal(intent)) return null;  // internal transition handled
             System.out.println("acl HostBootstrap: startActivity suppressed (no external-activity host): " + intent);
             return null;
         }
