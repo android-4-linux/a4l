@@ -576,6 +576,19 @@ public final class HostBootstrap {
             if (sApplication != null) return sApplication;
             return this;
         }
+        // getBaseContext() returns mBase, which is null (super(null)). Libraries that unwrap a
+        // ContextWrapper chain then NPE: Glide's RequestManagerRetriever.get() does
+        // ((ContextWrapper) ctx).getBaseContext().getApplicationContext(), so binding a F-Droid app
+        // card (Glide.with(view context) -> recurse into this bare AppContext) crashed the
+        // RecyclerView layout and left the app list unrendered. Hand back the Application: Glide's
+        // get() short-circuits on `instanceof Application`, terminating the unwrap cleanly. Only when
+        // no Application exists yet (early startup, before any view renders) fall back to the null
+        // base, preserving the prior behavior for that window.
+        @Override public android.content.Context getBaseContext() {
+            if (application != null) return application;
+            if (sApplication != null) return sApplication;
+            return super.getBaseContext();
+        }
         public int getDisplayId() { return 0; }
         // A null-base ContextWrapper NPEs on getDisplay()/getDisplayNoVerify() (mBase == null);
         // WindowManagerImpl.addView calls mContext.getDisplayNoVerify(), so a Dialog/PopupWindow on
