@@ -1090,6 +1090,17 @@ public final class HostBootstrap {
                                 String mn = m.getName();
                                 if (mn.endsWith("Restrictions") && m.getReturnType() == android.os.Bundle.class)
                                     return new android.os.Bundle();
+                                // The host user is past first-unlock and running. Default here is false,
+                                // which reads as Direct Boot Mode: FirebaseApp then POSTPONES init
+                                // ("Device in Direct Boot Mode: postponing initialization"), leaving
+                                // Firebase Performance's singleton null so its background gauge task NPEs
+                                // -- and Pandora's StatsUncaughtExceptionHandler System.exit(0)s the
+                                // process on that uncaught exception. Adobe's SDK bails the same way.
+                                // Report the user unlocked/running so credential-locked-gated init runs.
+                                if ((mn.equals("isUserUnlocked") || mn.equals("isUserUnlockingOrUnlocked")
+                                        || mn.equals("isUserRunning") || mn.equals("isUserRunningOrStopping"))
+                                        && m.getReturnType() == boolean.class)
+                                    return Boolean.TRUE;
                                 return defaultValue(m.getReturnType());
                             });
                     java.lang.reflect.Constructor<?> c = android.os.UserManager.class
