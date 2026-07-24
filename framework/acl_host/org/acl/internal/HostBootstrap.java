@@ -2136,7 +2136,10 @@ public final class HostBootstrap {
             Class<?> cls = sAppContext.getClassLoader().loadClass(cmp.getClassName());
             if (!android.app.Activity.class.isAssignableFrom(cls)) return false;
             android.app.Activity a = (android.app.Activity) cls.getConstructor().newInstance();
-            attachActivity(a, sAppContext);
+            // attachActivityContext (not attachActivity) also sets mApplication, so getApplication()
+            // is non-null before onCreate -- androidx ComponentActivity.getDefaultViewModelProvider
+            // Factory() throws "activity is not yet attached to the Application instance" otherwise.
+            attachActivityContext(a, sAppContext, sApplication);
             try { setField(android.app.Activity.class, a, "mIntent", intent); } catch (Throwable ignored) {}
             invokeActivityLifecycle(a, "onCreate", android.os.Bundle.class, null);
             invokeActivityLifecycle(a, "onStart", null, null);
