@@ -1464,6 +1464,15 @@ public final class HostBootstrap {
                     null /* originatingPackageName */, null /* installingPackageName */);
         }
         @Override public String getInstallerPackageName(String p) { return null; }
+        // PackageManager.buildRequestPermissionsIntent() calls this to address the permission
+        // controller, and the AOSP base throws "Not implemented. Must override in a subclass." That
+        // throw escapes Activity.requestPermissions() on the main thread and kills whatever called it
+        // -- for castlab it cancelled the coroutine expo requests permissions in, leaving the app on
+        // its spinner. Name the AOSP controller package; nothing launches it (NoopInstrumentation
+        // answers the request with GRANTED), it just has to be a non-throwing, non-null name.
+        @Override public String getPermissionControllerPackageName() {
+            return "com.android.permissioncontroller";
+        }
         // Kotlin callers dereference this with a non-null assertion, so a null (the stub default)
         // crashes them. acl advertises no optional hardware features; return an empty array rather
         // than null (hasSystemFeature() answers individual queries).
@@ -2107,7 +2116,39 @@ public final class HostBootstrap {
         @Override public android.app.Instrumentation.ActivityResult execStartActivity(
                 android.content.Context who, android.os.IBinder contextThread, android.os.IBinder token,
                 String target, android.content.Intent intent, int requestCode, android.os.Bundle options) {
+            if (grantPermissionRequest(who, intent, requestCode)) return null;
             return suppress(intent);
+        }
+
+        // Activity.requestPermissions() does not call a service — it builds an ACTION_REQUEST_PERMISSIONS
+        // intent and startActivityForResult()s the permission controller, then waits for the result to
+        // come back through onRequestPermissionsResult(). acl has no permission controller to launch, so
+        // suppressing it silently leaves the app waiting forever: castlab's first screen requests
+        // permissions inside a coroutine and sits on its loading spinner. acl grants every permission
+        // (checkSelfPermission returns GRANTED), so answer the request directly with GRANTED for each
+        // name asked. Posted rather than called inline because the framework finishes bookkeeping in
+        // requestPermissions() after this returns.
+        private boolean grantPermissionRequest(android.content.Context who,
+                                               android.content.Intent intent, final int requestCode) {
+            if (intent == null || !(who instanceof android.app.Activity)) return false;
+            if (!"android.content.pm.action.REQUEST_PERMISSIONS".equals(intent.getAction())) return false;
+            final String[] names = intent.getStringArrayExtra(
+                    "android.content.pm.extra.REQUEST_PERMISSIONS_NAMES");
+            if (names == null || names.length == 0) return false;
+            final android.app.Activity a = (android.app.Activity) who;
+            final int[] grants = new int[names.length];
+            java.util.Arrays.fill(grants, android.content.pm.PackageManager.PERMISSION_GRANTED);
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
+                @Override public void run() {
+                    try {
+                        a.onRequestPermissionsResult(requestCode, names, grants);
+                    } catch (Throwable t) {
+                        android.util.Log.w("acl", "onRequestPermissionsResult failed: " + t);
+                    }
+                }
+            });
+            android.util.Log.i("acl", "requestPermissions: granted " + names.length + " permission(s)");
+            return true;
         }
         @Override public android.app.Instrumentation.ActivityResult execStartActivity(
                 android.content.Context who, android.os.IBinder contextThread, android.os.IBinder token,
