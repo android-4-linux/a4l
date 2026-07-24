@@ -337,7 +337,7 @@ void ensure_null_art_fs() {
 // bridge below, wrfsbase's to a *glibc* %fs that is Mesa's TLS home, calls the host Mesa symbol, and
 // swaps back. The bridge is { donor_fs; fns[] } — populated here and its address written into the
 // forwarder libs' acl_gl_{egl,gles}_bridge globals after they load. See docs/ndk-scope.md.
-#include "gl_forward_syms.inc"  // kEglForwardSyms[20], kGlesForwardSyms[106] — ABI-ordered
+#include "gl_forward_syms.inc"  // kEglForwardSyms[20], kGlesForwardSyms[109] — ABI-ordered
 struct GlBridge {
   std::uintptr_t donor_fs;  // offset 0: the donor glibc %fs (Mesa's per-thread TLS lives here)
   void* fns[128];           // offset 8: host-Mesa function pointers, indexed to match the forwarders
@@ -702,7 +702,7 @@ void install_gl_forwarders(BionicRuntime* rt) {
   };
   static GlBridge egl_b{}, gles_b{};
   const int em = fill(egl_b, megl, kEglForwardSyms, 20);
-  const int gm = fill(gles_b, mgles, kGlesForwardSyms, 106);
+  const int gm = fill(gles_b, mgles, kGlesForwardSyms, 109);
 
   // Publish the donor pool into libEGL.so (where acl_gl_pick_donor + the pool live) and grab
   // pick_donor's address for the JIT stubs. Written before the bridge is wired, so it is ready before
@@ -771,7 +771,7 @@ void install_gl_forwarders(BionicRuntime* rt) {
   const bool e = wire("libEGL.so", "acl_gl_egl_bridge", &egl_b);
   const bool g = wire("libGLESv2.so", "acl_gl_gles_bridge", &gles_b);
   log::i(kTag, "GL forwarders wired: EGL {}/{} GLES {}/{} donor-pool={} pick={} (egl={} gles={})",
-         20 - em, 20, 106 - gm, 106, npub, g_gl_pick_donor != nullptr, e, g);
+         20 - em, 20, 109 - gm, 109, npub, g_gl_pick_donor != nullptr, e, g);
 
   // Vulkan forwarder: the staged bionic libvulkan.so forwards vkGetInstanceProcAddr to
   // acl_vk_get_instance_proc_addr (bridge fns[0]), which relays to host Mesa's libvulkan — the SAME
@@ -2157,7 +2157,14 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
     }
   }
   void* h = load(abs_path, error);
-  if (!h) return nullptr;
+  if (!h) {
+    // The load error otherwise only reaches the app as an UnsatisfiedLinkError message, which apps
+    // with a custom native loader (Telegram's NativeLoader) catch and hide — so log the real dlopen
+    // reason (missing dep, unresolved symbol) here.
+    log::w(kTag, "load_library failed: {} ({})", abs_path,
+           error != nullptr && !error->empty() ? error->c_str() : "no dlerror");
+    return nullptr;
+  }
   // If this lib pulled in the bionic libEGL.so/libGLESv2.so forwarders (they are its NEEDED deps,
   // loaded by the line above), point them at host Mesa now — before any GL call. Gated internally.
   install_gl_forwarders(this);
