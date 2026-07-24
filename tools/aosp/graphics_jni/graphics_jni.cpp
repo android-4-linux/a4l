@@ -3523,6 +3523,26 @@ AclSurfaceTexture* st_from(JNIEnv* env, jobject thiz) {
 // DIAG (acl_graphics_profile): SurfaceTextures created; texture-layer draws with a frame vs blank.
 std::atomic<std::uint64_t> g_st_created{0}, g_tl_frames{0}, g_tl_blanks{0};
 
+// SurfaceTexture.postEventFromNative(WeakReference) — the frame-available notify. Firing it makes a
+// TextureView invalidate() and re-record its display list, so the resolve-at-replay layer drawable
+// (which SkPictureRecorder snapshots at record time, NOT at replay) picks up each new produced frame
+// AND the layer's real size. Without it a settled tree (ACL_FORCE_RECORD=0) shows the first snapshot
+// forever (blank 0x0). Cached at nativeInit; the notify may run on a producer/donor thread, so it
+// attaches to the VM if needed.
+JavaVM* g_st_vm = nullptr;
+jclass g_st_class = nullptr;         // global ref to android.graphics.SurfaceTexture
+jmethodID g_st_post = nullptr;       // static postEventFromNative(WeakReference)
+void post_frame_available(AclSurfaceTexture* st) {
+  if (g_st_vm == nullptr || g_st_post == nullptr || st == nullptr || st->weak_self == nullptr) return;
+  JNIEnv* env = nullptr;
+  if (g_st_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+    if (g_st_vm->AttachCurrentThreadAsDaemon(&env, nullptr) != JNI_OK)
+      return;  // stays attached (pooled producer/donor thread) — cheap on later frames
+  }
+  env->CallStaticVoidMethod(g_st_class, g_st_post, st->weak_self);
+  if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
 // Draw a texture layer's latest frame at the canvas origin, scaled to the layer's WxH (the canvas is
 // already positioned + clipped at the TextureView by the enclosing View.draw). Null frame -> nothing.
 void draw_texture_layer_immediate(SkCanvas* c, AclTextureLayer* l) {
@@ -3588,8 +3608,8 @@ extern "C" void acl_graphics_surfacetexture_set_pixels(jlong st_handle, const vo
   const SkPixmap pm(info, rgba, stride > 0 ? static_cast<size_t>(stride) : info.minRowBytes());
   sk_sp<SkImage> img = SkImage::MakeRasterCopy(pm);
   if (!img) return;
-  std::lock_guard<std::mutex> lk(st->mu);
-  st->current = std::move(img);  // present thread reads it via snapshot()
+  { std::lock_guard<std::mutex> lk(st->mu); st->current = std::move(img); }  // present reads via snapshot()
+  post_frame_available(st);  // -> TextureView.invalidate() -> re-record so the drawable re-snapshots
 }
 // The SurfaceTexture's default buffer size (TextureView set it to the view's WxH before the app's
 // GLThread created the producer surface), so acl can size the offscreen GL window to match — no
@@ -3612,6 +3632,14 @@ void SurfaceTexture_nativeInit(JNIEnv* env, jobject thiz, jboolean isDetached, j
   st->tex_name = texName;
   st->weak_self = weakSelf != nullptr ? env->NewGlobalRef(weakSelf) : nullptr;
   if (g_st_field != nullptr) env->SetLongField(thiz, g_st_field, reinterpret_cast<jlong>(st));
+  if (g_st_post == nullptr) {  // cache the frame-available notify seam once
+    env->GetJavaVM(&g_st_vm);
+    jclass c = env->GetObjectClass(thiz);
+    g_st_class = static_cast<jclass>(env->NewGlobalRef(c));
+    g_st_post = env->GetStaticMethodID(c, "postEventFromNative", "(Ljava/lang/ref/WeakReference;)V");
+    env->DeleteLocalRef(c);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+  }
   g_st_created.fetch_add(1, std::memory_order_relaxed);
 }
 void SurfaceTexture_nativeFinalize(JNIEnv* env, jobject thiz) {
