@@ -78,6 +78,14 @@ class GlWindow {
   // width*height*4. Backend-independent (plain glReadPixels + a vertical flip).
   bool read_rgba(std::vector<std::uint8_t>* out, std::string* error);
 
+  // Read the PRESENTED (front) buffer back as top-down RGBA_8888 by CPU-mapping it — no GL context
+  // needed, so it works regardless of which thread/%fs holds the context (unlike glReadPixels). Must
+  // be called AFTER swap() (which locks the front buffer). Gbm only; base returns false.
+  virtual bool read_front_rgba(std::vector<std::uint8_t>* /*out*/, std::string* error) {
+    if (error) *error = "read_front_rgba: unsupported backend";
+    return false;
+  }
+
  protected:
   GlWindow(GlBackend backend, void* egl_display, void* egl_context, void* egl_config)
       : backend_(backend), dpy_(egl_display), ctx_(egl_context), cfg_(egl_config) {}

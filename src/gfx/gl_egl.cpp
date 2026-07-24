@@ -316,6 +316,34 @@ class GbmGlWindow final : public GlWindow {
     return true;
   }
 
+  // CPU-map the presented (front) buffer -> top-down RGBA_8888. No GL context needed, so it reads the
+  // real rendered content regardless of which %fs/thread holds the context. Must follow swap().
+  bool read_front_rgba(std::vector<std::uint8_t>* out, std::string* error) override {
+    if (out == nullptr || locked_ == nullptr || width_ <= 0 || height_ <= 0) {
+      if (error) *error = "read_front_rgba: no front buffer";
+      return false;
+    }
+    std::uint32_t stride = 0;
+    void* map_data = nullptr;
+    void* ptr = gbm_bo_map(locked_, 0, 0, static_cast<std::uint32_t>(width_),
+                           static_cast<std::uint32_t>(height_), GBM_BO_TRANSFER_READ, &stride, &map_data);
+    if (ptr == nullptr) { if (error) *error = "gbm_bo_map failed"; return false; }
+    const std::size_t row = static_cast<std::size_t>(width_) * 4;
+    out->resize(row * static_cast<std::size_t>(height_));
+    for (int y = 0; y < height_; ++y) {
+      const std::uint8_t* src = static_cast<const std::uint8_t*>(ptr) + static_cast<std::size_t>(y) * stride;
+      std::uint8_t* dst = out->data() + static_cast<std::size_t>(y) * row;
+      for (int x = 0; x < width_; ++x) {  // XRGB8888 (mem B,G,R,X) -> RGBA (R,G,B,255)
+        dst[x * 4 + 0] = src[x * 4 + 2];
+        dst[x * 4 + 1] = src[x * 4 + 1];
+        dst[x * 4 + 2] = src[x * 4 + 0];
+        dst[x * 4 + 3] = 255;
+      }
+    }
+    gbm_bo_unmap(locked_, map_data);
+    return true;  // gbm is top-down; no flip
+  }
+
   bool resize(int w, int h, std::string* error) override {
     if (w == width_ && h == height_) return true;
     release_front();

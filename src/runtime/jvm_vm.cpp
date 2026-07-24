@@ -206,14 +206,20 @@ bool st_readback_and_swap(void* egl_surface) {
   }
   std::string err;
   auto feed = st_set_pixels();
-  if (win != nullptr && st != 0 && feed != nullptr && win->read_rgba(buf, &err) && !buf->empty()) {
+  if (win == nullptr || st == 0 || feed == nullptr) return true;
+  // Swap FIRST (renders + locks the front buffer), then CPU-map the PRESENTED front buffer — a
+  // context/%fs-independent read of the real rendered content. Falls back to glReadPixels (needs the
+  // context current on this thread's %fs) if the gbm map path is unavailable.
+  win->swap(nullptr, &err);
+  // Read the PRESENTED buffer by CPU-mapping it (%fs/context-independent) — falls back to glReadPixels.
+  bool ok = win->read_front_rgba(buf, &err) || win->read_rgba(buf, &err);
+  if (ok && !buf->empty()) {
     feed(st, buf->data(), win->width(), win->height(), win->width() * 4);
     static bool once = false;
     if (!once) { once = true; log::i(kTag, "SurfaceTexture: producer feed live ({}x{})", win->width(), win->height()); }
   } else if (!err.empty()) {
     log::w(kTag, "egl: SurfaceTexture readback failed: {}", err);
   }
-  if (win != nullptr) win->swap(nullptr, &err);
   return true;
 }
 // The VM boot thread == the app main/UI thread. eglGetDisplay from HERE is the throwaway
