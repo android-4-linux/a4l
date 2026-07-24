@@ -46,6 +46,9 @@ struct AclEgl10Hooks {
   // SurfaceTexture consumer, then swap — return true (handled). Return false for any other surface
   // so the caller does an ordinary eglSwapBuffers.
   bool (*swap_surfacetexture)(void* egl_surface, void* user) = nullptr;
+  // Is `egl_surface` a SurfaceTexture producer window? eglMakeCurrent uses it to route the bind to
+  // the native-GL donor %fs (mixed Java-EGL/native-GL context bridging).
+  bool (*is_surfacetexture_surface)(void* egl_surface, void* user) = nullptr;
   void* user = nullptr;
 };
 

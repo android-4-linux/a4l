@@ -4479,6 +4479,10 @@ class ArtVm final : public JniVm {
     hooks.swap_surfacetexture = [](void* egl_surface, void*) -> bool {
       return st_readback_and_swap(egl_surface);  // Java EGL10 swap path
     };
+    hooks.is_surfacetexture_surface = [](void* egl_surface, void*) -> bool {
+      std::lock_guard<std::mutex> lk(g_st_gl_mtx);
+      return g_st_gl_producers.find(egl_surface) != g_st_gl_producers.end();
+    };
     if (gfx::register_egl10(env, hooks) == JNI_OK)
       log::i(kTag, "egl10: EGLImpl registered (GLThread context + window-surface path live)");
 

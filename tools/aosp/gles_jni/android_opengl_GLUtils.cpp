@@ -24,6 +24,30 @@ ReadBitmapFn read_bitmap() {
   return f;
 }
 
+// Mixed Java-EGL/native-GL bridging: a SurfaceTexture producer's context is bound on the app's
+// native-GL donor %fs, so this Java-side upload must run there too (else no current context). The
+// thread is flagged donor-routed by egl10's eglMakeCurrent; run_on_donor keys the right donor.
+using RouteGetFn = int (*)(void);
+using RunOnDonorFn = void (*)(void (*)(void*), void*);
+RouteGetFn route_get() {
+  static auto f = reinterpret_cast<RouteGetFn>(dlsym(RTLD_DEFAULT, "acl_gl_donor_route_get"));
+  return f;
+}
+RunOnDonorFn run_on_donor() {
+  static auto f = reinterpret_cast<RunOnDonorFn>(dlsym(RTLD_DEFAULT, "acl_gl_run_on_donor"));
+  return f;
+}
+struct TexImgArgs { GLenum target; GLint level; GLsizei w, h; GLint border; const void* px; };
+void do_tex_image(void* p) {
+  auto* a = static_cast<TexImgArgs*>(p);
+  glTexImage2D(a->target, a->level, GL_RGBA, a->w, a->h, a->border, GL_RGBA, GL_UNSIGNED_BYTE, a->px);
+}
+struct TexSubArgs { GLenum target; GLint level, xoff, yoff; GLsizei w, h; const void* px; };
+void do_tex_sub(void* p) {
+  auto* a = static_cast<TexSubArgs*>(p);
+  glTexSubImage2D(a->target, a->level, a->xoff, a->yoff, a->w, a->h, GL_RGBA, GL_UNSIGNED_BYTE, a->px);
+}
+
 jfieldID g_bmp_ptr = nullptr;
 jmethodID g_bmp_w = nullptr, g_bmp_h = nullptr;
 
@@ -65,8 +89,15 @@ jint texImage2D(JNIEnv* env, jclass, jint target, jint level, jint /*internalfor
   std::vector<std::uint32_t> px;
   int w = 0, h = 0;
   if (!bitmap_rgba(env, bitmap, &px, &w, &h)) return -1;  // GLUtils treats nonzero as error
-  glTexImage2D(static_cast<GLenum>(target), level, GL_RGBA, w, h, border, GL_RGBA, GL_UNSIGNED_BYTE,
-               px.data());
+  RouteGetFn rg = route_get();
+  RunOnDonorFn rd = run_on_donor();
+  if (rg != nullptr && rd != nullptr && rg()) {
+    TexImgArgs a{static_cast<GLenum>(target), level, w, h, border, px.data()};
+    rd(do_tex_image, &a);
+  } else {
+    glTexImage2D(static_cast<GLenum>(target), level, GL_RGBA, w, h, border, GL_RGBA, GL_UNSIGNED_BYTE,
+                 px.data());
+  }
   return 0;
 }
 
@@ -75,8 +106,15 @@ jint texSubImage2D(JNIEnv* env, jclass, jint target, jint level, jint xoffset, j
   std::vector<std::uint32_t> px;
   int w = 0, h = 0;
   if (!bitmap_rgba(env, bitmap, &px, &w, &h)) return -1;
-  glTexSubImage2D(static_cast<GLenum>(target), level, xoffset, yoffset, w, h, GL_RGBA,
-                  GL_UNSIGNED_BYTE, px.data());
+  RouteGetFn rg = route_get();
+  RunOnDonorFn rd = run_on_donor();
+  if (rg != nullptr && rd != nullptr && rg()) {
+    TexSubArgs a{static_cast<GLenum>(target), level, xoffset, yoffset, w, h, px.data()};
+    rd(do_tex_sub, &a);
+  } else {
+    glTexSubImage2D(static_cast<GLenum>(target), level, xoffset, yoffset, w, h, GL_RGBA,
+                    GL_UNSIGNED_BYTE, px.data());
+  }
   return 0;
 }
 

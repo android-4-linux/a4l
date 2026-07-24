@@ -205,9 +205,30 @@ jlong _eglCreateWindowSurfaceTexture(JNIEnv* e, jobject, jobject display, jobjec
                                                        a.data(), g_hooks.user);
   return reinterpret_cast<jlong>(s);
 }
+// Mixed Java-EGL/native-GL bridging: run a Java-side GL Mesa call under the thread's native-GL donor
+// %fs (defined in bionic_runtime.cpp, the -fno-stack-protector TU).
+extern "C" void acl_gl_run_on_donor(void (*fn)(void*), void* arg);
+extern "C" void acl_gl_donor_route_set(int on);
+struct AclMakeCurrentArgs { EGLDisplay dpy; EGLSurface draw; EGLSurface read; EGLContext ctx; EGLBoolean ok; };
 jboolean _eglMakeCurrent(JNIEnv* e, jobject, jobject display, jobject draw, jobject read, jobject context) {
-  return to_jbool(eglMakeCurrent(get_display(e, display), get_surface(e, draw),
-                                 get_surface(e, read), get_context(e, context)));
+  EGLDisplay dpy = get_display(e, display);
+  EGLSurface d = get_surface(e, draw);
+  EGLSurface r = get_surface(e, read);
+  EGLContext c = get_context(e, context);
+  // A SurfaceTexture producer surface: the app renders it in NATIVE GL (on the bionic-%fs donor), so
+  // bind the context on THAT donor %fs — else the native GL has no current context. Mark the thread
+  // donor-routed so GLUtils uploads textures on the same donor.
+  if (g_hooks.is_surfacetexture_surface != nullptr && d != EGL_NO_SURFACE &&
+      g_hooks.is_surfacetexture_surface(d, g_hooks.user)) {
+    AclMakeCurrentArgs a{dpy, d, r, c, EGL_FALSE};
+    acl_gl_run_on_donor(+[](void* p) {
+      auto* a = static_cast<AclMakeCurrentArgs*>(p);
+      a->ok = eglMakeCurrent(a->dpy, a->draw, a->read, a->ctx);
+    }, &a);
+    if (a.ok == EGL_TRUE) acl_gl_donor_route_set(1);
+    return to_jbool(a.ok);
+  }
+  return to_jbool(eglMakeCurrent(dpy, d, r, c));
 }
 jboolean _eglSwapBuffers(JNIEnv* e, jobject, jobject display, jobject surface) {
   EGLSurface s = get_surface(e, surface);

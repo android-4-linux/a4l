@@ -354,6 +354,11 @@ constexpr int kGlDonorPool = 8;
 std::atomic<std::uintptr_t> g_gl_donor_pool[kGlDonorPool];
 std::atomic<int> g_gl_donor_published{0};
 void* g_gl_pick_donor = nullptr;  // address of libEGL.so's acl_gl_pick_donor, for the JIT stubs
+// Registry of glibc %fs values whose GL is donor-routed (a producer/native-GL context is current on
+// that thread). Set by the Java eglMakeCurrent path; read by GLUtils so its texImage2D routes to the
+// same donor. Defined here (visible to the routing helpers below the anon namespace).
+std::uintptr_t g_gl_route[64] = {0};
+std::mutex g_gl_route_mu;
 void* gl_fs_donor(void* arg) {
   const int i = static_cast<int>(reinterpret_cast<intptr_t>(arg));
   g_gl_donor_pool[i].store(get_fs(), std::memory_order_release);
@@ -1045,6 +1050,43 @@ bool bootstrap_x86_64(const BionicConfig& cfg, std::uintptr_t* out_bionic_fs, vo
 }
 
 }  // namespace
+
+// ── Java-GL donor bridging (mixed Java-EGL + native-GL apps) ─────────────────────────────────────
+// An app that sets up GL via Java (EGLImpl.eglMakeCurrent, GLUtils.texImage2D) but RENDERS in native
+// code (Telegram's IntroActivity) has a context-currency split: Java GL runs under the thread's ART
+// glibc %fs, native GL under the thread's bionic %fs -> a DIFFERENT donor (Mesa keys current-context
+// by %fs/TLS), so whichever %fs holds the context, the other path renders nothing. Bridge it: run the
+// Java-GL Mesa call under the SAME donor native GL uses — key pick_donor by the thread's BIONIC %fs
+// (recovered from its glibc %fs via bionic_fs_for) instead of the current glibc one. Safe here: this
+// is the -fno-stack-protector TU (no canary read through the swapped %fs); the body touches no
+// __thread while switched (only stack locals + the Mesa call, whose TLS home IS the donor %fs).
+extern "C" void acl_gl_run_on_donor(void (*fn)(void*), void* arg) {
+  if (fn == nullptr) return;
+  if (g_gl_pick_donor == nullptr) { fn(arg); return; }
+  std::uintptr_t glibc;
+  asm volatile("rdfsbase %0" : "=r"(glibc));
+  const std::uintptr_t bionic = bionic_fs_for(glibc);
+  if (bionic == 0) { fn(arg); return; }  // thread not attached to bionic yet -> can't route
+  asm volatile("wrfsbase %0" ::"r"(bionic));  // key pick_donor by the bionic %fs
+  const std::uintptr_t donor = reinterpret_cast<std::uintptr_t (*)()>(g_gl_pick_donor)();
+  asm volatile("wrfsbase %0" ::"r"(donor));   // Mesa's per-thread TLS home for native GL
+  fn(arg);
+  asm volatile("wrfsbase %0" ::"r"(glibc));   // restore
+}
+extern "C" void acl_gl_donor_route_set(int on) {
+  std::uintptr_t glibc;
+  asm volatile("rdfsbase %0" : "=r"(glibc));
+  std::lock_guard<std::mutex> lk(g_gl_route_mu);
+  for (std::uintptr_t& r : g_gl_route)
+    if (r == (on ? 0u : glibc)) { r = on ? glibc : 0u; return; }
+}
+extern "C" int acl_gl_donor_route_get(void) {
+  std::uintptr_t glibc;
+  asm volatile("rdfsbase %0" : "=r"(glibc));
+  for (std::uintptr_t r : g_gl_route)
+    if (r == glibc) return 1;
+  return 0;
+}
 
 // --- glue that flips %fs; must stay in this -fno-stack-protector TU ---
 
