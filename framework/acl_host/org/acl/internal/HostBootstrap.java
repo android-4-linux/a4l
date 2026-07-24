@@ -2831,9 +2831,20 @@ public final class HostBootstrap {
         return java.lang.reflect.Proxy.newProxyInstance(
                 iface.getClassLoader(), new Class<?>[]{iface},
                 (p, method, a) -> {
-                    if ("getCurrentThermalStatus".equals(method.getName()))
-                        return PowerBridge.thermalStatus();
-                    return defaultValue(method.getReturnType());  // listener register/unregister
+                    String n = method.getName();
+                    if ("getCurrentThermalStatus".equals(n)) return PowerBridge.thermalStatus();
+                    // IThermalService's (un)register* return boolean, and the framework reads false
+                    // as failure: PowerManager.addThermalStatusListener throws
+                    // RuntimeException("Listener failed to set") on it. That escapes into callers
+                    // that do not expect it -- chromium's PowerMonitor.isBatteryPower() takes it
+                    // during WebView startup, which aborts the renderer
+                    // ([FATAL:jni_android.cc] uncaught Java exception) and kills every WebView app.
+                    // acl has no thermal callbacks to deliver, but accepting the registration is the
+                    // honest answer: the listener is held, it simply never fires.
+                    if ((n.startsWith("register") || n.startsWith("unregister"))
+                            && method.getReturnType() == boolean.class)
+                        return Boolean.TRUE;
+                    return defaultValue(method.getReturnType());
                 });
     }
 
