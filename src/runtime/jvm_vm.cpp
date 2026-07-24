@@ -4189,8 +4189,14 @@ class ArtVm final : public JniVm {
            reinterpret_cast<void*>(+[](JNIEnv*, jclass, jint) {})},
           {const_cast<char*>("setThreadPriority"), const_cast<char*>("(II)V"),
            reinterpret_cast<void*>(+[](JNIEnv*, jclass, jint, jint) {})},
+          // getThreadPriority(tid) is missing here, so callers hit UnsatisfiedLinkError and their
+          // thread dies — GMS Measurement (Firebase Analytics) spawns a pool that all died this way,
+          // churning worker threads during startup. Return THREAD_PRIORITY_DEFAULT (0), consistent
+          // with the no-op setter (acl doesn't reprioritize app threads).
+          {const_cast<char*>("getThreadPriority"), const_cast<char*>("(I)I"),
+           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jint) -> jint { return 0; })},
       };
-      if (env->RegisterNatives(c, m, 2) != JNI_OK) env->ExceptionClear();
+      if (env->RegisterNatives(c, m, 3) != JNI_OK) env->ExceptionClear();
       env->DeleteLocalRef(c);
     } else {
       env->ExceptionClear();
