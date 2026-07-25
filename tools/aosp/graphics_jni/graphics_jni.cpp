@@ -1374,18 +1374,31 @@ void RenderNode_nAddAnimator(JNIEnv*, jclass, jlong, jlong) {}
 void RenderNode_nEndAllAnimators(JNIEnv*, jclass, jlong) {}
 void RenderNode_nForceEndAnimators(JNIEnv*, jclass, jlong) {}
 
-// @CriticalNative (handle-only). Macros for the uniform get/set forms; setters return
-// JNI_TRUE ("value changed"), which at worst requests an extra redraw — harmless.
+// ── Scene-change generation counter (damage/dirty foundation) ──────────────────────────────────
+// A monotonically increasing count bumped whenever something that affects the rendered frame
+// changes: a RenderNode property, a re-record (nFinishRecording), or a produced texture frame. It
+// lets the present loop tell an unchanged (idle) scene from a changed one — the prerequisite for
+// skipping redundant redraws. Exposed to the runtime via dlsym. Only bumps on an ACTUAL change (the
+// setters compare first), so re-setting a property to its current value doesn't dirty the frame.
+std::atomic<std::uint64_t> g_scene_gen{0};
+inline void bump_scene() { g_scene_gen.fetch_add(1, std::memory_order_relaxed); }
+extern "C" std::uint64_t acl_graphics_scene_generation() {
+  return g_scene_gen.load(std::memory_order_relaxed);
+}
+
+// @CriticalNative (handle-only). Macros for the uniform get/set forms; setters bump the scene
+// generation only when the value actually changes (so an idle frame that re-sets the same values is
+// not counted dirty).
 #define RN_SETF(fn, field) \
-  jboolean fn(jlong h, jfloat v) { auto* n = rnode(h); if (n) n->field = v; return JNI_TRUE; }
+  jboolean fn(jlong h, jfloat v) { auto* n = rnode(h); if (n && n->field != v) { n->field = v; bump_scene(); } return JNI_TRUE; }
 #define RN_GETF(fn, field) \
   jfloat fn(jlong h) { auto* n = rnode(h); return n ? n->field : 0.0f; }
 #define RN_SETI(fn, field) \
-  jboolean fn(jlong h, jint v) { auto* n = rnode(h); if (n) n->field = v; return JNI_TRUE; }
+  jboolean fn(jlong h, jint v) { auto* n = rnode(h); if (n && n->field != v) { n->field = v; bump_scene(); } return JNI_TRUE; }
 #define RN_GETI(fn, field) \
   jint fn(jlong h) { auto* n = rnode(h); return n ? n->field : 0; }
 #define RN_SETB(fn, field) \
-  jboolean fn(jlong h, jboolean v) { auto* n = rnode(h); if (n) n->field = (v != JNI_FALSE); return JNI_TRUE; }
+  jboolean fn(jlong h, jboolean v) { auto* n = rnode(h); const bool b = (v != JNI_FALSE); if (n && n->field != b) { n->field = b; bump_scene(); } return JNI_TRUE; }
 #define RN_GETB(fn, field) \
   jboolean fn(jlong h) { auto* n = rnode(h); return (n && n->field) ? JNI_TRUE : JNI_FALSE; }
 #define RN_NOPB(fn) jboolean fn(jlong) { return JNI_TRUE; }
@@ -1428,13 +1441,17 @@ void RenderNode_nGetInverseTransformMatrix(jlong, jlong m) {
 }
 jboolean RenderNode_nHasIdentityMatrix(jlong) { return JNI_TRUE; }
 jboolean RenderNode_nOffsetTopAndBottom(jlong h, jint off) {
-  auto* n = rnode(h); if (n) { n->top += off; n->bottom += off; } return JNI_TRUE;
+  auto* n = rnode(h); if (n && off != 0) { n->top += off; n->bottom += off; bump_scene(); } return JNI_TRUE;
 }
 jboolean RenderNode_nOffsetLeftAndRight(jlong h, jint off) {
-  auto* n = rnode(h); if (n) { n->left += off; n->right += off; } return JNI_TRUE;
+  auto* n = rnode(h); if (n && off != 0) { n->left += off; n->right += off; bump_scene(); } return JNI_TRUE;
 }
 jboolean RenderNode_nSetLeftTopRightBottom(jlong h, jint l, jint t, jint r, jint b) {
-  auto* n = rnode(h); if (n) { n->left = l; n->top = t; n->right = r; n->bottom = b; } return JNI_TRUE;
+  auto* n = rnode(h);
+  if (n && (n->left != l || n->top != t || n->right != r || n->bottom != b)) {
+    n->left = l; n->top = t; n->right = r; n->bottom = b; bump_scene();
+  }
+  return JNI_TRUE;
 }
 RN_SETI(RenderNode_nSetLeft, left)
 RN_SETI(RenderNode_nSetTop, top)
@@ -1513,8 +1530,10 @@ jboolean RenderNode_nSetRevealClip(jlong, jboolean, jfloat, jfloat, jfloat) { re
 RN_SETF(RenderNode_nSetAlpha, alpha)
 RN_GETF(RenderNode_nGetAlpha, alpha)
 jboolean RenderNode_nSetRenderEffect(jlong node, jlong effect) {
-  if (auto* n = rnode(node))
+  if (auto* n = rnode(node)) {
     n->render_effect = sk_ref_sp(reinterpret_cast<SkImageFilter*>(effect));  // may be null (cleared)
+    bump_scene();
+  }
   return JNI_TRUE;
 }
 RN_SETB(RenderNode_nSetHasOverlappingRendering, hasOverlappingRendering)
@@ -3943,6 +3962,7 @@ extern "C" void acl_graphics_surfacetexture_set_pixels(jlong st_handle, const vo
   if (!img) return;
   { std::lock_guard<std::mutex> lk(st->mu); st->current = std::move(img); }  // present reads via snapshot()
   g_st_produced.fetch_add(1, std::memory_order_relaxed);  // signal the present loop to re-record
+  bump_scene();  // a TextureView produced a new frame -> the scene changed
   post_frame_available(st);  // -> TextureView.invalidate() -> re-record so the drawable re-snapshots
 }
 // A monotonically increasing count of produced SurfaceTexture frames. The present loop force-records
@@ -4134,6 +4154,7 @@ void RecordingCanvas_nFinish(jlong canvas, jlong node) {
   if (is_recorder_handle(canvas)) {
     std::vector<DisplayItem> items = recorder_of(canvas)->finish();
     if (n != nullptr) { n->display_list = std::move(items); n->picture = nullptr; }
+    bump_scene();  // a node re-recorded its content -> the frame changed
     return;
   }
   if (canvas == g_present_gpu_canvas) return;  // root: content already drawn immediate

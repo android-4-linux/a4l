@@ -1453,6 +1453,37 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     return v != nullptr && *v != '\0' && v[0] != '0';
   }();
   if (force_record != nullptr) force_record(force_record_on ? 1 : 0);
+  // Damage/dirty MEASUREMENT (native, no behavior change): the scene-generation counter is bumped in
+  // graphics_jni whenever a RenderNode property, a re-record, or a produced texture changes the frame.
+  // A frame whose generation is unchanged since the previous frame produced identical pixels — i.e. it
+  // would be SKIPPABLE by a native idle gate. ACL_DIRTY_STATS logs the clean/total ratio so we can see
+  // how much a gate would actually save before building it. Note: the overlay pass force-records every
+  // frame, so a persistent Dialog/Popup inflates "dirty"; this measures the main-content path.
+  static auto scene_gen = reinterpret_cast<std::uint64_t (*)()>(
+      ::dlsym(RTLD_DEFAULT, "acl_graphics_scene_generation"));
+  static const bool dirty_stats = std::getenv("ACL_DIRTY_STATS") != nullptr;
+  static const bool idle_gate = std::getenv("ACL_IDLE_GATE") != nullptr;  // opt-in until corpus-proven
+  static std::uint64_t gate_last_gen = ~0ull;  // sentinel: first frame always differs -> draws
+  static std::uint64_t stat_total = 0, stat_skipped = 0;
+  static auto last_full_draw = std::chrono::steady_clock::now();
+  const std::uint64_t gen_before = scene_gen != nullptr ? scene_gen() : 0;
+  const bool scene_changed = (scene_gen == nullptr) || (gen_before != gate_last_gen);
+  // Safety backstop: draw at least ~5 Hz even when unchanged, bounding staleness if some rare change
+  // source is not yet instrumented (worst case ~200ms, not a permanent freeze).
+  const bool safety_redraw =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - last_full_draw).count() >= 200;
+  if (dirty_stats) {
+    ++stat_total;
+    if (!scene_changed && !safety_redraw) ++stat_skipped;
+    if (stat_total % 120 == 0)
+      log::i(kTag, "dirty-stats: {}/{} frames skippable ({}%)", stat_skipped, stat_total,
+             stat_total ? stat_skipped * 100 / stat_total : 0);
+  }
+  if (idle_gate && !scene_changed && !safety_redraw) {
+    s->presenter->keepalive();  // nothing changed since the last drawn frame — re-present, skip the draw
+    return;
+  }
   const auto draw_t0 = std::chrono::steady_clock::now();
   // Deferred present (ACL_PRESENT_RT): (re)begin the present-root picture recording for this frame,
   // just before View.draw records into s->canvas. No-op in the default immediate path.
@@ -1556,6 +1587,10 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   }
   if (!present_submit(s, f, bufidx))
     s->presenter->keepalive();  // submit failed (buffer build) — keep the vsync loop ticking
+  // Frame drawn: remember the scene generation it reflects (incl. this frame's re-records) and the
+  // time, so the idle gate can skip subsequent unchanged frames until the next real change.
+  gate_last_gen = scene_gen != nullptr ? scene_gen() : 0;
+  last_full_draw = std::chrono::steady_clock::now();
 }
 void JNICALL PresentDriver_nClose(JNIEnv* env, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
