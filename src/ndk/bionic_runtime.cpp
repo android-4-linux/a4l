@@ -40,6 +40,9 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <ucontext.h>
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 #include "log/log.h"
@@ -830,6 +833,48 @@ void install_gl_forwarders(BionicRuntime* rt) {
 
 void acl_signal_trampoline(int sig, siginfo_t* info, void* uctx) {
   const std::uintptr_t cur = get_fs();
+  // DIAG (ACL_FAULT_DEBUG): identify the faulting instruction's library — ART's own backtrace fails
+  // when %fs is wrong, so this locates the fault (JIT/ART vs a bionic app lib vs acl) via a raw,
+  // signal-safe /proc/self/maps scan. Bounded; no stdio/malloc. Env cached once (getenv is safe here).
+  static const bool fault_dbg = std::getenv("ACL_FAULT_DEBUG") != nullptr;
+  static std::atomic<int> fdbg{0};
+  if (fault_dbg && (sig == SIGSEGV || sig == SIGBUS) && fdbg.fetch_add(1) < 64) {
+    const auto* uc = static_cast<const ucontext_t*>(uctx);
+    const std::uintptr_t rip =
+        uc != nullptr ? static_cast<std::uintptr_t>(uc->uc_mcontext.gregs[REG_RIP]) : 0;
+    auto hex = [](char* p, std::uintptr_t v) {  // 0x + 16 hex, returns end
+      *p++ = '0'; *p++ = 'x';
+      for (int i = 15; i >= 0; --i) { int d = (v >> (i * 4)) & 0xf; *p++ = d < 10 ? '0' + d : 'a' + d - 10; }
+      return p;
+    };
+    char hdr[96]; char* q = hdr;
+    const char* h0 = "[acl.fault] sig="; while (*h0) *q++ = *h0++;
+    *q++ = '0' + sig / 10; *q++ = '0' + sig % 10;
+    const char* h1 = " fs="; while (*h1) *q++ = *h1++; q = hex(q, cur);
+    const char* h2 = " rip="; while (*h2) *q++ = *h2++; q = hex(q, rip);
+    *q++ = '\n'; write(2, hdr, q - hdr);
+    // scan /proc/self/maps for the line whose range covers rip; write just that line. Fixed buffers,
+    // no allocation (a std::string here could deadlock if the fault is inside malloc).
+    int fd = open("/proc/self/maps", O_RDONLY);
+    if (fd >= 0) {
+      char m[4096]; char line[512]; std::size_t ll = 0; ssize_t r;
+      auto covers = [&]() {
+        std::uintptr_t lo = 0, hi = 0; std::size_t i = 0;
+        auto rd = [&](std::uintptr_t& out) { out = 0; for (; i < ll; ++i) { char c = line[i]; int d = (c>='0'&&c<='9')?c-'0':(c>='a'&&c<='f')?c-'a'+10:-1; if (d<0) break; out = out*16+d; } };
+        rd(lo); if (i < ll && line[i] == '-') { ++i; rd(hi); }
+        return hi != 0 && rip >= lo && rip < hi;
+      };
+      while ((r = read(fd, m, sizeof m)) > 0) {
+        for (ssize_t i = 0; i < r; ++i) {
+          if (m[i] == '\n') {
+            if (covers()) { const char* p = "[acl.fault] map: "; write(2, p, 17); write(2, line, ll); write(2, "\n", 1); }
+            ll = 0;
+          } else if (ll < sizeof line - 1) { line[ll++] = m[i]; }
+        }
+      }
+      close(fd);
+    }
+  }
   std::uintptr_t target = glibc_fs_for(cur);  // attached thread on its bionic %fs -> its glibc %fs
   if (target == 0 && !is_known_glibc_fs(cur)) {
     // Not a tracked bionic %fs, and not a known ART-glibc %fs => a bionic-spawned thread ART never
