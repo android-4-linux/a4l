@@ -1462,7 +1462,10 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   static auto scene_gen = reinterpret_cast<std::uint64_t (*)()>(
       ::dlsym(RTLD_DEFAULT, "acl_graphics_scene_generation"));
   static const bool dirty_stats = std::getenv("ACL_DIRTY_STATS") != nullptr;
-  static const bool idle_gate = std::getenv("ACL_IDLE_GATE") != nullptr;  // opt-in until corpus-proven
+  static const bool idle_gate = [] {  // default ON; ACL_IDLE_GATE=0 disables (visible-session validated)
+    const char* v = std::getenv("ACL_IDLE_GATE");
+    return v == nullptr || (*v != '\0' && v[0] != '0');
+  }();
   static std::uint64_t gate_last_gen = ~0ull;  // sentinel: first frame always differs -> draws
   static std::uint64_t stat_total = 0, stat_skipped = 0;
   static auto last_full_draw = std::chrono::steady_clock::now();
