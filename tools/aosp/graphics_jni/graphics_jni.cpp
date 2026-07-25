@@ -395,6 +395,23 @@ void Bitmap_nativeGetPixels(JNIEnv* env, jclass, jlong ptr, jintArray pixels, ji
   env->ReleaseIntArrayElements(pixels, dst, 0);  // copy back + release
 }
 
+// Bitmap.setPixels -> write an int[] of unpremultiplied Color ints into the bitmap (converting to
+// its config/alpha). Mirror of nativeGetPixels; needed by the NDK AndroidBitmap_unlockPixels copy-
+// back (a native lib that locks a Bitmap, mutates the pixels, and unlocks — e.g. Telegram's stack
+// blur). No-op on an immutable bitmap.
+void Bitmap_nativeSetPixels(JNIEnv* env, jclass, jlong ptr, jintArray pixels, jint offset,
+                            jint stride, jint x, jint y, jint width, jint height) {
+  auto* w = reinterpret_cast<AclBitmap*>(ptr);
+  if (w == nullptr || w->immutable || pixels == nullptr || width <= 0 || height <= 0) return;
+  jint* src = env->GetIntArrayElements(pixels, nullptr);
+  if (src == nullptr) return;
+  const SkImageInfo info =
+      SkImageInfo::Make(width, height, kN32_SkColorType, kUnpremul_SkAlphaType);
+  const SkPixmap pm(info, src + offset, static_cast<size_t>(stride) * sizeof(jint));
+  w->bitmap.writePixels(pm, x, y);
+  env->ReleaseIntArrayElements(pixels, src, JNI_ABORT);  // src read-only; nothing to copy back
+}
+
 jint Bitmap_nativeGetAllocationByteCount(JNIEnv*, jclass, jlong ptr) {
   auto* w = reinterpret_cast<AclBitmap*>(ptr);
   return static_cast<jint>(w->bitmap.computeByteSize());
@@ -3335,6 +3352,7 @@ const JNINativeMethod kBitmap[] = {
     {"nativeGetNativeFinalizer", "()J", reinterpret_cast<void*>(Bitmap_nativeGetNativeFinalizer)},
     {"nativeGetPixel", "(JII)I", reinterpret_cast<void*>(Bitmap_nativeGetPixel)},
     {"nativeGetPixels", "(J[IIIIIII)V", reinterpret_cast<void*>(Bitmap_nativeGetPixels)},
+    {"nativeSetPixels", "(J[IIIIIII)V", reinterpret_cast<void*>(Bitmap_nativeSetPixels)},
     {"nativeGetAllocationByteCount", "(J)I",
      reinterpret_cast<void*>(Bitmap_nativeGetAllocationByteCount)},
     {"nativeSetHasAlpha", "(JZZ)V", reinterpret_cast<void*>(Bitmap_nativeSetHasAlpha)},
