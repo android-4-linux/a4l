@@ -2539,6 +2539,17 @@ public final class HostBootstrap {
                 setField(vriCls, vri, "mChoreographer",
                         android.view.Choreographer.getInstance());
             } catch (Throwable ignored) {}
+            // Key dispatch: DecorView.superDispatchKeyEvent -> ViewRootImpl.dispatchUnhandledKeyEvent
+            // -> mUnhandledKeyManager.dispatch(mView, event). The ctor-created final mUnhandledKeyManager
+            // is skipped by the hollow allocate -> NPE that aborts the WHOLE key dispatch before the
+            // focused view (an EditText) ever sees onKeyDown -> physical keyboard typing does nothing.
+            // Seed a real one (a no-arg static inner class).
+            try {
+                Class<?> ukmCls = Class.forName("android.view.ViewRootImpl$UnhandledKeyManager");
+                java.lang.reflect.Constructor<?> ukmCtor = ukmCls.getDeclaredConstructor();
+                ukmCtor.setAccessible(true);
+                setField(vriCls, vri, "mUnhandledKeyManager", ukmCtor.newInstance());
+            } catch (Throwable ignored) {}
             // The ViewRootImpl ctor creates mImeFocusController (final); the hollow one skips it, so
             // a focus change during dispatchAttachedToWindow — View.onFocusChanged reaches
             // mViewRootImpl.getImeFocusController().onViewFocusChanged (View.java) — NPEs on the null

@@ -929,6 +929,25 @@ void present_sync_ime_focus(PresentSession* s) {
   s->presenter->set_ime_visible(want);  // no-ops if unchanged (dedup in the presenter)
 }
 
+// An xkb keysym -> its Unicode codepoint if it is a PRINTABLE character (Latin-1 direct, or the
+// 0x01000000 direct-unicode range), else 0. Function/editing keysyms (Return, BackSpace, arrows,
+// modifiers — the 0xff.. range) return 0 and are dispatched as KeyEvents instead.
+std::uint32_t keysym_to_codepoint(std::uint32_t keysym) {
+  if (keysym >= 0x20 && keysym <= 0x7e) return keysym;              // ASCII printable
+  if (keysym >= 0xa0 && keysym <= 0xff) return keysym;             // Latin-1 supplement
+  if ((keysym & 0xff000000u) == 0x01000000u) return keysym & 0x00ffffffu;  // direct Unicode
+  return 0;
+}
+// Minimal UTF-8 encode of a codepoint.
+std::string utf8_encode(std::uint32_t cp) {
+  std::string o;
+  if (cp < 0x80) o.push_back(static_cast<char>(cp));
+  else if (cp < 0x800) { o.push_back(static_cast<char>(0xC0 | (cp >> 6))); o.push_back(static_cast<char>(0x80 | (cp & 0x3F))); }
+  else if (cp < 0x10000) { o.push_back(static_cast<char>(0xE0 | (cp >> 12))); o.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F))); o.push_back(static_cast<char>(0x80 | (cp & 0x3F))); }
+  else { o.push_back(static_cast<char>(0xF0 | (cp >> 18))); o.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F))); o.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F))); o.push_back(static_cast<char>(0x80 | (cp & 0x3F))); }
+  return o;
+}
+
 // Deliver a compositor pointer/key event to the decor View (native side of MotionEvent/
 // KeyEvent). Runs synchronously inside presenter->dispatch() on the main thread.
 void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
@@ -967,13 +986,31 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
     if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionDescribe(); env->ExceptionClear(); }
     present_sync_ime_focus(s);  // a tap that focused a text field -> show the OSK
   } else if (const auto* k = std::get_if<wm::KeyInput>(&ev)) {
+    // Printable key press -> commit the character to the focused editor's InputConnection (the same
+    // path the compositor IME uses), keyed off the xkb keysym. This works without a loadable
+    // KeyCharacterMap (a hardware KeyEvent's getUnicodeChar() returns 0 on acl's host, so the raw-key
+    // path inserts nothing). Editing/function keys (Enter, Backspace, arrows) fall through to KeyEvent
+    // dispatch below, which handles them via onKeyDown (no char needed).
+    if (k->action == wm::KeyInput::Action::Down) {
+      if (std::uint32_t cp = keysym_to_codepoint(k->keysym); cp != 0) {
+        present_deliver_input(s, wm::TextInput{utf8_encode(cp), false, 1});
+        return;
+      }
+    }
     if (s->keyevent_cls == nullptr || s->ke_obtain == nullptr || s->dispatch_key == nullptr) return;
     const jint action = k->action == wm::KeyInput::Action::Down ? 0 : 1;
-    jobject ke = env->CallStaticObjectMethod(s->keyevent_cls, s->ke_obtain, action,
-                                             acl_evdev_to_android_keycode(k->keycode));
+    const jint keycode = acl_evdev_to_android_keycode(k->keycode);
+    jobject ke = env->NewObject(s->keyevent_cls, s->ke_obtain, action, keycode);
+    jboolean kh = JNI_FALSE;
     if (ke != nullptr) {
-      env->CallBooleanMethod(s->view, s->dispatch_key, ke);
+      kh = env->CallBooleanMethod(s->view, s->dispatch_key, ke);
       env->DeleteLocalRef(ke);
+    }
+    static int kdiag = 0;
+    if (kdiag < 24) {
+      log::i(kTag, "input: key action={} evdev={} android={} ke={} handled={}", action, k->keycode,
+             keycode, ke != nullptr, kh == JNI_TRUE);
+      ++kdiag;
     }
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
     present_sync_ime_focus(s);  // a key (e.g. Tab) that moved focus onto/off a text field
@@ -1096,7 +1133,7 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env, jclass, jobject view, jint w, jin
     env->DeleteLocalRef(mecls);
   } else { env->ExceptionClear(); }
   if (jclass kecls = env->FindClass("android/view/KeyEvent")) {
-    s->ke_obtain = env->GetStaticMethodID(kecls, "obtain", "(II)Landroid/view/KeyEvent;");
+    s->ke_obtain = env->GetMethodID(kecls, "<init>", "(II)V");
     s->keyevent_cls = static_cast<jclass>(env->NewGlobalRef(kecls));
     env->DeleteLocalRef(kecls);
   } else { env->ExceptionClear(); }
@@ -1365,6 +1402,39 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
       if (drag_step == kDragSteps) {
         present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Up, drg[2], drg[3]});
         log::i(kTag, "input: synthetic DRAG up at ({},{})", drg[2], drg[3]);
+      }
+    }
+  }
+  // DIAG: env-gated synthetic text (ACL_TEST_TYPE="text") — commit `text` to the focused editor's
+  // InputConnection at frame 200 (simulates a compositor IME commit). Tests InputConnection routing
+  // to a real EditText without a physical keyboard / OSK. Pair with ACL_TEST_TAP to focus the field.
+  static bool typed = false;
+  if (const char* tt = std::getenv("ACL_TEST_TYPE")) {
+    if (!typed && s->frames >= 200) {
+      typed = true;
+      log::i(kTag, "input: synthetic TYPE \"{}\"", tt);
+      present_deliver_input(
+          s, wm::TextInput{std::string(tt), false, static_cast<int>(std::string(tt).size())});
+    }
+  }
+  // DIAG: env-gated synthetic keystrokes (ACL_TEST_KEYS="sym1,sym2,..." xkb keysyms — for ASCII the
+  // keysym equals the codepoint) — Down+Up each at frame 200. Tests the physical-keyboard path
+  // (wl_keyboard -> keysym -> printable commit / KeyEvent). e.g. "104,101,108,108,111" = h,e,l,l,o.
+  static bool keyed = false;
+  if (const char* kk = std::getenv("ACL_TEST_KEYS")) {
+    if (!keyed && s->frames >= 200) {
+      keyed = true;
+      log::i(kTag, "input: synthetic KEYS \"{}\"", kk);
+      for (const char* p = kk; *p;) {
+        char* end = nullptr;
+        long sym = std::strtol(p, &end, 10);
+        if (end == p) break;
+        if (sym > 0) {
+          present_deliver_input(s, wm::KeyInput{wm::KeyInput::Action::Down, 0, static_cast<std::uint32_t>(sym)});
+          present_deliver_input(s, wm::KeyInput{wm::KeyInput::Action::Up, 0, static_cast<std::uint32_t>(sym)});
+        }
+        p = end;
+        while (*p == ',') ++p;
       }
     }
   }
@@ -1698,7 +1768,7 @@ void attach_view_to_gl_session(JNIEnv* env, PresentSession* s, jobject view, int
     env->ExceptionClear();
   }
   if (jclass kecls = env->FindClass("android/view/KeyEvent")) {
-    s->ke_obtain = env->GetStaticMethodID(kecls, "obtain", "(II)Landroid/view/KeyEvent;");
+    s->ke_obtain = env->GetMethodID(kecls, "<init>", "(II)V");
     s->keyevent_cls = static_cast<jclass>(env->NewGlobalRef(kecls));
     env->DeleteLocalRef(kecls);
   } else {
@@ -2532,7 +2602,7 @@ class JniVm : public Vm {
     jmethodID me_obtain = env_->GetStaticMethodID(mecls, "obtain", "(JJIFFI)Landroid/view/MotionEvent;");
     jmethodID me_recycle = env_->GetMethodID(mecls, "recycle", "()V");
     jclass kecls = static_cast<jclass>(env_->NewGlobalRef(env_->FindClass("android/view/KeyEvent")));
-    jmethodID ke_obtain = env_->GetStaticMethodID(kecls, "obtain", "(II)Landroid/view/KeyEvent;");
+    jmethodID ke_obtain = env_->GetMethodID(kecls, "<init>", "(II)V");
     clear_exception();
     auto down_time = std::make_shared<std::uint64_t>(0);
 
@@ -2596,7 +2666,7 @@ class JniVm : public Vm {
       } else if (const auto* k = std::get_if<wm::KeyInput>(&ev)) {
         if (ke_obtain == nullptr || dispatch_key == nullptr) return;
         const jint action = k->action == wm::KeyInput::Action::Down ? 0 : 1;
-        jobject ke = env_->CallStaticObjectMethod(kecls, ke_obtain, action,
+        jobject ke = env_->NewObject(kecls, ke_obtain, action,
                                                   acl_evdev_to_android_keycode(k->keycode));
         if (ke != nullptr) { env_->CallBooleanMethod(gview, dispatch_key, ke); env_->DeleteLocalRef(ke); }
         clear_exception();
@@ -2835,7 +2905,7 @@ class JniVm : public Vm {
     jobject keyevent_cls = nullptr;
     jmethodID ke_obtain = nullptr, dispatch_key = nullptr;
     if (jclass kecls = env_->FindClass("android/view/KeyEvent")) {
-      ke_obtain = env_->GetStaticMethodID(kecls, "obtain", "(II)Landroid/view/KeyEvent;");
+      ke_obtain = env_->GetMethodID(kecls, "<init>", "(II)V");
       keyevent_cls = env_->NewGlobalRef(kecls);
       env_->DeleteLocalRef(kecls);
     }
@@ -2912,7 +2982,7 @@ class JniVm : public Vm {
     const auto on_key = [&, this](const wm::KeyInput& ev) {
       if (keyevent_cls == nullptr || ke_obtain == nullptr || dispatch_key == nullptr) return;
       const jint action = ev.action == wm::KeyInput::Action::Down ? 0 : 1;  // ACTION_DOWN/UP
-      jobject ke = env_->CallStaticObjectMethod(static_cast<jclass>(keyevent_cls), ke_obtain,
+      jobject ke = env_->NewObject(static_cast<jclass>(keyevent_cls), ke_obtain,
                                                 action, android_keycode(ev.keycode));
       if (ke != nullptr) {
         env_->CallBooleanMethod(view, dispatch_key, ke);
@@ -3073,7 +3143,7 @@ class JniVm : public Vm {
       env_->DeleteLocalRef(mecls);
     }
     if (jclass kecls = env_->FindClass("android/view/KeyEvent")) {
-      ke_obtain = env_->GetStaticMethodID(kecls, "obtain", "(II)Landroid/view/KeyEvent;");
+      ke_obtain = env_->GetMethodID(kecls, "<init>", "(II)V");
       keyevent_cls = env_->NewGlobalRef(kecls);
       env_->DeleteLocalRef(kecls);
     }
@@ -3103,7 +3173,7 @@ class JniVm : public Vm {
       } else if (const auto* k = std::get_if<wm::KeyInput>(&ev)) {
         if (keyevent_cls == nullptr || ke_obtain == nullptr || dispatch_key == nullptr) return;
         const jint action = k->action == wm::KeyInput::Action::Down ? 0 : 1;
-        jobject ke = env_->CallStaticObjectMethod(static_cast<jclass>(keyevent_cls), ke_obtain,
+        jobject ke = env_->NewObject(static_cast<jclass>(keyevent_cls), ke_obtain,
                                                   action, android_keycode(k->keycode));
         if (ke != nullptr) {
           env_->CallBooleanMethod(view, dispatch_key, ke);
