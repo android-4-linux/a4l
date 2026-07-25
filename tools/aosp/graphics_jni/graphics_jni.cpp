@@ -135,6 +135,13 @@ struct AclRenderNode : public SkRefCnt {
   int layerType = 0, spotShadowColor = 0, ambientShadowColor = 0;
   bool clipToBounds = true, clipToOutline = false, allowForceDark = true;
   bool hasOverlappingRendering = true;
+  // clipToOutline outline geometry (ViewOutlineProvider): a round-rect (radius 0 == plain rect) or a
+  // convex path, in the node's local coords. Applied as a clip by the walk when clipToOutline is set
+  // — the reason Material cards / buttons / rounded images have rounded corners instead of squares.
+  enum class OutlineKind : std::uint8_t { None, RoundRect, Path } outline_kind = OutlineKind::None;
+  SkRect outline_rect = SkRect::MakeEmpty();
+  float outline_radius = 0.0f;
+  SkPath outline_path;
   // RenderNode record/replay (Compose renders its content into RenderNode layers). `display_list`
   // is the segmented content (own-op SkPictures + live child/layer boundaries), walked live each
   // frame by draw_rendernode_immediate; `picture` is a legacy single-picture fallback (deferred
@@ -1452,12 +1459,35 @@ jboolean RenderNode_nSetClipBounds(jlong, jint, jint, jint, jint) { return JNI_T
 RN_NOPB(RenderNode_nSetClipBoundsEmpty)
 RN_NOPB(RenderNode_nSetProjectBackwards)
 RN_NOPB(RenderNode_nSetProjectionReceiver)
-jboolean RenderNode_nSetOutlineRoundRect(jlong, jint, jint, jint, jint, jfloat, jfloat) {
+jboolean RenderNode_nSetOutlineRoundRect(jlong node, jint l, jint t, jint r, jint b, jfloat radius,
+                                         jfloat /*alpha*/) {
+  if (auto* n = rnode(node)) {
+    n->outline_kind = AclRenderNode::OutlineKind::RoundRect;
+    n->outline_rect = SkRect::MakeLTRB(static_cast<float>(l), static_cast<float>(t),
+                                       static_cast<float>(r), static_cast<float>(b));
+    n->outline_radius = radius;
+    n->outline_path.reset();
+  }
   return JNI_TRUE;
 }
-jboolean RenderNode_nSetOutlinePath(jlong, jlong, jfloat) { return JNI_TRUE; }
-RN_NOPB(RenderNode_nSetOutlineEmpty)
-RN_NOPB(RenderNode_nSetOutlineNone)
+jboolean RenderNode_nSetOutlinePath(jlong node, jlong path, jfloat /*alpha*/) {
+  auto* n = rnode(node);
+  auto* p = reinterpret_cast<SkPath*>(path);
+  if (n != nullptr && p != nullptr) {
+    n->outline_kind = AclRenderNode::OutlineKind::Path;
+    n->outline_path = *p;  // copy: the app may mutate/free its Path after setting the outline
+  }
+  return JNI_TRUE;
+}
+// setOutlineEmpty (outline present but empty) / setOutlineNone (no outline) — both clear any clip.
+jboolean RenderNode_nSetOutlineEmpty(jlong node) {
+  if (auto* n = rnode(node)) { n->outline_kind = AclRenderNode::OutlineKind::None; n->outline_path.reset(); }
+  return JNI_TRUE;
+}
+jboolean RenderNode_nSetOutlineNone(jlong node) {
+  if (auto* n = rnode(node)) { n->outline_kind = AclRenderNode::OutlineKind::None; n->outline_path.reset(); }
+  return JNI_TRUE;
+}
 RN_NOPB(RenderNode_nClearStretch)
 jboolean RenderNode_nStretch(jlong, jfloat, jfloat, jfloat, jfloat) { return JNI_TRUE; }
 jboolean RenderNode_nHasShadow(jlong) { return JNI_FALSE; }
@@ -3560,6 +3590,19 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
     c->translate(-px, -py);
   }
   if (n->clipToBounds && w > 0 && h > 0) c->clipRect(SkRect::MakeWH(w, h));
+  // clipToOutline: clip the node's content + children to its ViewOutlineProvider shape (rounded
+  // rect or convex path), antialiased — Material cards/buttons/rounded images. Applied in the node's
+  // transformed local space, so it scales/rotates with the content (like clipToBounds).
+  if (n->clipToOutline && n->outline_kind != AclRenderNode::OutlineKind::None) {
+    if (n->outline_kind == AclRenderNode::OutlineKind::RoundRect && !n->outline_rect.isEmpty()) {
+      if (n->outline_radius > 0.0f)
+        c->clipRRect(SkRRect::MakeRectXY(n->outline_rect, n->outline_radius, n->outline_radius), true);
+      else
+        c->clipRect(n->outline_rect, true);
+    } else if (n->outline_kind == AclRenderNode::OutlineKind::Path && !n->outline_path.isEmpty()) {
+      c->clipPath(n->outline_path, true);
+    }
+  }
   if (n->alpha < 1.0f) {
     SkPaint lp;
     lp.setAlphaf(n->alpha);
