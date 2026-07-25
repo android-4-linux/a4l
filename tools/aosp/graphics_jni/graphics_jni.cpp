@@ -1059,6 +1059,19 @@ void Canvas_nRestoreToCount(jlong canvas, jint saveCount) {
   auto* c = canvas_sk(canvas);
   if (c != nullptr) c->restoreToCount(saveCount);
 }
+// View fading edges: saveUnclippedLayer saves a layer over a rect WITHOUT clipping subsequent draws
+// to it; restoreUnclippedLayer composites it with a gradient paint that fades the edge to transparent.
+// acl's first cut treats the pair as a plain save/restore — content renders correctly and scrolling
+// works; the cosmetic edge-fade gradient is not yet applied. This exists to stop the UnsatisfiedLink
+// that took down ANY fading-edge ScrollView/ListView/RecyclerView/EditText. Both @CriticalNative.
+jint Canvas_nSaveUnclippedLayer(jlong canvas, jint, jint, jint, jint) {
+  auto* c = canvas_sk(canvas);
+  return c != nullptr ? c->save() : 1;
+}
+void Canvas_nRestoreUnclippedLayer(jlong canvas, jint saveCount, jlong /*paint*/) {
+  auto* c = canvas_sk(canvas);
+  if (c != nullptr && saveCount >= 1) c->restoreToCount(saveCount);
+}
 jint Canvas_nGetSaveCount(jlong canvas) {
   auto* c = canvas_sk(canvas);
   return c != nullptr ? c->getSaveCount() : 0;
@@ -4658,6 +4671,8 @@ const JNINativeMethod kCanvas[] = {
     {"nSaveLayerAlpha", "(JFFFFI)I", reinterpret_cast<void*>(Canvas_nSaveLayerAlpha)},
     {"nRestore", "(J)Z", reinterpret_cast<void*>(Canvas_nRestore)},
     {"nRestoreToCount", "(JI)V", reinterpret_cast<void*>(Canvas_nRestoreToCount)},
+    {"nSaveUnclippedLayer", "(JIIII)I", reinterpret_cast<void*>(Canvas_nSaveUnclippedLayer)},
+    {"nRestoreUnclippedLayer", "(JIJ)V", reinterpret_cast<void*>(Canvas_nRestoreUnclippedLayer)},
     {"nGetSaveCount", "(J)I", reinterpret_cast<void*>(Canvas_nGetSaveCount)},
     {"nTranslate", "(JFF)V", reinterpret_cast<void*>(Canvas_nTranslate)},
     {"nScale", "(JFF)V", reinterpret_cast<void*>(Canvas_nScale)},
