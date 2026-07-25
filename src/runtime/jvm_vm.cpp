@@ -1441,24 +1441,18 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   // traversal (a white window that never settles).
   static auto force_record = reinterpret_cast<void (*)(int)>(
       ::dlsym(RTLD_DEFAULT, "acl_graphics_set_force_record"));
+  // The RenderNode display list now records LIVE child/texture-layer boundaries (hwui's tree model),
+  // and the present-root walk resolves them every frame — so a settled Compose layer or an animating
+  // TextureView shows its latest content with NO parent re-record. Force-record is therefore OFF for
+  // the main content by default (the cache + the live walk are correct and fast); ACL_FORCE_RECORD=1
+  // reinstates the old re-record-everything path as a fallback. The overlay pass still force-records
+  // (below) because a Dialog/Popup is a SEPARATE composition acl doesn't recompose, so its layers must
+  // be re-recorded to pick up content produced after the initial (empty) compose.
   static const bool force_record_on = [] {
     const char* v = std::getenv("ACL_FORCE_RECORD");
-    return v == nullptr || *v == '\0' || v[0] != '0';
+    return v != nullptr && *v != '\0' && v[0] != '0';
   }();
-  // A TextureView that produced a new SurfaceTexture frame needs the tree re-recorded THIS frame,
-  // even with ACL_FORCE_RECORD=0: acl's RenderNode-via-SkPicture snapshots the resolve-at-replay
-  // layer drawable, so a cached ANCESTOR picture holds a stale frame. Re-record only while a
-  // TextureView actually animates (the count changed since last frame) — static screens stay cheap.
-  static auto st_produced = reinterpret_cast<std::uint64_t (*)()>(
-      ::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_produced"));
-  static std::uint64_t last_st_produced = 0;
-  bool st_dirty = false;
-  if (st_produced != nullptr) {
-    const std::uint64_t now = st_produced();
-    st_dirty = now != last_st_produced;
-    last_st_produced = now;
-  }
-  if (force_record != nullptr) force_record((force_record_on || st_dirty) ? 1 : 0);
+  if (force_record != nullptr) force_record(force_record_on ? 1 : 0);
   const auto draw_t0 = std::chrono::steady_clock::now();
   // Deferred present (ACL_PRESENT_RT): (re)begin the present-root picture recording for this frame,
   // just before View.draw records into s->canvas. No-op in the default immediate path.
@@ -1491,6 +1485,10 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   static auto recstats0 = reinterpret_cast<std::uint64_t (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_profile_recstats"));
   const std::uint64_t ops_pre_overlay = ov_diag && drawops ? drawops() : 0;
   const std::uint64_t rep_pre_overlay = ov_diag && recstats0 ? (recstats0() & 0xfffff) : 0;
+  // Force-record the overlay layers only: a Dialog/Popup is a separate composition acl doesn't
+  // recompose, so its RenderNodes must re-record each frame to reflect content produced after the
+  // initial (empty) compose. The main content, already drawn above with caching, is unaffected.
+  if (force_record != nullptr) force_record(1);
   if (overlay_present != nullptr && s->canvas != nullptr)
     env->CallStaticVoidMethod(overlay_cls, overlay_present, s->canvas, s->w, s->h);
   if (force_record != nullptr) force_record(0);  // whole frame drawn; re-arm caching for the next

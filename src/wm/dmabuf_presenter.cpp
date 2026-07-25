@@ -359,6 +359,9 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     // !suspended_: the compositor marked the toplevel not-visible (xdg_toplevel.suspended) — skip
     // producing frames it will not show. (It also withholds frame callbacks, so need_frame_ stays
     // false; this is the explicit belt-and-suspenders + the resume path re-arms need_frame_.)
+    // Diagnostic override presents as buffers free (no frame-callback / suspend gating), since an
+    // occluded compositor sends neither — lets a post-init frame reach ACL_GPU_DUMP for validation.
+    if (ignore_suspend_) return configured_ && free_slot() >= 0;
     return configured_ && !suspended_ && need_frame_ && free_slot() >= 0;
   }
   int next_buffer() const noexcept override { return free_slot(); }
@@ -820,7 +823,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
 
   bool present_loop() noexcept {
     while (!closed_) {
-      if (configured_ && !suspended_ && need_frame_ &&
+      if (configured_ && (!suspended_ || ignore_suspend_) && need_frame_ &&
           (max_frames_ == 0 || frame_index_ < max_frames_)) {
         need_frame_ = false;
         // Request the next frame-callback tick, then attach + commit the frame.
@@ -860,7 +863,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   // release or re-tick). end_frame fence-waits for the GPU copy before Commit.
   bool present_loop_dynamic() noexcept {
     while (!closed_) {
-      if (configured_ && !suspended_ && need_frame_ && free_slot() >= 0 &&
+      if (configured_ && (!suspended_ || ignore_suspend_) && need_frame_ && free_slot() >= 0 &&
           (max_frames_ == 0 || frame_index_ < max_frames_)) {
         const int s = free_slot();
         need_frame_ = false;
@@ -1009,6 +1012,9 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   std::uint64_t max_frames_ = 0, frame_index_ = 0, frame_callbacks_ = 0;
   bool configured_ = false, need_frame_ = false, closed_ = false;
   bool suspended_ = false;  // xdg_toplevel.suspended: surface occluded (locked/minimized) — pause present
+  // Diagnostic override: keep presenting even while the compositor reports the toplevel occluded, so a
+  // frame can be dumped (ACL_GPU_DUMP) for headless validation when no display is actively viewing.
+  const bool ignore_suspend_ = std::getenv("ACL_IGNORE_SUSPEND") != nullptr;
 };
 
 }  // namespace

@@ -103,6 +103,27 @@ struct AclPaint {
 // recording is bypassed either way. So this only tracks the geometry/transform state the
 // View reads back; recording/animation are no-ops. Lets the real android.view.View
 // construct + measure/layout on host ART; the real present is the Vulkan Canvas (begin_frame).
+// ── RenderNode display list (hwui's live-reference tree model, re-owned on Skia) ──────────────
+// hwui records each RenderNode's content as a display list whose child references are LIVE pointers,
+// and the RenderThread WALKS the tree every frame — a child's update is picked up with no parent
+// re-record. acl's earlier model recorded a node into ONE SkPicture, and drawRenderNode(child)
+// became an SkDrawable that SkPictureRecorder SNAPSHOTS at finishRecording — so a parent cached a
+// FROZEN copy of the child (the inversion that made settled TextureViews/Compose layers go stale and
+// forced a re-record-everything hack). This restores hwui's model: a node's content is a SEQUENCE of
+// segments (SkPictures of its own ops) split at child/texture-layer BOUNDARIES that the native walk
+// (draw_rendernode_immediate) resolves LIVE at their position. SkPicture playback composes recorded
+// setMatrix ops with the playback CTM, so splitting the recording preserves transforms across segment
+// boundaries. Clean-room: hwui's semantics (SDK/AOSP-documented RenderNode model); no the predecessor.
+struct AclRenderNode;      // self-reference in a child boundary
+struct AclTextureLayer;    // TextureView layer boundary (defined with the SurfaceTexture natives)
+struct DisplayItem {
+  enum class Kind : std::uint8_t { Picture, Child, Layer } kind = Kind::Picture;
+  sk_sp<SkPicture> picture;          // Picture: a segment of the node's own recorded ops
+  sk_sp<AclRenderNode> child;        // Child: live reference to a child node (resolved at walk)
+  AclTextureLayer* layer = nullptr;  // Layer: a TextureView's layer (Java-owned; not reffed here)
+  SkMatrix matrix = SkMatrix::I();   // node-local CTM captured at the boundary (Child/Layer)
+};
+
 struct AclRenderNode : public SkRefCnt {
   int left = 0, top = 0, right = 0, bottom = 0;
   float alpha = 1.0f, cameraDistance = 0.0f;
@@ -114,9 +135,12 @@ struct AclRenderNode : public SkRefCnt {
   int layerType = 0, spotShadowColor = 0, ambientShadowColor = 0;
   bool clipToBounds = true, clipToOutline = false, allowForceDark = true;
   bool hasOverlappingRendering = true;
-  // RenderNode record/replay (Compose renders its content into RenderNode layers). picture is
-  // the recorded display list (from beginRecording/endRecording); is_present_root marks acl's
-  // top-level node whose RecordingCanvas draws immediately onto the GPU SkCanvas (not a picture).
+  // RenderNode record/replay (Compose renders its content into RenderNode layers). `display_list`
+  // is the segmented content (own-op SkPictures + live child/layer boundaries), walked live each
+  // frame by draw_rendernode_immediate; `picture` is a legacy single-picture fallback (deferred
+  // present-root path, and leaf nodes with no boundaries). is_present_root marks acl's top-level
+  // node whose RecordingCanvas draws immediately onto the GPU SkCanvas (not recorded).
+  std::vector<DisplayItem> display_list;
   sk_sp<SkPicture> picture;
   bool is_present_root = false;
 };
@@ -256,22 +280,35 @@ struct AclRasterCanvas {
   std::unique_ptr<SkCanvas> sk;
 };
 constexpr jlong kRasterTag = 1;
+// A RenderNode display-list recording canvas is a NodeRecorder (see the display-list model): its
+// handle carries bit 1 so canvas_sk() resolves it to the CURRENT segment's SkCanvas, which changes
+// each time the recording is split at a child/layer boundary while the Java-held handle stays stable.
+// (bit 0 = raster wrapper, bit 1 = node recorder; heap pointers are >=8-byte aligned so both are free
+// and never collide with a raw SkCanvas* handle.)
+constexpr jlong kRecorderTag = 2;
 inline bool is_raster_handle(jlong h) { return (h & kRasterTag) != 0; }
+inline bool is_recorder_handle(jlong h) { return (h & kRecorderTag) != 0; }
 inline AclRasterCanvas* raster_of(jlong h) {
   return reinterpret_cast<AclRasterCanvas*>(h & ~kRasterTag);
 }
+SkCanvas* recorder_seg_canvas(jlong h);  // current segment canvas; defined with NodeRecorder
 inline SkCanvas* canvas_sk(jlong h) {
   if (h == 0) return nullptr;
-  if (is_raster_handle(h)) return raster_of(h)->sk.get();
+  if (h & (kRasterTag | kRecorderTag)) {
+    if (h & kRasterTag) return raster_of(h)->sk.get();
+    return recorder_seg_canvas(h);
+  }
   return reinterpret_cast<SkCanvas*>(h);
 }
 
 // NativeAllocationRegistry finalizers (returned as function pointers to Java).
 void free_bitmap(void* p) { delete reinterpret_cast<AclBitmap*>(p); }
 void free_paint(void* p) { delete reinterpret_cast<AclPaint*>(p); }
+void free_node_recorder(jlong h);  // defined with NodeRecorder
 void free_canvas(void* p) {
   const jlong h = reinterpret_cast<jlong>(p);
   if (is_raster_handle(h)) { delete raster_of(h); return; }  // our wrapper owns its SkCanvas
+  if (is_recorder_handle(h)) { free_node_recorder(h); return; }  // our NodeRecorder owns its segments
   if (acl_graphics_canvas_borrowed(p)) return;  // surface-owned (GPU); not ours to delete
   if (is_recording_canvas(p)) return;           // owned by its SkPictureRecorder; not ours
   delete reinterpret_cast<SkCanvas*>(p);
@@ -1337,7 +1374,10 @@ void RenderNode_nForceEndAnimators(JNIEnv*, jclass, jlong) {}
 // nDiscardDisplayList: framework frees the node's recorded content — drop the picture so the next
 // hasDisplayList()/nIsValid reports "empty" and View.updateDisplayListIfDirty() re-records.
 void RenderNode_nDiscardDisplayList(jlong node) {
-  if (auto* n = reinterpret_cast<AclRenderNode*>(node)) n->picture = nullptr;
+  if (auto* n = reinterpret_cast<AclRenderNode*>(node)) {
+    n->picture = nullptr;
+    n->display_list.clear();
+  }
 }
 // RenderNode.hasDisplayList() -> nIsValid. This MUST be false until the node has actually recorded
 // a display list (endRecording -> nFinishRecording sets picture): View.updateDisplayListIfDirty()
@@ -1358,7 +1398,8 @@ jboolean RenderNode_nIsValid(jlong node) {
   auto* n = reinterpret_cast<AclRenderNode*>(node);
   if (n == nullptr) return JNI_FALSE;
   if (g_force_record.load(std::memory_order_relaxed) && !n->is_present_root) return JNI_FALSE;
-  return (n->is_present_root || n->picture != nullptr) ? JNI_TRUE : JNI_FALSE;
+  return (n->is_present_root || !n->display_list.empty() || n->picture != nullptr) ? JNI_TRUE
+                                                                                   : JNI_FALSE;
 }
 void RenderNode_nGetTransformMatrix(jlong, jlong m) {
   if (auto* mat = reinterpret_cast<SkMatrix*>(m)) mat->reset();
@@ -3272,6 +3313,97 @@ extern "C" std::uint64_t acl_graphics_profile_recstats() {
 
 extern "C" void acl_graphics_set_present_canvas(jlong c) { g_present_gpu_canvas = c; }
 
+// ── NodeRecorder: segmented display-list recording (hwui live-reference model) ────────────────
+// A RenderNode's recording canvas. It records the node's own draw ops into an SkPictureRecorder, and
+// at each child/texture-layer boundary (nDrawRenderNode / nDrawTextureLayer) it FINISHES the current
+// segment into a Picture DisplayItem, records a live Child/Layer boundary, and BEGINS a fresh segment
+// — so children are references the native walk resolves live, never snapshots. The Java-held handle
+// (a kRecorderTag-tagged NodeRecorder*) is stable across splits; canvas_sk() resolves it to `seg`,
+// the current segment's canvas, which changes each split. One NodeRecorder is pooled/reused across
+// many nodes (nReset per node, nFinish moves its items into that node's display_list). The pre-split
+// CTM is re-applied to each new segment (carry_m) so own-content after a boundary keeps its transform;
+// SkPicture playback composes the recorded setMatrix with the walk CTM, so this nests correctly.
+struct NodeRecorder {
+  SkPictureRecorder rec;
+  SkCanvas* seg = nullptr;          // current segment's recording canvas (null between finish and reset)
+  int w = 1, h = 1;
+  SkMatrix carry_m = SkMatrix::I();  // CTM at the last boundary, re-applied to the next segment
+  int carry_saves = 0;               // unbalanced save() depth carried across the boundary
+  std::vector<DisplayItem> items;
+
+  explicit NodeRecorder(int W, int H) { reset(W, H); }
+
+  // Begin a segment, restoring the canvas STATE the recording was in when the previous segment was
+  // split: the CTM (carry_m) and the save-stack DEPTH (carry_saves). The depth matters because the
+  // framework saves the canvas before dispatchDraw and restores after (fading edges / clipChildren),
+  // straddling child boundaries — without re-issuing the saves, the restore in the next segment
+  // underflows ("more restores than saves"). Balanced saves are auto-closed at finishRecording.
+  void begin_seg() {
+    seg = rec.beginRecording(SkRect::MakeIWH(w, h));
+    if (seg == nullptr) return;
+    if (!carry_m.isIdentity()) seg->setMatrix(carry_m);
+    for (int i = 0; i < carry_saves; ++i) seg->save();
+  }
+  // Finalize the current segment into a Picture item (dropped if it recorded nothing).
+  void flush_seg() {
+    if (seg == nullptr) return;
+    sk_sp<SkPicture> pic = rec.finishRecordingAsPicture();
+    seg = nullptr;
+    if (pic && pic->approximateOpCount(true) > 0) {
+      DisplayItem it;
+      it.kind = DisplayItem::Kind::Picture;
+      it.picture = std::move(pic);
+      items.push_back(std::move(it));
+    }
+  }
+  // Split at a boundary: capture the node-local CTM + save depth, finish the segment, push the
+  // boundary, restart the recording in the same canvas state so post-boundary ops (and the framework's
+  // straddling restore) behave as if the recording were never split.
+  void split(DisplayItem&& boundary) {
+    const int sc = seg != nullptr ? seg->getSaveCount() : 1;  // 1 == base (no extra saves)
+    carry_m = seg != nullptr ? seg->getTotalMatrix() : SkMatrix::I();
+    carry_saves = sc > 1 ? sc - 1 : 0;
+    boundary.matrix = carry_m;
+    flush_seg();
+    items.push_back(std::move(boundary));
+    begin_seg();
+  }
+  void boundary_child(AclRenderNode* child) {
+    DisplayItem it;
+    it.kind = DisplayItem::Kind::Child;
+    it.child = sk_ref_sp(child);
+    split(std::move(it));
+  }
+  void boundary_layer(AclTextureLayer* layer) {
+    DisplayItem it;
+    it.kind = DisplayItem::Kind::Layer;
+    it.layer = layer;
+    split(std::move(it));
+  }
+  void reset(int W, int H) {
+    if (seg != nullptr) { rec.finishRecordingAsPicture(); seg = nullptr; }
+    items.clear();
+    carry_m = SkMatrix::I();
+    carry_saves = 0;
+    w = W > 0 ? W : 1;
+    h = H > 0 ? H : 1;
+    begin_seg();
+  }
+  std::vector<DisplayItem> finish() {
+    flush_seg();
+    return std::move(items);
+  }
+};
+
+inline NodeRecorder* recorder_of(jlong h) {
+  return reinterpret_cast<NodeRecorder*>(h & ~kRecorderTag);
+}
+SkCanvas* recorder_seg_canvas(jlong h) {
+  auto* nr = recorder_of(h);
+  return nr != nullptr ? nr->seg : nullptr;
+}
+void free_node_recorder(jlong h) { delete recorder_of(h); }
+
 // ── Deferred present (Step 1 of the UI-thread/RenderThread split) ─────────────────────────────
 // Normally the present-root RecordingCanvas draws IMMEDIATELY onto the GPU SkCanvas, so View.draw
 // does GrContext work on the present thread — which cannot be moved off it (GrDirectContext is
@@ -3401,11 +3533,19 @@ bool is_recording_canvas(void* p) {
   return g_recorders.find(reinterpret_cast<SkCanvas*>(p)) != g_recorders.end();
 }
 
-// Draw a RenderNode's recorded picture onto `c` NOW, applying the node's position + transform + clip
-// + alpha (the properties the View/Compose set via the RenderNode setters). Reads the node's CURRENT
-// picture + transform, so at replay time it reflects the layer's latest state.
+void draw_texture_layer_immediate(SkCanvas* c, AclTextureLayer* l);  // defined with TextureLayer
+
+// Walk a RenderNode's display list onto `c` NOW, applying the node's position + transform + clip +
+// alpha (the properties the View/Compose set via the RenderNode setters). This is hwui's tree walk:
+// own-op segments are replayed in order, and each child/texture-layer BOUNDARY is resolved LIVE at its
+// recorded position — recursing into the child's CURRENT display list, or compositing the layer's
+// CURRENT frame. So a settled subtree (a cached Compose layer, an animating TextureView) shows its
+// latest content every frame with no parent re-record. Reads the node's current transform too, so an
+// animated property takes effect immediately. Legacy leaf/deferred nodes with a single `picture` and
+// no boundaries fall through to a plain drawPicture.
 void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
-  if (c == nullptr || n == nullptr || n->picture == nullptr) return;
+  if (c == nullptr || n == nullptr) return;
+  if (n->display_list.empty() && n->picture == nullptr) return;
   const float w = static_cast<float>(n->right - n->left);
   const float h = static_cast<float>(n->bottom - n->top);
   SkAutoCanvasRestore acr(c, true);
@@ -3425,7 +3565,39 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
     lp.setAlphaf(n->alpha);
     c->saveLayer(nullptr, &lp);
   }
-  c->drawPicture(n->picture);
+  static const bool walk_dbg = std::getenv("ACL_WALK_DEBUG") != nullptr;
+  static std::atomic<int> walk_dbg_budget{400};
+  if (walk_dbg && walk_dbg_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+    int np = 0, nc = 0, nl = 0;
+    for (const DisplayItem& it : n->display_list)
+      (it.kind == DisplayItem::Kind::Picture ? np : it.kind == DisplayItem::Kind::Child ? nc : nl)++;
+    std::fprintf(stderr, "[acl.walk] node ltrb=(%d,%d,%d,%d) alpha=%.2f clip=%d dl=%zu (pic=%d child=%d layer=%d) pic=%p\n",
+                 n->left, n->top, n->right, n->bottom, n->alpha, n->clipToBounds,
+                 n->display_list.size(), np, nc, nl, static_cast<void*>(n->picture.get()));
+  }
+  if (!n->display_list.empty()) {
+    for (const DisplayItem& it : n->display_list) {
+      switch (it.kind) {
+        case DisplayItem::Kind::Picture:
+          if (it.picture) c->drawPicture(it.picture);
+          break;
+        case DisplayItem::Kind::Child: {
+          SkAutoCanvasRestore bcr(c, true);
+          c->concat(it.matrix);  // node-local CTM at the boundary (composed with the walk CTM)
+          draw_rendernode_immediate(c, it.child.get());
+          break;
+        }
+        case DisplayItem::Kind::Layer: {
+          SkAutoCanvasRestore bcr(c, true);
+          c->concat(it.matrix);
+          draw_texture_layer_immediate(c, it.layer);
+          break;
+        }
+      }
+    }
+  } else {
+    c->drawPicture(n->picture);
+  }
 }
 
 // A deferred reference to a child RenderNode, recorded into a PARENT's picture. Its onDraw runs at
@@ -3547,8 +3719,19 @@ void post_frame_available(AclSurfaceTexture* st) {
 // Draw a texture layer's latest frame at the canvas origin, scaled to the layer's WxH (the canvas is
 // already positioned + clipped at the TextureView by the enclosing View.draw). Null frame -> nothing.
 void draw_texture_layer_immediate(SkCanvas* c, AclTextureLayer* l) {
-  if (c == nullptr || l == nullptr || l->st == nullptr) return;
+  static const bool walk_dbg = std::getenv("ACL_WALK_DEBUG") != nullptr;
+  static std::atomic<int> ldbg{60};
+  const bool dbg = walk_dbg && ldbg.fetch_sub(1, std::memory_order_relaxed) > 0;
+  if (c == nullptr || l == nullptr || l->st == nullptr) {
+    if (dbg) std::fprintf(stderr, "[acl.walk] layer draw SKIP c=%p l=%p st=%p\n",
+                          static_cast<void*>(c), static_cast<void*>(l),
+                          static_cast<void*>(l ? l->st : nullptr));
+    return;
+  }
   sk_sp<SkImage> img = l->st->snapshot();
+  if (dbg) std::fprintf(stderr, "[acl.walk] layer draw l=%p wh=%dx%d img=%p %dx%d\n",
+                        static_cast<void*>(l), l->width, l->height, static_cast<void*>(img.get()),
+                        img ? img->width() : 0, img ? img->height() : 0);
   if (!img) { g_tl_blanks.fetch_add(1, std::memory_order_relaxed); return; }
   g_tl_frames.fetch_add(1, std::memory_order_relaxed);
   const float w = l->width > 0 ? static_cast<float>(l->width) : static_cast<float>(img->width());
@@ -3781,35 +3964,44 @@ jlong RecordingCanvas_nCreate(jlong node, jint w, jint h) {
     if (g_present_gpu_canvas != 0) return g_present_gpu_canvas;
   }
   g_rn_begins.fetch_add(1, std::memory_order_relaxed);
-  auto* rec = new SkPictureRecorder();
-  SkCanvas* c = rec->beginRecording(SkRect::MakeIWH(w > 0 ? w : 1, h > 0 ? h : 1));
-  std::lock_guard<std::mutex> lk(g_rec_mu);
-  g_recorders[c] = rec;
-  return reinterpret_cast<jlong>(c);
+  // A NodeRecorder: records segmented content (own ops + live child/layer boundaries). Its handle is
+  // tagged so canvas_sk() resolves it to the current segment; stable across the boundary splits.
+  auto* nr = new NodeRecorder(w, h);
+  return reinterpret_cast<jlong>(nr) | kRecorderTag;
 }
-// nResetDisplayListCanvas(canvas, node, w, h): re-begin recording on the SAME recorder (stable ptr).
+// nResetDisplayListCanvas(canvas, node, w, h): re-begin recording (clears the prior display list).
 void RecordingCanvas_nReset(jlong canvas, jlong /*node*/, jint w, jint h) {
-  auto* c = canvas_sk(canvas);
+  if (is_recorder_handle(canvas)) { recorder_of(canvas)->reset(w, h); return; }
   if (canvas == g_present_gpu_canvas) return;  // root draws immediate; nothing to reset
+  auto* c = canvas_sk(canvas);  // deferred present-root record canvas (g_present_record_canvas)
   std::lock_guard<std::mutex> lk(g_rec_mu);
   auto it = g_recorders.find(c);
   if (it != g_recorders.end()) it->second->beginRecording(SkRect::MakeIWH(w > 0 ? w : 1, h > 0 ? h : 1));
 }
-// nFinishRecording(canvas, node): finalize the recorder's picture into the node.
+// nFinishRecording(canvas, node): finalize the recording into the node's display list.
 void RecordingCanvas_nFinish(jlong canvas, jlong node) {
   g_rn_finishes.fetch_add(1, std::memory_order_relaxed);
   auto* n = reinterpret_cast<AclRenderNode*>(node);
+  if (is_recorder_handle(canvas)) {
+    std::vector<DisplayItem> items = recorder_of(canvas)->finish();
+    if (n != nullptr) { n->display_list = std::move(items); n->picture = nullptr; }
+    return;
+  }
   if (canvas == g_present_gpu_canvas) return;  // root: content already drawn immediate
   auto* c = canvas_sk(canvas);
   std::lock_guard<std::mutex> lk(g_rec_mu);
   auto it = g_recorders.find(c);
   if (it != g_recorders.end() && n != nullptr) n->picture = it->second->finishRecordingAsPicture();
 }
-// nDrawRenderNode(canvas, node): replay the node's picture onto the canvas (which may be the GPU
-// root canvas -> immediate, or another recorder -> nested/flattened into the parent picture).
+// nDrawRenderNode(canvas, node): record a live child boundary into the recording, or (on the present-
+// root GPU/deferred canvas) replay the node — draw_rendernode walks it live / defers it.
 void RecordingCanvas_nDrawRenderNode(jlong canvas, jlong node) {
   g_rn_replays.fetch_add(1, std::memory_order_relaxed);
   tick_draw();
+  if (is_recorder_handle(canvas)) {
+    recorder_of(canvas)->boundary_child(reinterpret_cast<AclRenderNode*>(node));
+    return;
+  }
   draw_rendernode(canvas_sk(canvas), reinterpret_cast<AclRenderNode*>(node));
 }
 void RecordingCanvas_nEnableZ(jlong, jboolean) {}
@@ -3818,6 +4010,10 @@ void RecordingCanvas_nEnableZ(jlong, jboolean) {}
 // until a producer feeds one (Stage 2) — either way the traversal completes.
 void RecordingCanvas_nDrawTextureLayer(jlong canvas, jlong layer) {
   tick_draw();
+  if (is_recorder_handle(canvas)) {
+    recorder_of(canvas)->boundary_layer(tlayer(layer));
+    return;
+  }
   draw_texture_layer(canvas_sk(canvas), layer);
 }
 jint RecordingCanvas_nGetMaximumTextureWidth() { return 8192; }
