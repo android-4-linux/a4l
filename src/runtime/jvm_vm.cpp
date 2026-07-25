@@ -138,6 +138,10 @@ struct GlPresentSession {
   std::mutex mtx;
   std::condition_variable cv;
   bool ready = false;
+  // Set once acl commits to Skia present (nOpen): there is NO GLSurfaceView on the toplevel, so no
+  // wayland GL session will ever be published. A TextureView's GLThread parked in get_display can then
+  // stop waiting immediately and take the gbm fallback, instead of blocking the full 10s timeout.
+  bool no_gl_session = false;
 };
 GlPresentSession g_gl_session;
 // The headless gbm GL device: acl's fallback for GL that isn't a GLSurfaceView on the toplevel
@@ -1196,6 +1200,10 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env, jclass, jobject view, jint w, jin
     }
   }
   if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  // Skia present: no GLSurfaceView on the toplevel, so a TextureView's GLThread need not wait for a
+  // wayland GL session in get_display — wake it now so it takes the gbm fallback immediately.
+  { std::lock_guard<std::mutex> lk(g_gl_session.mtx); g_gl_session.no_gl_session = true; }
+  g_gl_session.cv.notify_all();
   log::i(kTag, "PresentDriver.nOpen: {}x{} presenter ready (looper-driven)", w, h);
   return reinterpret_cast<jlong>(s);
 }
@@ -4499,7 +4507,11 @@ class ArtVm final : public JniVm {
       // blocks (present only runs after onCreate) — it takes the headless gbm fallback below.
       if (std::this_thread::get_id() != g_gl_main_thread) {
         std::unique_lock<std::mutex> lk(g_gl_session.mtx);
-        g_gl_session.cv.wait_for(lk, std::chrono::seconds(10), [] { return g_gl_session.ready; });
+        // Wake as soon as EITHER a GLSurfaceView session is published (ready) OR acl commits to Skia
+        // present (no_gl_session) — the latter means no session is coming, so a TextureView producer
+        // stops waiting and takes the gbm fallback below instead of blocking the full 10s.
+        g_gl_session.cv.wait_for(lk, std::chrono::seconds(10),
+                                 [] { return g_gl_session.ready || g_gl_session.no_gl_session; });
         if (g_gl_session.ready && g_gl_session.device != nullptr)
           return static_cast<EGLDisplay>(g_gl_session.device->egl_display());
       } else if (g_gl_session.device != nullptr) {
