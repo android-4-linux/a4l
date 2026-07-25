@@ -71,6 +71,8 @@
 #include "SkPoint3.h"
 #include "utils/SkShadowUtils.h"
 #include "SkShadowFlags.h"
+#include "SkImageFilter.h"
+#include "effects/SkImageFilters.h"
 #include "SkPathTypes.h"
 #include "SkRegion.h"
 #include "utils/SkParsePath.h"
@@ -149,6 +151,9 @@ struct AclRenderNode : public SkRefCnt {
   SkRect outline_rect = SkRect::MakeEmpty();
   float outline_radius = 0.0f;
   SkPath outline_path;
+  // RenderNode.setRenderEffect (Compose Modifier.blur, backdrop blur): an SkImageFilter the walk
+  // composites the node's content through (blur / color-filter / offset / chain).
+  sk_sp<SkImageFilter> render_effect;
   // RenderNode record/replay (Compose renders its content into RenderNode layers). `display_list`
   // is the segmented content (own-op SkPictures + live child/layer boundaries), walked live each
   // frame by draw_rendernode_immediate; `picture` is a legacy single-picture fallback (deferred
@@ -1507,7 +1512,11 @@ RN_GETB(RenderNode_nGetClipToOutline, clipToOutline)
 jboolean RenderNode_nSetRevealClip(jlong, jboolean, jfloat, jfloat, jfloat) { return JNI_TRUE; }
 RN_SETF(RenderNode_nSetAlpha, alpha)
 RN_GETF(RenderNode_nGetAlpha, alpha)
-jboolean RenderNode_nSetRenderEffect(jlong, jlong) { return JNI_TRUE; }
+jboolean RenderNode_nSetRenderEffect(jlong node, jlong effect) {
+  if (auto* n = rnode(node))
+    n->render_effect = sk_ref_sp(reinterpret_cast<SkImageFilter*>(effect));  // may be null (cleared)
+  return JNI_TRUE;
+}
 RN_SETB(RenderNode_nSetHasOverlappingRendering, hasOverlappingRendering)
 RN_GETB(RenderNode_nHasOverlappingRendering, hasOverlappingRendering)
 void RenderNode_nSetUsageHint(jlong, jint) {}
@@ -3668,9 +3677,13 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
       c->clipPath(n->outline_path, true);
     }
   }
-  if (n->alpha < 1.0f) {
+  // A layer is needed for group alpha AND/OR a RenderEffect (blur etc.): render the node's content
+  // into an offscreen and composite it through the effect + alpha. The filter applies in the node's
+  // transformed local space (so a scaled node scales its blur too).
+  if (n->alpha < 1.0f || n->render_effect != nullptr) {
     SkPaint lp;
     lp.setAlphaf(n->alpha);
+    if (n->render_effect != nullptr) lp.setImageFilter(n->render_effect);
     c->saveLayer(nullptr, &lp);
   }
   static const bool walk_dbg = std::getenv("ACL_WALK_DEBUG") != nullptr;
@@ -5299,6 +5312,59 @@ const JNINativeMethod kSurfaceControl[] = {
     {"nativeSetTransformHint", "(JI)V", reinterpret_cast<void*>(SC_nSetTransformHint)},
 };
 
+// ── android.graphics.RenderEffect (RenderNode.setRenderEffect / Compose Modifier.blur) ──────────
+// Each factory builds an SkImageFilter (mirroring AOSP hwui jni/RenderEffect.cpp) and returns the raw
+// pointer; ownership transfers to Java via nativeGetFinalizer (SkSafeUnref). setRenderEffect stashes
+// it on the node and the walk composites the node's content through it. Blur / offset / color-filter /
+// chain are backed; bitmap/blend/shader/runtime return 0 (Java reads 0 as "no effect").
+float blur_radius_to_sigma(float r) { return r > 0.0f ? 0.57735f * r + 0.5f : 0.0f; }  // Skia BLUR_SIGMA_SCALE
+void free_image_filter(void* p) { SkSafeUnref(reinterpret_cast<SkImageFilter*>(p)); }
+
+jlong RenderEffect_nGetFinalizer(JNIEnv*, jclass) {
+  return reinterpret_cast<jlong>(&free_image_filter);
+}
+jlong RenderEffect_nCreateBlur(JNIEnv*, jclass, jfloat rx, jfloat ry, jlong input, jint edge) {
+  auto* in = reinterpret_cast<SkImageFilter*>(input);
+  sk_sp<SkImageFilter> f = SkImageFilters::Blur(blur_radius_to_sigma(rx), blur_radius_to_sigma(ry),
+                                                static_cast<SkTileMode>(edge), sk_ref_sp(in), nullptr);
+  return reinterpret_cast<jlong>(f.release());
+}
+jlong RenderEffect_nCreateOffset(JNIEnv*, jclass, jfloat ox, jfloat oy, jlong input) {
+  auto* in = reinterpret_cast<SkImageFilter*>(input);
+  sk_sp<SkImageFilter> f = SkImageFilters::Offset(ox, oy, sk_ref_sp(in));
+  return reinterpret_cast<jlong>(f.release());
+}
+jlong RenderEffect_nCreateColorFilter(JNIEnv*, jclass, jlong cf, jlong input) {
+  auto* colorFilter = reinterpret_cast<SkColorFilter*>(cf);
+  auto* in = reinterpret_cast<SkImageFilter*>(input);
+  sk_sp<SkImageFilter> f = SkImageFilters::ColorFilter(sk_ref_sp(colorFilter), sk_ref_sp(in), nullptr);
+  return reinterpret_cast<jlong>(f.release());
+}
+jlong RenderEffect_nCreateChain(JNIEnv*, jclass, jlong outer, jlong inner) {
+  auto* o = reinterpret_cast<SkImageFilter*>(outer);
+  auto* i = reinterpret_cast<SkImageFilter*>(inner);
+  sk_sp<SkImageFilter> f = SkImageFilters::Compose(sk_ref_sp(o), sk_ref_sp(i));
+  return reinterpret_cast<jlong>(f.release());
+}
+jlong RenderEffect_nCreateBitmap(JNIEnv*, jclass, jlong, jfloat, jfloat, jfloat, jfloat, jfloat,
+                                 jfloat, jfloat, jfloat) { return 0; }
+jlong RenderEffect_nCreateBlend(JNIEnv*, jclass, jlong, jlong, jint) { return 0; }
+jlong RenderEffect_nCreateShader(JNIEnv*, jclass, jlong) { return 0; }
+jlong RenderEffect_nCreateRuntimeShader(JNIEnv*, jclass, jlong, jstring) { return 0; }
+
+const JNINativeMethod kRenderEffect[] = {
+    {"nativeGetFinalizer", "()J", reinterpret_cast<void*>(RenderEffect_nGetFinalizer)},
+    {"nativeCreateOffsetEffect", "(FFJ)J", reinterpret_cast<void*>(RenderEffect_nCreateOffset)},
+    {"nativeCreateBlurEffect", "(FFJI)J", reinterpret_cast<void*>(RenderEffect_nCreateBlur)},
+    {"nativeCreateBitmapEffect", "(JFFFFFFFF)J", reinterpret_cast<void*>(RenderEffect_nCreateBitmap)},
+    {"nativeCreateColorFilterEffect", "(JJ)J", reinterpret_cast<void*>(RenderEffect_nCreateColorFilter)},
+    {"nativeCreateBlendModeEffect", "(JJI)J", reinterpret_cast<void*>(RenderEffect_nCreateBlend)},
+    {"nativeCreateChainEffect", "(JJ)J", reinterpret_cast<void*>(RenderEffect_nCreateChain)},
+    {"nativeCreateShaderEffect", "(J)J", reinterpret_cast<void*>(RenderEffect_nCreateShader)},
+    {"nativeCreateRuntimeShaderEffect", "(JLjava/lang/String;)J",
+     reinterpret_cast<void*>(RenderEffect_nCreateRuntimeShader)},
+};
+
 bool reg(JNIEnv* env, const char* cls, const JNINativeMethod* m, jint n) {
   jclass c = env->FindClass(cls);
   if (c == nullptr) {
@@ -5373,6 +5439,7 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   reg(env, "android/graphics/text/LineBreaker", kLineBreaker, n(kLineBreaker));
   // RuntimeShader (AGSL) — Material ripple / custom shaders. Best-effort.
   reg(env, "android/graphics/RuntimeShader", kRuntimeShader, n(kRuntimeShader));
+  reg(env, "android/graphics/RenderEffect", kRenderEffect, n(kRenderEffect));
   ok = reg(env, "android/graphics/BaseCanvas", kBaseCanvas, n(kBaseCanvas)) && ok;
   ok = reg(env, "android/graphics/Path", kPath, n(kPath)) && ok;
   // PathMeasure (progress arcs / path-following animations) — a missing native_create blanks the
