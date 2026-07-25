@@ -68,6 +68,9 @@
 #include "SkPathMeasure.h"
 #include "SkPathOps.h"
 #include "SkRRect.h"
+#include "SkPoint3.h"
+#include "utils/SkShadowUtils.h"
+#include "SkShadowFlags.h"
 #include "SkPathTypes.h"
 #include "SkRegion.h"
 #include "utils/SkParsePath.h"
@@ -122,6 +125,7 @@ struct DisplayItem {
   sk_sp<AclRenderNode> child;        // Child: live reference to a child node (resolved at walk)
   AclTextureLayer* layer = nullptr;  // Layer: a TextureView's layer (Java-owned; not reffed here)
   SkMatrix matrix = SkMatrix::I();   // node-local CTM captured at the boundary (Child/Layer)
+  bool z_ordered = false;            // Child recorded inside an enableZ region: sort by Z + cast shadow
 };
 
 struct AclRenderNode : public SkRefCnt {
@@ -132,7 +136,10 @@ struct AclRenderNode : public SkRefCnt {
   float scaleX = 1.0f, scaleY = 1.0f;
   float pivotX = 0, pivotY = 0;
   bool pivotExplicit = false;
-  int layerType = 0, spotShadowColor = 0, ambientShadowColor = 0;
+  int layerType = 0;
+  // Shadow colors default to opaque BLACK (Android RenderNode default); the walk multiplies them by
+  // the ambient/spot shadow alphas (0.039 / 0.19) when casting an elevation shadow.
+  int spotShadowColor = 0xFF000000, ambientShadowColor = 0xFF000000;
   bool clipToBounds = true, clipToOutline = false, allowForceDark = true;
   bool hasOverlappingRendering = true;
   // clipToOutline outline geometry (ViewOutlineProvider): a round-rect (radius 0 == plain rect) or a
@@ -3359,6 +3366,7 @@ struct NodeRecorder {
   int w = 1, h = 1;
   SkMatrix carry_m = SkMatrix::I();  // CTM at the last boundary, re-applied to the next segment
   int carry_saves = 0;               // unbalanced save() depth carried across the boundary
+  bool z_enabled = false;            // inside a RecordingCanvas.enableZ() region (children are Z-sorted)
   std::vector<DisplayItem> items;
 
   explicit NodeRecorder(int W, int H) { reset(W, H); }
@@ -3402,6 +3410,7 @@ struct NodeRecorder {
     DisplayItem it;
     it.kind = DisplayItem::Kind::Child;
     it.child = sk_ref_sp(child);
+    it.z_ordered = z_enabled;
     split(std::move(it));
   }
   void boundary_layer(AclTextureLayer* layer) {
@@ -3415,6 +3424,7 @@ struct NodeRecorder {
     items.clear();
     carry_m = SkMatrix::I();
     carry_saves = 0;
+    z_enabled = false;
     w = W > 0 ? W : 1;
     h = H > 0 ? H : 1;
     begin_seg();
@@ -3565,6 +3575,70 @@ bool is_recording_canvas(void* p) {
 
 void draw_texture_layer_immediate(SkCanvas* c, AclTextureLayer* l);  // defined with TextureLayer
 
+// Apply a node's view-property transform (position + translation + scale/rotate about the pivot) —
+// the placement shared by the node's content draw and its cast shadow. Does NOT apply clip/alpha.
+void apply_view_transform(SkCanvas* c, const AclRenderNode* n) {
+  const float w = static_cast<float>(n->right - n->left);
+  const float h = static_cast<float>(n->bottom - n->top);
+  c->translate(static_cast<float>(n->left), static_cast<float>(n->top));
+  c->translate(n->translationX, n->translationY);
+  if (n->scaleX != 1.0f || n->scaleY != 1.0f || n->rotation != 0.0f) {
+    const float px = n->pivotExplicit ? n->pivotX : w * 0.5f;
+    const float py = n->pivotExplicit ? n->pivotY : h * 0.5f;
+    c->translate(px, py);
+    if (n->rotation != 0.0f) c->rotate(n->rotation);
+    c->scale(n->scaleX, n->scaleY);
+    c->translate(-px, -py);
+  }
+}
+
+// A node's shadow-casting outline (its ViewOutlineProvider shape) in local coords; false = no outline.
+bool node_outline_path(const AclRenderNode* n, SkPath* out) {
+  if (n->outline_kind == AclRenderNode::OutlineKind::RoundRect && !n->outline_rect.isEmpty()) {
+    out->reset();
+    if (n->outline_radius > 0.0f)
+      out->addRRect(SkRRect::MakeRectXY(n->outline_rect, n->outline_radius, n->outline_radius));
+    else
+      out->addRect(n->outline_rect);
+    return true;
+  }
+  if (n->outline_kind == AclRenderNode::OutlineKind::Path && !n->outline_path.isEmpty()) {
+    *out = n->outline_path;
+    return true;
+  }
+  return false;
+}
+
+// Cast a node's elevation shadow (ambient + spot), mirroring hwui's ReorderBarrierDrawables: a light
+// centerd above the top of the screen (light_y=0, light_z=500dp, radius=800dp), zParams=(0,0,Z), and
+// ambient/spot colors multiplied by the theme shadow alphas (0.039 / 0.19). SkShadowUtils tessellates
+// the shadow of the node's outline for that geometry. The caller's canvas is in the parent space; this
+// applies the node's view transform so the shadow lands under it. No-op unless the node has an outline
+// and Z > 0. Opt out with ACL_NO_SHADOWS.
+const bool g_shadows_off = std::getenv("ACL_NO_SHADOWS") != nullptr;
+void draw_child_shadow(SkCanvas* c, const AclRenderNode* n) {
+  if (g_shadows_off) return;
+  const float z = n->elevation + n->translationZ;
+  if (z <= 0.001f) return;
+  SkPath path;
+  if (!node_outline_path(n, &path)) return;
+  SkAutoCanvasRestore acr(c, true);
+  apply_view_transform(c, n);
+  const SkISize base = c->getBaseLayerSize();
+  const float lightX = base.width() > 0 ? base.width() * 0.5f : 640.0f;
+  const SkPoint3 zParams = SkPoint3::Make(0.0f, 0.0f, z);
+  const SkPoint3 lightPos = SkPoint3::Make(lightX, 0.0f, 500.0f);  // dp≈px (acl presents at scale 1)
+  auto mulA = [](int color, float a) {
+    const SkColor sc = static_cast<SkColor>(color);
+    return SkColorSetA(sc, static_cast<U8CPU>(SkColorGetA(sc) * a + 0.5f));
+  };
+  const SkColor ambient = mulA(n->ambientShadowColor, 0.039f);
+  const SkColor spot = mulA(n->spotShadowColor, 0.19f);
+  const uint32_t flags =
+      n->alpha < 1.0f ? SkShadowFlags::kTransparentOccluder_ShadowFlag : SkShadowFlags::kNone_ShadowFlag;
+  SkShadowUtils::DrawShadow(c, path, zParams, lightPos, 800.0f, ambient, spot, flags);
+}
+
 // Walk a RenderNode's display list onto `c` NOW, applying the node's position + transform + clip +
 // alpha (the properties the View/Compose set via the RenderNode setters). This is hwui's tree walk:
 // own-op segments are replayed in order, and each child/texture-layer BOUNDARY is resolved LIVE at its
@@ -3579,16 +3653,7 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
   const float w = static_cast<float>(n->right - n->left);
   const float h = static_cast<float>(n->bottom - n->top);
   SkAutoCanvasRestore acr(c, true);
-  c->translate(static_cast<float>(n->left), static_cast<float>(n->top));
-  c->translate(n->translationX, n->translationY);
-  if (n->scaleX != 1.0f || n->scaleY != 1.0f || n->rotation != 0.0f) {
-    const float px = n->pivotExplicit ? n->pivotX : w * 0.5f;
-    const float py = n->pivotExplicit ? n->pivotY : h * 0.5f;
-    c->translate(px, py);
-    if (n->rotation != 0.0f) c->rotate(n->rotation);
-    c->scale(n->scaleX, n->scaleY);
-    c->translate(-px, -py);
-  }
+  apply_view_transform(c, n);
   if (n->clipToBounds && w > 0 && h > 0) c->clipRect(SkRect::MakeWH(w, h));
   // clipToOutline: clip the node's content + children to its ViewOutlineProvider shape (rounded
   // rect or convex path), antialiased — Material cards/buttons/rounded images. Applied in the node's
@@ -3619,7 +3684,34 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
                  n->display_list.size(), np, nc, nl, static_cast<void*>(n->picture.get()));
   }
   if (!n->display_list.empty()) {
-    for (const DisplayItem& it : n->display_list) {
+    const std::vector<DisplayItem>& dl = n->display_list;
+    for (std::size_t i = 0; i < dl.size();) {
+      const DisplayItem& it = dl[i];
+      // A run of consecutive Z-ordered child boundaries (an enableZ region): draw them sorted by Z
+      // (elevation + translationZ), shadows first (under all content), then content in ascending Z so
+      // higher children draw on top. Reproduces hwui's reorder barrier for Material elevation.
+      if (it.kind == DisplayItem::Kind::Child && it.z_ordered) {
+        std::size_t j = i;
+        std::vector<const DisplayItem*> grp;
+        while (j < dl.size() && dl[j].kind == DisplayItem::Kind::Child && dl[j].z_ordered)
+          grp.push_back(&dl[j++]);
+        std::stable_sort(grp.begin(), grp.end(), [](const DisplayItem* a, const DisplayItem* b) {
+          return (a->child->elevation + a->child->translationZ) <
+                 (b->child->elevation + b->child->translationZ);
+        });
+        for (const DisplayItem* g : grp) {
+          SkAutoCanvasRestore bcr(c, true);
+          c->concat(g->matrix);
+          draw_child_shadow(c, g->child.get());
+        }
+        for (const DisplayItem* g : grp) {
+          SkAutoCanvasRestore bcr(c, true);
+          c->concat(g->matrix);
+          draw_rendernode_immediate(c, g->child.get());
+        }
+        i = j;
+        continue;
+      }
       switch (it.kind) {
         case DisplayItem::Kind::Picture:
           if (it.picture) c->drawPicture(it.picture);
@@ -3637,6 +3729,7 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
           break;
         }
       }
+      ++i;
     }
   } else {
     c->drawPicture(n->picture);
@@ -4047,7 +4140,12 @@ void RecordingCanvas_nDrawRenderNode(jlong canvas, jlong node) {
   }
   draw_rendernode(canvas_sk(canvas), reinterpret_cast<AclRenderNode*>(node));
 }
-void RecordingCanvas_nEnableZ(jlong, jboolean) {}
+// RecordingCanvas.enableZ(true)/disableZ(false): the framework brackets a ViewGroup's children with
+// this so hwui draws them in Z order and casts elevation shadows. Mark the recorder so child
+// boundaries recorded in the region are Z-ordered by the walk.
+void RecordingCanvas_nEnableZ(jlong canvas, jboolean enable) {
+  if (is_recorder_handle(canvas)) recorder_of(canvas)->z_enabled = (enable == JNI_TRUE);
+}
 // RecordingCanvas.drawTextureLayer(layer): composite a TextureView's SurfaceTexture frame into the
 // display list (@CriticalNative — canvas, layer only). Draws the layer's latest frame, or nothing
 // until a producer feeds one (Stage 2) — either way the traversal completes.
