@@ -82,6 +82,8 @@ std::vector<std::string> setup_art(const std::string& home, const std::string& e
   opts.push_back("-Xbootclasspath-locations:" + bcp);
   if (const char* img = std::getenv("ACL_ART_BOOT_IMAGE"); img && *img)
     opts.push_back(std::string("-Ximage:") + img);
+  else if (std::getenv("ACL_ART_JIT") != nullptr)
+    opts.push_back("-Xusejit:true");  // opt-in imageless JIT (see jvm_vm: %fs boundary blocks default)
   else
     opts.push_back("-Xint");  // imageless: interpret; no runtime dex2oat
   return opts;

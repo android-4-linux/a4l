@@ -3882,14 +3882,14 @@ class ArtVm final : public JniVm {
     if (const char* img = std::getenv("ACL_ART_BOOT_IMAGE");
         img != nullptr && *img != '\0') {
       option_strings.push_back(std::string("-Ximage:") + img);
-    } else if (const char* jit = std::getenv("ACL_ART_JIT"); jit != nullptr && *jit != '\0') {
-      // Imageless but JIT-compiled. -Xint is stronger than the imageless constraint requires:
-      // the JIT compiles hot methods in memory at runtime and needs no boot image (that is
-      // dex2oat's job, not the JIT's). Interpreter-only costs roughly an order of magnitude,
-      // which a heavy app (React Native class loading, Compose) shows as an unresponsive UI.
+    } else if (std::getenv("ACL_ART_JIT") != nullptr) {
+      // Opt-in imageless JIT: compiles hot methods in memory (no boot image needed) — measured ~23x
+      // on hot compute vs -Xint. NOT yet the default: JIT-compiled code exposes acl's bionic/glibc
+      // %fs boundary (a threadpool thread ran JIT code with %fs=0 -> SIGSEGV in Telegram/WebRTC),
+      // which the interpreter masks. Default stays -Xint until that %fs interaction is fixed.
       option_strings.push_back("-Xusejit:true");
     } else {
-      option_strings.push_back("-Xint");  // imageless: interpret; no runtime dex2oat
+      option_strings.push_back("-Xint");  // default: imageless interpret; no runtime dex2oat
     }
     option_strings.push_back("-Djava.class.path=" + join(cp, ':'));
     // Where System.loadLibrary resolves boot-classpath native libs (acl's libsoundpool.so — the
