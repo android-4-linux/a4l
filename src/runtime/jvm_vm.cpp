@@ -3877,19 +3877,22 @@ class ArtVm final : public JniVm {
     option_strings.push_back("-Xbootclasspath:" + bcp_joined);
     option_strings.push_back("-Xbootclasspath-locations:" + bcp_joined);
     // P2.1: a dex2oat'd framework boot image (ACL_ART_BOOT_IMAGE) makes the framework
-    // AOT-compiled on the bootclasspath; without one, interpret imageless (-Xint). The
-    // image's baked bootclasspath must match ACL_ART_BOOTCLASSPATH or ART falls back.
+    // AOT-compiled on the bootclasspath. Without one, run imageless with the JIT: it compiles hot
+    // methods in memory (no boot image needed) — measured ~23x on hot compute vs the interpreter
+    // (jitbench: 44ms vs 1039ms). JIT is now the DEFAULT. It was previously blocked because JIT-
+    // compiled code uses implicit null-check SIGSEGVs that the interpreter never emits, and acl's
+    // signal shim mis-swapped ART's own worker/JIT/app threads to the "null-ART" %fs (they're glibc
+    // but never crossed the bionic boundary, so absent from the pairing table), making ART's fault
+    // handler read a null Thread and re-enter fatally. Fixed in src/ndk/bionic_runtime.cpp by keying
+    // that swap on is_glibc_fs() (a real bionic-vs-glibc TCB test) instead of the pairing table.
+    // Force the interpreter with ACL_ART_INT=1 (debugging, or to sidestep a dex the JIT miscompiles).
     if (const char* img = std::getenv("ACL_ART_BOOT_IMAGE");
         img != nullptr && *img != '\0') {
       option_strings.push_back(std::string("-Ximage:") + img);
-    } else if (std::getenv("ACL_ART_JIT") != nullptr) {
-      // Opt-in imageless JIT: compiles hot methods in memory (no boot image needed) — measured ~23x
-      // on hot compute vs -Xint. NOT yet the default: JIT-compiled code exposes acl's bionic/glibc
-      // %fs boundary (a threadpool thread ran JIT code with %fs=0 -> SIGSEGV in Telegram/WebRTC),
-      // which the interpreter masks. Default stays -Xint until that %fs interaction is fixed.
-      option_strings.push_back("-Xusejit:true");
+    } else if (std::getenv("ACL_ART_INT") != nullptr) {
+      option_strings.push_back("-Xint");  // opt-out: imageless interpret; no runtime dex2oat
     } else {
-      option_strings.push_back("-Xint");  // default: imageless interpret; no runtime dex2oat
+      option_strings.push_back("-Xusejit:true");  // default: imageless JIT
     }
     option_strings.push_back("-Djava.class.path=" + join(cp, ':'));
     // Where System.loadLibrary resolves boot-classpath native libs (acl's libsoundpool.so — the
