@@ -194,6 +194,7 @@ jlong st_handle_of(JNIEnv* env, jobject surface_texture) {
 // on whatever thread swaps: the app's Java GLThread (EGL10 path) or a GL donor thread (native EGL
 // path) — in both the app's GL context is current on the caller, so glReadPixels reads the finished
 // back buffer. The GlWindow::swap does the gbm lock/release dance Mesa's raw swap would skip.
+extern "C" void acl_gl_run_on_donor(void (*fn)(void*), void* arg);  // bionic_runtime.cpp
 bool st_readback_and_swap(void* egl_surface) {
   gfx::GlWindow* win = nullptr;
   std::vector<std::uint8_t>* buf = nullptr;
@@ -209,10 +210,17 @@ bool st_readback_and_swap(void* egl_surface) {
   std::string err;
   auto feed = st_set_pixels();
   if (win == nullptr || st == 0 || feed == nullptr) return true;
-  // Swap FIRST (renders + locks the front buffer), then CPU-map the PRESENTED front buffer — a
-  // context/%fs-independent read of the real rendered content. Falls back to glReadPixels (needs the
-  // context current on this thread's %fs) if the gbm map path is unavailable.
-  win->swap(nullptr, &err);
+  // Swap the gbm surface on the app's native-GL DONOR %fs: the app renders in native GL (context
+  // current on the donor), but this hook may run on the ART glibc %fs (Java eglSwapBuffers), where the
+  // context is NOT current and eglSwapBuffers would present an empty buffer. Only the swap needs the
+  // donor %fs; the CPU gbm-map read + the feed (which JNI-calls onFrameAvailable) must stay on the
+  // real thread %fs, or ART's stack-bounds check aborts. acl_gl_run_on_donor is a no-op-route (falls
+  // back to a direct call) when already on a donor %fs (the native swap path).
+  struct SwapArg { gfx::GlWindow* win; std::string* err; } sa{win, &err};
+  acl_gl_run_on_donor(+[](void* p) {
+    auto* a = static_cast<SwapArg*>(p);
+    a->win->swap(nullptr, a->err);
+  }, &sa);
   // Read the PRESENTED buffer by CPU-mapping it (%fs/context-independent) — falls back to glReadPixels.
   bool ok = win->read_front_rgba(buf, &err) || win->read_rgba(buf, &err);
   if (ok && !buf->empty()) {

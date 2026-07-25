@@ -723,6 +723,7 @@ void install_gl_forwarders(BionicRuntime* rt) {
   const int em = fill(egl_b, megl, kEglForwardSyms, 20);
   const int gm = fill(gles_b, mgles, kGlesForwardSyms, 109);
 
+
   // Publish the donor pool into libEGL.so (where acl_gl_pick_donor + the pool live) and grab
   // pick_donor's address for the JIT stubs. Written before the bridge is wired, so it is ready before
   // any GL call can reach a forwarder.

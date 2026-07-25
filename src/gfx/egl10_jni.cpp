@@ -234,8 +234,8 @@ jboolean _eglMakeCurrent(JNIEnv* e, jobject, jobject display, jobject draw, jobj
 }
 jboolean _eglSwapBuffers(JNIEnv* e, jobject, jobject display, jobject surface) {
   EGLSurface s = get_surface(e, surface);
-  // A TextureView SurfaceTexture producer window: read back + route the frame to the consumer +
-  // swap, all inside the hook. Falls through to a plain swap for every other surface.
+  // A TextureView SurfaceTexture producer window: read back + route the frame to the consumer + swap,
+  // inside the hook (the hook runs the eglSwapBuffers itself on the app's native-GL donor %fs).
   if (g_hooks.swap_surfacetexture != nullptr && g_hooks.swap_surfacetexture(s, g_hooks.user))
     return JNI_TRUE;
   // Mesa's Wayland WSI attaches/commits/throttles acl's wl_surface here.
