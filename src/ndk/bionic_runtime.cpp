@@ -299,16 +299,22 @@ struct SavedSig {
 SavedSig g_saved_sig[65];  // indexed by signo (1..64)
 std::atomic<bool> g_shims_installed{false};
 
-// True if `fs` is the glibc %fs of a thread acl attached (i.e. an ART thread). Scans the pairing
-// table's glibc side. Lets the signal shim tell an attached ART thread already on its glibc %fs
-// (leave it alone, so ART's own fault handler runs) from a bionic-spawned thread ART never owned.
-bool is_known_glibc_fs(std::uintptr_t fs) {
-  const int n = g_fs_pair_count.load(std::memory_order_acquire);
-  for (int i = 0; i < n && i < kMaxAttached; ++i) {
-    if (g_fs_pairs[i].bionic_fs.load(std::memory_order_acquire) == 0) continue;
-    if (g_fs_pairs[i].glibc_fs == fs) return true;
-  }
-  return false;
+// True if `fs` is a glibc thread pointer (TCB), signal-safe. A glibc x86-64 tcbhead_t self-
+// references at BOTH %fs:0x00 (`tcb`) and %fs:0x10 (`self`) — TLS_INIT_TP sets head->tcb =
+// head->self = the thread pointer. A bionic x86-64 TLS block self-references at %fs:0x00
+// (TLS_SLOT_SELF) too, but %fs:0x10 is TLS_SLOT_APP (slot 2, historically errno), never the base.
+// So the 0x10 self-reference distinguishes an ART/glibc thread — whose %fs ART's own fault handler
+// must use (Thread::Current() lives in it) — from a bionic-spawned thread ART never owned. This is
+// the correct generalization of is_known_glibc_fs(): it recognizes EVERY glibc thread, including
+// ART's own worker/JIT/app (e.g. Telegram DispatchQueue) threads that never attached across the
+// bionic boundary and so are absent from the pairing table. `fs` is the live TCB of the faulting
+// thread, so both loads are always mapped — no fault, no allocation.
+bool is_glibc_fs(std::uintptr_t fs) {
+  if (fs == 0) return false;
+  const auto slot = [](std::uintptr_t base, std::uintptr_t off) {
+    return *reinterpret_cast<const std::uintptr_t*>(base + off);
+  };
+  return slot(fs, 0x00) == fs && slot(fs, 0x10) == fs;
 }
 
 // A glibc %fs whose libart Thread::self_tls_ reads null, donated by a real glibc thread that parks
@@ -876,14 +882,33 @@ void acl_signal_trampoline(int sig, siginfo_t* info, void* uctx) {
     }
   }
   std::uintptr_t target = glibc_fs_for(cur);  // attached thread on its bionic %fs -> its glibc %fs
-  if (target == 0 && !is_known_glibc_fs(cur)) {
-    // Not a tracked bionic %fs, and not a known ART-glibc %fs => a bionic-spawned thread ART never
-    // owned. Give it the null-ART %fs so ART's fault handler sees Thread::Current()==null and
-    // declines. (A pure glibc non-ART thread also lands here; its self_tls_ is already null, so the
-    // swap is harmless.) When the donor isn't up yet, fall through to the old behavior.
+  if (target == 0 && !is_glibc_fs(cur)) {
+    // Not a tracked bionic %fs, and NOT a glibc TCB => a bionic-spawned thread ART never owned.
+    // Give it the null-ART %fs so ART's fault handler sees Thread::Current()==null and declines
+    // (see g_null_art_fs). Crucially we test is_glibc_fs(cur), not is_known_glibc_fs(cur): ART's own
+    // worker/JIT/app threads (e.g. Telegram DispatchQueue) are glibc but never crossed the bionic
+    // boundary, so they're absent from the pairing table. Under -Xusejit those threads take implicit
+    // null-check SIGSEGVs in JIT code; swapping their valid %fs to null-ART made ART's handler read a
+    // null Thread and re-enter fatally ("HandleUnexpectedSignal reentered"). is_glibc_fs leaves their
+    // %fs alone so ART handles the implicit check. When the donor isn't up yet, fall through.
     target = g_null_art_fs.load(std::memory_order_acquire);
   }
   const bool swap = target != 0 && target != cur;
+  if (fault_dbg && (sig == SIGSEGV || sig == SIGBUS) && fdbg.load() <= 64) {
+    // DIAG: the %fs decision for this fault — is the swap-to-null-ART firing on an ART glibc thread?
+    auto hx = [](char* p, std::uintptr_t v) {
+      *p++ = '0'; *p++ = 'x';
+      for (int i = 15; i >= 0; --i) { int d = (v >> (i * 4)) & 0xf; *p++ = d < 10 ? '0' + d : 'a' + d - 10; }
+      return p;
+    };
+    char b[256]; char* q = b;
+    const char* p0 = "[acl.fault] cur="; while (*p0) *q++ = *p0++; q = hx(q, cur);
+    const char* p1 = " glibc_for="; while (*p1) *q++ = *p1++; q = hx(q, glibc_fs_for(cur));
+    const char* p2 = " glibc_tcb="; while (*p2) *q++ = *p2++; *q++ = is_glibc_fs(cur) ? '1' : '0';
+    const char* p3 = " target="; while (*p3) *q++ = *p3++; q = hx(q, target);
+    const char* p4 = " swap="; while (*p4) *q++ = *p4++; *q++ = swap ? '1' : '0';
+    *q++ = '\n'; write(2, b, q - b);
+  }
   if (swap) set_fs(target);
   const SavedSig s = (sig > 0 && sig <= 64) ? g_saved_sig[sig] : SavedSig{};
   if (s.handler != nullptr) {
