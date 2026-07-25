@@ -3522,6 +3522,7 @@ AclSurfaceTexture* st_from(JNIEnv* env, jobject thiz) {
 
 // DIAG (acl_graphics_profile): SurfaceTextures created; texture-layer draws with a frame vs blank.
 std::atomic<std::uint64_t> g_st_created{0}, g_tl_frames{0}, g_tl_blanks{0};
+std::atomic<std::uint64_t> g_st_produced{0};  // produced SurfaceTexture frames (drives re-record)
 
 // SurfaceTexture.postEventFromNative(WeakReference) — the frame-available notify. Firing it makes a
 // TextureView invalidate() and re-record its display list, so the resolve-at-replay layer drawable
@@ -3609,7 +3610,15 @@ extern "C" void acl_graphics_surfacetexture_set_pixels(jlong st_handle, const vo
   sk_sp<SkImage> img = SkImage::MakeRasterCopy(pm);
   if (!img) return;
   { std::lock_guard<std::mutex> lk(st->mu); st->current = std::move(img); }  // present reads via snapshot()
+  g_st_produced.fetch_add(1, std::memory_order_relaxed);  // signal the present loop to re-record
   post_frame_available(st);  // -> TextureView.invalidate() -> re-record so the drawable re-snapshots
+}
+// A monotonically increasing count of produced SurfaceTexture frames. The present loop force-records
+// the frame after any TextureView produced, so cached ANCESTOR pictures re-snapshot the resolve-at-
+// replay layer drawable (SkPicture snapshots drawables, so a cached ancestor otherwise holds a stale
+// frame). Self-limiting: only while a TextureView animates. Read via dlsym by the runtime.
+extern "C" std::uint64_t acl_graphics_surfacetexture_produced() {
+  return g_st_produced.load(std::memory_order_relaxed);
 }
 // The SurfaceTexture's default buffer size (TextureView set it to the view's WxH before the app's
 // GLThread created the producer surface), so acl can size the offscreen GL window to match — no

@@ -1445,7 +1445,20 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     const char* v = std::getenv("ACL_FORCE_RECORD");
     return v == nullptr || *v == '\0' || v[0] != '0';
   }();
-  if (force_record != nullptr) force_record(force_record_on ? 1 : 0);
+  // A TextureView that produced a new SurfaceTexture frame needs the tree re-recorded THIS frame,
+  // even with ACL_FORCE_RECORD=0: acl's RenderNode-via-SkPicture snapshots the resolve-at-replay
+  // layer drawable, so a cached ANCESTOR picture holds a stale frame. Re-record only while a
+  // TextureView actually animates (the count changed since last frame) — static screens stay cheap.
+  static auto st_produced = reinterpret_cast<std::uint64_t (*)()>(
+      ::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_produced"));
+  static std::uint64_t last_st_produced = 0;
+  bool st_dirty = false;
+  if (st_produced != nullptr) {
+    const std::uint64_t now = st_produced();
+    st_dirty = now != last_st_produced;
+    last_st_produced = now;
+  }
+  if (force_record != nullptr) force_record((force_record_on || st_dirty) ? 1 : 0);
   const auto draw_t0 = std::chrono::steady_clock::now();
   // Deferred present (ACL_PRESENT_RT): (re)begin the present-root picture recording for this frame,
   // just before View.draw records into s->canvas. No-op in the default immediate path.
