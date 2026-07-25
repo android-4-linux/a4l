@@ -226,7 +226,13 @@ bool st_readback_and_swap(void* egl_surface) {
   if (ok && !buf->empty()) {
     feed(st, buf->data(), win->width(), win->height(), win->width() * 4);
     static bool once = false;
-    if (!once) { once = true; log::i(kTag, "SurfaceTexture: producer feed live ({}x{})", win->width(), win->height()); }
+    if (!once) {
+      once = true;
+      log::i(kTag, "SurfaceTexture: producer feed live ({}x{})", win->width(), win->height());
+      if (const char* p = std::getenv("ACL_ST_DUMP")) {  // dev: dump one fed RGBA frame for inspection
+        if (FILE* f = std::fopen(p, "wb")) { std::fwrite(buf->data(), 1, buf->size(), f); std::fclose(f); }
+      }
+    }
   } else if (!err.empty()) {
     log::w(kTag, "egl: SurfaceTexture readback failed: {}", err);
   }
