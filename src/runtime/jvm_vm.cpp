@@ -716,9 +716,65 @@ jint acl_evdev_to_android_keycode(std::uint32_t evdev) {
     case 2: return 8;   case 3: return 9;   case 4: return 10;  case 5: return 11;       // 1 2 3 4
     case 6: return 12;  case 7: return 13;  case 8: return 14;  case 9: return 15;       // 5 6 7 8
     case 10: return 16; case 11: return 7;                                               // 9 0
-    case 28: return 66;  case 57: return 62;  case 1: return 111;  case 14: return 67;   // ENT SPC ESC DEL
+    case 28: return 66;  case 57: return 62;  case 1: return 111;  case 14: return 67;   // ENT SPC ESC DEL(back)
     case 15: return 61;  case 105: return 21; case 106: return 22;                       // TAB LEFT RIGHT
-    case 103: return 19; case 108: return 20;                                            // UP DOWN
+    case 103: return 19; case 108: return 20;  case 111: return 112;                     // UP DOWN FORWARD_DEL
+    case 102: return 122; case 107: return 123;                                          // HOME END
+    case 42: return 59;  case 54: return 60;                                             // SHIFT L/R
+    case 29: return 113; case 97: return 114;                                            // CTRL L/R
+    case 56: return 57;  case 100: return 58;                                            // ALT L/R
+    default: return 0;
+  }
+}
+
+// The Android meta-state bit(s) a key contributes while held, keyed off evdev scancode then keysym
+// (0 if the key is not a modifier). Tracking these lets dispatched KeyEvents carry metaState, without
+// which Shift+Arrow selects nothing and Ctrl+shortcuts are inert.
+jint acl_modifier_meta_bits(std::uint32_t evdev, std::uint32_t keysym) {
+  switch (evdev) {
+    case 42: return 0x1 | 0x40;      // LeftShift  -> META_SHIFT_ON | META_SHIFT_LEFT_ON
+    case 54: return 0x1 | 0x80;      // RightShift -> META_SHIFT_ON | META_SHIFT_RIGHT_ON
+    case 29: return 0x1000 | 0x2000; // LeftCtrl   -> META_CTRL_ON  | META_CTRL_LEFT_ON
+    case 97: return 0x1000 | 0x4000; // RightCtrl  -> META_CTRL_ON  | META_CTRL_RIGHT_ON
+    case 56: return 0x2 | 0x10;      // LeftAlt    -> META_ALT_ON   | META_ALT_LEFT_ON
+    case 100: return 0x2 | 0x20;     // RightAlt   -> META_ALT_ON   | META_ALT_RIGHT_ON
+    default: break;
+  }
+  switch (keysym) {  // keymap-less / synthetic fallback (X keysyms)
+    case 0xffe1: return 0x1 | 0x40;      case 0xffe2: return 0x1 | 0x80;       // Shift_L/R
+    case 0xffe3: return 0x1000 | 0x2000; case 0xffe4: return 0x1000 | 0x4000;  // Control_L/R
+    case 0xffe9: return 0x2 | 0x10;      case 0xffea: return 0x2 | 0x20;       // Alt_L/R
+    default: return 0;
+  }
+}
+
+// Map an xkb keysym for an editing/function key to an Android keycode, else 0. A fallback for the
+// evdev map above: a synthetic key (ACL_TEST_KEYS) or a keymap-less compositor may deliver a keysym
+// with no evdev scancode (keycode 0), yet these keys still need an Android keycode to act.
+jint acl_keysym_to_android_keycode(std::uint32_t keysym) {
+  switch (keysym) {
+    case 0xff08: return 67;   // BackSpace -> KEYCODE_DEL
+    case 0xffff: return 112;  // Delete    -> KEYCODE_FORWARD_DEL
+    case 0xff0d:              // Return
+    case 0xff8d: return 66;   // KP_Enter  -> KEYCODE_ENTER
+    case 0xff09: return 61;   // Tab       -> KEYCODE_TAB
+    case 0xff1b: return 111;  // Escape    -> KEYCODE_ESCAPE
+    case 0xff51: return 21;   // Left
+    case 0xff53: return 22;   // Right
+    case 0xff52: return 19;   // Up
+    case 0xff54: return 20;   // Down
+    case 0xff50: return 122;  // Home
+    case 0xff57: return 123;  // End
+    // Modifiers must reach the editor as their real keycodes: TextView's selection (ArrowKeyMovement-
+    // Method.isSelecting) reads the shift state MetaKeyKeyListener records from a KEYCODE_SHIFT_LEFT
+    // down, NOT the arrow event's metaState. Without this a keymap-less/synthetic Shift is UNKNOWN and
+    // Shift+Arrow only moves the caret.
+    case 0xffe1: return 59;   // Shift_L   -> KEYCODE_SHIFT_LEFT
+    case 0xffe2: return 60;   // Shift_R   -> KEYCODE_SHIFT_RIGHT
+    case 0xffe3: return 113;  // Control_L -> KEYCODE_CTRL_LEFT
+    case 0xffe4: return 114;  // Control_R -> KEYCODE_CTRL_RIGHT
+    case 0xffe9: return 57;   // Alt_L     -> KEYCODE_ALT_LEFT
+    case 0xffea: return 58;   // Alt_R     -> KEYCODE_ALT_RIGHT
     default: return 0;
   }
 }
@@ -752,6 +808,9 @@ struct PresentSession {
   jmethodID m_measure = nullptr, m_gmw = nullptr, m_gmh = nullptr, m_layout = nullptr, m_draw = nullptr;
   jclass motionevent_cls = nullptr, keyevent_cls = nullptr;  // global refs
   jmethodID me_obtain = nullptr, me_recycle = nullptr, ke_obtain = nullptr;
+  jmethodID ke_obtain_meta = nullptr;  // KeyEvent(downTime,eventTime,action,code,repeat,metaState)
+  jint meta_state = 0;                 // live modifier bitmask (META_SHIFT_ON|META_CTRL_ON|…)
+  jint sel_anchor = -1;                // fixed end of a Shift+move selection (-1 = none in progress)
   jmethodID dispatch_touch = nullptr, dispatch_key = nullptr;
   jclass hostbootstrap_cls = nullptr;                 // global ref
   jmethodID route_overlay_touch = nullptr;            // HostBootstrap.routeOverlayTouch(MotionEvent)Z
@@ -948,6 +1007,156 @@ std::string utf8_encode(std::uint32_t cp) {
   return o;
 }
 
+// Delete `before` chars behind and `after` chars ahead of the cursor via the FOCUSED editor's
+// InputConnection (the same route commitText uses for typed text). Returns true iff a focused
+// editor accepted an InputConnection — i.e. the deletion was routed to an editor. This is shared by
+// the compositor IME's delete_surrounding_text and by physical Backspace/Delete keys, so both edit
+// the same buffer that typing fills (a raw KEYCODE_DEL to a hollow-ViewRootImpl decor view does not
+// reliably reach a Compose TextField). Caller falls back to raw KeyEvent dispatch when this is false
+// (a non-editor view — a game, a shortcut — that wants the key itself).
+bool present_try_delete_surrounding(PresentSession* s, JNIEnv* env, jint before, jint after) {
+  jclass vcls = env->GetObjectClass(s->view);
+  jmethodID find_focus = vcls ? env->GetMethodID(vcls, "findFocus", "()Landroid/view/View;") : nullptr;
+  jobject focused = find_focus ? env->CallObjectMethod(s->view, find_focus) : nullptr;
+  jobject target = focused != nullptr ? focused : s->view;
+  jclass fcls = env->GetObjectClass(target);
+  jmethodID create_ic = fcls ? env->GetMethodID(
+      fcls, "onCreateInputConnection",
+      "(Landroid/view/inputmethod/EditorInfo;)Landroid/view/inputmethod/InputConnection;") : nullptr;
+  jclass ei_cls = env->FindClass("android/view/inputmethod/EditorInfo");
+  jmethodID ei_ctor = ei_cls ? env->GetMethodID(ei_cls, "<init>", "()V") : nullptr;
+  jobject ei = ei_ctor ? env->NewObject(ei_cls, ei_ctor) : nullptr;
+  jobject ic = (create_ic != nullptr && ei != nullptr) ? env->CallObjectMethod(target, create_ic, ei) : nullptr;
+  bool handled = false;
+  if (ic != nullptr) {
+    jclass ic_cls = env->GetObjectClass(ic);
+    // If text is selected, Backspace/Delete must remove the SELECTION, not a char beside it —
+    // deleteSurroundingText(1,0) would wrongly delete the char before the selection. getSelectedText
+    // (null/empty when there's no selection) tells us; commitText("",1) replaces a selection with
+    // nothing, i.e. deletes it. With no selection, fall back to deleteSurroundingText(before,after).
+    jstring sel = nullptr;
+    if (jmethodID gsel = ic_cls ? env->GetMethodID(ic_cls, "getSelectedText",
+                                                   "(I)Ljava/lang/CharSequence;") : nullptr) {
+      jobject cs = env->CallObjectMethod(ic, gsel, 0);
+      if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+      if (cs != nullptr) {
+        jclass cs_cls = env->GetObjectClass(cs);
+        jmethodID ts = cs_cls ? env->GetMethodID(cs_cls, "toString", "()Ljava/lang/String;") : nullptr;
+        sel = ts ? static_cast<jstring>(env->CallObjectMethod(cs, ts)) : nullptr;
+        if (cs_cls != nullptr) env->DeleteLocalRef(cs_cls);
+        env->DeleteLocalRef(cs);
+      }
+    }
+    const bool has_selection = sel != nullptr && env->GetStringLength(sel) > 0;
+    if (has_selection) {
+      jmethodID commit = ic_cls ? env->GetMethodID(ic_cls, "commitText",
+                                                   "(Ljava/lang/CharSequence;I)Z") : nullptr;
+      jstring empty = env->NewStringUTF("");
+      if (commit != nullptr) { env->CallBooleanMethod(ic, commit, empty, 1); handled = true; }
+      if (empty != nullptr) env->DeleteLocalRef(empty);
+    } else {
+      jmethodID m = ic_cls ? env->GetMethodID(ic_cls, "deleteSurroundingText", "(II)Z") : nullptr;
+      if (m != nullptr) { env->CallBooleanMethod(ic, m, before, after); handled = true; }
+    }
+    if (sel != nullptr) env->DeleteLocalRef(sel);
+    if (ic_cls != nullptr) env->DeleteLocalRef(ic_cls);
+    env->DeleteLocalRef(ic);
+  }
+  if (ei != nullptr) env->DeleteLocalRef(ei);
+  if (ei_cls != nullptr) env->DeleteLocalRef(ei_cls);
+  if (fcls != nullptr) env->DeleteLocalRef(fcls);
+  if (focused != nullptr) env->DeleteLocalRef(focused);
+  if (vcls != nullptr) env->DeleteLocalRef(vcls);
+  if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  return handled;
+}
+
+// Extend (or start) the focused editor's selection by one unit in `keycode`'s direction, via the
+// InputConnection (getExtractedText -> setSelection). acl needs this because the standard TextView
+// key path is inert on host: KeyCharacterMap.getKeyboardType() is 0 there, so TextKeyListener picks
+// NullKeyListener and never records the shift MetaKeyKeyListener/ArrowKeyMovementMethod need — a raw
+// Shift+Arrow only moves the caret. s->sel_anchor holds the fixed end across successive Shift+moves.
+// keycode: 21=Left 22=Right 122=MOVE_HOME 123=MOVE_END. Returns true iff routed to an editor.
+bool present_try_extend_selection(PresentSession* s, JNIEnv* env, jint keycode) {
+  jclass vcls = env->GetObjectClass(s->view);
+  jmethodID find_focus = vcls ? env->GetMethodID(vcls, "findFocus", "()Landroid/view/View;") : nullptr;
+  jobject focused = find_focus ? env->CallObjectMethod(s->view, find_focus) : nullptr;
+  jobject target = focused != nullptr ? focused : s->view;
+  jclass fcls = env->GetObjectClass(target);
+  jmethodID create_ic = fcls ? env->GetMethodID(
+      fcls, "onCreateInputConnection",
+      "(Landroid/view/inputmethod/EditorInfo;)Landroid/view/inputmethod/InputConnection;") : nullptr;
+  jclass ei_cls = env->FindClass("android/view/inputmethod/EditorInfo");
+  jmethodID ei_ctor = ei_cls ? env->GetMethodID(ei_cls, "<init>", "()V") : nullptr;
+  jobject ei = ei_ctor ? env->NewObject(ei_cls, ei_ctor) : nullptr;
+  jobject ic = (create_ic != nullptr && ei != nullptr) ? env->CallObjectMethod(target, create_ic, ei) : nullptr;
+  bool handled = false;
+  if (ic != nullptr) {
+    jclass ic_cls = env->GetObjectClass(ic);
+    jclass req_cls = env->FindClass("android/view/inputmethod/ExtractedTextRequest");
+    jmethodID req_ctor = req_cls ? env->GetMethodID(req_cls, "<init>", "()V") : nullptr;
+    jobject req = req_ctor ? env->NewObject(req_cls, req_ctor) : nullptr;
+    jmethodID get_et = ic_cls ? env->GetMethodID(
+        ic_cls, "getExtractedText",
+        "(Landroid/view/inputmethod/ExtractedTextRequest;I)Landroid/view/inputmethod/ExtractedText;") : nullptr;
+    jobject et = (get_et != nullptr && req != nullptr) ? env->CallObjectMethod(ic, get_et, req, 0) : nullptr;
+    if (et != nullptr) {
+      jclass et_cls = env->GetObjectClass(et);
+      jint selS = env->GetIntField(et, env->GetFieldID(et_cls, "selectionStart", "I"));
+      jint selE = env->GetIntField(et, env->GetFieldID(et_cls, "selectionEnd", "I"));
+      jobject textcs = env->GetObjectField(et, env->GetFieldID(et_cls, "text", "Ljava/lang/CharSequence;"));
+      std::u16string text16;
+      if (textcs != nullptr) {
+        jclass cs_cls = env->GetObjectClass(textcs);
+        jmethodID m_ts = env->GetMethodID(cs_cls, "toString", "()Ljava/lang/String;");
+        jstring js = m_ts ? static_cast<jstring>(env->CallObjectMethod(textcs, m_ts)) : nullptr;
+        if (js != nullptr) {
+          const jchar* jc = env->GetStringChars(js, nullptr);
+          text16.assign(reinterpret_cast<const char16_t*>(jc), env->GetStringLength(js));
+          env->ReleaseStringChars(js, jc);
+          env->DeleteLocalRef(js);
+        }
+        env->DeleteLocalRef(cs_cls);
+      }
+      const jint len = static_cast<jint>(text16.size());
+      if (selS >= 0 && selE >= 0 && selS <= len && selE <= len) {
+        // The anchor is the end NOT moving. Reuse it across a run of Shift+moves; re-seat it when it
+        // no longer matches either current end (a fresh selection, incl. a collapsed caret => selS).
+        jint anchor = s->sel_anchor;
+        if (anchor < 0 || (anchor != selS && anchor != selE)) anchor = selS;
+        jint active = (selS == anchor) ? selE : selS;
+        switch (keycode) {
+          case 21: if (active > 0) --active; break;    // DPAD_LEFT
+          case 22: if (active < len) ++active; break;  // DPAD_RIGHT
+          case 122: while (active > 0 && text16[active - 1] != u'\n') --active; break;  // MOVE_HOME
+          case 123: while (active < len && text16[active] != u'\n') ++active; break;    // MOVE_END
+          default: break;
+        }
+        jmethodID set_sel = ic_cls ? env->GetMethodID(ic_cls, "setSelection", "(II)Z") : nullptr;
+        if (set_sel != nullptr) {
+          env->CallBooleanMethod(ic, set_sel, anchor, active);
+          s->sel_anchor = anchor;
+          handled = true;
+        }
+      }
+      if (textcs != nullptr) env->DeleteLocalRef(textcs);
+      env->DeleteLocalRef(et_cls);
+      env->DeleteLocalRef(et);
+    }
+    if (req != nullptr) env->DeleteLocalRef(req);
+    if (req_cls != nullptr) env->DeleteLocalRef(req_cls);
+    env->DeleteLocalRef(ic_cls);
+    env->DeleteLocalRef(ic);
+  }
+  if (ei != nullptr) env->DeleteLocalRef(ei);
+  if (ei_cls != nullptr) env->DeleteLocalRef(ei_cls);
+  if (fcls != nullptr) env->DeleteLocalRef(fcls);
+  if (focused != nullptr) env->DeleteLocalRef(focused);
+  if (vcls != nullptr) env->DeleteLocalRef(vcls);
+  if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+  return handled;
+}
+
 // Deliver a compositor pointer/key event to the decor View (native side of MotionEvent/
 // KeyEvent). Runs synchronously inside presenter->dispatch() on the main thread.
 void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
@@ -957,7 +1166,7 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
     if (s->motionevent_cls == nullptr || s->me_obtain == nullptr || s->dispatch_touch == nullptr) return;
     const jint action = p->action == wm::PointerInput::Action::Down ? 0
                       : p->action == wm::PointerInput::Action::Up   ? 1 : 2;
-    if (action == 0) s->down_time = present_now_ns();
+    if (action == 0) { s->down_time = present_now_ns(); s->sel_anchor = -1; }  // tap starts a fresh caret
     jobject me = env->CallStaticObjectMethod(
         s->motionevent_cls, s->me_obtain, static_cast<jlong>(s->down_time),
         static_cast<jlong>(present_now_ns()), action, static_cast<jfloat>(p->x),
@@ -991,16 +1200,51 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
     // KeyCharacterMap (a hardware KeyEvent's getUnicodeChar() returns 0 on acl's host, so the raw-key
     // path inserts nothing). Editing/function keys (Enter, Backspace, arrows) fall through to KeyEvent
     // dispatch below, which handles them via onKeyDown (no char needed).
-    if (k->action == wm::KeyInput::Action::Down) {
-      if (std::uint32_t cp = keysym_to_codepoint(k->keysym); cp != 0) {
-        present_deliver_input(s, wm::TextInput{utf8_encode(cp), false, 1});
+    const bool key_down = k->action == wm::KeyInput::Action::Down;
+    // Maintain the live modifier mask so combos carry metaState (Shift+Arrow selects; without it the
+    // movement method only moves the caret). Update before building the KeyEvent so a Shift-down event
+    // itself reports META_SHIFT_ON, as on device.
+    if (jint mbit = acl_modifier_meta_bits(k->keycode, k->keysym); mbit != 0) {
+      if (key_down) s->meta_state |= mbit; else s->meta_state &= ~mbit;
+    }
+    // Android keycode: prefer the evdev scancode, fall back to the keysym (synthetic / keymap-less).
+    jint keycode = acl_evdev_to_android_keycode(k->keycode);
+    if (keycode == 0) keycode = acl_keysym_to_android_keycode(k->keysym);
+    if (key_down) {
+      // Shift+Arrow/Home/End -> extend the selection through the InputConnection (the host key path
+      // can't; see present_try_extend_selection). Any other real key ends the selection run.
+      const bool shift_held = (s->meta_state & 0x1) != 0;
+      const bool is_sel_move = keycode == 21 || keycode == 22 || keycode == 122 || keycode == 123;
+      if (shift_held && is_sel_move && present_try_extend_selection(s, env, keycode)) {
+        present_sync_ime_focus(s);
         return;
       }
+      if (acl_modifier_meta_bits(k->keycode, k->keysym) == 0) s->sel_anchor = -1;  // non-modifier key ends the run
+      // A printable char with no Ctrl/Alt held -> commit to the editor (Shift is already folded into
+      // the keysym as the upper-case codepoint). With Ctrl/Alt down it's a shortcut, not text.
+      if ((s->meta_state & (0x1000 | 0x2)) == 0) {
+        if (std::uint32_t cp = keysym_to_codepoint(k->keysym); cp != 0) {
+          present_deliver_input(s, wm::TextInput{utf8_encode(cp), false, 1});
+          return;
+        }
+      }
+      // Backspace / forward-delete with NO selection edit the focused editor's InputConnection (the
+      // buffer typing fills) — a raw KEYCODE_DEL to the hollow decor view does not reliably reach a
+      // Compose TextField. With a selection the helper deletes it. Only when no editor is focused do
+      // we fall through to KeyEvent dispatch (a game/shortcut that wants the raw key).
+      if (keycode == 67 && present_try_delete_surrounding(s, env, 1, 0)) return;   // KEYCODE_DEL
+      if (keycode == 112 && present_try_delete_surrounding(s, env, 0, 1)) return;  // KEYCODE_FORWARD_DEL
     }
-    if (s->keyevent_cls == nullptr || s->ke_obtain == nullptr || s->dispatch_key == nullptr) return;
-    const jint action = k->action == wm::KeyInput::Action::Down ? 0 : 1;
-    const jint keycode = acl_evdev_to_android_keycode(k->keycode);
-    jobject ke = env->NewObject(s->keyevent_cls, s->ke_obtain, action, keycode);
+    if (s->keyevent_cls == nullptr || s->dispatch_key == nullptr) return;
+    const jint action = key_down ? 0 : 1;
+    // Build with the full ctor so metaState rides along (Shift+Arrow selection). Fall back to the
+    // 2-arg ctor if the 6-arg id didn't resolve.
+    jobject ke = s->ke_obtain_meta != nullptr
+        ? env->NewObject(s->keyevent_cls, s->ke_obtain_meta,
+                         static_cast<jlong>(s->down_time), static_cast<jlong>(present_now_ns()),
+                         action, keycode, 0, s->meta_state)
+        : (s->ke_obtain != nullptr ? env->NewObject(s->keyevent_cls, s->ke_obtain, action, keycode)
+                                   : nullptr);
     jboolean kh = JNI_FALSE;
     if (ke != nullptr) {
       kh = env->CallBooleanMethod(s->view, s->dispatch_key, ke);
@@ -1008,8 +1252,9 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
     }
     static int kdiag = 0;
     if (kdiag < 24) {
-      log::i(kTag, "input: key action={} evdev={} android={} ke={} handled={}", action, k->keycode,
-             keycode, ke != nullptr, kh == JNI_TRUE);
+      log::i(kTag, "input: key action={} evdev={} keysym={:#x} android={} meta={:#x} full_ctor={} ke={} handled={}",
+             action, k->keycode, k->keysym, keycode, s->meta_state, s->ke_obtain_meta != nullptr,
+             ke != nullptr, kh == JNI_TRUE);
       ++kdiag;
     }
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
@@ -1050,31 +1295,7 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
   } else if (const auto* d = std::get_if<wm::DeleteSurroundingText>(&ev)) {
     log::i(kTag, "IME delete-surrounding: before={} after={}", d->before, d->after);
-    jclass vcls = env->GetObjectClass(s->view);
-    jmethodID find_focus = vcls ? env->GetMethodID(vcls, "findFocus", "()Landroid/view/View;") : nullptr;
-    jobject focused = find_focus ? env->CallObjectMethod(s->view, find_focus) : nullptr;
-    jobject target = focused != nullptr ? focused : s->view;
-    jclass fcls = env->GetObjectClass(target);
-    jmethodID create_ic = fcls ? env->GetMethodID(
-        fcls, "onCreateInputConnection",
-        "(Landroid/view/inputmethod/EditorInfo;)Landroid/view/inputmethod/InputConnection;") : nullptr;
-    jclass ei_cls = env->FindClass("android/view/inputmethod/EditorInfo");
-    jmethodID ei_ctor = ei_cls ? env->GetMethodID(ei_cls, "<init>", "()V") : nullptr;
-    jobject ei = ei_ctor ? env->NewObject(ei_cls, ei_ctor) : nullptr;
-    jobject ic = (create_ic != nullptr && ei != nullptr) ? env->CallObjectMethod(target, create_ic, ei) : nullptr;
-    if (ic != nullptr) {
-      jclass ic_cls = env->GetObjectClass(ic);
-      jmethodID m = ic_cls ? env->GetMethodID(ic_cls, "deleteSurroundingText", "(II)Z") : nullptr;
-      if (m != nullptr) env->CallBooleanMethod(ic, m, static_cast<jint>(d->before), static_cast<jint>(d->after));
-      if (ic_cls != nullptr) env->DeleteLocalRef(ic_cls);
-      env->DeleteLocalRef(ic);
-    }
-    if (ei != nullptr) env->DeleteLocalRef(ei);
-    if (ei_cls != nullptr) env->DeleteLocalRef(ei_cls);
-    if (fcls != nullptr) env->DeleteLocalRef(fcls);
-    if (focused != nullptr) env->DeleteLocalRef(focused);
-    if (vcls != nullptr) env->DeleteLocalRef(vcls);
-    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+    present_try_delete_surrounding(s, env, static_cast<jint>(d->before), static_cast<jint>(d->after));
   }
 }
 
@@ -1134,6 +1355,8 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env, jclass, jobject view, jint w, jin
   } else { env->ExceptionClear(); }
   if (jclass kecls = env->FindClass("android/view/KeyEvent")) {
     s->ke_obtain = env->GetMethodID(kecls, "<init>", "(II)V");
+    s->ke_obtain_meta = env->GetMethodID(kecls, "<init>", "(JJIIII)V");  // +metaState (Shift+Arrow select)
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
     s->keyevent_cls = static_cast<jclass>(env->NewGlobalRef(kecls));
     env->DeleteLocalRef(kecls);
   } else { env->ExceptionClear(); }
@@ -1420,18 +1643,25 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   // DIAG: env-gated synthetic keystrokes (ACL_TEST_KEYS="sym1,sym2,..." xkb keysyms — for ASCII the
   // keysym equals the codepoint) — Down+Up each at frame 200. Tests the physical-keyboard path
   // (wl_keyboard -> keysym -> printable commit / KeyEvent). e.g. "104,101,108,108,111" = h,e,l,l,o.
+  // A 'd' or 'u' prefix sends ONLY a down or up (to HOLD a modifier across other keys), e.g.
+  // "d65505,65363,65363,u65505,65288" = Shift-hold, Right, Right, Shift-release, Backspace (selects
+  // two chars then deletes the selection). 65505=Shift_L 65363=Right 65288=BackSpace.
   static bool keyed = false;
   if (const char* kk = std::getenv("ACL_TEST_KEYS")) {
     if (!keyed && s->frames >= 200) {
       keyed = true;
       log::i(kTag, "input: synthetic KEYS \"{}\"", kk);
       for (const char* p = kk; *p;) {
+        char which = 0;
+        if (*p == 'd' || *p == 'u') { which = *p; ++p; }
         char* end = nullptr;
         long sym = std::strtol(p, &end, 10);
         if (end == p) break;
         if (sym > 0) {
-          present_deliver_input(s, wm::KeyInput{wm::KeyInput::Action::Down, 0, static_cast<std::uint32_t>(sym)});
-          present_deliver_input(s, wm::KeyInput{wm::KeyInput::Action::Up, 0, static_cast<std::uint32_t>(sym)});
+          const auto down = wm::KeyInput{wm::KeyInput::Action::Down, 0, static_cast<std::uint32_t>(sym)};
+          const auto up = wm::KeyInput{wm::KeyInput::Action::Up, 0, static_cast<std::uint32_t>(sym)};
+          if (which != 'u') present_deliver_input(s, down);
+          if (which != 'd') present_deliver_input(s, up);
         }
         p = end;
         while (*p == ',') ++p;
@@ -1769,6 +1999,8 @@ void attach_view_to_gl_session(JNIEnv* env, PresentSession* s, jobject view, int
   }
   if (jclass kecls = env->FindClass("android/view/KeyEvent")) {
     s->ke_obtain = env->GetMethodID(kecls, "<init>", "(II)V");
+    s->ke_obtain_meta = env->GetMethodID(kecls, "<init>", "(JJIIII)V");  // +metaState (Shift+Arrow select)
+    if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
     s->keyevent_cls = static_cast<jclass>(env->NewGlobalRef(kecls));
     env->DeleteLocalRef(kecls);
   } else {
