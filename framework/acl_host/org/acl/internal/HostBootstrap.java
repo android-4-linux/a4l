@@ -2689,6 +2689,13 @@ public final class HostBootstrap {
                     android.content.Context.class);
             aiCtor.setAccessible(true);
             Object attachInfo = aiCtor.newInstance(session, window, display, vri, handler, callbacks, ctx);
+            // A non-null window token. View.getWindowToken() returns mAttachInfo.mWindowToken, and
+            // several views GATE on it: ViewPager.populate() early-returns while getWindowToken()==null,
+            // so the pager never instantiates its pages — the Telegram intro's ViewPager sat at
+            // childViews=0 (adapter had 6 pages) and could not be swiped. acl has no Binder window, but
+            // a plain Binder is a valid IBinder and satisfies the non-null gate; populate() then runs on
+            // the next measure and the pages (and swipe) come alive.
+            try { setField(aiCls, attachInfo, "mWindowToken", new android.os.Binder()); } catch (Throwable ignored) {}
             // acl's present canvas is a hardware-accelerated RecordingCanvas over a GPU (Skia/Ganesh
             // → dma-buf) surface, so the view tree must believe it is hardware-accelerated. This is
             // what makes View.isHardwareAccelerated() true, so Jetpack Compose picks RenderNodeLayer
@@ -2741,7 +2748,24 @@ public final class HostBootstrap {
           .append(" vis=").append(v.getVisibility())
           .append(" shown=").append(v.isShown())
           .append(" click=").append(v.isClickable())
-          .append(" enabled=").append(v.isEnabled());
+          .append(" enabled=").append(v.isEnabled())
+          // hscroll/vscroll = canScroll{Horizontally,Vertically}(-1),(+1): a ViewPager/scroller only
+          // intercepts a drag in a direction it reports it CAN scroll — false,false means it won't
+          // page/scroll no matter how far you drag (empty adapter / single page / wrong bounds).
+          .append(" hscroll=").append(v.canScrollHorizontally(-1)).append(',').append(v.canScrollHorizontally(1))
+          .append(" vscroll=").append(v.canScrollVertically(-1)).append(',').append(v.canScrollVertically(1))
+          .append(" attached=").append(v.isAttachedToWindow());
+        // A ViewPager with an adapter but no child views never populated its pages (nothing to swipe).
+        if (v.getClass().getName().contains("ViewPager")) {
+            try {
+                Object ad = v.getClass().getMethod("getAdapter").invoke(v);
+                int cnt = ad == null ? -1 : (Integer) ad.getClass().getMethod("getCount").invoke(ad);
+                sb.append(" [PAGER adapter=").append(ad == null ? "null" : ad.getClass().getSimpleName())
+                  .append(" count=").append(cnt)
+                  .append(" childViews=").append(((android.view.ViewGroup) v).getChildCount())
+                  .append(" curItem=").append(v.getClass().getMethod("getCurrentItem").invoke(v)).append(']');
+            } catch (Throwable t) { sb.append(" [PAGER reflect-fail: ").append(t).append(']'); }
+        }
         System.out.println("acl viewtree: " + sb);
         if (v instanceof android.view.ViewGroup) {
             android.view.ViewGroup g = (android.view.ViewGroup) v;
