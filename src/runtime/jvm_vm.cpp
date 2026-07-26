@@ -716,7 +716,7 @@ jint acl_evdev_to_android_keycode(std::uint32_t evdev) {
     case 2: return 8;   case 3: return 9;   case 4: return 10;  case 5: return 11;       // 1 2 3 4
     case 6: return 12;  case 7: return 13;  case 8: return 14;  case 9: return 15;       // 5 6 7 8
     case 10: return 16; case 11: return 7;                                               // 9 0
-    case 28: return 66;  case 57: return 62;  case 1: return 111;  case 14: return 67;   // ENT SPC ESC DEL(back)
+    case 28: return 66;  case 57: return 62;  case 1: return 4;    case 14: return 67;   // ENT SPC ESC->BACK DEL(back)
     case 15: return 61;  case 105: return 21; case 106: return 22;                       // TAB LEFT RIGHT
     case 103: return 19; case 108: return 20;  case 111: return 112;                     // UP DOWN FORWARD_DEL
     case 102: return 122; case 107: return 123;                                          // HOME END
@@ -758,7 +758,7 @@ jint acl_keysym_to_android_keycode(std::uint32_t keysym) {
     case 0xff0d:              // Return
     case 0xff8d: return 66;   // KP_Enter  -> KEYCODE_ENTER
     case 0xff09: return 61;   // Tab       -> KEYCODE_TAB
-    case 0xff1b: return 111;  // Escape    -> KEYCODE_ESCAPE
+    case 0xff1b: return 4;    // Escape    -> KEYCODE_BACK (desktop/emulator convention: no HW back key)
     case 0xff51: return 21;   // Left
     case 0xff53: return 22;   // Right
     case 0xff52: return 19;   // Up
@@ -3622,7 +3622,7 @@ class JniVm : public Vm {
       case 10: return 16; case 11: return 7;                                               // 9 0
       case 28: return 66;  // ENTER
       case 57: return 62;  // SPACE
-      case 1: return 111;  // ESC -> KEYCODE_ESCAPE
+      case 1: return 4;    // ESC -> KEYCODE_BACK (no hardware back key on desktop)
       case 14: return 67;  // BACKSPACE -> KEYCODE_DEL
       case 15: return 61;  // TAB
       case 105: return 21; case 106: return 22;  // LEFT RIGHT
