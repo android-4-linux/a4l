@@ -791,6 +791,20 @@ std::uint64_t present_now_ns() {
 // AOT-compiles + preverifies the framework the app-launch path runs before any JIT warmup).
 const std::uint64_t g_proc_start_ns = present_now_ns();
 
+// The density (dpi) acl reports to apps, defaulting to the compositor-derived svc value (160*scale).
+// Apps choose phone vs tablet layouts from smallestWidthDp = min(w,h)px / density: at density 1.0 a
+// 1280x800 window is 800dp = XLARGE/tablet (Telegram shows a centered multi-pane intro whose ViewPager
+// gets awkward gesture routing), whereas a real phone at that resolution is ~2-3x density → ~400dp →
+// NORMAL, the full-screen swipeable layout apps primarily target. ACL_DENSITY_DPI overrides it.
+int acl_density_dpi() {
+  static const int ov = [] {
+    const char* e = std::getenv("ACL_DENSITY_DPI");
+    const int v = e != nullptr ? std::atoi(e) : 0;
+    return v > 0 ? v : 0;
+  }();
+  return ov != 0 ? ov : static_cast<int>(svc::window().density_dpi());
+}
+
 // Per-window native state for PresentDriver; its address is the jlong `s` handed to Java.
 struct RenderThread;  // per-window GPU render thread (deferred-present split); defined below
 
@@ -1628,6 +1642,15 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   if (s == nullptr || !s->presenter) return;
   static int tdiag = 0;
   if (tdiag < 4) { log::i(kTag, "PresentDriver.nTraverse: entered (frame {})", s->frames); ++tdiag; }
+  // Synthetic-input trigger: by presented-frame count by default, or by wall-ms since process start
+  // when ACL_TEST_MS is set. Frame-count is unreliable when the idle gate freezes s->frames (static
+  // app) or when free-running inflates it — wall-ms fires at a real time regardless. Used by the
+  // DRAG/FLING hooks so a swipe lands after an app's launch settles (e.g. ACL_TEST_MS=1 + frame=4000).
+  static const bool test_ms = std::getenv("ACL_TEST_MS") != nullptr;
+  const std::uint64_t elapsed_ms = (present_now_ns() - g_proc_start_ns) / 1000000ull;
+  const auto reached = [&](long p) {
+    return test_ms ? elapsed_ms >= static_cast<std::uint64_t>(p) : s->frames >= static_cast<std::uint64_t>(p);
+  };
   // DIAG: env-gated synthetic tap (ACL_TEST_TAP="x,y[,frame]") — inject Down then Up at the point
   // on frame N (default 120) to exercise the input -> hit-test -> recompose chain without a live
   // pointer. Down and Up two frames apart so Compose registers a full press+release.
@@ -1676,7 +1699,7 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     }
   }
   if (drg[0] >= 0.f) {
-    if (drag_step < 0 && s->frames >= static_cast<std::uint64_t>(drag_frame)) {
+    if (drag_step < 0 && reached(drag_frame)) {
       present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Down, drg[0], drg[1]});
       log::i(kTag, "input: synthetic DRAG down at ({},{})", drg[0], drg[1]);
       drag_step = 0;
@@ -1707,7 +1730,7 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
       if (std::sscanf(d, "%f,%f,%f,%ld", &a, &b, &c, &g) >= 3) { fl[0] = a; fl[1] = b; fl[2] = c; fl_gap = g > kFlingMoves + 2 ? g : 60; }
     }
   }
-  if (fl[0] >= 0.f && s->frames >= static_cast<std::uint64_t>(kFlingStart)) {
+  if (fl[0] >= 0.f && reached(kFlingStart)) {
     const long phase = static_cast<long>(s->frames - kFlingStart) % fl_gap;
     if (phase == 0) {
       present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Down, fl[0], fl[1]});
@@ -2483,7 +2506,7 @@ class JniVm : public Vm {
     if (jmethodID m = env_->GetStaticMethodID(boot, "setDisplay", "(III)V")) {
       jint dw = static_cast<jint>(svc::window().display_width());
       jint dh = static_cast<jint>(svc::window().display_height());
-      const jint ddpi = static_cast<jint>(svc::window().density_dpi());
+      const jint ddpi = static_cast<jint>(acl_density_dpi());
       // ACL_DISPLAY_SIZE=WxH overrides the advertised display (hence the window/surface) size — the
       // app measures its content view to this, so the whole WebView/present path runs at WxH instead
       // of fullscreen (small-window / automotive cases, and reduced-size testing). e.g. 640x480.
@@ -2568,7 +2591,7 @@ class JniVm : public Vm {
       env_->CallStaticVoidMethod(boot, set_disp,
                                  static_cast<jint>(svc::window().display_width()),
                                  static_cast<jint>(svc::window().display_height()),
-                                 static_cast<jint>(svc::window().density_dpi()));
+                                 static_cast<jint>(acl_density_dpi()));
     }
     clear_exception();
 
