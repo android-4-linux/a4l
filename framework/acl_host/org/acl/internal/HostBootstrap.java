@@ -1516,6 +1516,45 @@ public final class HostBootstrap {
     static final java.util.Map<String, android.content.ContentProvider> sProviderByAuthority =
             new java.util.HashMap<String, android.content.ContentProvider>();
 
+    // full activity class -> full parentActivityName, parsed once from AndroidManifest.xml. Backs
+    // PackageManager.getActivityInfo(...).parentActivityName so onSupportNavigateUp / the Up arrow work.
+    private static java.util.Map<String, String> sParentActivity;
+    private static String normalizeClass(String name, String pkg) {
+        if (name == null) return null;
+        if (name.startsWith(".")) return pkg + name;
+        return name.indexOf('.') < 0 ? pkg + "." + name : name;
+    }
+    static synchronized String parentActivityName(String activityClass) {
+        if (sParentActivity == null) {
+            java.util.Map<String, String> m = new java.util.HashMap<>();
+            AppContext c = sAppContext;
+            android.content.res.XmlResourceParser xml = null;
+            try {
+                if (c != null) {
+                    final String NS = "http://schemas.android.com/apk/res/android";
+                    final String p = c.getPackageName();
+                    xml = c.getResources().getAssets().openXmlResourceParser("AndroidManifest.xml");
+                    for (int ev = xml.getEventType();
+                         ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
+                        if (ev == android.content.res.XmlResourceParser.START_TAG
+                                && "activity".equals(xml.getName())) {
+                            String name = xml.getAttributeValue(NS, "name");
+                            String parent = xml.getAttributeValue(NS, "parentActivityName");
+                            if (name != null && parent != null)
+                                m.put(normalizeClass(name, p), normalizeClass(parent, p));
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                System.err.println("acl HostBootstrap: parentActivityName parse failed: " + t);
+            } finally {
+                if (xml != null) xml.close();
+            }
+            sParentActivity = m;
+        }
+        return sParentActivity.get(activityClass);
+    }
+
     static final class AppPackageManager extends StubPackageManager {
         private final String pkg;
         AppPackageManager(String pkg) { this.pkg = pkg; }
@@ -1714,6 +1753,10 @@ public final class HostBootstrap {
             ai.packageName = component != null ? component.getPackageName() : pkg;
             ai.name = component != null ? component.getClassName() : null;
             ai.applicationInfo = getApplicationInfo(pkg, 0);
+            // The manifest's android:parentActivityName — NavUtils.getParentActivityName reads it here
+            // (via PackageManager, not the Activity), so AppCompatActivity.onSupportNavigateUp (the
+            // toolbar Up arrow) can navigate up. Without it Up-nav finds no parent and no-ops.
+            if (ai.name != null) ai.parentActivityName = parentActivityName(ai.name);
             return ai;
         }
         @Override public android.content.pm.ApplicationInfo getApplicationInfo(String p, int flags) {
@@ -2048,11 +2091,39 @@ public final class HostBootstrap {
             ActivityRecord rec = new ActivityRecord(a, token, caller, rc);
             sTask.push(rec);
             sByToken.put(token, rec);
+            seedBackFallback(a);  // so onBackPressed()/the Up arrow finish when the app doesn't handle back
             System.out.println("acl activity-stack: pushed " + a.getClass().getName()
                     + " (depth=" + sTask.size() + (rc >= 0 ? ", forResult rc=" + rc : "") + ")");
         } catch (Throwable t) {
             System.err.println("acl activity-stack: register failed: " + t);
         }
+    }
+
+    // Provide the platform's "finish on unhandled back" default to a ComponentActivity's
+    // OnBackPressedDispatcher. On API 33+androidx, onBackPressed() (called by app code — e.g. a
+    // toolbar Up arrow wired to onBackPressed(), or a plain back) no longer finishes on its own; the
+    // default moved to the OnBackInvokedDispatcher, which acl doesn't drive. So acl seeds the
+    // dispatcher's fallback Runnable to finish() the activity (-> finishActivityByToken -> pop). Field
+    // is mFallbackOnBackPressed in AOSP; obfuscated apps rename it, so fall back to the sole
+    // Runnable-typed field. Best-effort (plain Activities finish natively; non-androidx apps skip this).
+    private static void seedBackFallback(android.app.Activity a) {
+        try {
+            Object d = a.getClass().getMethod("getOnBackPressedDispatcher").invoke(a);
+            if (d == null) return;
+            final Runnable finish = () -> {
+                System.out.println("acl activity-stack: back fallback -> finish " + a.getClass().getName());
+                try { a.finish(); } catch (Throwable ignored) {}
+            };
+            java.lang.reflect.Field target = null;
+            for (Class<?> k = d.getClass(); k != null && target == null; k = k.getSuperclass())
+                for (java.lang.reflect.Field f : k.getDeclaredFields())
+                    if ("mFallbackOnBackPressed".equals(f.getName())) { target = f; break; }
+            if (target == null)
+                for (Class<?> k = d.getClass(); k != null && target == null; k = k.getSuperclass())
+                    for (java.lang.reflect.Field f : k.getDeclaredFields())
+                        if (Runnable.class.equals(f.getType())) { target = f; break; }
+            if (target != null) { target.setAccessible(true); target.set(d, finish); }
+        } catch (Throwable ignored) {}
     }
 
     // Best-effort call of a no-arg Activity lifecycle method (onPause/onStop/onDestroy/onRestart/…).
@@ -3071,6 +3142,20 @@ public final class HostBootstrap {
                         return java.lang.reflect.Proxy.newProxyInstance(
                                 ctrl.getClassLoader(), new Class<?>[]{ctrl},
                                 (cp, cm, ca) -> {
+                                    // Up navigation (AppCompatActivity.onSupportNavigateUp -> Activity
+                                    // .navigateUpTo). target=ca[1]; go to it with CLEAR_TOP so acl reuses
+                                    // the existing parent (MainActivity) and finishes everything above it
+                                    // (the detail). Posted to avoid reentrancy: this runs inside the Up
+                                    // arrow's onClick, and launchInternalActivity destroys the source.
+                                    if ("navigateUpTo".equals(cm.getName()) && ca != null && ca.length >= 2
+                                            && ca[1] instanceof android.content.Intent) {
+                                        final android.content.Intent target = (android.content.Intent) ca[1];
+                                        target.addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                                        new android.os.Handler(android.os.Looper.getMainLooper())
+                                                .post(() -> launchInternalActivity(target));
+                                        return cm.getReturnType() == boolean.class ? Boolean.TRUE
+                                                : defaultValue(cm.getReturnType());
+                                    }
                                     if ("finishActivity".equals(cm.getName()) && ca != null && ca.length >= 1
                                             && ca[0] instanceof android.os.IBinder) {
                                         int code = ca.length > 1 && ca[1] instanceof Integer
