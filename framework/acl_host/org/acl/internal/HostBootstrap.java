@@ -2008,6 +2008,151 @@ public final class HostBootstrap {
     // ActivityThread, so seed the minimum onCreate/setContentView need via reflection: a
     // default ActivityInfo and a PhoneWindow bound to the context. Returns the Activity so the
     // caller can drive onCreate then read getWindow().getDecorView() as the content view.
+    // ── In-process Activity task stack (acl plays the ActivityManager role; no Binder, ADR-3) ──
+    // Android tracks activities in AMS as a token-keyed task; startActivity pushes, finish() pops and
+    // resumes the one beneath. acl already owns both seams (Instrumentation.execStartActivity for the
+    // launch, and the IActivityClientController stub for finish), so it maintains the SAME model here:
+    // one task (a stack of ActivityRecord), each activity carrying a real Binder token so finish()'s
+    // ActivityClient.finishActivity(mToken,...) resolves to its record. This is what makes the toolbar
+    // back arrow, the BACK key, and programmatic finish() all navigate back — they converge on finish()
+    // -> finishActivity(token). Single-threaded: every activity lifecycle transition, the finish post,
+    // and the present loop all run on the main Looper, so no synchronization is needed.
+    static final class ActivityRecord {
+        final android.app.Activity activity;
+        final android.os.IBinder token;
+        final android.os.IBinder callerToken;  // the record that startActivityForResult'd us, or null
+        final int requestCode;                 // -1 unless started for a result
+        int resultCode = android.app.Activity.RESULT_CANCELED;
+        android.content.Intent resultData;
+        ActivityRecord(android.app.Activity a, android.os.IBinder t, android.os.IBinder caller, int rc) {
+            activity = a; token = t; callerToken = caller; requestCode = rc;
+        }
+    }
+    static final java.util.ArrayDeque<ActivityRecord> sTask = new java.util.ArrayDeque<>();  // head = top
+    static final java.util.Map<android.os.IBinder, ActivityRecord> sByToken = new java.util.HashMap<>();
+    // Set by execStartActivity just before an internal launch so the record the new activity registers
+    // (in attachActivity) can remember who to return a result to. Consumed once, then cleared.
+    static android.os.IBinder sPendingCallerToken = null;
+    static int sPendingRequestCode = -1;
+
+    // Give an activity a real token and push it as the task's new top. Called from attachActivity, so
+    // BOTH the jvm_vm-launched ROOT (via attachActivityContext) and internal startActivity launches are
+    // adopted uniformly — the first push is the root (finishing it ends the task -> process exit).
+    private static void registerActivity(android.app.Activity a) {
+        try {
+            android.os.IBinder token = new android.os.Binder();
+            setField(android.app.Activity.class, a, "mToken", token);
+            final android.os.IBinder caller = sPendingCallerToken;
+            final int rc = sPendingRequestCode;
+            sPendingCallerToken = null; sPendingRequestCode = -1;
+            ActivityRecord rec = new ActivityRecord(a, token, caller, rc);
+            sTask.push(rec);
+            sByToken.put(token, rec);
+            System.out.println("acl activity-stack: pushed " + a.getClass().getName()
+                    + " (depth=" + sTask.size() + (rc >= 0 ? ", forResult rc=" + rc : "") + ")");
+        } catch (Throwable t) {
+            System.err.println("acl activity-stack: register failed: " + t);
+        }
+    }
+
+    // Best-effort call of a no-arg Activity lifecycle method (onPause/onStop/onDestroy/onRestart/…).
+    private static void safeLifecycle(android.app.Activity a, String name) {
+        try { invokeActivityLifecycle(a, name, null, null); }
+        catch (Throwable t) { System.err.println("acl activity-stack: " + name + " failed: " + t); }
+    }
+    // Deliver a for-result callback to the caller being returned to (Activity.onActivityResult is protected).
+    private static void deliverActivityResult(android.app.Activity a, int requestCode, int resultCode,
+                                              android.content.Intent data) {
+        try {
+            java.lang.reflect.Method m = android.app.Activity.class.getDeclaredMethod(
+                    "onActivityResult", int.class, int.class, android.content.Intent.class);
+            m.setAccessible(true);
+            m.invoke(a, requestCode, resultCode, data);
+        } catch (Throwable t) { System.err.println("acl activity-stack: onActivityResult failed: " + t); }
+    }
+
+    // The real finish() seam: ActivityClient.finishActivity(token,…) routes here (see makeActivityTask
+    // Handler). Deferred to the next main-loop tick because finish() is still unwinding when it calls in
+    // (matching Android's async finish) — running the teardown inline would re-enter a half-finished
+    // activity. Records the result first so the caller sees it on the way back.
+    static boolean finishActivityByToken(android.os.IBinder token, int resultCode,
+                                         android.content.Intent resultData) {
+        System.out.println("acl activity-stack: finishActivity(token) -> "
+                + (token != null && sByToken.get(token) != null
+                        ? sByToken.get(token).activity.getClass().getName() : "UNKNOWN/null token"));
+        final ActivityRecord rec = token != null ? sByToken.get(token) : null;
+        if (rec == null) return false;
+        rec.resultCode = resultCode;
+        rec.resultData = resultData;
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> finishRecord(rec));
+        return true;
+    }
+    // The system's BACK action. A real ViewRootImpl routes the BACK key to the top window's back
+    // handling; acl owns that system side, so it invokes the top activity's onBackPressed() — which
+    // consults the OnBackPressedDispatcher (app interception: closing a drawer/sheet, WebView history,
+    // a registered callback) and otherwise falls through to finish(), popping the task stack via
+    // finishActivityByToken. This is why it is invoked here rather than reconstructed from raw-key
+    // onKeyUp tracking, which acl's direct (no-ViewRootImpl-input-stage) dispatch doesn't carry. Posted
+    // to the main Looper because the caller is mid key-dispatch and onBackPressed may finish+re-present.
+    public static void dispatchBack() {
+        final ActivityRecord top = sTask.peek();
+        if (top == null) return;
+        final android.app.Activity a = top.activity;
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+            try {
+                // Mirror the platform's decision: if the app has an enabled OnBackPressedCallback (a
+                // drawer/bottom-sheet/WebView-history handler), dispatch to it via onBackPressed();
+                // otherwise the SYSTEM finishes the top activity. On API 33 + androidx, an unhandled
+                // onBackPressed() no longer finishes on its own (the legacy fallback is gone in favor of
+                // the OnBackInvokedDispatcher acl doesn't drive), so acl must finish() here — which pops
+                // the task stack via ActivityClient.finishActivity(mToken) -> finishActivityByToken.
+                boolean appHandles = false;
+                try {
+                    Object d = a.getClass().getMethod("getOnBackPressedDispatcher").invoke(a);
+                    if (d != null)
+                        appHandles = Boolean.TRUE.equals(
+                                d.getClass().getMethod("hasEnabledCallbacks").invoke(d));
+                } catch (Throwable ignored) {}
+                if (appHandles) a.onBackPressed();  // app intercepts back
+                else a.finish();                    // system default: finish -> pop
+            } catch (Throwable t) {
+                System.err.println("acl activity-stack: dispatchBack failed: " + t);
+            }
+        });
+    }
+
+    // Tear down a finishing activity and, if it was the visible top, resume + re-present the one beneath.
+    private static void finishRecord(ActivityRecord rec) {
+        try {
+            if (rec == null || !sByToken.containsKey(rec.token)) return;  // already gone
+            final boolean wasTop = (sTask.peek() == rec);
+            safeLifecycle(rec.activity, "onPause");
+            safeLifecycle(rec.activity, "onStop");
+            safeLifecycle(rec.activity, "onDestroy");
+            sTask.remove(rec);
+            sByToken.remove(rec.token);
+            if (!wasTop) return;  // a below-top finish: no foreground change
+            final ActivityRecord next = sTask.peek();
+            if (next == null) {  // the root finished -> the task (and this single-app process) is done
+                System.out.println("acl activity-stack: task empty (root finished) -> exit");
+                System.exit(0);
+                return;
+            }
+            if (rec.requestCode >= 0 && rec.callerToken == next.token)
+                deliverActivityResult(next.activity, rec.requestCode, rec.resultCode, rec.resultData);
+            safeLifecycle(next.activity, "onRestart");
+            safeLifecycle(next.activity, "onStart");
+            ensureResumed(next.activity);
+            android.view.Window w = next.activity.getWindow();
+            android.view.View decor = w != null ? w.getDecorView() : null;
+            if (decor != null) PresentDriver.setContentView(decor);
+            System.out.println("acl activity-stack: popped to " + next.activity.getClass().getName()
+                    + " (depth=" + sTask.size() + ")");
+        } catch (Throwable t) {
+            System.err.println("acl activity-stack: finishRecord failed: " + t);
+        }
+    }
+
     public static void attachActivity(android.app.Activity a, android.content.Context ctx)
             throws Exception {
         seedCompatCallbacks();  // before any Dialog: keep opt-in compat changes off (crash-free)
@@ -2154,6 +2299,9 @@ public final class HostBootstrap {
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: fragment host attach deferred: " + t);
         }
+        // Adopt this activity into the task stack with a token (see ActivityRecord). The first push is
+        // the root; each internal startActivity pushes on top. finish()/BACK/the toolbar arrow pop it.
+        registerActivity(a);
     }
 
     // Launch an Activity of THIS app internally and make it the presented decor. Many apps run a
@@ -2166,14 +2314,52 @@ public final class HostBootstrap {
     static boolean launchInternalActivity(android.content.Intent intent) {
         android.content.ComponentName cmp = intent != null ? intent.getComponent() : null;
         if (cmp == null || sAppContext == null) return false;
+        final String targetCls = cmp.getClassName();
+        final int flags = intent.getFlags();
+        android.app.Activity a = null;
+        ActivityRecord prev = null;
         try {
-            Class<?> cls = sAppContext.getClassLoader().loadClass(cmp.getClassName());
+            // FLAG_ACTIVITY_SINGLE_TOP: relaunching the current top delivers onNewIntent, no new instance.
+            ActivityRecord top = sTask.peek();
+            if (top != null && (flags & android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP) != 0
+                    && targetCls.equals(top.activity.getClass().getName())) {
+                try { setField(android.app.Activity.class, top.activity, "mIntent", intent); } catch (Throwable ignored) {}
+                invokeActivityLifecycle(top.activity, "onNewIntent", android.content.Intent.class, intent);
+                invokeActivityLifecycle(top.activity, "onResume", null, null);
+                android.util.Log.i("acl", "launchInternalActivity: " + targetCls + " singleTop -> onNewIntent");
+                return true;
+            }
+            // FLAG_ACTIVITY_CLEAR_TOP: an existing instance is brought forward, finishing everything above it.
+            if ((flags & android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP) != 0) {
+                ActivityRecord existing = null;
+                for (ActivityRecord r : sTask) if (targetCls.equals(r.activity.getClass().getName())) { existing = r; break; }
+                if (existing != null) {
+                    while (sTask.peek() != null && sTask.peek() != existing) {
+                        ActivityRecord r = sTask.pop(); sByToken.remove(r.token);
+                        safeLifecycle(r.activity, "onPause"); safeLifecycle(r.activity, "onStop");
+                        safeLifecycle(r.activity, "onDestroy");
+                    }
+                    try { setField(android.app.Activity.class, existing.activity, "mIntent", intent); } catch (Throwable ignored) {}
+                    invokeActivityLifecycle(existing.activity, "onNewIntent", android.content.Intent.class, intent);
+                    safeLifecycle(existing.activity, "onRestart"); safeLifecycle(existing.activity, "onStart");
+                    invokeActivityLifecycle(existing.activity, "onResume", null, null); ensureResumed(existing.activity);
+                    android.view.Window ew = existing.activity.getWindow();
+                    android.view.View ed = ew != null ? ew.getDecorView() : null;
+                    if (ed != null) PresentDriver.setContentView(ed);
+                    android.util.Log.i("acl", "launchInternalActivity: " + targetCls + " clearTop -> reused");
+                    return true;
+                }
+            }
+            // Standard launch: instantiate, pause the current top, attach (pushes the record), resume, present.
+            Class<?> cls = sAppContext.getClassLoader().loadClass(targetCls);
             if (!android.app.Activity.class.isAssignableFrom(cls)) return false;
-            android.app.Activity a = (android.app.Activity) cls.getConstructor().newInstance();
+            a = (android.app.Activity) cls.getConstructor().newInstance();
+            prev = sTask.peek();
+            if (prev != null) safeLifecycle(prev.activity, "onPause");  // pause the outgoing before the new resumes
             // attachActivityContext (not attachActivity) also sets mApplication, so getApplication()
             // is non-null before onCreate -- androidx ComponentActivity.getDefaultViewModelProvider
             // Factory() throws "activity is not yet attached to the Application instance" otherwise.
-            attachActivityContext(a, sAppContext, sApplication);
+            attachActivityContext(a, sAppContext, sApplication);  // sets token + pushes record (top = a)
             try { setField(android.app.Activity.class, a, "mIntent", intent); } catch (Throwable ignored) {}
             invokeActivityLifecycle(a, "onCreate", android.os.Bundle.class, null);
             invokeActivityLifecycle(a, "onStart", null, null);
@@ -2181,12 +2367,26 @@ public final class HostBootstrap {
             ensureResumed(a);
             android.view.Window w = a.getWindow();
             android.view.View decor = w != null ? w.getDecorView() : null;
-            if (decor == null) { android.util.Log.w("acl", "launchInternalActivity: no decor for " + cmp.getClassName()); return false; }
+            if (decor == null) { android.util.Log.w("acl", "launchInternalActivity: no decor for " + targetCls); return false; }
             attachDecorToWindow(decor);
             boolean shown = PresentDriver.setContentView(decor);
-            android.util.Log.i("acl", "launchInternalActivity: " + cmp.getClassName() + (shown ? " presented" : " launched (no present)"));
+            if (prev != null) safeLifecycle(prev.activity, "onStop");  // outgoing fully stopped once the new shows
+            android.util.Log.i("acl", "launchInternalActivity: " + targetCls + (shown ? " presented" : " launched (no present)"));
             return shown;
         } catch (Throwable t) {
+            // The launch failed. If the new activity was already pushed (attach happens before onCreate),
+            // pop it and resume the previous top so the stack + presented screen stay consistent.
+            if (a != null && sTask.peek() != null && sTask.peek().activity == a) {
+                ActivityRecord bad = sTask.pop(); sByToken.remove(bad.token);
+                if (prev != null) {
+                    try {
+                        invokeActivityLifecycle(prev.activity, "onResume", null, null);
+                        android.view.Window pw = prev.activity.getWindow();
+                        android.view.View pd = pw != null ? pw.getDecorView() : null;
+                        if (pd != null) PresentDriver.setContentView(pd);
+                    } catch (Throwable ignored) {}
+                }
+            }
             Throwable cause = (t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null)
                     ? t.getCause() : t;
             android.util.Log.w("acl", "launchInternalActivity " + cmp.getClassName() + " failed: " + cause);
@@ -2306,8 +2506,15 @@ public final class HostBootstrap {
             if (!ownComponent) return false;
             return launchInternalActivity(intent);
         }
-        private android.app.Instrumentation.ActivityResult suppress(android.content.Intent intent) {
+        // `callerToken` is the starting activity's token and `requestCode` its startActivityForResult
+        // code (-1 for a plain startActivity). Stash them so the launched activity's record can remember
+        // who to return a result to (consumed in registerActivity). Cleared if the launch is suppressed.
+        private android.app.Instrumentation.ActivityResult suppress(android.content.Intent intent,
+                android.os.IBinder callerToken, int requestCode) {
+            sPendingCallerToken = callerToken;
+            sPendingRequestCode = requestCode;
             if (routeInternal(intent)) return null;  // internal transition handled
+            sPendingCallerToken = null; sPendingRequestCode = -1;  // not launched; don't leak to the next
             System.out.println("acl HostBootstrap: startActivity suppressed (no external-activity host): " + intent);
             return null;
         }
@@ -2315,13 +2522,13 @@ public final class HostBootstrap {
                 android.content.Context who, android.os.IBinder contextThread, android.os.IBinder token,
                 android.app.Activity target, android.content.Intent intent, int requestCode,
                 android.os.Bundle options) {
-            return suppress(intent);
+            return suppress(intent, token, requestCode);
         }
         @Override public android.app.Instrumentation.ActivityResult execStartActivity(
                 android.content.Context who, android.os.IBinder contextThread, android.os.IBinder token,
                 String target, android.content.Intent intent, int requestCode, android.os.Bundle options) {
             if (grantPermissionRequest(who, intent, requestCode)) return null;
-            return suppress(intent);
+            return suppress(intent, token, requestCode);
         }
 
         // Activity.requestPermissions() does not call a service — it builds an ACTION_REQUEST_PERMISSIONS
@@ -2358,7 +2565,7 @@ public final class HostBootstrap {
                 android.content.Context who, android.os.IBinder contextThread, android.os.IBinder token,
                 String target, android.content.Intent intent, int requestCode, android.os.Bundle options,
                 android.os.UserHandle user) {
-            return suppress(intent);
+            return suppress(intent, token, requestCode);
         }
     }
 
@@ -2706,6 +2913,14 @@ public final class HostBootstrap {
             // a plain Binder is a valid IBinder and satisfies the non-null gate; populate() then runs on
             // the next measure and the pages (and swipe) come alive.
             try { setField(aiCls, attachInfo, "mWindowToken", new android.os.Binder()); } catch (Throwable ignored) {}
+            // KeyEvent tracking state. The BACK key is delivered as a down+up pair; Activity.onKeyDown
+            // (KEYCODE_BACK) calls event.startTracking() and onKeyUp fires onBackPressed() only if
+            // event.isTracking() — which needs a non-null DispatcherState here (View.dispatchKeyEvent
+            // passes mAttachInfo.mKeyDispatchState). Without it, startTracking is a no-op, the up isn't
+            // tracked, onBackPressed never fires, and BACK/finish() → the task stack never pops.
+            try {
+                setField(aiCls, attachInfo, "mKeyDispatchState", new android.view.KeyEvent.DispatcherState());
+            } catch (Throwable ignored) {}
             // acl's present canvas is a hardware-accelerated RecordingCanvas over a GPU (Skia/Ganesh
             // → dma-buf) surface, so the view tree must believe it is hardware-accelerated. This is
             // what makes View.isHardwareAccelerated() true, so Jetpack Compose picks RenderNodeLayer
@@ -2840,6 +3055,36 @@ public final class HostBootstrap {
         return java.lang.reflect.Proxy.newProxyInstance(
                 iface.getClassLoader(), new Class<?>[]{iface},
                 (p, method, a) -> defaultValue(method.getReturnType()));
+    }
+
+    // IActivityTaskManager: getActivityClientController() hands back a controller whose finishActivity
+    // (token, code, data, finishTask) drives acl's Activity task stack — Activity.finish() ->
+    // ActivityClient.finishActivity(mToken,...) -> here. The toolbar Up arrow, the BACK key
+    // (onBackPressed -> finish), and programmatic finish() all converge on this one seam. Every other
+    // IActivityTaskManager/controller method still defaults (no-op), preserving prior behavior.
+    private static Object makeActivityTaskHandler(Class<?> iface) {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    if ("getActivityClientController".equals(method.getName())) {
+                        final Class<?> ctrl = method.getReturnType();  // IActivityClientController
+                        return java.lang.reflect.Proxy.newProxyInstance(
+                                ctrl.getClassLoader(), new Class<?>[]{ctrl},
+                                (cp, cm, ca) -> {
+                                    if ("finishActivity".equals(cm.getName()) && ca != null && ca.length >= 1
+                                            && ca[0] instanceof android.os.IBinder) {
+                                        int code = ca.length > 1 && ca[1] instanceof Integer
+                                                ? (Integer) ca[1] : android.app.Activity.RESULT_CANCELED;
+                                        android.content.Intent data = ca.length > 2 && ca[2] instanceof android.content.Intent
+                                                ? (android.content.Intent) ca[2] : null;
+                                        boolean handled = finishActivityByToken((android.os.IBinder) ca[0], code, data);
+                                        return cm.getReturnType() == boolean.class ? handled : defaultValue(cm.getReturnType());
+                                    }
+                                    return defaultValue(cm.getReturnType());
+                                });
+                    }
+                    return defaultValue(method.getReturnType());
+                });
     }
 
     // INotificationManager translated to the host notification daemon (svc/notify).
@@ -3320,8 +3565,9 @@ public final class HostBootstrap {
         // host notification daemon (svc/notify → org.freedesktop.Notifications) instead of a
         // no-op proxy.
         svc.put("notification", "android.app.INotificationManager");
-        // Activity.setTaskDescription (called during theme init) → ActivityClient →
-        // IActivityTaskManager.getActivityClientController() → a nested no-op.
+        // IActivityTaskManager.getActivityClientController() → a controller that drives acl's Activity
+        // task stack: finishActivity(token,…) pops+restores (makeActivityTaskHandler), everything else
+        // (setTaskDescription during theme init, activityIdle/Paused/…) defaults harmlessly.
         svc.put("activity_task", "android.app.IActivityTaskManager");
         svc.put("display", "android.hardware.display.IDisplayManager");
         // ViewRootImpl.<init> resolves the IME service; a no-Binder proxy suffices (no IME host).
@@ -3378,6 +3624,7 @@ public final class HostBootstrap {
                                 : "uimode".equals(name) ? makeUiModeHandler(iface)
                                 : "power".equals(name) ? makePowerHandler(iface)
                                 : "media_session".equals(name) ? makeSessionManagerHandler(iface)
+                                : "activity_task".equals(name) ? makeActivityTaskHandler(iface)
                                 : noop(iface);
                         final String descriptor = ifaceName;  // AIDL DESCRIPTOR == interface FQN
                         // Proxy IBinder (an interface) rather than new Binder() — the latter

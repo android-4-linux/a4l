@@ -1239,6 +1239,21 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
     // Android keycode: prefer the evdev scancode, fall back to the keysym (synthetic / keymap-less).
     jint keycode = acl_evdev_to_android_keycode(k->keycode);
     if (keycode == 0) keycode = acl_keysym_to_android_keycode(k->keysym);
+    // KEYCODE_BACK: acl drives the system back action itself (HostBootstrap.dispatchBack -> top
+    // activity onBackPressed -> app interception or finish() -> Activity task-stack pop). The raw-key
+    // onKeyUp back-tracking doesn't carry through acl's direct dispatch, so route it here on the press
+    // and consume both edges rather than dispatching BACK as a plain KeyEvent.
+    if (keycode == 4) {
+      if (key_down) {
+        if (jclass hb = env->FindClass("org/acl/internal/HostBootstrap")) {
+          if (jmethodID m = env->GetStaticMethodID(hb, "dispatchBack", "()V"))
+            env->CallStaticVoidMethod(hb, m);
+          env->DeleteLocalRef(hb);
+        }
+        if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
+      }
+      return;
+    }
     if (key_down) {
       // Shift+Arrow/Home/End -> extend the selection through the InputConnection (the host key path
       // can't; see present_try_extend_selection). Any other real key ends the selection run.
@@ -1651,35 +1666,38 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   const auto reached = [&](long p) {
     return test_ms ? elapsed_ms >= static_cast<std::uint64_t>(p) : s->frames >= static_cast<std::uint64_t>(p);
   };
-  // DIAG: env-gated synthetic tap (ACL_TEST_TAP="x,y[,frame]") — inject Down then Up at the point
-  // on frame N (default 120) to exercise the input -> hit-test -> recompose chain without a live
-  // pointer. Down and Up two frames apart so Compose registers a full press+release.
-  static float tap_x = -1.f, tap_y = -1.f;
-  static long tap_frame = 120;
-  static int tap_state = 0;
+  // DIAG: env-gated synthetic tap(s) (ACL_TEST_TAP="x,y[,frame]" — or a ';'-separated LIST
+  // "x,y,t;x,y,t;…" to script a navigation flow, e.g. tap a card then its back arrow). Each tap
+  // injects Down then Up (2 frames later, or +80ms under ACL_TEST_MS) so it registers as a real
+  // click. ACL_TEST_HOLD skips the Up (keeps the pressed state for a capture).
+  struct TapEvt { float x, y; long at; int state; std::uint64_t down_ms; };
+  static std::vector<TapEvt> taps;
   static bool tap_parsed = false;
   if (!tap_parsed) {
     tap_parsed = true;
     if (const char* t = std::getenv("ACL_TEST_TAP")) {
-      float x = 0, y = 0;
-      long fr = 120;
-      if (std::sscanf(t, "%f,%f,%ld", &x, &y, &fr) >= 2) { tap_x = x; tap_y = y; tap_frame = fr; }
+      for (const char* p = t; p != nullptr && *p;) {
+        float x = 0, y = 0; long at = 120;
+        if (std::sscanf(p, "%f,%f,%ld", &x, &y, &at) >= 2) taps.push_back({x, y, at, 0, 0});
+        const char* semi = std::strchr(p, ';');
+        p = semi != nullptr ? semi + 1 : nullptr;
+      }
     }
   }
-  if (tap_x >= 0.f) {
-    static std::uint64_t tap_down_ms = 0;
-    if (tap_state == 0 && reached(tap_frame)) {
-      log::i(kTag, "input: synthetic TAP down at ({},{})", tap_x, tap_y);
-      present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Down, tap_x, tap_y});
-      tap_state = 1; tap_down_ms = elapsed_ms;
-    } else if (tap_state == 1 && std::getenv("ACL_TEST_HOLD") == nullptr
-               && (test_ms ? (elapsed_ms - tap_down_ms >= 80)
-                           : s->frames >= static_cast<std::uint64_t>(tap_frame) + 2)) {
-      // ACL_TEST_HOLD keeps the pointer down (no Up) so the pressed state / ripple persists for a
-      // screen capture; otherwise release to complete the tap (fires the composable's onClick).
-      present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Up, tap_x, tap_y});
-      log::i(kTag, "input: synthetic TAP up");
-      tap_state = 2;
+  {
+    const bool hold = std::getenv("ACL_TEST_HOLD") != nullptr;
+    for (auto& tp : taps) {
+      if (tp.state == 0 && reached(tp.at)) {
+        log::i(kTag, "input: synthetic TAP down at ({},{})", tp.x, tp.y);
+        present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Down, tp.x, tp.y});
+        tp.state = 1; tp.down_ms = elapsed_ms;
+      } else if (tp.state == 1 && !hold
+                 && (test_ms ? (elapsed_ms - tp.down_ms >= 80)
+                             : s->frames >= static_cast<std::uint64_t>(tp.at) + 2)) {
+        present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Up, tp.x, tp.y});
+        log::i(kTag, "input: synthetic TAP up at ({},{})", tp.x, tp.y);
+        tp.state = 2;
+      }
     }
   }
   // DIAG: env-gated synthetic drag (ACL_TEST_DRAG="x1,y1,x2,y2[,frame]") — Down at (x1,y1) once the
@@ -1761,9 +1779,12 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   // A 'd' or 'u' prefix sends ONLY a down or up (to HOLD a modifier across other keys), e.g.
   // "d65505,65363,65363,u65505,65288" = Shift-hold, Right, Right, Shift-release, Backspace (selects
   // two chars then deletes the selection). 65505=Shift_L 65363=Right 65288=BackSpace.
+  // Fires at frame 200 by default; ACL_TEST_KEYS_AT overrides the trigger (frames, or ms under
+  // ACL_TEST_MS) so a key sequence can land after a navigation settles (e.g. BACK after a card tap).
+  static const long keys_at = [] { const char* v = std::getenv("ACL_TEST_KEYS_AT"); return v ? std::atol(v) : 200; }();
   static bool keyed = false;
   if (const char* kk = std::getenv("ACL_TEST_KEYS")) {
-    if (!keyed && s->frames >= 200) {
+    if (!keyed && reached(keys_at)) {
       keyed = true;
       log::i(kTag, "input: synthetic KEYS \"{}\"", kk);
       for (const char* p = kk; *p;) {
