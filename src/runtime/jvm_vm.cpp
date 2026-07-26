@@ -1804,6 +1804,15 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     return;
   }
   const auto draw_t0 = std::chrono::steady_clock::now();
+  // Steady-state throughput probe (ACL_FRAME_STATS): triage for whether partial-redraw (damage
+  // tracking) is worth building. Every 120 DRAWN frames it reports avg record time (View.draw into
+  // the display list), avg raster time (gpu_end: replay + flush + copy to dma-buf), and effective
+  // drawn-fps. Partial-redraw shrinks only the RASTER cost, and only when the changed area is small —
+  // so if frames are record-bound or vsync-bound here, damage tracking wins nothing. Immediate path
+  // only (deferred/ACL_PRESENT_RT rasters on the RenderThread; record time still counts).
+  static const bool frame_stats = std::getenv("ACL_FRAME_STATS") != nullptr;
+  static std::uint64_t fs_n = 0, fs_record_ns = 0, fs_raster_ns = 0;
+  static auto fs_window_t0 = std::chrono::steady_clock::now();
   // Deferred present (ACL_PRESENT_RT): (re)begin the present-root picture recording for this frame,
   // just before View.draw records into s->canvas. No-op in the default immediate path.
   static auto begin_record = reinterpret_cast<void (*)(int, int)>(
@@ -1898,11 +1907,23 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     s->presenter->keepalive();  // the RT presents async — keep the vsync loop ticking so a later
     return;                     // idle tick picks up the completed frame and submits it
   }
+  const auto raster_t0 = std::chrono::steady_clock::now();  // record done; GPU raster begins
   PresentDmabuf f{};
   if (!s->gpu_end(bufidx, &f)) {  // immediate: replay-less flush/copy inline on this thread
     if (diag) log::w(kTag, "PresentDriver.nTraverse: gpu_end failed");
     s->presenter->keepalive();  // GPU end-frame failed — keep ticking, retry next frame
     return;
+  }
+  if (frame_stats) {
+    const auto now = std::chrono::steady_clock::now();
+    fs_record_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(raster_t0 - draw_t0).count();
+    fs_raster_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(now - raster_t0).count();
+    if (++fs_n % 120 == 0) {
+      const double win_ms = std::chrono::duration_cast<std::chrono::microseconds>(now - fs_window_t0).count() / 1000.0;
+      log::i(kTag, "frame-stats: {} drawn frames, record {:.2f}ms raster {:.2f}ms avg, {:.1f} fps (drawn)",
+             fs_n, fs_record_ns / 120.0 / 1e6, fs_raster_ns / 120.0 / 1e6, win_ms > 0 ? 120000.0 / win_ms : 0.0);
+      fs_record_ns = 0; fs_raster_ns = 0; fs_window_t0 = now;
+    }
   }
   if (!present_submit(s, f, bufidx))
     s->presenter->keepalive();  // submit failed (buffer build) — keep the vsync loop ticking
