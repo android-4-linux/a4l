@@ -608,6 +608,16 @@ public final class HostBootstrap {
                 int type, android.os.Bundle options) {
             return this;
         }
+        // A null-base ContextWrapper NPEs on createConfigurationContext (delegates to mBase). androidx
+        // AppCompat's ContextThemeWrapper.getResourcesInternal calls it to build config-specific
+        // Resources for drawable loading; Glide's AppCompatResources.getDrawable (F-Droid's app-list
+        // icons) hit this, and the uncaught NPE on acl's main Looper CRASHED the app ~1s after its
+        // first frame (window "flashed and was gone"). acl has one display/config, so return self —
+        // getResources() yields the app Resources, enough to resolve the drawable.
+        @Override public android.content.Context createConfigurationContext(
+                android.content.res.Configuration cfg) {
+            return this;
+        }
         // ContextWrapper delegates this to a null base on this context; ViewRootImpl.<init>
         // (Dialog/PopupWindow add path) reads getBasePackageName(), so a null-base delegation
         // would NPE. Return the app package (getOpPackageName is already overridden below).
