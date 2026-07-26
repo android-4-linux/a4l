@@ -3191,6 +3191,96 @@ jobject ImageDecoder_nGetSampledSize(JNIEnv* env, jclass, jlong nativePtr, jint 
   return o;
 }
 
+// ── android.graphics.BitmapFactory (classic decode, Skia SkAndroidCodec) ─────────
+// The modern ImageDecoder path above is not what most apps use to turn a downloaded/asset image
+// into a Bitmap — Glide, Picasso, and framework loaders call BitmapFactory.decode{Stream,ByteArray}
+// -> nativeDecode*. Without these, every such decode threw UnsatisfiedLinkError (F-Droid's app-list
+// icons downloaded fine but never decoded -> Glide placeholders). Decode over the same SkAndroidCodec
+// (png/jpeg/webp) as ImageDecoder, honoring the Options fields apps actually depend on:
+// inJustDecodeBounds (bounds-only probe), inSampleSize (subsample), inMutable, and out{Width,Height}.
+jobject decode_encoded_to_bitmap(JNIEnv* env, sk_sp<SkData> data, jobject options) {
+  if (data == nullptr || data->isEmpty()) return nullptr;
+  std::unique_ptr<SkCodec> codec = SkCodec::MakeFromStream(SkMemoryStream::Make(data));
+  if (codec == nullptr) return nullptr;
+  std::unique_ptr<SkAndroidCodec> acodec = SkAndroidCodec::MakeFromCodec(std::move(codec));
+  if (acodec == nullptr) return nullptr;
+  const SkImageInfo srcInfo = acodec->getInfo();
+  int sampleSize = 1;
+  bool justBounds = false, wantMutable = false;
+  if (options != nullptr) {
+    jclass oc = env->GetObjectClass(options);
+    if (jfieldID f = env->GetFieldID(oc, "inJustDecodeBounds", "Z"))
+      justBounds = env->GetBooleanField(options, f) == JNI_TRUE;
+    if (jfieldID f = env->GetFieldID(oc, "inSampleSize", "I")) {
+      const int s = env->GetIntField(options, f);
+      if (s > 1) sampleSize = s;
+    }
+    if (jfieldID f = env->GetFieldID(oc, "inMutable", "Z"))
+      wantMutable = env->GetBooleanField(options, f) == JNI_TRUE;
+    if (jfieldID f = env->GetFieldID(oc, "outWidth", "I")) env->SetIntField(options, f, srcInfo.width());
+    if (jfieldID f = env->GetFieldID(oc, "outHeight", "I")) env->SetIntField(options, f, srcInfo.height());
+    env->ExceptionClear();
+    env->DeleteLocalRef(oc);
+  }
+  if (justBounds) return nullptr;  // caller only wanted out{Width,Height}
+  const SkISize dim = acodec->getSampledDimensions(sampleSize);
+  const SkImageInfo info = srcInfo.makeWH(dim.width(), dim.height())
+                               .makeColorType(kN32_SkColorType)
+                               .makeAlphaType(kPremul_SkAlphaType);
+  auto* w = new AclBitmap();
+  if (!w->bitmap.tryAllocPixels(info)) { delete w; return nullptr; }
+  SkAndroidCodec::AndroidOptions aopts;
+  aopts.fSampleSize = sampleSize;
+  const SkCodec::Result r =
+      acodec->getAndroidPixels(info, w->bitmap.getPixels(), w->bitmap.rowBytes(), &aopts);
+  if (r != SkCodec::kSuccess && r != SkCodec::kIncompleteInput) { delete w; return nullptr; }
+  w->immutable = !wantMutable;  // BitmapFactory results are immutable unless Options.inMutable
+  return env->NewObject(g_bitmap_class, g_bitmap_ctor, reinterpret_cast<jlong>(w),
+                        w->bitmap.width(), w->bitmap.height(), /*density=*/0,
+                        /*requestPremultiplied=*/JNI_TRUE, static_cast<jbyteArray>(nullptr),
+                        static_cast<jobject>(nullptr));
+}
+// nativeDecodeStream(InputStream is, byte[] storage, Rect padding, Options opts, long, long).
+jobject BitmapFactory_nativeDecodeStream(JNIEnv* env, jclass, jobject is, jbyteArray storage,
+                                         jobject /*padding*/, jobject options, jlong, jlong) {
+  if (is == nullptr) return nullptr;
+  jclass isc = env->GetObjectClass(is);
+  jmethodID readM = env->GetMethodID(isc, "read", "([BII)I");
+  env->DeleteLocalRef(isc);
+  if (readM == nullptr) { env->ExceptionClear(); return nullptr; }
+  jbyteArray buf = storage;
+  const bool localBuf = (buf == nullptr);
+  if (localBuf) buf = env->NewByteArray(16384);
+  if (buf == nullptr) return nullptr;
+  const jsize cap = env->GetArrayLength(buf);
+  std::vector<std::uint8_t> all;
+  for (;;) {
+    const jint nr = env->CallIntMethod(is, readM, buf, 0, cap);
+    if (env->ExceptionCheck() == JNI_TRUE) { env->ExceptionClear(); break; }
+    if (nr <= 0) break;
+    jbyte* p = env->GetByteArrayElements(buf, nullptr);
+    if (p == nullptr) break;
+    all.insert(all.end(), reinterpret_cast<std::uint8_t*>(p), reinterpret_cast<std::uint8_t*>(p) + nr);
+    env->ReleaseByteArrayElements(buf, p, JNI_ABORT);
+  }
+  if (localBuf) env->DeleteLocalRef(buf);
+  if (all.empty()) return nullptr;
+  return decode_encoded_to_bitmap(env, SkData::MakeWithCopy(all.data(), all.size()), options);
+}
+// nativeDecodeByteArray(byte[] data, int offset, int length, Options opts, long, long).
+jobject BitmapFactory_nativeDecodeByteArray(JNIEnv* env, jclass, jbyteArray data, jint offset,
+                                            jint length, jobject options, jlong, jlong) {
+  if (data == nullptr || length <= 0) return nullptr;
+  const jsize len = env->GetArrayLength(data);
+  if (offset < 0 || offset + length > len) return nullptr;
+  jbyte* p = env->GetByteArrayElements(data, nullptr);
+  if (p == nullptr) return nullptr;
+  sk_sp<SkData> sk = SkData::MakeWithCopy(reinterpret_cast<std::uint8_t*>(p) + offset,
+                                          static_cast<size_t>(length));
+  env->ReleaseByteArrayElements(data, p, JNI_ABORT);
+  return decode_encoded_to_bitmap(env, sk, options);
+}
+
 // ── android.graphics.NinePatch (over the npTc chunk) ─────────────────────────────
 // The chunk is the (deserialized) Res_png_9patch a nine-patch Bitmap carries. validate
 // copies it to the native heap and hands back the pointer NinePatch/NinePatchDrawable holds.
@@ -3357,6 +3447,15 @@ const JNINativeMethod kImageDecoder[] = {
      reinterpret_cast<void*>(ImageDecoder_nGetSampledSize)},
     {"nGetPadding", "(JLandroid/graphics/Rect;)V", reinterpret_cast<void*>(ImageDecoder_nGetPadding)},
     {"nClose", "(J)V", reinterpret_cast<void*>(ImageDecoder_nClose)},
+};
+const JNINativeMethod kBitmapFactory[] = {
+    {"nativeDecodeStream",
+     "(Ljava/io/InputStream;[BLandroid/graphics/Rect;Landroid/graphics/BitmapFactory$Options;JJ)"
+     "Landroid/graphics/Bitmap;",
+     reinterpret_cast<void*>(BitmapFactory_nativeDecodeStream)},
+    {"nativeDecodeByteArray",
+     "([BIILandroid/graphics/BitmapFactory$Options;JJ)Landroid/graphics/Bitmap;",
+     reinterpret_cast<void*>(BitmapFactory_nativeDecodeByteArray)},
 };
 
 const JNINativeMethod kBitmap[] = {
@@ -5473,6 +5572,9 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   bool ok = true;
   ok = reg(env, "android/graphics/Bitmap", kBitmap, n(kBitmap)) && ok;
   ok = reg(env, "android/graphics/Canvas", kCanvas, n(kCanvas)) && ok;
+  // Classic BitmapFactory decode (Glide/Picasso/framework loaders). Best-effort: absent -> downloaded
+  // images throw UnsatisfiedLinkError in decode and never appear (F-Droid icons). Not gated on `ok`.
+  reg(env, "android/graphics/BitmapFactory", kBitmapFactory, n(kBitmapFactory));
   // RenderNode record/replay (Compose). Best-effort: absent -> Compose layers don't replay (blank);
   // present -> Compose renders. Not gated on `ok` so a signature drift never kills the whole floor.
   // A RecordingCanvas draws through BaseRecordingCanvas.nDraw* (its OWN natives, distinct from
