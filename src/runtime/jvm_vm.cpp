@@ -1558,6 +1558,36 @@ static bool present_submit(PresentSession* s, const PresentDmabuf& f, int slot) 
     return v != nullptr && *v != '\0' && *v != '0';
   }();
   if (submit_debug) log::i(kTag, "present_submit: frame {} slot {} fd {}", s->frames, slot, f.fd);
+  // Jank probe (ACL_FRAME_STATS): present-to-present INTERVALS are the smoothness signal — a scroll is
+  // smooth only if acl hits every vsync. Every 120 presents, report p50/p99/max interval and the count
+  // over 1.5x the refresh period (a missed vsync = a dropped frame). Refresh comes from the real
+  // wp_presentation feedback (s->pf_refresh_ns); 60Hz assumed until it arrives. Averages hide jank —
+  // the render path already averages sub-ms (ACL_FRAME_STATS record/raster), so drops here would be
+  // GC pauses / heavy app-logic frames / pacing hiccups, not raster cost.
+  static const bool jank_stats = std::getenv("ACL_FRAME_STATS") != nullptr;
+  if (jank_stats) {
+    static std::uint64_t j_last_ns = 0, j_n = 0, j_drops = 0;
+    static double j_ring[256];
+    static std::size_t j_ri = 0, j_have = 0;
+    const std::uint64_t now = present_now_ns();
+    if (j_last_ns != 0) {
+      const double intv_ms = (now - j_last_ns) / 1e6;
+      j_ring[j_ri++ % 256] = intv_ms;
+      if (j_have < 256) ++j_have;
+      const std::uint32_t rns = s->pf_refresh_ns.load(std::memory_order_relaxed);
+      const double refresh_ms = rns > 0 ? rns / 1e6 : 16.667;
+      if (intv_ms > 1.5 * refresh_ms) ++j_drops;
+      if (++j_n % 120 == 0) {
+        std::vector<double> v(j_ring, j_ring + j_have);
+        std::sort(v.begin(), v.end());
+        const double p50 = v[v.size() / 2], p99 = v[(v.size() * 99) / 100], mx = v.back();
+        log::i(kTag, "jank-stats: {} presents, interval p50 {:.1f}ms p99 {:.1f}ms max {:.1f}ms; "
+                     "{} dropped (>{:.1f}ms, refresh {:.1f}ms)",
+               j_n, p50, p99, mx, j_drops, 1.5 * refresh_ms, refresh_ms);
+      }
+    }
+    j_last_ns = now;
+  }
   if (s->frames == 0)
     log::i(kTag, "startup: time-to-first-frame {}ms (process start -> first present)",
            (present_now_ns() - g_proc_start_ns) / 1000000ull);
@@ -1634,6 +1664,32 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
         present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Up, drg[2], drg[3]});
         log::i(kTag, "input: synthetic DRAG up at ({},{})", drg[2], drg[3]);
       }
+    }
+  }
+  // DIAG: env-gated REPEATING fling (ACL_TEST_FLING="cx,cy,dy,gap") — sustains scrolling for jank
+  // measurement. Every `gap` frames from frame 120: Down at (cx,cy), 4 fast upward Moves totalling dy
+  // (fling velocity), Up — then let it decelerate before the next. Pair with ACL_FRAME_STATS on a
+  // scrolling list (ListView/RecyclerView) to sample present intervals under continuous scroll.
+  static float fl[3] = {-1.f, 0.f, 0.f};  // cx, cy, dy
+  static long fl_gap = 60;
+  static bool fl_parsed = false;
+  constexpr long kFlingStart = 120, kFlingMoves = 4;
+  if (!fl_parsed) {
+    fl_parsed = true;
+    if (const char* d = std::getenv("ACL_TEST_FLING")) {
+      float a = 0, b = 0, c = 0; long g = 60;
+      if (std::sscanf(d, "%f,%f,%f,%ld", &a, &b, &c, &g) >= 3) { fl[0] = a; fl[1] = b; fl[2] = c; fl_gap = g > kFlingMoves + 2 ? g : 60; }
+    }
+  }
+  if (fl[0] >= 0.f && s->frames >= static_cast<std::uint64_t>(kFlingStart)) {
+    const long phase = static_cast<long>(s->frames - kFlingStart) % fl_gap;
+    if (phase == 0) {
+      present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Down, fl[0], fl[1]});
+    } else if (phase <= kFlingMoves) {
+      const float y = fl[1] - fl[2] * (static_cast<float>(phase) / static_cast<float>(kFlingMoves));
+      present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Move, fl[0], y});
+      if (phase == kFlingMoves)
+        present_deliver_input(s, wm::PointerInput{wm::PointerInput::Action::Up, fl[0], fl[1] - fl[2]});
     }
   }
   // DIAG: env-gated synthetic text (ACL_TEST_TYPE="text") — commit `text` to the focused editor's
