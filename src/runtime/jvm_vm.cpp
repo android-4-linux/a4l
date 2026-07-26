@@ -786,6 +786,11 @@ std::uint64_t present_now_ns() {
   return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(ts.tv_nsec);
 }
 
+// A monotonic anchor initialized at TU load (~process start), so the first presented frame can report
+// cold-start time-to-first-frame — the metric that separates imageless-JIT from a boot-image (which
+// AOT-compiles + preverifies the framework the app-launch path runs before any JIT warmup).
+const std::uint64_t g_proc_start_ns = present_now_ns();
+
 // Per-window native state for PresentDriver; its address is the jlong `s` handed to Java.
 struct RenderThread;  // per-window GPU render thread (deferred-present split); defined below
 
@@ -1553,6 +1558,9 @@ static bool present_submit(PresentSession* s, const PresentDmabuf& f, int slot) 
     return v != nullptr && *v != '\0' && *v != '0';
   }();
   if (submit_debug) log::i(kTag, "present_submit: frame {} slot {} fd {}", s->frames, slot, f.fd);
+  if (s->frames == 0)
+    log::i(kTag, "startup: time-to-first-frame {}ms (process start -> first present)",
+           (present_now_ns() - g_proc_start_ns) / 1000000ull);
   if (s->frames == 0 || s->frames % 60 == 0)
     log::i(kTag, "PresentDriver: frame {} presented ({}x{}) — looper-driven", s->frames, f.width,
            f.height);
@@ -4118,10 +4126,14 @@ class ArtVm final : public JniVm {
     // handler read a null Thread and re-enter fatally. Fixed in src/ndk/bionic_runtime.cpp by keying
     // that swap on is_glibc_fs() (a real bionic-vs-glibc TCB test) instead of the pairing table.
     // Force the interpreter with ACL_ART_INT=1 (debugging, or to sidestep a dex the JIT miscompiles).
-    if (const char* img = std::getenv("ACL_ART_BOOT_IMAGE");
-        img != nullptr && *img != '\0') {
+    const bool force_int = std::getenv("ACL_ART_INT") != nullptr;
+    if (const char* img = std::getenv("ACL_ART_BOOT_IMAGE"); img != nullptr && *img != '\0') {
+      // A boot image AOT-compiles + preverifies the framework (the app-launch path runs before any
+      // JIT warmup) — but the APP dex is never in the image, so it still needs the JIT to compile its
+      // hot methods. Compose them: image for the framework, JIT for the app. ACL_ART_INT drops JIT.
       option_strings.push_back(std::string("-Ximage:") + img);
-    } else if (std::getenv("ACL_ART_INT") != nullptr) {
+      if (!force_int) option_strings.push_back("-Xusejit:true");
+    } else if (force_int) {
       option_strings.push_back("-Xint");  // opt-out: imageless interpret; no runtime dex2oat
     } else {
       option_strings.push_back("-Xusejit:true");  // default: imageless JIT
