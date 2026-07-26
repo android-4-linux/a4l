@@ -816,6 +816,9 @@ struct PresentSession {
   jmethodID ke_obtain_meta = nullptr;  // KeyEvent(downTime,eventTime,action,code,repeat,metaState)
   jint meta_state = 0;                 // live modifier bitmask (META_SHIFT_ON|META_CTRL_ON|…)
   jint sel_anchor = -1;                // fixed end of a Shift+move selection (-1 = none in progress)
+  std::uint64_t in_ts = 0;             // present_now_ns of an input not yet reflected in a present
+  std::uint64_t in_frame = 0;          // s->frames when that input arrived
+  bool in_pending = false;             // an input is awaiting the present that reflects it
   jmethodID dispatch_touch = nullptr, dispatch_key = nullptr;
   jclass hostbootstrap_cls = nullptr;                 // global ref
   jmethodID route_overlay_touch = nullptr;            // HostBootstrap.routeOverlayTouch(MotionEvent)Z
@@ -1172,6 +1175,13 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
     const jint action = p->action == wm::PointerInput::Action::Down ? 0
                       : p->action == wm::PointerInput::Action::Up   ? 1 : 2;
     if (action == 0) { s->down_time = present_now_ns(); s->sel_anchor = -1; }  // tap starts a fresh caret
+    // Input-latency probe: stamp the first input (Down/Move) not yet reflected in a present; the next
+    // present measures acl's internal input->present latency (see present_submit). Down=0 Move=2.
+    if ((action == 0 || action == 2) && !s->in_pending) {
+      s->in_ts = present_now_ns();
+      s->in_frame = s->frames;
+      s->in_pending = true;
+    }
     jobject me = env->CallStaticObjectMethod(
         s->motionevent_cls, s->me_obtain, static_cast<jlong>(s->down_time),
         static_cast<jlong>(present_now_ns()), action, static_cast<jfloat>(p->x),
@@ -1585,6 +1595,22 @@ static bool present_submit(PresentSession* s, const PresentDmabuf& f, int slot) 
                      "{} dropped (>{:.1f}ms, refresh {:.1f}ms)",
                j_n, p50, p99, mx, j_drops, 1.5 * refresh_ms, refresh_ms);
       }
+    }
+    // Input->present latency: wall time and frame-lag from an input event to the present that reflects
+    // it. Measures acl's INTERNAL response (dispatch + record + raster + submit + pipeline depth);
+    // it excludes compositor transport, vsync-arrival quantization, and scanout, so it's a lower bound
+    // on finger-to-photons. frame_lag=0 => same-tick (immediate mode); 1 => one vsync behind (deferred).
+    if (s->in_pending) {
+      static std::uint64_t il_n = 0, il_sum_us = 0, il_max_us = 0, il_lag_sum = 0, il_lag_max = 0;
+      const std::uint64_t lat_us = (now - s->in_ts) / 1000;
+      const std::uint64_t lag = s->frames - s->in_frame;
+      il_sum_us += lat_us; if (lat_us > il_max_us) il_max_us = lat_us;
+      il_lag_sum += lag;   if (lag > il_lag_max) il_lag_max = lag;
+      if (++il_n % 120 == 0)
+        log::i(kTag, "input-latency: {} samples, {:.2f}ms avg {:.2f}ms max (internal); frame-lag {:.2f} avg {} max",
+               il_n, il_sum_us / 120.0 / 1000.0, il_max_us / 1000.0, il_lag_sum / 120.0, il_lag_max);
+      if (il_n % 120 == 0) { il_sum_us = 0; il_max_us = 0; il_lag_sum = 0; il_lag_max = 0; }
+      s->in_pending = false;
     }
     j_last_ns = now;
   }
