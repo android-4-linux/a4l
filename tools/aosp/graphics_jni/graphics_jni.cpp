@@ -802,6 +802,27 @@ void Canvas_nDrawBitmapRect(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, j
                      SkCanvas::kStrict_SrcRectConstraint);
 }
 
+// nDrawBitmapMatrix(canvas, bitmap, matrix, paint): draw a Bitmap transformed by an arbitrary
+// Matrix. Canvas.drawBitmap(bitmap, Matrix, Paint) routes here; Glide's image pipeline (F-Droid app
+// icons/screenshots) uses it heavily, so a missing native threw UnsatisfiedLinkError every frame —
+// Glide caught it, invalidated, and retried, spinning the main thread (input latency) and leaving the
+// image blank. Concat the matrix onto a saved CTM and draw at the origin (matches SkCanvas semantics
+// AOSP's SkiaCanvas::drawBitmap(bitmap, matrix, paint) uses). paint may be 0 (no paint).
+void Canvas_nDrawBitmapMatrix(JNIEnv*, jclass, jlong canvas, jlong bitmapHandle, jlong matrixHandle,
+                              jlong paint) {
+  tick_draw();
+  auto* c = canvas_sk(canvas);
+  auto* b = reinterpret_cast<AclBitmap*>(bitmapHandle);
+  if (c == nullptr || b == nullptr) return;
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  auto* mat = reinterpret_cast<SkMatrix*>(matrixHandle);
+  sk_sp<SkImage> img = SkImage::MakeFromBitmap(b->bitmap);
+  if (img == nullptr) return;
+  SkAutoCanvasRestore acr(c, true);
+  if (mat != nullptr) c->concat(*mat);
+  c->drawImage(img.get(), 0, 0, SkSamplingOptions(), ap != nullptr ? &ap->paint : nullptr);
+}
+
 void Canvas_nDrawPath(JNIEnv*, jclass, jlong canvas, jlong path, jlong paint) {
   tick_draw();
   auto* c = canvas_sk(canvas);
@@ -4846,6 +4867,7 @@ const JNINativeMethod kBaseCanvas[] = {
     {"nDrawTextOnPath", "(JLjava/lang/String;JFFIJ)V", reinterpret_cast<void*>(Canvas_nDrawTextOnPathString)},
     {"nDrawBitmap", "(JJFFJIII)V", reinterpret_cast<void*>(Canvas_nDrawBitmap)},
     {"nDrawBitmap", "(JJFFFFFFFFJII)V", reinterpret_cast<void*>(Canvas_nDrawBitmapRect)},
+    {"nDrawBitmapMatrix", "(JJJJ)V", reinterpret_cast<void*>(Canvas_nDrawBitmapMatrix)},
     {"nDrawNinePatch", "(JJJFFFFJII)V", reinterpret_cast<void*>(Canvas_nDrawNinePatch)},
     {"nDrawPath", "(JJJ)V", reinterpret_cast<void*>(Canvas_nDrawPath)},
 };
