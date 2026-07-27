@@ -44,6 +44,18 @@ public final class PresentDriver {
         nSetContentView(s, decor);
         return true;
     }
+
+    // Force the whole view tree to re-record (not replay from cache) for the next `frames` present
+    // traversals. Used on an activity restore (pop / clear-top): the restored decor is fully laid
+    // out but its content RenderNodes hold display lists from before it was backgrounded, which the
+    // default cache path never re-traverses -> stale/blank content. A short pulse refreshes it.
+    private static native void nPulseForceRecord(long s, int frames);
+
+    /** Re-record the whole tree for the next {@code frames} frames (activity transition refresh). */
+    public static void pulseForceRecord(int frames) {
+        final long s = sSession;
+        if (s != 0L) nPulseForceRecord(s, frames);
+    }
     private static native int nRepeatFd(long s);         // wl_keyboard repeat timerfd (-1 if none)
     private static native boolean nDispatch(long s);      // drain wl events; false once closed
     private static native void nDispatchRepeat(long s);   // service one key-repeat tick

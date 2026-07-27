@@ -1527,6 +1527,14 @@ void JNICALL PresentDriver_nSetImeVisible(JNIEnv*, jclass, jlong sp, jboolean vi
 // The traversal method IDs (measure/layout/draw/dispatch*) are declared on android.view.View, so
 // they stay valid for any decor and need not be re-resolved. Runs on the present/main thread (an
 // internal startActivity is dispatched there), so no cross-thread hazard with nTraverse.
+// Force-record pulse: a countdown of frames over which the whole view tree is re-recorded (every
+// RenderNode's nIsValid -> false) rather than replayed from cache. Set by nPulseForceRecord on an
+// activity transition (a pop/restore brings back a fully laid-out decor whose content RenderNodes
+// still hold the display lists from before it was backgrounded; acl's default cache path never re-
+// traverses them, so the content draws stale/empty until it is force-recorded once). A short pulse
+// refreshes the tree at the transition and then returns to the cheap cache path. Cross-thread: set
+// on the main thread (restoreDecor), read/decremented on the present thread (nTraverse).
+static std::atomic<int> g_force_record_pulse{0};
 void JNICALL PresentDriver_nSetContentView(JNIEnv* env, jclass, jlong sp, jobject view) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
   if (s == nullptr || view == nullptr) return;
@@ -1534,6 +1542,15 @@ void JNICALL PresentDriver_nSetContentView(JNIEnv* env, jclass, jlong sp, jobjec
   s->view = env->NewGlobalRef(view);
   if (old != nullptr) env->DeleteGlobalRef(old);
   log::i(kTag, "PresentDriver.nSetContentView: decor swapped (activity transition)");
+}
+// Force the whole view tree to re-record for the next `frames` traversals. Called on an activity
+// transition (restoreDecor) so a restored decor's stale content RenderNodes refresh instead of
+// replaying pre-background display lists (which draw blank, letting the previous screen bleed
+// through — a "page overlay"). A latch (max, not overwrite) so overlapping transitions coalesce.
+void JNICALL PresentDriver_nPulseForceRecord(JNIEnv*, jclass, jlong, jint frames) {
+  if (frames < 0) frames = 0;
+  int cur = g_force_record_pulse.load(std::memory_order_relaxed);
+  if (frames > cur) g_force_record_pulse.store(frames, std::memory_order_relaxed);
 }
 jint JNICALL PresentDriver_nRepeatFd(JNIEnv*, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
@@ -1896,7 +1913,11 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     const char* v = std::getenv("ACL_FORCE_RECORD");
     return v != nullptr && *v != '\0' && v[0] != '0';
   }();
-  if (force_record != nullptr) force_record(force_record_on ? 1 : 0);
+  // A transition pulse (nPulseForceRecord) forces the whole tree to re-record for a few frames so a
+  // restored decor's stale content display lists refresh; decrement it as each pulse frame is drawn.
+  const int fr_pulse = g_force_record_pulse.load(std::memory_order_relaxed);
+  if (force_record != nullptr) force_record((force_record_on || fr_pulse > 0) ? 1 : 0);
+  if (fr_pulse > 0) g_force_record_pulse.store(fr_pulse - 1, std::memory_order_relaxed);
   // Damage/dirty MEASUREMENT (native, no behavior change): the scene-generation counter is bumped in
   // graphics_jni whenever a RenderNode property, a re-record, or a produced texture changes the frame.
   // A frame whose generation is unchanged since the previous frame produced identical pixels — i.e. it
@@ -1927,7 +1948,7 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
       log::i(kTag, "dirty-stats: {}/{} frames skippable ({}%)", stat_skipped, stat_total,
              stat_total ? stat_skipped * 100 / stat_total : 0);
   }
-  if (idle_gate && !scene_changed && !safety_redraw) {
+  if (idle_gate && !scene_changed && !safety_redraw && fr_pulse == 0) {
     s->presenter->keepalive();  // nothing changed since the last drawn frame — re-present, skip the draw
     return;
   }
@@ -2313,6 +2334,8 @@ void register_present_driver_natives(JNIEnv* env) {
        reinterpret_cast<void*>(PresentDriver_nMaybeDeliverVsync)},
       {const_cast<char*>("nTraverse"), const_cast<char*>("(J)V"),
        reinterpret_cast<void*>(PresentDriver_nTraverse)},
+      {const_cast<char*>("nPulseForceRecord"), const_cast<char*>("(JI)V"),
+       reinterpret_cast<void*>(PresentDriver_nPulseForceRecord)},
       {const_cast<char*>("nClose"), const_cast<char*>("(J)V"),
        reinterpret_cast<void*>(PresentDriver_nClose)},
   };

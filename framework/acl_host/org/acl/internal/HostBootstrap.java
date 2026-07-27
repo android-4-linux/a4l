@@ -2193,6 +2193,34 @@ public final class HostBootstrap {
     }
 
     // Tear down a finishing activity and, if it was the visible top, resume + re-present the one beneath.
+    // Bring a previously-shown decor back to the foreground. Swapping s->view alone is not enough:
+    // the present loop (nTraverse) re-runs measure/layout/draw every frame, but draw replays each
+    // view's CACHED RenderNode display list, and acl's default present path relies on those cached
+    // lists rather than re-recording every frame. A decor that was backgrounded while another activity
+    // ran comes back with a fully measured/laid-out tree but STALE display lists for its content (only
+    // the chrome, which the restore's forceLayout touches, repaints) — so the content area draws
+    // nothing and, on a live compositor, the previous activity's frame bleeds through it, reading as a
+    // "page overlay". View.invalidate() does not help: acl's re-owned RenderNode replay only re-records
+    // a node when its parent re-records (stock hwui semantics), and a cached parent never re-traverses
+    // its children. So drive acl's force-record for a short pulse of frames — the whole tree re-records
+    // top-down once, refreshing the restored content — then the cheap cache path resumes.
+    private static final int RESTORE_RECORD_FRAMES = 4;
+    private static void restoreDecor(android.view.View decor) {
+        PresentDriver.setContentView(decor);
+        forceFullRelayout(decor);
+        decor.requestLayout();
+        PresentDriver.pulseForceRecord(RESTORE_RECORD_FRAMES);
+    }
+
+    private static void forceFullRelayout(android.view.View v) {
+        if (v == null) return;
+        v.forceLayout();
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0, n = g.getChildCount(); i < n; i++) forceFullRelayout(g.getChildAt(i));
+        }
+    }
+
     private static void finishRecord(ActivityRecord rec) {
         try {
             if (rec == null || !sByToken.containsKey(rec.token)) return;  // already gone
@@ -2216,7 +2244,7 @@ public final class HostBootstrap {
             ensureResumed(next.activity);
             android.view.Window w = next.activity.getWindow();
             android.view.View decor = w != null ? w.getDecorView() : null;
-            if (decor != null) PresentDriver.setContentView(decor);
+            if (decor != null) restoreDecor(decor);
             System.out.println("acl activity-stack: popped to " + next.activity.getClass().getName()
                     + " (depth=" + sTask.size() + ")");
         } catch (Throwable t) {
@@ -2416,7 +2444,7 @@ public final class HostBootstrap {
                     invokeActivityLifecycle(existing.activity, "onResume", null, null); ensureResumed(existing.activity);
                     android.view.Window ew = existing.activity.getWindow();
                     android.view.View ed = ew != null ? ew.getDecorView() : null;
-                    if (ed != null) PresentDriver.setContentView(ed);
+                    if (ed != null) restoreDecor(ed);
                     android.util.Log.i("acl", "launchInternalActivity: " + targetCls + " clearTop -> reused");
                     return true;
                 }
@@ -2454,7 +2482,7 @@ public final class HostBootstrap {
                         invokeActivityLifecycle(prev.activity, "onResume", null, null);
                         android.view.Window pw = prev.activity.getWindow();
                         android.view.View pd = pw != null ? pw.getDecorView() : null;
-                        if (pd != null) PresentDriver.setContentView(pd);
+                        if (pd != null) restoreDecor(pd);
                     } catch (Throwable ignored) {}
                 }
             }
