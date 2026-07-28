@@ -3056,6 +3056,16 @@ public final class HostBootstrap {
             // own present loop and never calls into it (its record/replay is re-owned in graphics_jni).
             try {
                 Object tr = allocateHollow(Class.forName("android.view.ThreadedRenderer"));
+                // HardwareRenderer.registerAnimatingRenderNode reads mRootNode.mNativeRenderNode; the
+                // hollow renderer (no ctor) leaves mRootNode null, so a RippleDrawable / reveal / AVD
+                // animation NPEs mid-View.draw and aborts the whole frame (buttons stop responding
+                // visually while a ripple is pending). Seed a real RootRenderNode so the register call
+                // resolves to acl's no-op native instead of dereferencing null.
+                try {
+                    Object rootNode = Class.forName("android.graphics.RenderNode")
+                            .getConstructor(String.class).newInstance("acl$rt$root");
+                    setField(Class.forName("android.graphics.HardwareRenderer"), tr, "mRootNode", rootNode);
+                } catch (Throwable ignored) {}
                 setField(aiCls, attachInfo, "mThreadedRenderer", tr);
             } catch (Throwable ignored) {}
             // The DecorView's attach calls back into mViewRootImpl.setOnContentApplyWindowInsets

@@ -2872,6 +2872,14 @@ void Typeface_nativeWarmUpCache(JNIEnv*, jclass, jstring) {}
 // android.graphics.HardwareRenderer — acl dropped hwui (ADR-4); RT-animation and other
 // process-global config natives are accepted no-ops (Compose's recomposer toggles them).
 void HardwareRenderer_nSetRtAnimationsEnabled(JNIEnv*, jclass, jboolean) {}
+// RenderThread animation registration. A RippleDrawable (Material touch feedback), circular reveal,
+// and AnimatedVectorDrawable register a RenderNodeAnimator with the RootRenderNode so the RT pumps it.
+// acl has no RenderThread pump, so these are no-ops — the animation just does not play. Registering
+// them (rather than leaving them unbound) is what keeps HardwareRenderer.registerAnimatingRenderNode
+// from throwing UnsatisfiedLinkError once its hollow mRootNode is seeded; the throw otherwise aborts
+// View.draw for the whole frame every time a button ripple is pending (buttons look/act stuck).
+void HardwareRenderer_nRegisterAnimatingRenderNode(JNIEnv*, jclass, jlong, jlong) {}
+void HardwareRenderer_nRegisterVectorDrawableAnimator(JNIEnv*, jclass, jlong, jlong) {}
 
 // ── android.view.DisplayEventReceiver (synthetic vsync source) ───────────────────
 // The Choreographer's vsync source (normally SurfaceFlinger). acl provides a synthetic
@@ -5285,6 +5293,8 @@ const JNINativeMethod kRegion[] = {
 };
 const JNINativeMethod kHardwareRenderer[] = {
     {"nSetRtAnimationsEnabled", "(Z)V", reinterpret_cast<void*>(HardwareRenderer_nSetRtAnimationsEnabled)},
+    {"nRegisterAnimatingRenderNode", "(JJ)V", reinterpret_cast<void*>(HardwareRenderer_nRegisterAnimatingRenderNode)},
+    {"nRegisterVectorDrawableAnimator", "(JJ)V", reinterpret_cast<void*>(HardwareRenderer_nRegisterVectorDrawableAnimator)},
     // ViewRootImpl.<init> -> HighContrastTextManager sets this (a static debug toggle); no-op.
     {"nSetHighContrastText", "(Z)V", reinterpret_cast<void*>(+[](JNIEnv*, jclass, jboolean) {})},
     // TextureView hardware-layer path (see AclTextureLayer): create/update/detach a texture layer.
