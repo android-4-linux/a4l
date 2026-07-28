@@ -15,7 +15,7 @@ package android.net.wifi;
  * the accessors return the same "not connected" values a device reports in that state
  * ({@code <unknown ssid>}, a null BSSID, network id -1).
  */
-public class WifiInfo {
+public class WifiInfo implements android.net.TransportInfo {
     /** Android's sentinel for an unavailable SSID (matches the platform constant). */
     public static final String SSID_NONE = "<unknown ssid>";
 
