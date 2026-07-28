@@ -2369,8 +2369,14 @@ public final class HostBootstrap {
         // minimal Context lacks). Needed for setContentView but not for early onCreate; don't
         // let it fail the attach.
         try {
+            // The window (and thus its LayoutInflater) MUST be created with the Activity as its
+            // context, not the app Context: a View's getContext() returns the inflater's context, and
+            // apps cast it to their Activity type — e.g. F-Droid's SettingsView.onAttachedToWindow does
+            // (AppCompatActivity) getContext(), which ClassCastExceptions on the AppContext and aborts
+            // the bottom-nav page attach (the tab appears not to respond). The Activity's base context
+            // is already set (attachActivityContext) so it is a usable Context here.
             Object window = Class.forName("com.android.internal.policy.PhoneWindow")
-                    .getConstructor(android.content.Context.class).newInstance(ctx);
+                    .getConstructor(android.content.Context.class).newInstance(a);
             setField(android.app.Activity.class, a, "mWindow", window);
             // Activity implements Window.Callback; real Activity.attach() wires it so the
             // window routes events to the Activity (AppCompat requires a non-null callback).
@@ -2382,7 +2388,7 @@ public final class HostBootstrap {
             // so the eventual addView -> ViewRootImpl.setView path has a session.
             seedWindowManagerGlobal();
             Object wmImpl = Class.forName("android.view.WindowManagerImpl")
-                    .getConstructor(android.content.Context.class).newInstance(ctx);
+                    .getConstructor(android.content.Context.class).newInstance(a);
             java.lang.reflect.Method setWm = android.view.Window.class.getMethod(
                     "setWindowManager", android.view.WindowManager.class,
                     android.os.IBinder.class, String.class);
