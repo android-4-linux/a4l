@@ -118,6 +118,15 @@ public final class BluetoothAdapter {
     public boolean isOffloadedFilteringSupported() { return false; }
     public boolean isOffloadedScanBatchingSupported() { return false; }
 
+    // BLE scanner (apps discovering nearby devices — e.g. Sonos speaker discovery — call this in
+    // onCreate). acl has no BLE-scan backend, so hand back a scanner whose scans are no-ops rather
+    // than null (a null return commonly NPEs the caller). Only when Bluetooth is off does the real
+    // API return null, which acl mirrors so an app that gates on it still behaves.
+    public android.bluetooth.le.BluetoothLeScanner getBluetoothLeScanner() {
+        if (getState() != STATE_ON) return null;
+        return new android.bluetooth.le.BluetoothLeScanner();
+    }
+
     /** Validate an "AA:BB:CC:DD:EE:FF" address, mirroring BluetoothAdapter.checkBluetoothAddress. */
     public static boolean checkBluetoothAddress(String address) {
         if (address == null || address.length() != 17) return false;
