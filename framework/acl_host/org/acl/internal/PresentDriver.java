@@ -35,6 +35,13 @@ public final class PresentDriver {
     private static native long nOpen(View decor, int w, int h, String title, String appId);
     private static native int nFd(long s);              // Wayland connection fd
     private static native void nSetImeVisible(long s, boolean visible); // show/hide compositor text-input
+    private static native void nSetClipboard(long s, String text);       // put UTF-8 text on the host clipboard
+
+    /** Put UTF-8 {@code text} on the host (Wayland) clipboard, so a Share/copy can be pasted elsewhere. */
+    public static void setClipboard(String text) {
+        final long s = sSession;
+        if (s != 0L && text != null) nSetClipboard(s, text);
+    }
     private static native void nSetContentView(long s, View decor);      // swap presented decor (activity transition)
 
     /** Swap the presented decor to a newly-launched Activity's (internal splash -> main transition). */

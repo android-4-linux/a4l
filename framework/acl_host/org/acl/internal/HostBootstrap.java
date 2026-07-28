@@ -2637,7 +2637,33 @@ public final class HostBootstrap {
             sPendingRequestCode = requestCode;
             if (routeInternal(intent)) return null;  // internal transition handled
             sPendingCallerToken = null; sPendingRequestCode = -1;  // not launched; don't leak to the next
+            // A Share (ACTION_SEND, or ACTION_CHOOSER wrapping it) has no other app to target on acl,
+            // but its text/URL is still useful — route it to the host clipboard so it can be pasted.
+            String shared = extractShareText(intent);
+            if (shared != null && !shared.isEmpty()) {
+                PresentDriver.setClipboard(shared);
+                System.out.println("acl HostBootstrap: Share -> host clipboard (" + shared.length() + " chars)");
+                return null;
+            }
             System.out.println("acl HostBootstrap: startActivity suppressed (no external-activity host): " + intent);
+            return null;
+        }
+
+        // Pull the shared text from a Share intent: EXTRA_TEXT of an ACTION_SEND, or of the wrapped
+        // EXTRA_INTENT inside an ACTION_CHOOSER (Intent.createChooser). Returns null if not a text share.
+        private String extractShareText(android.content.Intent intent) {
+            if (intent == null) return null;
+            try {
+                android.content.Intent send = intent;
+                if (android.content.Intent.ACTION_CHOOSER.equals(intent.getAction())) {
+                    android.os.Parcelable p = intent.getParcelableExtra(android.content.Intent.EXTRA_INTENT);
+                    if (p instanceof android.content.Intent) send = (android.content.Intent) p;
+                }
+                if (android.content.Intent.ACTION_SEND.equals(send.getAction())) {
+                    CharSequence t = send.getCharSequenceExtra(android.content.Intent.EXTRA_TEXT);
+                    if (t != null) return t.toString();
+                }
+            } catch (Throwable ignored) {}
             return null;
         }
         @Override public android.app.Instrumentation.ActivityResult execStartActivity(

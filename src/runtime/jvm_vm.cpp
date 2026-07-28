@@ -1526,6 +1526,17 @@ void JNICALL PresentDriver_nSetImeVisible(JNIEnv*, jclass, jlong sp, jboolean vi
   auto* s = reinterpret_cast<PresentSession*>(sp);
   if (s != nullptr && s->presenter) s->presenter->set_ime_visible(visible == JNI_TRUE);
 }
+// Put UTF-8 text on the host clipboard (wl_data_device.set_selection). Called from HostBootstrap when
+// a Share / ClipboardManager copy is routed to the host. Runs on the present/main thread.
+void JNICALL PresentDriver_nSetClipboard(JNIEnv* env, jclass, jlong sp, jstring text) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s == nullptr || !s->presenter || text == nullptr) return;
+  const char* c = env->GetStringUTFChars(text, nullptr);
+  if (c != nullptr) {
+    s->presenter->set_clipboard(std::string(c));
+    env->ReleaseStringUTFChars(text, c);
+  }
+}
 // Swap the presented decor to a newly-launched Activity's (splash -> Main). The present loop
 // traverses s->view every frame; replace that global ref and the next frame draws the new decor.
 // The traversal method IDs (measure/layout/draw/dispatch*) are declared on android.view.View, so
@@ -2328,6 +2339,8 @@ void register_present_driver_natives(JNIEnv* env) {
       {const_cast<char*>("nFd"), const_cast<char*>("(J)I"), reinterpret_cast<void*>(PresentDriver_nFd)},
       {const_cast<char*>("nSetImeVisible"), const_cast<char*>("(JZ)V"),
        reinterpret_cast<void*>(PresentDriver_nSetImeVisible)},
+      {const_cast<char*>("nSetClipboard"), const_cast<char*>("(JLjava/lang/String;)V"),
+       reinterpret_cast<void*>(PresentDriver_nSetClipboard)},
       {const_cast<char*>("nSetContentView"), const_cast<char*>("(JLandroid/view/View;)V"),
        reinterpret_cast<void*>(PresentDriver_nSetContentView)},
       {const_cast<char*>("nRepeatFd"), const_cast<char*>("(J)I"),

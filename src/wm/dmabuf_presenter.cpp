@@ -236,6 +236,31 @@ class SeatH : public CWlSeat<SeatH> {
   }
 };
 
+// wl_data_device_manager / wl_data_device — clipboard endpoint. acl only sets the SELECTION (copy);
+// paste/drag-and-drop events are ignored (not needed for Share / setPrimaryClip).
+class DataDevMgrH : public CWlDataDeviceManager<DataDevMgrH> {};
+class DataDeviceH : public CWlDataDevice<DataDeviceH> {};
+// wl_data_source — serves the clipboard text. The compositor sends OnSend(mime, fd) when another
+// client pastes; write the UTF-8 text to the fd and close it. `text` lives with the handler (stable
+// across the WlPtr) so it survives until the selection is replaced or cancelled.
+class DataSourceH : public CWlDataSource<DataSourceH> {
+ public:
+  std::string text;
+  void OnSend(const char* /*mime*/, std::int32_t fd) override {
+    if (fd < 0) return;
+    const char* p = text.data();
+    std::size_t left = text.size();
+    while (left > 0) {
+      const ssize_t n = ::write(fd, p, left);
+      if (n < 0) { if (errno == EINTR) continue; break; }
+      if (n == 0) break;
+      p += n;
+      left -= static_cast<std::size_t>(n);
+    }
+    ::close(fd);
+  }
+};
+
 // The presenter is the DmabufFeedback "App": it receives OnDmabufFeedback (v4 tranches)
 // and OnDmabufLegacyFormat (v1–v3 fallback) via the wcs binding, and drives xdg-shell. It
 // is also the pointer/keyboard/IME listener (input parity with the shm presenter).
@@ -322,6 +347,29 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     }
     while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
     log::i("acl.wm.dmabuf", "IME {} (text-input-v3)", visible ? "show" : "hide");
+  }
+  // Put UTF-8 text on the compositor clipboard (wl_data_device.set_selection). Recreates the data
+  // source each time (its text lives in the handler); the previous selection is destroyed. Needs a
+  // recent input serial — a Share tap's button serial is captured in last_input_serial_.
+  void set_clipboard(const std::string& utf8) noexcept override {
+    if (ddm_.IsNull() || data_device_.IsNull()) {
+      log::w("acl.wm.dmabuf", "clipboard: no wl_data_device_manager — cannot copy");
+      return;
+    }
+    data_source_.Reset();  // destroy any previous source (frees the old selection)
+    wl_proxy* raw = wl::construct<wl_data_source_traits,
+        wl_data_device_manager_traits::Op::CreateDataSource>(*ddm_.Get());
+    if (!wl::SetupHandler(data_source_, raw)) {
+      log::w("acl.wm.dmabuf", "clipboard: create data source failed");
+      return;
+    }
+    data_source_.Get()->text = utf8;
+    for (const char* m : {"text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT"})
+      data_source_->Offer(m);
+    const std::uint32_t serial = last_input_serial_ != 0 ? last_input_serial_ : pointer_enter_serial_;
+    data_device_->SetSelection(data_source_.Get()->GetProxy(), serial);
+    while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
+    log::i("acl.wm.dmabuf", "clipboard: selection set ({} bytes, serial {})", utf8.size(), serial);
   }
   // Stage the text-input state and commit it. Called ONLY when the text_input is enabled — after the
   // OnEnter re-enable (a v3 enable resets all state, so it must be re-sent). Surrounding text +
@@ -467,6 +515,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
         presentation_.Record(name, ver);
       } else if (iface == wl_seat_traits::interface_name) {
         seat_name_ = name; seat_ver_ = ver;
+      } else if (iface == wl_data_device_manager_traits::interface_name) {
+        ddm_name_ = name; ddm_ver_ = ver;
       } else if (iface ==
                  text_input_unstable_v3::client::zwp_text_input_manager_v3_traits::interface_name) {
         ti_name_ = name; ti_ver_ = ver;
@@ -533,6 +583,19 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       if (shm_name_ != 0 && wl::BindHandler<wl_shm_traits>(registry_, shm_, shm_name_, shm_ver_))
         cursor_ready_ = cursor_.Init(shm_.Get()->GetProxy(), comp_.Get()->GetProxy());
       if (!cursor_ready_) log::w(kTag, "dmabuf present: no cursor (wl_shm/theme unavailable)");
+      // wl_data_device_manager → the seat's wl_data_device, for clipboard set_selection (Share). The
+      // manager is event-less, so attach a bare proxy (like wl_compositor); the data_device has events
+      // (paste/DnD, ignored) so it goes through SetupHandler.
+      if (ddm_name_ != 0) {
+        if (wl_proxy* mgr = registry_.Bind<wl_data_device_manager_traits>(
+                ddm_name_, std::min(ddm_ver_, wl_data_device_manager_traits::version))) {
+          ddm_.Attach(mgr);
+          if (wl_proxy* dd = wl::construct<wl_data_device_traits,
+                  wl_data_device_manager_traits::Op::GetDataDevice>(*ddm_.Get(),
+                                                                    seat_.Get()->GetProxy()))
+            (void)wl::SetupHandler(data_device_, dd);
+        }
+      }
     }
     if (want_ime_ && ti_name_ != 0 && !seat_.IsNull()) {
       ti_.Record(ti_name_, ti_ver_);
@@ -724,6 +787,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   }
   void OnPointerButton(const wl::PointerButtonEvent& e) {
     px_ = e.x; py_ = e.y;
+    last_input_serial_ = e.serial;  // most recent input serial — wl_data_device.set_selection needs one
     const bool pressed = e.state == WL_POINTER_BUTTON_STATE_PRESSED;
     if (pressed == pointer_down_) return;  // only edges
     pointer_down_ = pressed;
@@ -732,6 +796,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
 
   // wl_keyboard → app input (native side of a KeyEvent). Press/release/repeat → Down/Up.
   void OnKey(const wl::KeyEvent& e) {
+    if (e.serial != 0) last_input_serial_ = e.serial;
     if (input_ == nullptr || !*input_) return;
     const bool pressed = e.state == WL_KEYBOARD_KEY_STATE_PRESSED;
     (*input_)(KeyInput{pressed ? KeyInput::Action::Down : KeyInput::Action::Up, e.key,
@@ -961,6 +1026,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   wl::CursorManager cursor_;            // wl_pointer.set_cursor on enter
   bool cursor_ready_ = false;
   std::uint32_t pointer_enter_serial_ = 0;
+  std::uint32_t last_input_serial_ = 0;  // most recent pointer-button/key serial (set_selection needs one)
+  wl::WlPtr<DataDevMgrH> ddm_;            // wl_data_device_manager (clipboard)
+  wl::WlPtr<DataDeviceH> data_device_;    // clipboard selection endpoint
+  wl::WlPtr<DataSourceH> data_source_;    // current clipboard source (reused; text stored in the handler)
   wl::WlPtr<wl::XdgWmBaseHandler> xdg_wm_base_;
   wl::WlPtr<SurfaceH> surface_;
   wl::WlPtr<wl::XdgSurfaceHandler<Presenter>> xdg_surface_;
@@ -996,6 +1065,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   std::uint32_t comp_name_ = 0, comp_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
   std::uint32_t shm_name_ = 0, shm_ver_ = 0;  // wl_shm (cursor theme only)
   std::uint32_t seat_name_ = 0, seat_ver_ = 0, ti_name_ = 0, ti_ver_ = 0;
+  std::uint32_t ddm_name_ = 0, ddm_ver_ = 0;  // wl_data_device_manager (clipboard)
   std::uint32_t agl_name_ = 0, agl_ver_ = 0, ivi_name_ = 0, ivi_ver_ = 0;
   std::uint32_t fsh_name_ = 0, fsh_ver_ = 0, output_name_ = 0, output_ver_ = 0;
   ShellKind shell_kind_ = ShellKind::Xdg;   // ACL_WL_SHELL (default xdg)

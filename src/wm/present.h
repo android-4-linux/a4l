@@ -237,6 +237,11 @@ class IPresenter {
   // app's android.view.InputMethodManager show/hide (a focused text field). Default no-op for
   // presenters without a text-input binding. Called on the present/looper thread (approach A).
   virtual void set_ime_visible(bool /*visible*/) noexcept {}
+
+  // Put UTF-8 text on the compositor's clipboard (wl_data_device set_selection), so a Share /
+  // ClipboardManager.setPrimaryClip from the app reaches the host and can be pasted into other
+  // programs. Default no-op for presenters/compositors without a wl_data_device_manager.
+  virtual void set_clipboard(const std::string& /*utf8*/) noexcept {}
 };
 
 // Connect to the compositor and create a titled xdg_toplevel, returning a presenter ready for
