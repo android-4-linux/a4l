@@ -1526,6 +1526,13 @@ public final class HostBootstrap {
     static final java.util.Map<String, android.os.Bundle> sProviderMeta =
             new java.util.HashMap<String, android.os.Bundle>();
 
+    // Per-<service> <meta-data>, keyed by fully-qualified service class name, parsed from the
+    // manifest in installContentProviders and re-served via AppPackageManager.getServiceInfo. This
+    // is how Firebase's ComponentDiscovery works: it reads getServiceInfo(ComponentDiscoveryService,
+    // GET_META_DATA).metaData to find the ComponentRegistrar classes (firebase-messaging, etc.).
+    static final java.util.Map<String, android.os.Bundle> sServiceMeta =
+            new java.util.HashMap<String, android.os.Bundle>();
+
     // Installed providers keyed by each declared authority — AppContentResolver.acquireProvider
     // resolves content:// lookups here so query/insert/openFile reach the live provider instead of
     // the no-op stub. Populated by installContentProviders after a successful attachInfo/onCreate.
@@ -1761,6 +1768,22 @@ public final class HostBootstrap {
             if (pi.name != null) pi.metaData = sProviderMeta.get(pi.name);
             return pi;
         }
+        // Non-null ServiceInfo carrying the service's manifest <meta-data> (parsed into sServiceMeta).
+        // StubPackageManager returned null here, which NPEs a caller that reads serviceInfo.metaData:
+        // Firebase's ComponentDiscovery reads getServiceInfo(ComponentDiscoveryService, GET_META_DATA)
+        // .metaData to enumerate its ComponentRegistrars (firebase-messaging, installations, ...), and
+        // a null service left FirebaseMessaging.getInstance() throwing "Firebase Messaging component is
+        // not present". acl starts no services, so this only re-serves declared metadata.
+        @Override public android.content.pm.ServiceInfo getServiceInfo(
+                android.content.ComponentName component, int flags)
+                throws android.content.pm.PackageManager.NameNotFoundException {
+            android.content.pm.ServiceInfo si = new android.content.pm.ServiceInfo();
+            si.packageName = component != null ? component.getPackageName() : pkg;
+            si.name = component != null ? component.getClassName() : null;
+            si.applicationInfo = getApplicationInfo(pkg, 0);
+            if (si.name != null) si.metaData = sServiceMeta.get(si.name);
+            return si;
+        }
         // Non-null ActivityInfo (no parent activity) so androidx NavUtils.getParentActivityName
         // and similar reads don't NPE on a null result.
         @Override public android.content.pm.ActivityInfo getActivityInfo(
@@ -1960,6 +1983,11 @@ public final class HostBootstrap {
             final String NS = "http://schemas.android.com/apk/res/android";
             String cur = null;
             android.os.Bundle curMeta = null;
+            // <service> parsing runs in parallel: acl never starts a service (no ActivityThread/AMS),
+            // but their <meta-data> must be re-servable via getServiceInfo — Firebase's
+            // ComponentDiscoveryService is a metadata-only holder listing the ComponentRegistrars.
+            String curSvc = null;
+            android.os.Bundle curSvcMeta = null;
             for (int ev = xml.getEventType();
                  ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
                 if (ev == android.content.res.XmlResourceParser.START_TAG) {
@@ -1975,12 +2003,28 @@ public final class HostBootstrap {
                                     Boolean.toString(xml.getAttributeBooleanValue(NS, "exported", false)),
                                     Boolean.toString(xml.getAttributeBooleanValue(NS, "grantUriPermissions", false))});
                         }
-                    } else if (cur != null && "meta-data".equals(tag)) {
-                        AppContext.putMetaData(curMeta, xml, base.getResources());
+                    } else if ("service".equals(tag)) {
+                        String name = xml.getAttributeValue(NS, "name");
+                        if (name != null) {
+                            if (name.startsWith(".")) name = pkg + name;
+                            else if (name.indexOf('.') < 0) name = pkg + "." + name;
+                            curSvc = name;
+                            curSvcMeta = new android.os.Bundle();
+                        }
+                    } else if ("meta-data".equals(tag)) {
+                        // Attribute to whichever component encloses it (service takes precedence when
+                        // both are open, though they never nest); a bare <application> meta-data with
+                        // no open component is handled separately by parseManifestMetaData.
+                        if (curSvc != null) AppContext.putMetaData(curSvcMeta, xml, base.getResources());
+                        else if (cur != null) AppContext.putMetaData(curMeta, xml, base.getResources());
                     }
-                } else if (ev == android.content.res.XmlResourceParser.END_TAG
-                        && "provider".equals(xml.getName())) {
-                    if (cur != null) { sProviderMeta.put(cur, curMeta); cur = null; curMeta = null; }
+                } else if (ev == android.content.res.XmlResourceParser.END_TAG) {
+                    String end = xml.getName();
+                    if ("provider".equals(end)) {
+                        if (cur != null) { sProviderMeta.put(cur, curMeta); cur = null; curMeta = null; }
+                    } else if ("service".equals(end)) {
+                        if (curSvc != null) { sServiceMeta.put(curSvc, curSvcMeta); curSvc = null; curSvcMeta = null; }
+                    }
                 }
             }
         } catch (Throwable t) {
