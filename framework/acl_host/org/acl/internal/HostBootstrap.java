@@ -746,6 +746,15 @@ public final class HostBootstrap {
         // AppContext has a null base (super(null)), so Context methods not overridden here
         // would NPE. Device-protected (direct-boot) storage isn't modeled → plain storage.
         @Override public boolean isDeviceProtectedStorage() { return false; }
+        // Direct-boot / device-protected storage is a separate encrypted data dir on a device; acl
+        // (a desktop host) has a single storage root, so hand back THIS context — its files/prefs land
+        // in the normal app dir. The default ContextWrapper delegates to a null base and returns null,
+        // which NPEs callers that immediately dereference it (Firebase's DataCollectionConfigStorage
+        // and GMS measurement do createDeviceProtectedStorageContext().getSharedPreferences(...) on the
+        // androidx.startup init thread, aborting that InitializationProvider).
+        @Override public android.content.Context createDeviceProtectedStorageContext() { return this; }
+        @Override public boolean moveSharedPreferencesFrom(android.content.Context src, String name) { return true; }
+        @Override public boolean moveDatabaseFrom(android.content.Context src, String name) { return true; }
         @Override public boolean isRestricted() { return false; }  // TextView.readTextAppearance
         @Override public boolean canLoadUnsafeResources() { return true; }  // same, @hide
         // The single acl user (ADR-3). WorkManager's PendingIntent.getBroadcast path calls
