@@ -1902,6 +1902,29 @@ public final class HostBootstrap {
                     + (appClass == null || appClass.isEmpty() ? "(default)" : appClass)
                     + " (" + t + "); continuing with the Application attached");
         }
+        // DIAG (ACL_FORCE_STATIC_TRUE="pkg.Class:FIELD[,pkg.Class:FIELD]"): reflectively set boolean
+        // static field(s) to true after the app's classloader is up — e.g. to force an app's debug/
+        // logging flag on (org.telegram.messenger.BuildVars:LOGS_ENABLED routes Telegram's FileLog
+        // through android.util.Log into acl's stderr, so a network/sign-in response is visible).
+        try {
+            String spec = System.getenv("ACL_FORCE_STATIC_TRUE");
+            if (spec != null && !spec.isEmpty()) {
+                for (String one : spec.split(",")) {
+                    int c = one.lastIndexOf(':');
+                    if (c <= 0) continue;
+                    String cls = one.substring(0, c).trim(), fld = one.substring(c + 1).trim();
+                    try {
+                        java.lang.reflect.Field f = Class.forName(cls, true, app.getClassLoader())
+                                .getDeclaredField(fld);
+                        f.setAccessible(true);
+                        f.setBoolean(null, true);
+                        System.out.println("acl HostBootstrap: forced " + cls + "." + fld + " = true");
+                    } catch (Throwable t) {
+                        System.err.println("acl HostBootstrap: ACL_FORCE_STATIC_TRUE " + one + " -> " + t);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
         return app;  // never null → Activity.getApplication() works even if app init failed
     }
 
