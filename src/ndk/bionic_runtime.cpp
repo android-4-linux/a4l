@@ -346,11 +346,16 @@ void ensure_null_art_fs() {
 // bridge below, wrfsbase's to a *glibc* %fs that is Mesa's TLS home, calls the host Mesa symbol, and
 // swaps back. The bridge is { donor_fs; fns[] } — populated here and its address written into the
 // forwarder libs' acl_gl_{egl,gles}_bridge globals after they load. See docs/ndk-scope.md.
-#include "gl_forward_syms.inc"  // kEglForwardSyms[20], kGlesForwardSyms[109] — ABI-ordered
+#include "gl_forward_syms.inc"  // kEglForwardSyms[], kGlesForwardSyms[] — ABI-ordered (see the .inc)
+constexpr int kEglSymCount = static_cast<int>(sizeof(kEglForwardSyms) / sizeof(kEglForwardSyms[0]));
+constexpr int kGlesSymCount = static_cast<int>(sizeof(kGlesForwardSyms) / sizeof(kGlesForwardSyms[0]));
 struct GlBridge {
   std::uintptr_t donor_fs;  // offset 0: the donor glibc %fs (Mesa's per-thread TLS lives here)
-  void* fns[128];           // offset 8: host-Mesa function pointers, indexed to match the forwarders
+  // offset 8: host-Mesa function pointers, indexed to match the forwarders. Sized with headroom over
+  // the current symbol counts so adding entries to gl-forwarders.py does not silently overflow.
+  void* fns[256];
 };
+static_assert(kEglSymCount <= 256 && kGlesSymCount <= 256, "GlBridge::fns too small for symbol table");
 
 // A POOL of parked glibc threads whose %fs the app's GL threads borrow (one donor per GL thread), so
 // host Mesa's per-thread state (current context, driver TLS) is never shared between two GL threads.
@@ -729,8 +734,8 @@ void install_gl_forwarders(BionicRuntime* rt) {
     return missing;
   };
   static GlBridge egl_b{}, gles_b{};
-  const int em = fill(egl_b, megl, kEglForwardSyms, 20);
-  const int gm = fill(gles_b, mgles, kGlesForwardSyms, 109);
+  const int em = fill(egl_b, megl, kEglForwardSyms, kEglSymCount);
+  const int gm = fill(gles_b, mgles, kGlesForwardSyms, kGlesSymCount);
 
 
   // Publish the donor pool into libEGL.so (where acl_gl_pick_donor + the pool live) and grab
