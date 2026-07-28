@@ -1967,6 +1967,10 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
   static auto begin_record = reinterpret_cast<void (*)(int, int)>(
       ::dlsym(RTLD_DEFAULT, "acl_graphics_present_begin_record"));
   if (begin_record != nullptr) begin_record(s->w, s->h);
+  // New frame epoch: under force_record a node re-records once this frame, then caches (not once per
+  // visit, which explodes exponentially). Must bump before View.draw kicks the re-record traversal.
+  static auto frame_tick = reinterpret_cast<void (*)()>(::dlsym(RTLD_DEFAULT, "acl_graphics_frame_tick"));
+  if (frame_tick != nullptr) frame_tick();
   if (s->m_draw != nullptr && s->canvas != nullptr) env->CallVoidMethod(s->view, s->m_draw, s->canvas);
   if (env->ExceptionCheck() == JNI_TRUE) {
     env->ExceptionDescribe(); env->ExceptionClear();

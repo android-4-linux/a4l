@@ -162,6 +162,12 @@ struct AclRenderNode : public SkRefCnt {
   std::vector<DisplayItem> display_list;
   sk_sp<SkPicture> picture;
   bool is_present_root = false;
+  // Under force_record, the present frame epoch this node last re-recorded in. nIsValid reports the
+  // node invalid (forcing a re-record) only ONCE per frame — the first time it is visited — then valid
+  // for the rest of that frame. Without this, force_record reports invalid on EVERY visit, and because
+  // immediate-mode drawing reaches a node via multiple paths, the subtree re-records exponentially
+  // (measured 313k finishRecording / one frame). See activity-transition-2s-force-record memory.
+  std::uint64_t force_epoch = 0;
 };
 
 // ── Native handle guard ──────────────────────────────────────────────────────
@@ -1477,10 +1483,28 @@ std::atomic<int> g_force_record{0};
 extern "C" void acl_graphics_set_force_record(int on) {
   g_force_record.store(on, std::memory_order_relaxed);
 }
+// Present frame epoch — bumped once per frame (acl_graphics_frame_tick, before View.draw). Under
+// force_record, a node is reported invalid (re-record) only until its force_epoch reaches the current
+// epoch, i.e. exactly once per frame; see AclRenderNode::force_epoch.
+std::atomic<std::uint64_t> g_frame_epoch{1};
+extern "C" void acl_graphics_frame_tick() { g_frame_epoch.fetch_add(1, std::memory_order_relaxed); }
+// Safety fallback: ACL_FORCE_ONESHOT=0 restores the old force_record behavior (report invalid on
+// EVERY visit). That is exponential (a node re-records once per draw path, not once per frame:
+// measured ~313k finishRecording / one frame on a list, ~0.9s), so the default is one re-record per
+// frame. Kept as an escape hatch should an app depend on the per-visit re-record for some reason.
+static const bool g_force_oneshot = [] {
+  const char* v = std::getenv("ACL_FORCE_ONESHOT");
+  return v == nullptr || v[0] != '0';
+}();
 jboolean RenderNode_nIsValid(jlong node) {
   auto* n = reinterpret_cast<AclRenderNode*>(node);
   if (n == nullptr) return JNI_FALSE;
-  if (g_force_record.load(std::memory_order_relaxed) && !n->is_present_root) return JNI_FALSE;
+  // force_record: invalid until this node has re-recorded THIS frame, then valid (cached) for the rest
+  // of the frame. One re-record per node per frame — not one per visit (which explodes exponentially
+  // because immediate-mode drawing reaches each node via multiple paths).
+  if (g_force_record.load(std::memory_order_relaxed) && !n->is_present_root &&
+      (!g_force_oneshot || n->force_epoch != g_frame_epoch.load(std::memory_order_relaxed)))
+    return JNI_FALSE;
   return (n->is_present_root || !n->display_list.empty() || n->picture != nullptr) ? JNI_TRUE
                                                                                    : JNI_FALSE;
 }
@@ -4304,7 +4328,11 @@ void RecordingCanvas_nFinish(jlong canvas, jlong node) {
   auto* n = reinterpret_cast<AclRenderNode*>(node);
   if (is_recorder_handle(canvas)) {
     std::vector<DisplayItem> items = recorder_of(canvas)->finish();
-    if (n != nullptr) { n->display_list = std::move(items); n->picture = nullptr; }
+    if (n != nullptr) {
+      n->display_list = std::move(items);
+      n->picture = nullptr;
+      n->force_epoch = g_frame_epoch.load(std::memory_order_relaxed);  // recorded this frame -> now valid
+    }
     bump_scene();  // a node re-recorded its content -> the frame changed
     return;
   }
