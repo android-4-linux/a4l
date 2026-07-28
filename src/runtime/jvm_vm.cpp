@@ -40,6 +40,7 @@
 #include "svc/power/power_jni.h"
 #include "svc/keystore/keystore_jni.h"
 #include "svc/nsd/nsd_jni.h"
+#include "svc/share/share_jni.h"
 #include "svc/bluetooth/bt_jni.h"
 #include "svc/location/location_jni.h"
 #include "svc/net/connectivity_jni.h"
@@ -4674,6 +4675,7 @@ class ArtVm final : public JniVm {
     acl::power::register_power_natives(env);
     acl::keystore::register_keystore_natives(env);  // AndroidKeyStore material -> Secret Service
     acl::nsd::register_nsd_natives(env);
+    acl::share::register_share_natives(env);  // Share a URL -> xdg-desktop-portal OpenURI
     // Bind org.acl.internal.BluetoothBridge (android.bluetooth.* shims) to the svc/bluetooth
     // host BlueZ backend (org.bluez).
     acl::bt::register_bt_natives(env);

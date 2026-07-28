@@ -18,6 +18,8 @@ if have_sdbus
   # browse / resolve / advertise. Needs both D-Bus and JNI.
   if have_jni
     subdir('nsd')
+    # svc/share: hand a shared URI (Intent.ACTION_SEND of a URL) to xdg-desktop-portal's OpenURI.
+    subdir('share')
   endif
 endif
 

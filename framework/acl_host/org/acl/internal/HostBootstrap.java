@@ -2641,8 +2641,11 @@ public final class HostBootstrap {
             // but its text/URL is still useful — route it to the host clipboard so it can be pasted.
             String shared = extractShareText(intent);
             if (shared != null && !shared.isEmpty()) {
-                PresentDriver.setClipboard(shared);
-                System.out.println("acl HostBootstrap: Share -> host clipboard (" + shared.length() + " chars)");
+                PresentDriver.setClipboard(shared);      // always available to paste
+                String url = firstUrl(shared);
+                boolean opened = url != null && HostShare.openUri(url);  // + open in the host handler
+                System.out.println("acl HostBootstrap: Share -> host clipboard (" + shared.length()
+                        + " chars)" + (opened ? " + portal OpenURI " + url : ""));
                 return null;
             }
             System.out.println("acl HostBootstrap: startActivity suppressed (no external-activity host): " + intent);
@@ -2664,6 +2667,16 @@ public final class HostBootstrap {
                     if (t != null) return t.toString();
                 }
             } catch (Throwable ignored) {}
+            return null;
+        }
+
+        // The first http(s) URL token in a shared string (the whole text is usually just the URL, but
+        // some apps prefix "Check out ...:"). Returns null if none — then only the clipboard is used.
+        private String firstUrl(String text) {
+            if (text == null) return null;
+            for (String tok : text.split("\\s+")) {
+                if (tok.startsWith("http://") || tok.startsWith("https://")) return tok;
+            }
             return null;
         }
         @Override public android.app.Instrumentation.ActivityResult execStartActivity(
