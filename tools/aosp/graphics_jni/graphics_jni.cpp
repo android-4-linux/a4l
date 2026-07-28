@@ -3333,6 +3333,22 @@ jobject BitmapFactory_nativeDecodeByteArray(JNIEnv* env, jclass, jbyteArray data
   env->ReleaseByteArrayElements(data, p, JNI_ABORT);
   return decode_encoded_to_bitmap(env, sk, options);
 }
+// nativeDecodeAsset(long nativeAsset, Rect padding, Options opts, long inBitmap, long colorSpace).
+// BitmapFactory.decodeResourceStream / decodeStream take the AssetManager fast path for an
+// AssetInputStream, handing us the native android::Asset* directly. acl uses the real libandroidfw
+// AssetManager (register_android_content_AssetManager), so the pointer is a valid Asset — read its
+// whole buffer and decode. Telegram's sign-in screens (country flags, backgrounds) load images this
+// way; without it every such image threw UnsatisfiedLinkError.
+jobject BitmapFactory_nativeDecodeAsset(JNIEnv* env, jclass, jlong nativeAsset, jobject /*padding*/,
+                                        jobject options, jlong, jlong) {
+  auto* asset = reinterpret_cast<android::Asset*>(nativeAsset);
+  if (asset == nullptr) return nullptr;
+  const off64_t len = asset->getLength();
+  if (len <= 0) return nullptr;
+  const void* buf = asset->getBuffer(false /*wordAligned*/);  // whole asset, mmap or heap
+  if (buf == nullptr) return nullptr;
+  return decode_encoded_to_bitmap(env, SkData::MakeWithCopy(buf, static_cast<size_t>(len)), options);
+}
 
 // ── android.graphics.NinePatch (over the npTc chunk) ─────────────────────────────
 // The chunk is the (deserialized) Res_png_9patch a nine-patch Bitmap carries. validate
@@ -3509,6 +3525,9 @@ const JNINativeMethod kBitmapFactory[] = {
     {"nativeDecodeByteArray",
      "([BIILandroid/graphics/BitmapFactory$Options;JJ)Landroid/graphics/Bitmap;",
      reinterpret_cast<void*>(BitmapFactory_nativeDecodeByteArray)},
+    {"nativeDecodeAsset",
+     "(JLandroid/graphics/Rect;Landroid/graphics/BitmapFactory$Options;JJ)Landroid/graphics/Bitmap;",
+     reinterpret_cast<void*>(BitmapFactory_nativeDecodeAsset)},
 };
 
 const JNINativeMethod kBitmap[] = {
