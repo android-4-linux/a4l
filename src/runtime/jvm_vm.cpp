@@ -1212,11 +1212,15 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
       jboolean handled = consumed;
       if (consumed == JNI_FALSE)
         handled = env->CallBooleanMethod(s->view, s->dispatch_touch, me);
+      // handled=false means NO view consumed the touch (hit-test missed / non-clickable target);
+      // handled=true but "nothing happens" means the onClick ran but its action is unimplemented.
       static int idiag = 0;
-      if (idiag < 24) {
-        log::i(kTag, "input: pointer action={} ({},{}) -> {} handled={}",
-               action, p->x, p->y, consumed == JNI_TRUE ? "overlay" : "activity", handled == JNI_TRUE);
-        ++idiag;
+      static const bool input_diag = std::getenv("ACL_INPUT_DIAG") != nullptr;
+      if (input_diag || idiag < 24) {
+        log::i(kTag, "input: pointer action={} ({},{}) t={}ms -> {} handled={}",
+               action, p->x, p->y, (present_now_ns() - g_proc_start_ns) / 1000000ull,
+               consumed == JNI_TRUE ? "overlay" : "activity", handled == JNI_TRUE);
+        if (!input_diag) ++idiag;
       }
       if (s->me_recycle != nullptr) env->CallVoidMethod(me, s->me_recycle);
       env->DeleteLocalRef(me);
