@@ -4333,10 +4333,27 @@ class ArtVm final : public JniVm {
       option_strings.push_back("-Xusejit:true");  // default: imageless JIT
     }
     option_strings.push_back("-Djava.class.path=" + join(cp, ':'));
-    // Where System.loadLibrary resolves boot-classpath native libs (acl's libsoundpool.so — the
-    // android.media.SoundPool <clinit> loadLibrary("soundpool") — and any future supplemental .so).
-    if (const char* libpath = std::getenv("ACL_ART_LIBPATH"); libpath != nullptr && *libpath != '\0') {
-      option_strings.push_back(std::string("-Djava.library.path=") + libpath);
+    // Where System.loadLibrary resolves native libs not found in a classloader's own
+    // nativeLibraryDir. Two sources, in priority order:
+    //  - ACL_ART_LIBPATH: acl's supplemental libs (libsoundpool.so — the android.media.SoundPool
+    //    <clinit> loadLibrary("soundpool") — and any future supplemental .so).
+    //  - ACL_BIONIC_SYSROOT: the staged bionic sysroot, home of the system NDK libs acl provides
+    //    (libandroid.so, liblog.so, ...). An app that calls System.loadLibrary("android") directly
+    //    from Java — e.g. via ReLinker inside an androidx.startup Initializer — resolves it here;
+    //    without it findLibrary returns null and the app hits UnsatisfiedLinkError. (System NDK libs
+    //    pulled in as NEEDED deps of an app .so already load through the bionic linker; this covers
+    //    only the explicit Java-side loadLibrary of a system lib name.)
+    {
+      std::string libpath;
+      auto add = [&](const char* p) {
+        if (p == nullptr || *p == '\0') return;
+        if (!libpath.empty()) libpath.push_back(':');
+        libpath += p;
+      };
+      add(std::getenv("ACL_ART_LIBPATH"));
+      add(std::getenv("ACL_BIONIC_SYSROOT"));
+      if (!libpath.empty())
+        option_strings.push_back(std::string("-Djava.library.path=") + libpath);
     }
     // Extra raw ART runtime options, space-separated (e.g. "-verbose:class -verbose:jni" to
     // surface the missing class behind an app-swallowed NoClassDefFoundError). Debug/diagnostic.
