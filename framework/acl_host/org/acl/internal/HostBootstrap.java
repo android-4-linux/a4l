@@ -1011,6 +1011,21 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("netstats".equals(name)) {
+                // acl's clean-room android.app.usage.NetworkStatsManager (boot classpath). The real
+                // one lives in the connectivity apex (absent from acl's bcp), and acl has no per-uid
+                // traffic accounting, so this is a no-data shim. Apps resolve it via getSystemService
+                // (NETWORK_STATS_SERVICE) and often store it behind a Kotlin non-null assertion (Sonos
+                // telemetry's NetworkWindowLogger does), which NPEs on a null service. Reflective for
+                // the same reason as wifi/nsd: HostBootstrap compiles against the framework classes.jar
+                // whose NetworkStatsManager ctor differs from acl's shim.
+                try {
+                    return Class.forName("android.app.usage.NetworkStatsManager")
+                            .getConstructor().newInstance();
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("bluetooth".equals(name)) {
                 // acl's clean-room android.bluetooth.BluetoothManager (boot classpath, backed by
                 // svc/bluetooth → BlueZ). Reflective for the same reason as connectivity.
@@ -1230,6 +1245,7 @@ public final class HostBootstrap {
             if ("android.net.ConnectivityManager".equals(serviceClass.getName())) return "connectivity";
             if ("android.net.wifi.WifiManager".equals(serviceClass.getName())) return "wifi";
             if ("android.net.nsd.NsdManager".equals(serviceClass.getName())) return "servicediscovery";
+            if ("android.app.usage.NetworkStatsManager".equals(serviceClass.getName())) return "netstats";
             if ("android.bluetooth.BluetoothManager".equals(serviceClass.getName())) return "bluetooth";
             if (serviceClass == android.os.storage.StorageManager.class) return "storage";
             if (serviceClass == android.os.UserManager.class) return "user";
