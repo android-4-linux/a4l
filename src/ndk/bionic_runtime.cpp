@@ -2249,6 +2249,21 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
   // bionic-spawned threads (a real fault, or ART's all-thread crash dump) must be serviced with a
   // glibc %fs — otherwise ART's handler crashes on it before the shim is even installed. Idempotent.
   install_signal_shims();
+  // The calling thread need not be the main thread: an app can call System.loadLibrary off a
+  // background Java thread (e.g. Sentry's "SentryNdkLoadLi" loader thread doing
+  // SentryNdk.loadNativeLibraries). Loading runs bionic code — dlopen, the lib's .init_array
+  // constructors, JNI_OnLoad — so this thread needs its own bionic TCB before the RunScope below
+  // swaps %fs to it. Attach now: idempotent for the already-bootstrapped main thread, and for a
+  // bionic-born thread already paired through a prior up-call it recovers that pairing. Without
+  // this, RunScope hits an unattached thread and aborts the whole process.
+  {
+    std::string aerr;
+    if (attach_current_thread(&aerr) == 0) {
+      if (error) *error = "attach calling thread for native load failed: " + aerr;
+      log::w(kTag, "load_library: cannot attach calling thread for {}: {}", abs_path, aerr);
+      return nullptr;
+    }
+  }
   // Route the app's native logs (libflutter engine, Dart print, the debug VM-service URL, any liblog
   // user) into acl's stream: bionic liblog's default logd sink isn't running, so they otherwise
   // vanish. Done via libandroid's acl_ndk_log_init BEFORE loading `abs_path`, so its load-time
