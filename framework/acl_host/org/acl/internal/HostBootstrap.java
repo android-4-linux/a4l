@@ -2207,9 +2207,32 @@ public final class HostBootstrap {
     private static final int RESTORE_RECORD_FRAMES = 4;
     private static void restoreDecor(android.view.View decor) {
         PresentDriver.setContentView(decor);
+        clearOverlays(decor);   // drop any GhostView left by an unfinished shared-element transition
         forceFullRelayout(decor);
         decor.requestLayout();
         PresentDriver.pulseForceRecord(RESTORE_RECORD_FRAMES);
+    }
+
+    // Clear leftover ViewOverlay content across the restored tree. A shared-element activity
+    // transition (F-Droid list<->detail app icon) parks a GhostView in the decor's overlay; acl has no
+    // transition coordinator to end the transition, so on a pop the ghost stays and draws on top of the
+    // restored content (a stray icon floating over the list). Nothing legitimate lives in an overlay
+    // right after a restore, so clearing them removes the abandoned ghost without side effects.
+    private static java.lang.reflect.Field sViewOverlayField;
+    private static void clearOverlays(android.view.View v) {
+        if (v == null) return;
+        try {
+            if (sViewOverlayField == null) {
+                sViewOverlayField = android.view.View.class.getDeclaredField("mOverlay");
+                sViewOverlayField.setAccessible(true);
+            }
+            Object overlay = sViewOverlayField.get(v);
+            if (overlay instanceof android.view.ViewOverlay) ((android.view.ViewOverlay) overlay).clear();
+        } catch (Throwable ignored) {}
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup vg = (android.view.ViewGroup) v;
+            for (int i = 0, n = vg.getChildCount(); i < n; i++) clearOverlays(vg.getChildAt(i));
+        }
     }
 
     private static void forceFullRelayout(android.view.View v) {
