@@ -4574,9 +4574,25 @@ class ArtVm final : public JniVm {
           // wp_presentation, so accept + ignore it (0 = NO_ERROR).
           {const_cast<char*>("nativeSetFrameRate"), const_cast<char*>("(JFII)I"),
            reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong, jfloat, jint, jint) -> jint { return 0; })},
+          // new Surface(SurfaceTexture) -> nativeCreateFromSurfaceTexture. media3/ExoPlayer's
+          // PlaceholderSurface wraps a throwaway SurfaceTexture in a Surface for its video renderer;
+          // unbound this threw UnsatisfiedLinkError and killed the video path. Return a real
+          // MediaCodec-decodable producer (a ReaderCtx over a BufferQueue) as mNativeObject; decoded
+          // frames are queued and (no consumer yet) auto-dropped. Feeding them to the SurfaceTexture
+          // for on-screen video is the next step.
+          {const_cast<char*>("nativeCreateFromSurfaceTexture"),
+           const_cast<char*>("(Landroid/graphics/SurfaceTexture;)J"),
+           reinterpret_cast<void*>(+[](JNIEnv* e, jclass, jobject /*surfaceTexture*/) -> jlong {
+#if ACL_HAVE_GL
+             return image_reader_make_producer(e, 0, 0);
+#else
+             (void)e; return 0;
+#endif
+           })},
       };
-      if (env->RegisterNatives(sf, m, 3) == JNI_OK)
-        log::i(kTag, "android.view.Surface.nativeIsValid/nativeRelease/nativeSetFrameRate bound");
+      if (env->RegisterNatives(sf, m, 4) == JNI_OK)
+        log::i(kTag, "android.view.Surface.nativeIsValid/nativeRelease/nativeSetFrameRate/"
+                     "nativeCreateFromSurfaceTexture bound");
       env->DeleteLocalRef(sf);
     }
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();

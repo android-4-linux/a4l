@@ -26,6 +26,15 @@ void register_image_reader_natives(JNIEnv* env);
 // if it isn't a live acl ImageReader surface. The MediaCodec zero-copy output path uses this to
 // queue_imported() decoded frames into the reader (releaseOutputBuffer(render=true)).
 gfx::BufferQueue* image_reader_queue_from_surface(JNIEnv* env, jobject surface);
+
+// Create a bare producer context (a ReaderCtx over a fresh BufferQueue, registered like an
+// ImageReader's so image_reader_queue_from_surface accepts it) and return it as the native handle for
+// a Surface.mNativeObject. Used by Surface.nativeCreateFromSurfaceTexture so MediaCodec has a valid,
+// decodable output surface — ExoPlayer's PlaceholderSurface (a throwaway SurfaceTexture) needs this to
+// initialize its video renderer. Decoded frames are queued (queue_imported, any size) and, with no
+// consumer attached, auto-dropped; feeding them to the SurfaceTexture for display is a follow-on.
+// Returns 0 on failure.
+jlong image_reader_make_producer(JNIEnv* env, int w, int h);
 #endif
 
 }  // namespace acl::runtime

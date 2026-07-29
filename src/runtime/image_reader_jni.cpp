@@ -425,6 +425,26 @@ gfx::BufferQueue* image_reader_queue_from_surface(JNIEnv* env, jobject surface) 
   return reader_live(ctx) ? ctx->queue.get() : nullptr;
 }
 
+jlong image_reader_make_producer(JNIEnv* env, int w, int h) {
+  if (env == nullptr) return 0;
+  if (w <= 0) w = 64;
+  if (h <= 0) h = 64;
+  // The pool geometry here is nominal: the MediaCodec output path uses queue_imported() (external
+  // decoder AHBs at the real frame size), so this only sizes the (unused) dequeue pool. R8G8B8A8 +
+  // GPU sampled/color-output usage, a tiny pool.
+  std::string err;
+  auto q = gfx::BufferQueue::create(static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h),
+                                    /*R8G8B8A8_UNORM*/ 1u,
+                                    /*GPU_SAMPLED_IMAGE|GPU_COLOR_OUTPUT*/ 0x300ull, /*count*/ 2, &err);
+  if (!q) { log::w(kTag, "make_producer {}x{} failed: {}", w, h, err); return 0; }
+  auto* ctx = new ReaderCtx();
+  ctx->queue = std::move(q);
+  env->GetJavaVM(&ctx->vm);
+  { std::lock_guard<std::mutex> lk(g_readers_mu); g_readers.insert(ctx); }
+  log::i(kTag, "make_producer {}x{} -> ReaderCtx (MediaCodec-decodable Surface; no consumer yet)", w, h);
+  return reinterpret_cast<jlong>(ctx);
+}
+
 }  // namespace acl::runtime
 
 #endif  // ACL_HAVE_GL
