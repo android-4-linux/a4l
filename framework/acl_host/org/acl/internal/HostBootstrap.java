@@ -4095,6 +4095,18 @@ public final class HostBootstrap {
                 PresentDriver.setVideoBounds(loc[0], loc[1], w, h);
                 return;
             }
+            if (System.getenv("ACL_MC_DIAG") != null) {  // one-shot: what region does the app lay the video into?
+                StringBuilder chain = new StringBuilder();
+                for (Object v = sv; v instanceof android.view.View; v = ((android.view.View) v).getParent()) {
+                    android.view.View vv = (android.view.View) v;
+                    int[] l = new int[2];
+                    try { vv.getLocationInWindow(l); } catch (Throwable t) {}
+                    chain.append("\n  ").append(vv.getClass().getName())
+                         .append(" ").append(vv.getWidth()).append("x").append(vv.getHeight())
+                         .append(" @").append(l[0]).append(",").append(l[1]);
+                }
+                android.util.Log.i("acl.mc", "video view chain:" + chain);
+            }
             final long handle = PresentDriver.makeVideoSurface(w, h);
             if (handle == 0L) return;
             Class<?> c = android.view.SurfaceView.class;
