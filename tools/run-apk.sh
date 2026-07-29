@@ -95,6 +95,52 @@ FRES=$(first "$ROOT"/out/target/product/*/system/framework/framework-res.apk)
 W=$(mktemp -d "${TMPDIR:-/tmp}/acl-run-apk-XXXXXX")
 trap 'rm -rf "$W"' EXIT
 
+# --- App-bundle input (.apkm / .apks / .xapk = a zip of split APKs) -----------------------------
+# An app-bundle install is base.apk + split_config.{abi,density,language}.apk. acl runs the base
+# directly, so: merge the host-abi split's lib/ into the run APK (acl's native-lib extractor reads
+# the run APK), and hand the density/language RESOURCE splits to acl via ACL_SPLIT_APKS — the
+# framework ResourcesManager stacks them onto base so split-only resources resolve (see
+# HostBootstrap.appResourcesViaSplits). Without this, bundle apps miss config-split resources
+# (a -xxhdpi drawable, a localized string) and throw Resources$NotFoundException.
+SPLITS=""
+case "$APK" in
+  *.apkm|*.apks|*.xapk)
+    BDIR="$W/bundle"; mkdir -p "$BDIR"
+    unzip -o -q "$APK" '*.apk' -d "$BDIR" 2>/dev/null || die_skip "cannot unzip app-bundle $APK"
+    BASEAPK=$(first "$BDIR/base.apk" "$BDIR"/*base*.apk)
+    [ -n "$BASEAPK" ] || die_skip "no base.apk inside app-bundle $APK"
+    RUNAPK="$W/app.apk"; cp "$BASEAPK" "$RUNAPK"
+    # Host-abi native split -> merge its lib/<abi>/*.so into the run APK, stored (uncompressed) so
+    # the bionic loader can mmap/extract them. acl is an x86_64 host.
+    HOSTABI=x86_64; case "$(uname -m)" in aarch64|arm64) HOSTABI=arm64_v8a;; esac
+    ABISPLIT=$(first "$BDIR/split_config.$HOSTABI.apk" "$BDIR"/*"$HOSTABI"*.apk)
+    if [ -n "$ABISPLIT" ]; then
+      ( cd "$W" && rm -rf abilib && mkdir abilib && cd abilib \
+          && unzip -o -q "$ABISPLIT" 'lib/*' >/dev/null 2>&1 \
+          && zip -0 -q -r -X "$RUNAPK" lib ) \
+        || printf 'run-apk: warning: could not merge native split %s\n' "$ABISPLIT" >&2
+    fi
+    # Density resource split matching acl's advertised DPI (default mdpi=160), + the host-locale
+    # language split. The base language/densities stay in base.apk; splits only supplement.
+    DPI="${ACL_DENSITY_DPI:-160}"
+    if   [ "$DPI" -le 140 ]; then DENS=ldpi
+    elif [ "$DPI" -le 200 ]; then DENS=mdpi
+    elif [ "$DPI" -le 220 ]; then DENS=tvdpi
+    elif [ "$DPI" -le 280 ]; then DENS=hdpi
+    elif [ "$DPI" -le 400 ]; then DENS=xhdpi
+    elif [ "$DPI" -le 560 ]; then DENS=xxhdpi
+    else DENS=xxxhdpi; fi
+    add_split() { [ -f "$1" ] && SPLITS="${SPLITS:+$SPLITS:}$1"; }
+    DENSSPLIT=$(first "$BDIR/split_config.$DENS.apk")
+    [ -z "$DENSSPLIT" ] && DENSSPLIT=$(first "$BDIR"/split_config.xxhdpi.apk "$BDIR"/split_config.xhdpi.apk \
+                                            "$BDIR"/split_config.hdpi.apk "$BDIR"/split_config.mdpi.apk)
+    add_split "$DENSSPLIT"
+    LANG2="${LANG%%_*}"; LANG2="${LANG2%%.*}"; [ -n "$LANG2" ] && add_split "$BDIR/split_config.$LANG2.apk"
+    APK="$RUNAPK"
+    printf 'run-apk: app-bundle -> base + %s natives; resource splits: %s\n' "$HOSTABI" "${SPLITS:-none}" >&2
+    ;;
+esac
+
 # The two dex jars live at a STABLE path, not in $W: a dex2oat boot image bakes in the dex
 # *locations* of every bootclasspath entry, so aclshims.jar must sit at the same path when the
 # image is built (tools/build-boot-image.sh) and when the app runs, or ART rejects the image
@@ -181,6 +227,11 @@ if [ -f "$ACLROOT/build/src/audio/libsoundpool.so" ]; then
            LD_LIBRARY_PATH="$ACLROOT/build/src/audio:${LD_LIBRARY_PATH:-}")
 fi
 [ -n "${FRES:-}" ] && RUNNER+=(ACL_ART_FRAMEWORK_RES="$FRES")
+# Config-split resource APKs (from an app-bundle input) -> acl loads base + these via the framework
+# ResourcesManager so split-only resources resolve. An explicit ACL_SPLIT_APKS in the environment
+# wins (manual override); otherwise use what the bundle extraction above found.
+[ -n "${ACL_SPLIT_APKS:-}" ] && SPLITS="$ACL_SPLIT_APKS"
+[ -n "${SPLITS:-}" ] && RUNNER+=(ACL_SPLIT_APKS="$SPLITS")
 RGFONT=$(first "$ROOT"/external/roboto-fonts/Roboto-Regular.ttf)
 [ -n "${RGFONT:-}" ] && RUNNER+=(ACL_GRAPHICS_FONT="$RGFONT")
 [ -f "$HOME_DIR/lib64/libacl_graphics_jni.so" ] && RUNNER+=(ACL_ART_GRAPHICS_LIB="$HOME_DIR/lib64/libacl_graphics_jni.so")
