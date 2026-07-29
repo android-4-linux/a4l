@@ -1628,6 +1628,17 @@ void JNICALL PresentDriver_nSetVideoBounds(JNIEnv*, jclass, jlong sp, jint x, ji
   s->presenter->set_video_bounds(static_cast<int>(x), static_cast<int>(y),
                                  static_cast<int>(w), static_cast<int>(h));
 }
+// The eventfd the decode thread signals after a video frame is ready; the present loop epolls it so
+// video advances without waiting for a UI frame / input event. -1 if the presenter has no wake fd.
+jint JNICALL PresentDriver_nVideoWakeFd(JNIEnv*, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  return (s != nullptr && s->presenter) ? static_cast<jint>(s->presenter->video_wake_fd()) : -1;
+}
+// Present-thread: drain the wake eventfd + commit the pending video frame + flush.
+void JNICALL PresentDriver_nPumpVideo(JNIEnv*, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s != nullptr && s->presenter) s->presenter->pump_video();
+}
 // Build a gfx::DmabufFrame from a produced PresentDmabuf and present it; logs + bumps the presented-
 // frame count. Shared by the immediate path and the deferred RenderThread path. Returns false if the
 // dma-buf is invalid or submit failed (caller keepalives).
@@ -2384,6 +2395,10 @@ void register_present_driver_natives(JNIEnv* env) {
        reinterpret_cast<void*>(PresentDriver_nMakeVideoSurface)},
       {const_cast<char*>("nSetVideoBounds"), const_cast<char*>("(JIIII)V"),
        reinterpret_cast<void*>(PresentDriver_nSetVideoBounds)},
+      {const_cast<char*>("nVideoWakeFd"), const_cast<char*>("(J)I"),
+       reinterpret_cast<void*>(PresentDriver_nVideoWakeFd)},
+      {const_cast<char*>("nPumpVideo"), const_cast<char*>("(J)V"),
+       reinterpret_cast<void*>(PresentDriver_nPumpVideo)},
       {const_cast<char*>("nPulseForceRecord"), const_cast<char*>("(JI)V"),
        reinterpret_cast<void*>(PresentDriver_nPulseForceRecord)},
       {const_cast<char*>("nClose"), const_cast<char*>("(J)V"),

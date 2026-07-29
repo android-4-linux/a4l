@@ -75,6 +75,8 @@ public final class PresentDriver {
     // on-screen video SurfaceView, and position the wl_subsurface plane at that view's on-screen rect.
     private static native long nMakeVideoSurface(long s, int w, int h);
     private static native void nSetVideoBounds(long s, int x, int y, int w, int h);
+    private static native int nVideoWakeFd(long s);   // decode-thread -> present-loop wake eventfd (-1 if none)
+    private static native void nPumpVideo(long s);     // drain the wake fd + commit the pending video frame
 
     /** Make a real producer Surface handle (Surface.mNativeObject) for a video SurfaceView; 0 on fail. */
     public static long makeVideoSurface(int w, int h) {
@@ -188,6 +190,20 @@ public final class PresentDriver {
                     }
                 });
             nGlAloopPump();
+        }
+
+        // Video HW-plane wake fd: the decode thread signals it after a frame is ready, so we commit
+        // video frames as they arrive instead of only on UI frames / input events (idle-UI video
+        // would otherwise freeze until the next mouse move). Present-thread only touches Wayland here.
+        final int videoFd = nVideoWakeFd(s);
+        if (videoFd >= 0) {
+            mq.addOnFileDescriptorEventListener(makeFd(videoFd), 0x1 /*EVENT_INPUT*/,
+                new MessageQueue.OnFileDescriptorEventListener() {
+                    @Override public int onFileDescriptorEvents(FileDescriptor fd, int events) {
+                        nPumpVideo(s);
+                        return EVENT_INPUT;
+                    }
+                });
         }
 
         // Kick: schedule frame 0 (which requests a vsync) and deliver the first vsync so

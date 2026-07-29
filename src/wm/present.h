@@ -246,6 +246,12 @@ class IPresenter {
   // app surface's coordinates. Overrides the decode-side geometry (which is the encoded buffer size
   // at origin). `w,h` are the View's on-screen size (for future wp_viewport scaling). Default no-op.
   virtual void set_video_bounds(int /*x*/, int /*y*/, int /*w*/, int /*h*/) noexcept {}
+  // An eventfd the decode thread signals after stashing a video frame, so the present loop wakes to
+  // commit it WITHOUT depending on UI frames or input events (otherwise idle-UI video freezes until
+  // the next mouse move). The loop epolls this fd and calls pump_video() on it. -1 if unsupported.
+  virtual int video_wake_fd() const noexcept { return -1; }
+  // Present-thread: drain the eventfd + commit any pending video frame + flush. Default no-op.
+  virtual void pump_video() noexcept {}
 
   // IME: show/hide the compositor's text-input (zwp_text_input_v3) on the toplevel, driven by the
   // app's android.view.InputMethodManager show/hide (a focused text field). Default no-op for

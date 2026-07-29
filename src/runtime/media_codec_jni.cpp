@@ -105,6 +105,12 @@ struct CodecCtx {
   std::uint64_t tot_poolfull = 0;                   // ACL_MC_DIAG: driver breaks on a full output pool
   double recv_ms_sum = 0.0, ahb_ms_sum = 0.0;       // ACL_MC_DIAG: per-30 receive_frame / ahb_import time
   std::chrono::steady_clock::time_point t0_recv{};  // ACL_MC_DIAG: decode-rate window start
+  // HW-plane pacing: present decoded frames at their own presentation timestamp (1x), decoupled from
+  // ExoPlayer's render/drop cadence (which gates decode to ~2fps here). Baseline (re)set on the first
+  // frame and on any seek / large pts discontinuity.
+  bool pace_init = false;
+  std::int64_t pace_first_pts = 0, pace_last_pts = 0;
+  std::chrono::steady_clock::time_point pace_first_wall{};
 };
 
 CodecCtx* ctx_of(JNIEnv* env, jobject thiz) {
@@ -174,6 +180,31 @@ jobject build_format_map(JNIEnv* env, CodecCtx* ctx) {
   return m;
 }
 
+// HW-plane pacing: block the driver until wall-clock reaches the frame's presentation time (relative
+// to the first frame), so the plane plays at 1x. Decode itself is ~365fps; without this the plane
+// would fast-forward. The baseline resets on the first frame and on any backward / >5s pts jump
+// (seek / loop restart with a fresh timeline). Sleeps in <=10ms slices so stop is honored promptly.
+// Does NOT hold ctx->amu (releaseOutputBuffer must stay responsive on ExoPlayer's thread).
+void pace_to_pts(CodecCtx* ctx, std::int64_t pts) {
+  const auto now = std::chrono::steady_clock::now();
+  if (!ctx->pace_init || pts < ctx->pace_last_pts ||
+      (pts - ctx->pace_last_pts) > 5'000'000 /*us*/) {
+    ctx->pace_init = true;
+    ctx->pace_first_pts = pts;
+    ctx->pace_first_wall = now;
+    ctx->pace_last_pts = pts;
+    return;  // present the baseline frame immediately
+  }
+  ctx->pace_last_pts = pts;
+  const auto target = ctx->pace_first_wall + std::chrono::microseconds(pts - ctx->pace_first_pts);
+  while (!ctx->stop.load(std::memory_order_acquire)) {
+    const auto t = std::chrono::steady_clock::now();
+    if (t >= target) break;
+    std::this_thread::sleep_for(std::min<std::chrono::nanoseconds>(
+        target - t, std::chrono::milliseconds(10)));
+  }
+}
+
 // The async driver thread: OWNS the CodecDecoder and delivers MediaCodec callbacks via
 // postEventFromNative (Java routes them to the app's mCallback on its handler). Input is decoupled
 // through ctx->pending, so the decoder is only ever touched here — no cross-thread avcodec race.
@@ -212,13 +243,21 @@ void async_driver(CodecCtx* ctx) {
       // driver floods ExoPlayer with hundreds of undrained output buffers and its render pacing breaks
       // (only the first frame ever renders). Find a free slot in the fixed pool BEFORE decoding; if
       // none, stop until a release frees one.
+      // The HW-plane path (a video codec with an active wl_subsurface presenter) presents decoded
+      // frames DIRECTLY to the plane and hands ExoPlayer phantom output buffers (no AHB). It therefore
+      // does NOT gate decode on ExoPlayer's release cadence: the slot is allocated AFTER decode and the
+      // oldest slot is recycled when the pool is full (a phantom has nothing to free), and the frame is
+      // paced to its own timestamp. Non-plane paths keep the real MediaCodec backpressure (pre-gate on
+      // a free slot, hold the imported AHB until releaseOutputBuffer).
+      wm::IPresenter* vpr =
+          (ctx->mime.rfind("video/", 0) == 0) ? wm::active_video_presenter() : nullptr;
       int slot = -1;
-      {
+      if (vpr == nullptr) {
         std::lock_guard<std::mutex> lk(ctx->amu);
         for (std::size_t i = 0; i < ctx->outslots.size(); ++i)
           if (!ctx->outslots[i].used) { slot = static_cast<int>(i); break; }
+        if (slot < 0) { ctx->tot_poolfull++; break; }  // pool full — wait for releaseOutputBuffer
       }
-      if (slot < 0) { ctx->tot_poolfull++; break; }  // output pool full — wait for releaseOutputBuffer
       gfx::DmabufFrame f{};
       std::int64_t pts = 0;
       const auto t_rf = std::chrono::steady_clock::now();
@@ -243,13 +282,33 @@ void async_driver(CodecCtx* ctx) {
                ctx->tot_poolfull, ctx->recv_ms_sum / 30.0, ctx->ahb_ms_sum / 30.0);
         ctx->recv_ms_sum = 0.0; ctx->ahb_ms_sum = 0.0;
       }
-      // Route decoded VIDEO frames to the app's Wayland HW plane (a wl_subsurface): the compositor
-      // scans out the YUV dma-buf on a DRM overlay plane — zero-copy, zero-CPU, no Skia/YCbCr in acl.
-      // present_video dups the fd (f is recycled on the next receive_frame). Geometry is the buffer
-      // size at (0,0) for now; on-screen View bounds + wp_viewport scaling are a follow-up.
-      if (ctx->mime.rfind("video/", 0) == 0) {
-        if (wm::IPresenter* pr = wm::active_video_presenter())
-          pr->present_video(f, 0, 0, static_cast<int>(f.width), static_cast<int>(f.height));
+      if (vpr != nullptr) {
+        // HW-plane path: pace to the frame's timestamp, present directly (compositor scans the YUV
+        // dma-buf out on a DRM overlay plane — zero-copy, zero-CPU), then hand ExoPlayer a phantom
+        // output buffer (no AHB) so its pipeline keeps running without gating decode.
+        if (diag && (ctx->tot_recv % 30 == 2))
+          log::i(kTag, "plane pts={}us (delta from prev={}us)", pts, pts - ctx->pace_last_pts);
+        pace_to_pts(ctx, pts);
+        vpr->present_video(f, 0, 0, static_cast<int>(f.width), static_cast<int>(f.height));
+        {
+          std::lock_guard<std::mutex> lk(ctx->amu);
+          for (std::size_t i = 0; i < ctx->outslots.size(); ++i)
+            if (!ctx->outslots[i].used) { slot = static_cast<int>(i); break; }
+          if (slot < 0) {  // pool full — recycle the oldest phantom (nothing to free)
+            std::size_t oldest = 0;
+            for (std::size_t i = 1; i < ctx->outslots.size(); ++i)
+              if (ctx->outslots[i].pts < ctx->outslots[oldest].pts) oldest = i;
+            if (ctx->outslots[oldest].ahb != nullptr) gfx::ahb_release(ctx->outslots[oldest].ahb);
+            slot = static_cast<int>(oldest);
+          }
+          ctx->outslots[slot] = {nullptr, true, pts};  // phantom: presented on the plane, no AHB held
+        }
+        jobject info = env->NewObject(g_bufinfo_cls, g_bufinfo_ctor);
+        env->CallVoidMethod(info, g_bufinfo_set, 0, 0, static_cast<jlong>(pts), 0);
+        ctx->tot_queued++;
+        post(CB_OUTPUT_AVAILABLE, slot, info);
+        if (info) env->DeleteLocalRef(info);
+        break;  // one paced frame, then back to the outer loop to service input before the next
       }
       const auto t_ahb = std::chrono::steady_clock::now();
       ::AHardwareBuffer* ahb = gfx::ahb_import(f);
@@ -444,7 +503,10 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env, jobject thiz, jint index, jbool
     std::lock_guard<std::mutex> lk(ctx->amu);  // outslots shared with the async driver thread
     if (static_cast<std::size_t>(index) >= ctx->outslots.size()) return;
     auto& s = ctx->outslots[index];
-    if (!s.used || s.ahb == nullptr) return;
+    if (!s.used) return;
+    // Phantom (HW-plane) buffer: already presented on the plane, no AHB. Free the slot so the pool
+    // drains; nothing to render/queue. (The driver may have already recycled this index — harmless.)
+    if (s.ahb == nullptr) { rel_pts = s.pts; s = {}; ctx->acv.notify_one(); return; }
     ahb = s.ahb;
     rel_pts = s.pts;
     s = {};

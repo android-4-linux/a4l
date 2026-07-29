@@ -31,6 +31,7 @@
 
 #include <poll.h>
 #include <unistd.h>
+#include <sys/eventfd.h>
 
 #include <wayland-client.h>
 
@@ -603,6 +604,9 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     video_x_ = x; video_y_ = y; video_w_ = w; video_h_ = h;
     if (video_diag_ && (++video_enq_ % 30 == 1))
       log::i(kTag, "video: enqueued {} frames from decode", video_enq_);
+    // Wake the present loop so it commits this frame now — the decode thread cannot touch Wayland, and
+    // the loop would otherwise sleep until the next UI frame / input event (idle-UI video freeze).
+    if (video_wake_fd_ >= 0) { std::uint64_t one = 1; [[maybe_unused]] auto n = ::write(video_wake_fd_, &one, sizeof(one)); }
   }
   void hide_video() noexcept override {
     std::lock_guard<std::mutex> lk(video_mu_);
@@ -614,6 +618,15 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     std::lock_guard<std::mutex> lk(video_mu_);
     vb_x_ = x; vb_y_ = y; vb_w_ = w; vb_h_ = h; vb_set_ = true;
   }
+  int video_wake_fd() const noexcept override { return video_wake_fd_; }
+  // Present-thread: drain the wake eventfd, commit the pending video frame, flush the display. Driven
+  // by the present loop's epoll on video_wake_fd() so video advances independently of UI/input.
+  void pump_video() noexcept override {
+    if (video_wake_fd_ >= 0) { std::uint64_t v; while (::read(video_wake_fd_, &v, sizeof(v)) > 0) {} }
+    drain_video();
+    if (display_.Get() != nullptr) { while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {} }
+  }
+
   // Wayland-thread: lazily create the plane and present the pending video frame. Called each present
   // tick (submit/keepalive/dispatch).
   void drain_video() noexcept {
@@ -1313,6 +1326,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   int video_x_ = 0, video_y_ = 0, video_w_ = 0, video_h_ = 0;
   int vb_x_ = 0, vb_y_ = 0, vb_w_ = 0, vb_h_ = 0;  // video View on-screen bounds (set_video_bounds)
   bool vb_set_ = false;
+  int video_wake_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);  // decode thread -> present loop wake
   bool video_diag_ = std::getenv("ACL_VIDEO_DIAG") != nullptr;
   std::uint64_t video_enq_ = 0;
   BufferH buffer_;  // direct member: stable address for the dispatcher (static path)
