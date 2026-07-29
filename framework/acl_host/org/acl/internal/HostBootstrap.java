@@ -456,7 +456,68 @@ public final class HostBootstrap {
         else if (scheme == 2) sNightMode = android.content.res.Configuration.UI_MODE_NIGHT_NO;
     }
 
+    // Config-split APK paths for the running app (ACL_SPLIT_APKS, ':'-separated). An app-bundle
+    // install is base.apk + split_config.{density,lang,abi}.apk; acl runs the base directly and takes
+    // the splits here. Only existing files are returned.
+    static String[] splitApkPaths() {
+        String v = System.getenv("ACL_SPLIT_APKS");
+        if (v == null || v.isEmpty()) return new String[0];
+        java.util.List<String> out = new java.util.ArrayList<String>();
+        for (String p : v.split(":")) {
+            if (!p.isEmpty() && new java.io.File(p).isFile()) out.add(p);
+        }
+        return out.toArray(new String[0]);
+    }
+
+    // Build the app's Resources through the framework's ResourcesManager so base.apk + its config
+    // splits are stacked into ONE split-aware AssetManager — the same path ActivityThread/LoadedApk
+    // use on a real device (splitResDirs). This is how a density drawable / language string that
+    // lives only in a split resolves. Doing it via ResourcesManager (not a hand-rolled AssetManager +
+    // addAssetPath) is essential: RM owns the process-wide ApkAssets cache, so it merges the tables
+    // cleanly instead of a second AssetManager polluting shared state (which broke Firebase init).
+    // Reflection-only: getResources / getInstance / CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO are
+    // @hide. Returns null on any failure so appResources falls back to the base-only path.
+    private static Resources appResourcesViaSplits(String apkPath, String[] splits) {
+        try {
+            Class<?> rmCls = Class.forName("android.app.ResourcesManager");
+            Object rm = rmCls.getMethod("getInstance").invoke(null);
+            Class<?> ciCls = Class.forName("android.content.res.CompatibilityInfo");
+            Object compat = ciCls.getField("DEFAULT_COMPATIBILITY_INFO").get(null);
+            java.lang.reflect.Method m = rmCls.getMethod("getResources",
+                    android.os.IBinder.class, String.class, String[].class, String[].class,
+                    String[].class, String[].class, Integer.class,
+                    android.content.res.Configuration.class, ciCls, ClassLoader.class,
+                    java.util.List.class);
+            Resources r = (Resources) m.invoke(rm,
+                    null,                 // activityToken
+                    apkPath,              // resDir (base.apk)
+                    splits,               // splitResDirs (the config splits)
+                    null, null, null,     // legacyOverlayDirs, overlayPaths, libDirs
+                    null,                 // overrideDisplayId -> default display
+                    appConfiguration(),   // overrideConfig -> acl's advertised display config
+                    compat,               // CompatibilityInfo.DEFAULT
+                    null,                 // classLoader -> system
+                    null);                // ResourcesLoaders
+            if (r != null) {
+                System.out.println("acl HostBootstrap: split-aware resources via ResourcesManager (base + "
+                        + splits.length + " config split(s))");
+            }
+            return r;
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: ResourcesManager split load failed: " + t);
+            return null;
+        }
+    }
+
     private static Resources appResources(String apkPath, String frameworkResPath) {
+        // App-bundle install (base + config splits): route through the framework's split-aware
+        // ResourcesManager so split-only resources resolve. Single-APK apps (no ACL_SPLIT_APKS) keep
+        // the proven hand-rolled path below unchanged.
+        String[] splits = splitApkPaths();
+        if (splits.length > 0) {
+            Resources r = appResourcesViaSplits(apkPath, splits);
+            if (r != null) return r;
+        }
         try {
             android.content.res.AssetManager am =
                     android.content.res.AssetManager.class.getDeclaredConstructor().newInstance();
