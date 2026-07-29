@@ -477,6 +477,26 @@ public final class HostBootstrap {
     // cleanly instead of a second AssetManager polluting shared state (which broke Firebase init).
     // Reflection-only: getResources / getInstance / CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO are
     // @hide. Returns null on any failure so appResources falls back to the base-only path.
+    // Open the BASE apk's AndroidManifest.xml. openXmlResourceParser("AndroidManifest.xml") with no
+    // cookie returns the manifest of the FIRST apk in the AssetManager — which, with framework-res, a
+    // vendored WebView apk, or config SPLITS loaded, is often NOT the app's base.apk. A config split's
+    // manifest declares no <provider>/<application>/<activity>, so those parses silently came back
+    // empty: for a bundle app that dropped EVERY ContentProvider, incl. FirebaseInitProvider, and the
+    // app then died "Default FirebaseApp is not initialized". Pin the base apk via findCookieForPath.
+    static android.content.res.XmlResourceParser openBaseManifest(
+            android.content.res.AssetManager am, String baseApkPath) throws java.io.IOException {
+        int cookie = 0;
+        if (baseApkPath != null) {
+            try {
+                java.lang.reflect.Method m = am.getClass().getMethod("findCookieForPath", String.class);
+                Object c = m.invoke(am, baseApkPath);
+                if (c instanceof Integer) cookie = ((Integer) c).intValue();
+            } catch (Throwable ignored) { }
+        }
+        return cookie > 0 ? am.openXmlResourceParser(cookie, "AndroidManifest.xml")
+                          : am.openXmlResourceParser("AndroidManifest.xml");
+    }
+
     private static Resources appResourcesViaSplits(String apkPath, String[] splits) {
         try {
             Class<?> rmCls = Class.forName("android.app.ResourcesManager");
@@ -730,7 +750,7 @@ public final class HostBootstrap {
             android.os.Bundle b = new android.os.Bundle();
             android.content.res.XmlResourceParser xml = null;
             try {
-                xml = getResources().getAssets().openXmlResourceParser("AndroidManifest.xml");
+                xml = openBaseManifest(getResources().getAssets(), apkPath);  // apkPath: this AppContext's base
                 boolean inApp = false;
                 for (int ev = xml.getEventType();
                      ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
@@ -1641,7 +1661,8 @@ public final class HostBootstrap {
                 if (c != null) {
                     final String NS = "http://schemas.android.com/apk/res/android";
                     final String p = c.getPackageName();
-                    xml = c.getResources().getAssets().openXmlResourceParser("AndroidManifest.xml");
+                    xml = openBaseManifest(c.getResources().getAssets(),
+                            c.getApplicationInfo() != null ? c.getApplicationInfo().sourceDir : null);
                     for (int ev = xml.getEventType();
                          ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
                         if (ev == android.content.res.XmlResourceParser.START_TAG
@@ -1801,25 +1822,11 @@ public final class HostBootstrap {
             java.util.List<String> out = new java.util.ArrayList<String>();
             android.content.res.XmlResourceParser xml = null;
             try {
-                // Pin to the APP's apk. openXmlResourceParser(name) returns the FIRST match across
-                // every apk in the AssetManager, and acl adds others (framework-res, the vendored
-                // WebView apk) -- by the time permissions are queried the first "AndroidManifest.xml"
-                // was WebView's, which is how this parse reported 4 unrelated permissions for an app
-                // whose manifest declares 22. findCookieForPath selects the right one.
-                android.content.res.AssetManager am = base.getResources().getAssets();
-                int cookie = 0;
-                String apk = base.getApplicationInfo() != null
-                        ? base.getApplicationInfo().sourceDir : null;
-                if (apk != null) {
-                    try {
-                        java.lang.reflect.Method m =
-                                am.getClass().getMethod("findCookieForPath", String.class);
-                        Object c = m.invoke(am, apk);
-                        if (c instanceof Integer) cookie = ((Integer) c).intValue();
-                    } catch (Throwable ignored) { }
-                }
-                xml = cookie > 0 ? am.openXmlResourceParser(cookie, "AndroidManifest.xml")
-                                 : am.openXmlResourceParser("AndroidManifest.xml");
+                // Pin to the app's base apk (openBaseManifest): the first "AndroidManifest.xml" across
+                // the AssetManager can be framework-res / the vendored WebView apk / a config split,
+                // not the app — which once reported 4 unrelated permissions for an app declaring 22.
+                xml = openBaseManifest(base.getResources().getAssets(),
+                        base.getApplicationInfo() != null ? base.getApplicationInfo().sourceDir : null);
                 final String NS = "http://schemas.android.com/apk/res/android";
                 for (int ev = xml.getEventType();
                      ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
@@ -2064,7 +2071,8 @@ public final class HostBootstrap {
         java.util.List<String[]> providers = new java.util.ArrayList<String[]>();
         android.content.res.XmlResourceParser xml = null;
         try {
-            xml = base.getResources().getAssets().openXmlResourceParser("AndroidManifest.xml");
+            xml = openBaseManifest(base.getResources().getAssets(),
+                    base.getApplicationInfo() != null ? base.getApplicationInfo().sourceDir : null);
             final String NS = "http://schemas.android.com/apk/res/android";
             String cur = null;
             android.os.Bundle curMeta = null;
