@@ -19,6 +19,7 @@
 
 #include <cerrno>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -535,10 +536,15 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   // the next wl_surface.frame tick, attach + damage + commit + flush. Mirrors one iteration of
   // ── Video HW-plane seam (IPresenter) ─────────────────────────────────────────────────────────
   // Called from the DECODE thread: stash the frame + geometry; drain_video() (Wayland thread) does
-  // the actual subsurface commit. A newer frame supersedes an undrained one.
+  // the actual subsurface commit. The decoder recycles frame.fd on its next receive_frame, so DUP it
+  // — we own the copy until the compositor imports it in drain_video (create_immed dups on the wire).
+  // A newer frame supersedes (and frees the fd of) an undrained one.
   void present_video(const gfx::DmabufFrame& frame, int x, int y, int w, int h) noexcept override {
+    gfx::DmabufFrame f = frame;
+    f.fd = frame.fd >= 0 ? ::dup(frame.fd) : -1;
     std::lock_guard<std::mutex> lk(video_mu_);
-    video_pending_ = frame;
+    if (video_has_pending_ && video_pending_.fd >= 0) ::close(video_pending_.fd);  // superseded
+    video_pending_ = f;
     video_has_pending_ = true;
     video_x_ = x; video_y_ = y; video_w_ = w; video_h_ = h;
   }
@@ -572,7 +578,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     }
     (void)w; (void)h;  // on-screen size (wp_viewport scaling) is a follow-up; present at buffer size
     video_plane_.set_position(x, y);
-    video_plane_.present(frame);
+    video_plane_.present(frame);      // create_immed dups the fd on the wire
+    if (frame.fd >= 0) ::close(frame.fd);  // drop our owned dup
     // wl_subsurface.set_position is applied on the PARENT commit; commit it when the position changed.
     if (video_plane_.take_pos_dirty()) surface_.Get()->Commit();
   }
@@ -1284,6 +1291,17 @@ bool present_dmabuf_loop(int /*width*/, int /*height*/, std::string_view title,
                          std::uint64_t max_frames) noexcept {
   Presenter p;
   return p.run_loop(render, input, want_ime, title, app_id, max_frames);
+}
+
+// The app's active presenter, for routing decoded video frames to its HW plane (see present.h).
+namespace {
+std::atomic<IPresenter*> g_active_video_presenter{nullptr};
+}
+IPresenter* active_video_presenter() noexcept {
+  return g_active_video_presenter.load(std::memory_order_acquire);
+}
+void set_active_video_presenter(IPresenter* p) noexcept {
+  g_active_video_presenter.store(p, std::memory_order_release);
 }
 
 std::unique_ptr<IPresenter> presenter_open(int width, int height, std::string_view title,

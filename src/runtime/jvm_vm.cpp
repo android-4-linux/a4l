@@ -1436,6 +1436,9 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env, jclass, jobject view, jint w, jin
     delete s;
     return 0;
   }
+  // Publish this as the app's active presenter so decoded video frames can be routed to its HW plane
+  // (wm::SubsurfacePlane) via present_video from the media/decode side.
+  wm::set_active_video_presenter(s->presenter.get());
   // Deferred present (UI-thread/RenderThread split): when ACL_PRESENT_RT is set, the present-root
   // records into an SkPicture replayed on a dedicated RenderThread that owns all GrContext work, so
   // the UI thread does none (GrDirectContext is single-threaded). Otherwise, the immediate path wraps

@@ -28,6 +28,7 @@
 
 #include "gfx/ahardware_buffer.h"
 #include "gfx/buffer_queue.h"
+#include "wm/present.h"  // wm::active_video_presenter (route decoded video to the HW plane)
 #include "log/log.h"
 #include "media/video_decoder.h"
 #include "runtime/image_reader_jni.h"
@@ -219,6 +220,14 @@ void async_driver(CodecCtx* ctx) {
       const int rr = ctx->dec->receive_frame(&f, &pts, &err);
       if (diag && ctx->dbg_recv < 6) { log::i(kTag, "async receive_frame={} pts={} {}", rr, pts, err); ctx->dbg_recv++; }
       if (rr <= 0) break;
+      // Route decoded VIDEO frames to the app's Wayland HW plane (a wl_subsurface): the compositor
+      // scans out the YUV dma-buf on a DRM overlay plane — zero-copy, zero-CPU, no Skia/YCbCr in acl.
+      // present_video dups the fd (f is recycled on the next receive_frame). Geometry is the buffer
+      // size at (0,0) for now; on-screen View bounds + wp_viewport scaling are a follow-up.
+      if (ctx->mime.rfind("video/", 0) == 0) {
+        if (wm::IPresenter* pr = wm::active_video_presenter())
+          pr->present_video(f, 0, 0, static_cast<int>(f.width), static_cast<int>(f.height));
+      }
       ::AHardwareBuffer* ahb = gfx::ahb_import(f);
       if (ahb == nullptr) continue;
       { std::lock_guard<std::mutex> lk(ctx->amu); ctx->outslots[slot] = {ahb, true, pts}; }

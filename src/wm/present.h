@@ -254,6 +254,12 @@ class IPresenter {
   virtual void set_clipboard(const std::string& /*utf8*/) noexcept {}
 };
 
+// The app's active presenter, for routing decoded VIDEO frames to its HW plane (present_video) from
+// the media/decode side without threading the session pointer through. Set by the runtime when the
+// main present session opens (PresentDriver.nOpen); null when no session is active. Thread-safe.
+IPresenter* active_video_presenter() noexcept;
+void set_active_video_presenter(IPresenter* p) noexcept;
+
 // Connect to the compositor and create a titled xdg_toplevel, returning a presenter ready for
 // its first frame (configured, one buffer free). `input` (may be empty) receives pointer/key/IME.
 // Returns nullptr when no backend/compositor is available. Destroy to tear down + disconnect.
