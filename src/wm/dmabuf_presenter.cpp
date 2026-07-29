@@ -18,7 +18,11 @@
 #if ACL_HAVE_WCS && ACL_HAVE_VULKAN
 
 #include <cerrno>
+#include <algorithm>
 #include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <cstdlib>  // getenv/strtoul (ACL_WL_SHELL shell selection)
 #include <ctime>
 #include <string_view>
@@ -103,6 +107,117 @@ class FrameH : public CWlCallback<FrameH> {
 // them, so a bare handler suffices.
 class BufferParamsH
     : public dmabuf::CZwpLinuxBufferParamsV1<BufferParamsH> {};
+
+// wl_subcompositor / wl_subsurface: no events; bare handlers suffice.
+class SubcompositorH : public CWlSubcompositor<SubcompositorH> {};
+class SubsurfaceH : public CWlSubsurface<SubsurfaceH> {};
+
+// ── SubsurfacePlane: a video HW-plane path ─────────────────────────────────────────────────────
+// A wl_subsurface under the app's main wl_surface, onto which a decoded video frame is presented
+// DIRECTLY as a Linux dma-buf (zwp_linux_dmabuf_v1) — the compositor scans it out on a DRM overlay
+// plane (or GPU-composites), doing YUV→RGB + scaling. Zero-copy, zero-CPU, no Skia/YCbCr in acl:
+// this is the "video → hardware plane, decoder writes direct" path. First concrete piece — the
+// Wayland plumbing; routing (MediaCodec → here) and precise on-screen geometry iterate from this.
+class SubsurfacePlane {
+ public:
+  // Create the child surface + subsurface under `parent`. `create_params` yields a fresh
+  // zwp_linux_buffer_params_v1 proxy (the presenter binds it to feedback_.CreateParams()) — passed as
+  // a functor so this stays decoupled from the DmabufFeedback<Presenter> type (defined later).
+  bool create(CompositorH& comp, SubcompositorH& subcomp, SurfaceH& parent,
+              std::function<wl_proxy*()> create_params, std::string* err) noexcept {
+    create_params_ = std::move(create_params);
+    if (!wl::SetupHandler(surface_, wl::construct<wl_surface_traits,
+                          wl_compositor_traits::Op::CreateSurface>(comp))) {
+      if (err) *err = "child wl_surface create failed";
+      return false;
+    }
+    // wl_subsurface has no events -> Attach (SetupHandler would require an event dispatcher).
+    wl_proxy* ss = wl::construct<wl_subsurface_traits,
+                                 wl_subcompositor_traits::Op::GetSubsurface>(
+        subcomp, surface_.Get()->GetProxy(), parent.GetProxy());
+    if (ss == nullptr) {
+      if (err) *err = "wl_subcompositor.get_subsurface failed";
+      return false;
+    }
+    subsurface_.Attach(ss);
+    // Desync: the video plane commits its own frames at the decode cadence, independent of the app's
+    // UI commits (a synced subsurface would only update when the parent commits).
+    subsurface_.Get()->SetDesync();
+    created_ = true;
+    return true;
+  }
+
+  bool created() const noexcept { return created_; }
+
+  // Position of the plane's top-left in the PARENT surface's coordinate space. Double-buffered on the
+  // PARENT: the caller must commit the parent surface for a position change to take effect.
+  void set_position(int x, int y) noexcept {
+    if (subsurface_.Get() != nullptr && (x != x_ || y != y_)) {
+      subsurface_.Get()->SetPosition(x, y);
+      x_ = x;
+      y_ = y;
+      pos_dirty_ = true;
+    }
+  }
+  bool take_pos_dirty() noexcept { bool d = pos_dirty_; pos_dirty_ = false; return d; }
+
+  // Present one decoded frame (a distinct dma-buf each time — queue_imported semantics) directly on
+  // the plane: import fd → wl_buffer → attach + damage + commit (desync ⇒ takes effect now). Buffers
+  // stay alive until wl_buffer.release; released ones are pruned so memory is bounded. MUST run on the
+  // Wayland thread (the presenter marshals frames from the decode thread).
+  void present(const gfx::DmabufFrame& frame) noexcept {
+    if (!created_ || surface_.Get() == nullptr || frame.fd < 0) return;
+    // Prune buffers the compositor has released.
+    inflight_.erase(std::remove_if(inflight_.begin(), inflight_.end(),
+                                   [](const std::unique_ptr<InFlight>& b) { return !b->busy; }),
+                    inflight_.end());
+    if (inflight_.size() >= kMaxInFlight) return;  // compositor lagging — drop this frame
+    wl_proxy* praw = create_params_();
+    if (praw == nullptr) return;
+    wl::WlPtr<BufferParamsH> params;
+    params.Attach(praw);
+    for (std::uint32_t i = 0; i < frame.plane_count; ++i) {
+      params.Get()->Add(frame.fd, i, frame.planes[i].offset, frame.planes[i].stride,
+                        static_cast<std::uint32_t>(frame.modifier >> 32u),
+                        static_cast<std::uint32_t>(frame.modifier & 0xffffffffu));
+    }
+    wl_proxy* braw = wl::construct<wl_buffer_traits,
+                                   dmabuf::zwp_linux_buffer_params_v1_traits::Op::CreateImmed>(
+        *params.Get(), static_cast<std::int32_t>(frame.width),
+        static_cast<std::int32_t>(frame.height), frame.drm_format, 0u);
+    if (braw == nullptr) return;
+    auto slot = std::make_unique<InFlight>();
+    if (!wl::SetupHandler(slot->buf, braw)) return;  // wires wl_buffer.release -> busy=false
+    slot->buf.Get()->busy = &slot->busy;
+    slot->busy = true;
+    surface_.Get()->Attach(slot->buf.Get()->GetProxy(), 0, 0);
+    surface_.Get()->DamageBuffer(0, 0, static_cast<std::int32_t>(frame.width),
+                                 static_cast<std::int32_t>(frame.height));
+    surface_.Get()->Commit();
+    inflight_.push_back(std::move(slot));
+  }
+
+  // Detach (hide): attach a null buffer + commit. The plane occupies no pixels until the next present.
+  void hide() noexcept {
+    if (surface_.Get() == nullptr) return;
+    surface_.Get()->Attach(nullptr, 0, 0);
+    surface_.Get()->Commit();
+  }
+
+ private:
+  static constexpr std::size_t kMaxInFlight = 4;
+  struct InFlight {
+    wl::WlPtr<BufferH> buf;
+    bool busy = false;
+  };
+  wl::WlPtr<SurfaceH> surface_;
+  wl::WlPtr<SubsurfaceH> subsurface_;
+  std::vector<std::unique_ptr<InFlight>> inflight_;
+  std::function<wl_proxy*()> create_params_;
+  int x_ = 0, y_ = 0;
+  bool created_ = false;
+  bool pos_dirty_ = false;
+};
 
 // xdg_toplevel handler. xdg_toplevel.configure carries a `states` array; the wcs XdgToplevelHandler
 // decodes the v1/v2 states but deliberately omits `suspended` (xdg-shell v6) — which is exactly the
@@ -399,6 +514,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   // flush replies. Returns false once the toplevel closes.
   bool dispatch() noexcept override {
     if (wl_display_dispatch(display_.Get()) < 0) { closed_ = true; return false; }
+    drain_video();  // buffer releases just dispatched may have freed a slot for a queued video frame
     presentation_.Reap();
     while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {}
     return !closed_;
@@ -417,8 +533,53 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
 
   // Present the produced dma-buf into its free ping-pong slot: build the wl_buffer once, arm
   // the next wl_surface.frame tick, attach + damage + commit + flush. Mirrors one iteration of
+  // ── Video HW-plane seam (IPresenter) ─────────────────────────────────────────────────────────
+  // Called from the DECODE thread: stash the frame + geometry; drain_video() (Wayland thread) does
+  // the actual subsurface commit. A newer frame supersedes an undrained one.
+  void present_video(const gfx::DmabufFrame& frame, int x, int y, int w, int h) noexcept override {
+    std::lock_guard<std::mutex> lk(video_mu_);
+    video_pending_ = frame;
+    video_has_pending_ = true;
+    video_x_ = x; video_y_ = y; video_w_ = w; video_h_ = h;
+  }
+  void hide_video() noexcept override {
+    std::lock_guard<std::mutex> lk(video_mu_);
+    video_hide_req_ = true;
+  }
+  // Wayland-thread: lazily create the plane and present the pending video frame. Called each present
+  // tick (submit/keepalive/dispatch).
+  void drain_video() noexcept {
+    gfx::DmabufFrame frame{};
+    bool has = false, hide = false;
+    int x = 0, y = 0, w = 0, h = 0;
+    {
+      std::lock_guard<std::mutex> lk(video_mu_);
+      has = video_has_pending_;   video_has_pending_ = false;
+      hide = video_hide_req_;     video_hide_req_ = false;
+      frame = video_pending_;     x = video_x_; y = video_y_; w = video_w_; h = video_h_;
+    }
+    if (hide && video_plane_.created()) video_plane_.hide();
+    if (!has) return;
+    if (subcomp_.Get() == nullptr || comp_.Get() == nullptr || surface_.Get() == nullptr) return;
+    if (!video_plane_.created()) {
+      std::string err;
+      if (!video_plane_.create(*comp_.Get(), *subcomp_.Get(), *surface_.Get(),
+                               [this]() -> wl_proxy* { return feedback_.CreateParams(); }, &err)) {
+        log::w(kTag, "video HW-plane: subsurface create failed: {}", err);
+        return;
+      }
+      log::i(kTag, "video HW-plane: wl_subsurface created");
+    }
+    (void)w; (void)h;  // on-screen size (wp_viewport scaling) is a follow-up; present at buffer size
+    video_plane_.set_position(x, y);
+    video_plane_.present(frame);
+    // wl_subsurface.set_position is applied on the PARENT commit; commit it when the position changed.
+    if (video_plane_.take_pos_dirty()) surface_.Get()->Commit();
+  }
+
   // present_loop_dynamic, minus the poll (the Looper owns the wait).
   bool submit(const gfx::DmabufFrame& frame, int slot = -1) noexcept override {
+    drain_video();
     if (frame.fd < 0) return false;
     // Pin to the slot the frame was rendered into so the wl_buffer↔dma-buf pairing is fixed (each
     // slot's wl_buffer is permanently bound to its first fd). If it is somehow still held by the
@@ -452,6 +613,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   // Otherwise a single traversal that fails to submit() strands the vsync loop forever. Only
   // meaningful once a real frame has been shown.
   bool keepalive() noexcept override {
+    drain_video();  // video plays at its own cadence, independent of app UI frames
     if (closed_ || !configured_ || last_slot_ < 0 || !slots_[last_slot_].built) return false;
     if (wl_proxy* raw = wl::construct<wl_callback_traits, wl_surface_traits::Op::Frame>(
             *surface_.Get()))
@@ -507,6 +669,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     registry_.OnGlobal([this](wl::CRegistry&, std::uint32_t name, std::string_view iface,
                               std::uint32_t ver) {
       if (iface == wl_compositor_traits::interface_name) { comp_name_ = name; comp_ver_ = ver; }
+      else if (iface == wl_subcompositor_traits::interface_name) { subcomp_name_ = name; subcomp_ver_ = ver; }
       else if (iface == wl_shm_traits::interface_name) { shm_name_ = name; shm_ver_ = ver; }
       else if (iface == xdg_wm_base_traits::interface_name) { xdg_name_ = name; xdg_ver_ = ver; }
       else if (iface == dmabuf::zwp_linux_dmabuf_v1_traits::interface_name) {
@@ -547,6 +710,13 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
             comp_name_, std::min(comp_ver_, wl_compositor_traits::version)))
       comp_.Attach(raw);
     else return false;
+    // wl_subcompositor is optional (the video HW-plane path). Bind it when advertised so a
+    // SubsurfacePlane can put decoded video on its own subsurface; absent it, video has no plane.
+    if (subcomp_name_ != 0) {
+      if (wl_proxy* raw = registry_.Bind<wl_subcompositor_traits>(
+              subcomp_name_, std::min(subcomp_ver_, wl_subcompositor_traits::version)))
+        subcomp_.Attach(raw);
+    }
     // Bind xdg_wm_base whenever present: the Xdg shell needs it, and Agl falls back to it.
     if (xdg_name_ != 0 &&
         !wl::BindHandler<xdg_wm_base_traits>(registry_, xdg_wm_base_, xdg_name_, xdg_ver_))
@@ -1022,6 +1192,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   wl::WlPtr<wl::KeyboardHandler<Presenter>> keyboard_;  // created on wl_seat capabilities
   wl::ime::SelectedTextInput ti_;                       // text-input-v3 (IME)
   wl::WlPtr<CompositorH> comp_;
+  wl::WlPtr<SubcompositorH> subcomp_;   // wl_subcompositor (video HW-plane subsurface); optional
   wl::WlPtr<ShmH> shm_;                 // bound only for the cursor theme
   wl::CursorManager cursor_;            // wl_pointer.set_cursor on enter
   bool cursor_ready_ = false;
@@ -1042,6 +1213,17 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   wl::WlPtr<FullscreenShellH> fsh_;
   wl_proxy* output_ = nullptr;  // first wl_output (event-less bare proxy)
   wl::WlPtr<BufferParamsH> params_;
+
+  // Video HW-plane (wl_subsurface). present_video() enqueues a frame + geometry from the DECODE
+  // thread; drain_video() consumes it on the Wayland thread. video_pending_ borrows the frame's fd —
+  // the routing must keep it valid until drained (or dup it); good enough for the first-piece single
+  // pending slot (a newer frame supersedes an undrained one).
+  SubsurfacePlane video_plane_;
+  std::mutex video_mu_;
+  gfx::DmabufFrame video_pending_{};
+  bool video_has_pending_ = false;
+  bool video_hide_req_ = false;
+  int video_x_ = 0, video_y_ = 0, video_w_ = 0, video_h_ = 0;
   BufferH buffer_;  // direct member: stable address for the dispatcher (static path)
   FrameH frame_;    // direct member: stable address for the dispatcher
 
@@ -1063,6 +1245,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   const InputCallback* input_ = nullptr;      // pointer/key/IME sink (loop borrows; A owns below)
   InputCallback owned_input_;                 // owned input sink for the Looper-driven path (A)
   std::uint32_t comp_name_ = 0, comp_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
+  std::uint32_t subcomp_name_ = 0, subcomp_ver_ = 0;  // wl_subcompositor (video plane)
   std::uint32_t shm_name_ = 0, shm_ver_ = 0;  // wl_shm (cursor theme only)
   std::uint32_t seat_name_ = 0, seat_ver_ = 0, ti_name_ = 0, ti_ver_ = 0;
   std::uint32_t ddm_name_ = 0, ddm_ver_ = 0;  // wl_data_device_manager (clipboard)

@@ -233,6 +233,16 @@ class IPresenter {
   virtual void arm_present() noexcept {}                   // request wp_presentation feedback for the next commit
   virtual bool wait_configured(int timeout_ms) noexcept { return true; }  // pump until first configure
 
+  // Video HW-plane path: present a decoded video frame (a distinct dma-buf per frame) DIRECTLY on a
+  // wl_subsurface under the app's surface at the given on-screen rect — the compositor scans it out on
+  // a DRM overlay plane (YUV→RGB + scaling), zero-copy/zero-CPU. Thread-safe: may be called from the
+  // decode thread; the presenter marshals the frame to its own Wayland thread. `x,y` are the plane's
+  // top-left in the app surface's coords; `w,h` its on-screen size. Default no-op for presenters
+  // without a subsurface path.
+  virtual void present_video(const gfx::DmabufFrame& /*frame*/, int /*x*/, int /*y*/,
+                             int /*w*/, int /*h*/) noexcept {}
+  virtual void hide_video() noexcept {}  // detach the video plane's buffer. Default no-op.
+
   // IME: show/hide the compositor's text-input (zwp_text_input_v3) on the toplevel, driven by the
   // app's android.view.InputMethodManager show/hide (a focused text field). Default no-op for
   // presenters without a text-input binding. Called on the present/looper thread (approach A).
