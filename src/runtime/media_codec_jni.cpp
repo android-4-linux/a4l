@@ -26,6 +26,8 @@
 #include <thread>
 #include <vector>
 
+#include <unistd.h>  // dup/close for the HW-plane holding queue
+
 #include "gfx/ahardware_buffer.h"
 #include "gfx/buffer_queue.h"
 #include "wm/present.h"  // wm::active_video_presenter (route decoded video to the HW plane)
@@ -101,6 +103,7 @@ struct CodecCtx {
   struct Packet { std::vector<std::uint8_t> data; std::int64_t pts = 0; bool eos = false; };
   std::deque<Packet> pending;    // input packets from queueInputBuffer, consumed by the driver
   int dbg_sent = 0, dbg_recv = 0;  // ACL_MC_DIAG: log the first few send/receive on the driver
+  std::uint64_t tot_sent = 0; std::int64_t last_sent_pts = 0;  // ACL_MC_DIAG: input packet cadence
   std::uint64_t tot_recv = 0, tot_queued = 0, tot_rel_render = 0, tot_rel_drop = 0;  // ACL_MC_DIAG totals
   std::uint64_t tot_poolfull = 0;                   // ACL_MC_DIAG: driver breaks on a full output pool
   double recv_ms_sum = 0.0, ahb_ms_sum = 0.0;       // ACL_MC_DIAG: per-30 receive_frame / ahb_import time
@@ -108,8 +111,11 @@ struct CodecCtx {
   // HW-plane pacing: present decoded frames at their own presentation timestamp (1x), decoupled from
   // ExoPlayer's render/drop cadence (which gates decode to ~2fps here). Baseline (re)set on the first
   // frame and on any seek / large pts discontinuity.
+  // HW-plane INPUT pacing: feed the decoder each packet only once its presentation time has elapsed in
+  // wall-clock, so the (VAAPI) decoder runs at ~1x and neither drops (surface-pool overflow) nor fast-
+  // forwards. Baseline anchors on the first packet / a backward seek.
   bool pace_init = false;
-  std::int64_t pace_first_pts = 0, pace_last_pts = 0;
+  std::int64_t pace_first_pts = 0;
   std::chrono::steady_clock::time_point pace_first_wall{};
 };
 
@@ -180,31 +186,6 @@ jobject build_format_map(JNIEnv* env, CodecCtx* ctx) {
   return m;
 }
 
-// HW-plane pacing: block the driver until wall-clock reaches the frame's presentation time (relative
-// to the first frame), so the plane plays at 1x. Decode itself is ~365fps; without this the plane
-// would fast-forward. The baseline resets on the first frame and on any backward / >5s pts jump
-// (seek / loop restart with a fresh timeline). Sleeps in <=10ms slices so stop is honored promptly.
-// Does NOT hold ctx->amu (releaseOutputBuffer must stay responsive on ExoPlayer's thread).
-void pace_to_pts(CodecCtx* ctx, std::int64_t pts) {
-  const auto now = std::chrono::steady_clock::now();
-  if (!ctx->pace_init || pts < ctx->pace_last_pts ||
-      (pts - ctx->pace_last_pts) > 5'000'000 /*us*/) {
-    ctx->pace_init = true;
-    ctx->pace_first_pts = pts;
-    ctx->pace_first_wall = now;
-    ctx->pace_last_pts = pts;
-    return;  // present the baseline frame immediately
-  }
-  ctx->pace_last_pts = pts;
-  const auto target = ctx->pace_first_wall + std::chrono::microseconds(pts - ctx->pace_first_pts);
-  while (!ctx->stop.load(std::memory_order_acquire)) {
-    const auto t = std::chrono::steady_clock::now();
-    if (t >= target) break;
-    std::this_thread::sleep_for(std::min<std::chrono::nanoseconds>(
-        target - t, std::chrono::milliseconds(10)));
-  }
-}
-
 // The async driver thread: OWNS the CodecDecoder and delivers MediaCodec callbacks via
 // postEventFromNative (Java routes them to the app's mCallback on its handler). Input is decoupled
 // through ctx->pending, so the decoder is only ever touched here — no cross-thread avcodec race.
@@ -217,14 +198,35 @@ void async_driver(CodecCtx* ctx) {
   };
   { jobject fmt = build_format_map(env, ctx); post(CB_OUTPUT_FORMAT_CHANGE, 0, fmt); if (fmt) env->DeleteLocalRef(fmt); }
   std::string err;
+  bool paced_pending = false;  // set when the input pacer is holding packets not yet due
   while (!ctx->stop.load(std::memory_order_acquire)) {
+    const auto now = std::chrono::steady_clock::now();
+    // The HW-plane video path PACES INPUT to the source's own timeline: feed the decoder a packet only
+    // once its presentation time has elapsed in wall-clock. This makes the (VAAPI) decoder run at 1x,
+    // so it never decodes far ahead and drops frames from surface-pool overflow, and never fast-
+    // forwards — decoded frames come out at ~1x and are presented as they arrive. Non-plane codecs feed
+    // as fast as ExoPlayer queues (real MediaCodec behavior).
+    const bool plane_in =
+        (ctx->mime.rfind("video/", 0) == 0) && wm::active_video_presenter() != nullptr;
     std::vector<int> offer;
     std::vector<CodecCtx::Packet> send;
+    paced_pending = false;
     {
       std::unique_lock<std::mutex> lk(ctx->amu);
       for (std::size_t i = 0; i < ctx->inbufs.size(); ++i)
         if (ctx->inbufs[i].free) { ctx->inbufs[i].free = false; offer.push_back(static_cast<int>(i)); }
-      while (!ctx->pending.empty()) { send.push_back(std::move(ctx->pending.front())); ctx->pending.pop_front(); }
+      while (!ctx->pending.empty()) {
+        auto& p = ctx->pending.front();
+        if (plane_in && !p.eos) {
+          if (!ctx->pace_init || p.pts < ctx->pace_first_pts) {  // first packet / backward seek: anchor
+            ctx->pace_init = true; ctx->pace_first_pts = p.pts; ctx->pace_first_wall = now;
+          }
+          const auto due = ctx->pace_first_wall + std::chrono::microseconds(p.pts - ctx->pace_first_pts);
+          if (now < due) { paced_pending = true; break; }  // not due yet — feed it on a later tick
+        }
+        send.push_back(std::move(p));
+        ctx->pending.pop_front();
+      }
     }
     static const bool diag = std::getenv("ACL_MC_DIAG") != nullptr;
     for (int idx : offer) post(CB_INPUT_AVAILABLE, idx, nullptr);  // "buffer idx is free — fill + queue it"
@@ -232,6 +234,12 @@ void async_driver(CodecCtx* ctx) {
       int sr;
       if (p.eos) sr = ctx->dec->send_packet(nullptr, 0, p.pts, &err);
       else sr = ctx->dec->send_packet(p.data.data(), p.data.size(), p.pts, &err);
+      if (diag && !p.eos) {
+        if (++ctx->tot_sent % 30 == 1)
+          log::i(kTag, "input: sent {} packets, pts={}us (delta from prev={}us)",
+                 ctx->tot_sent, p.pts, p.pts - ctx->last_sent_pts);
+        ctx->last_sent_pts = p.pts;
+      }
       if (diag && ctx->dbg_sent < 4) {
         log::i(kTag, "async send_packet {}B eos={} pts={} -> {} {}", p.data.size(), p.eos, p.pts, sr, err);
         ctx->dbg_sent++;
@@ -244,11 +252,10 @@ void async_driver(CodecCtx* ctx) {
       // (only the first frame ever renders). Find a free slot in the fixed pool BEFORE decoding; if
       // none, stop until a release frees one.
       // The HW-plane path (a video codec with an active wl_subsurface presenter) presents decoded
-      // frames DIRECTLY to the plane and hands ExoPlayer phantom output buffers (no AHB). It therefore
-      // does NOT gate decode on ExoPlayer's release cadence: the slot is allocated AFTER decode and the
-      // oldest slot is recycled when the pool is full (a phantom has nothing to free), and the frame is
-      // paced to its own timestamp. Non-plane paths keep the real MediaCodec backpressure (pre-gate on
-      // a free slot, hold the imported AHB until releaseOutputBuffer).
+      // frames DIRECTLY to the plane and hands ExoPlayer phantom output buffers (no AHB). It does NOT
+      // gate decode on ExoPlayer's release cadence (the slot is allocated after decode, recycling the
+      // oldest phantom if full). Timing comes from INPUT pacing above, so the decoder produces at ~1x
+      // and we present each frame as it arrives — draining the decoder fully so it never drops.
       wm::IPresenter* vpr =
           (ctx->mime.rfind("video/", 0) == 0) ? wm::active_video_presenter() : nullptr;
       int slot = -1;
@@ -283,12 +290,9 @@ void async_driver(CodecCtx* ctx) {
         ctx->recv_ms_sum = 0.0; ctx->ahb_ms_sum = 0.0;
       }
       if (vpr != nullptr) {
-        // HW-plane path: pace to the frame's timestamp, present directly (compositor scans the YUV
-        // dma-buf out on a DRM overlay plane — zero-copy, zero-CPU), then hand ExoPlayer a phantom
-        // output buffer (no AHB) so its pipeline keeps running without gating decode.
-        if (diag && (ctx->tot_recv % 30 == 2))
-          log::i(kTag, "plane pts={}us (delta from prev={}us)", pts, pts - ctx->pace_last_pts);
-        pace_to_pts(ctx, pts);
+        // HW-plane path: present this frame NOW (input pacing above already spread frames at ~1x), and
+        // hand ExoPlayer a phantom output buffer (no AHB) so its pipeline runs without gating decode.
+        // Keep draining the decoder fully so its surface pool never overflows.
         vpr->present_video(f, 0, 0, static_cast<int>(f.width), static_cast<int>(f.height));
         {
           std::lock_guard<std::mutex> lk(ctx->amu);
@@ -308,7 +312,7 @@ void async_driver(CodecCtx* ctx) {
         ctx->tot_queued++;
         post(CB_OUTPUT_AVAILABLE, slot, info);
         if (info) env->DeleteLocalRef(info);
-        break;  // one paced frame, then back to the outer loop to service input before the next
+        continue;  // drain the decoder fully; input pacing controls the rate
       }
       const auto t_ahb = std::chrono::steady_clock::now();
       ::AHardwareBuffer* ahb = gfx::ahb_import(f);
@@ -324,8 +328,12 @@ void async_driver(CodecCtx* ctx) {
       if (info) env->DeleteLocalRef(info);
     }
     std::unique_lock<std::mutex> lk(ctx->amu);
-    if (ctx->pending.empty() && !ctx->stop.load(std::memory_order_acquire))
-      ctx->acv.wait_for(lk, std::chrono::milliseconds(4));
+    if (!ctx->stop.load(std::memory_order_acquire)) {
+      if (paced_pending)
+        ctx->acv.wait_for(lk, std::chrono::milliseconds(5));  // input pacer holding packets — re-check soon
+      else if (ctx->pending.empty())
+        ctx->acv.wait_for(lk, std::chrono::milliseconds(4));
+    }
   }
   ctx->vm->DetachCurrentThread();
 }
