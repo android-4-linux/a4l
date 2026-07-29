@@ -140,6 +140,7 @@ public final class PresentDriver {
                 // ExoPlayer stops rendering to a PlaceholderSurface (which skips every frame) — before
                 // the traversal, so the surfaceCreated it fires is reflected this frame.
                 HostBootstrap.maybeInjectVideoSurface(decor);
+                HostBootstrap.maybeLogVideoPlayer(decor);
                 nTraverse(s);
                 postTraversal(choreo, postCallback, traversal[0]);
             }

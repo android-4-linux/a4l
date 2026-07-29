@@ -43,6 +43,7 @@
 #include "fullscreen_shell_client.hpp"   // ACL_WL_SHELL=simple (zwp_fullscreen_shell_v1)
 #include "presentation_time_client.hpp"
 #include "text_input_v3_client.hpp"  // WL_IME_BACKEND_TEXT_INPUT_V3 (IME)
+#include "viewporter_client.hpp"     // wp_viewport: scale the video HW plane to its View bounds
 
 #include <wl/client_helpers.hpp>
 #include <wl/dmabuf_feedback.hpp>  // wl::DmabufFeedback<App>, wl::FeedbackSnapshot
@@ -68,6 +69,7 @@ namespace {
 using namespace wayland::client;
 using namespace xdg_shell::client;
 namespace dmabuf = linux_dmabuf_unstable_v1::client;
+namespace vp = viewporter::client;
 
 constexpr const char* kTag = "acl.wm.dmabuf";
 
@@ -112,6 +114,8 @@ class BufferParamsH
 // wl_subcompositor / wl_subsurface: no events; bare handlers suffice.
 class SubcompositorH : public CWlSubcompositor<SubcompositorH> {};
 class SubsurfaceH : public CWlSubsurface<SubsurfaceH> {};
+class ViewporterH : public vp::CWpViewporter<ViewporterH> {};  // event-less -> Attach
+class ViewportH : public vp::CWpViewport<ViewportH> {};
 
 // ── SubsurfacePlane: a video HW-plane path ─────────────────────────────────────────────────────
 // A wl_subsurface under the app's main wl_surface, onto which a decoded video frame is presented
@@ -125,6 +129,7 @@ class SubsurfacePlane {
   // zwp_linux_buffer_params_v1 proxy (the presenter binds it to feedback_.CreateParams()) — passed as
   // a functor so this stays decoupled from the DmabufFeedback<Presenter> type (defined later).
   bool create(CompositorH& comp, SubcompositorH& subcomp, SurfaceH& parent,
+              ViewporterH* viewporter,
               std::function<wl_proxy*()> create_params, std::string* err) noexcept {
     create_params_ = std::move(create_params);
     if (!wl::SetupHandler(surface_, wl::construct<wl_surface_traits,
@@ -144,8 +149,26 @@ class SubsurfacePlane {
     // Desync: the video plane commits its own frames at the decode cadence, independent of the app's
     // UI commits (a synced subsurface would only update when the parent commits).
     subsurface_.Get()->SetDesync();
+    // wp_viewport on the child surface: scale the decoded buffer (its own encoded size) to the video
+    // View's on-screen rect. Without it the compositor shows the buffer at 1:1 buffer pixels, so a
+    // 1280x720 clip lands as a fixed block in a corner instead of filling the view.
+    if (viewporter != nullptr) {
+      if (wl_proxy* vraw = wl::construct<vp::wp_viewport_traits, vp::wp_viewporter_traits::Op::GetViewport>(
+              *viewporter, surface_.Get()->GetProxy()))
+        viewport_.Attach(vraw);
+    }
     created_ = true;
     return true;
+  }
+
+  // Scale the plane's buffer to `w`x`h` (the video View's on-screen size) via wp_viewport. Applied on
+  // the child surface's own commit (present()), so no parent commit is needed.
+  void set_dest(int w, int h) noexcept {
+    if (viewport_.Get() != nullptr && w > 0 && h > 0 && (w != dest_w_ || h != dest_h_)) {
+      viewport_.Get()->SetDestination(w, h);
+      dest_w_ = w;
+      dest_h_ = h;
+    }
   }
 
   bool created() const noexcept { return created_; }
@@ -238,6 +261,8 @@ class SubsurfacePlane {
   };
   wl::WlPtr<SurfaceH> surface_;
   wl::WlPtr<SubsurfaceH> subsurface_;
+  wl::WlPtr<ViewportH> viewport_;  // scales the buffer to the View bounds (may be null)
+  int dest_w_ = 0, dest_h_ = 0;
   FrameH frame_cb_;            // wl_surface.frame for the plane; OnDone re-sets frame_ready_
   bool frame_ready_ = true;    // may present now (true) / waiting for the compositor's frame tick
   bool diag_ = false;
@@ -608,15 +633,17 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     if (!video_plane_.created()) {
       std::string err;
       if (!video_plane_.create(*comp_.Get(), *subcomp_.Get(), *surface_.Get(),
+                               viewporter_.Get(),
                                [this]() -> wl_proxy* { return feedback_.CreateParams(); }, &err)) {
         log::w(kTag, "video HW-plane: subsurface create failed: {}", err);
         return;
       }
-      log::i(kTag, "video HW-plane: wl_subsurface created");
+      log::i(kTag, "video HW-plane: wl_subsurface created (viewport={})",
+             viewporter_.Get() != nullptr);
       video_plane_.set_diag(video_diag_);
     }
-    (void)w; (void)h;  // on-screen size (wp_viewport scaling) is a follow-up; present at buffer size
     video_plane_.set_position(x, y);
+    video_plane_.set_dest(w, h);  // scale the decoded buffer to the video View's on-screen size
     video_plane_.present(frame);      // create_immed dups the fd on the wire
     if (frame.fd >= 0) ::close(frame.fd);  // drop our owned dup
     // wl_subsurface.set_position is applied on the PARENT commit; commit it when the position changed.
@@ -716,6 +743,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
                               std::uint32_t ver) {
       if (iface == wl_compositor_traits::interface_name) { comp_name_ = name; comp_ver_ = ver; }
       else if (iface == wl_subcompositor_traits::interface_name) { subcomp_name_ = name; subcomp_ver_ = ver; }
+      else if (iface == vp::wp_viewporter_traits::interface_name) { vpr_name_ = name; vpr_ver_ = ver; }
       else if (iface == wl_shm_traits::interface_name) { shm_name_ = name; shm_ver_ = ver; }
       else if (iface == xdg_wm_base_traits::interface_name) { xdg_name_ = name; xdg_ver_ = ver; }
       else if (iface == dmabuf::zwp_linux_dmabuf_v1_traits::interface_name) {
@@ -762,6 +790,12 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       if (wl_proxy* raw = registry_.Bind<wl_subcompositor_traits>(
               subcomp_name_, std::min(subcomp_ver_, wl_subcompositor_traits::version)))
         subcomp_.Attach(raw);
+    }
+    // wp_viewporter is optional too — used to scale the video plane's buffer to the View bounds.
+    if (vpr_name_ != 0) {
+      if (wl_proxy* raw = registry_.Bind<vp::wp_viewporter_traits>(
+              vpr_name_, std::min(vpr_ver_, vp::wp_viewporter_traits::version)))
+        viewporter_.Attach(raw);
     }
     // Bind xdg_wm_base whenever present: the Xdg shell needs it, and Agl falls back to it.
     if (xdg_name_ != 0 &&
@@ -1245,6 +1279,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   wl::ime::SelectedTextInput ti_;                       // text-input-v3 (IME)
   wl::WlPtr<CompositorH> comp_;
   wl::WlPtr<SubcompositorH> subcomp_;   // wl_subcompositor (video HW-plane subsurface); optional
+  wl::WlPtr<ViewporterH> viewporter_;   // wp_viewporter (scale the video plane to View bounds); optional
   wl::WlPtr<ShmH> shm_;                 // bound only for the cursor theme
   wl::CursorManager cursor_;            // wl_pointer.set_cursor on enter
   bool cursor_ready_ = false;
@@ -1302,6 +1337,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   InputCallback owned_input_;                 // owned input sink for the Looper-driven path (A)
   std::uint32_t comp_name_ = 0, comp_ver_ = 0, xdg_name_ = 0, xdg_ver_ = 0;
   std::uint32_t subcomp_name_ = 0, subcomp_ver_ = 0;  // wl_subcompositor (video plane)
+  std::uint32_t vpr_name_ = 0, vpr_ver_ = 0;          // wp_viewporter (video plane scaling)
   std::uint32_t shm_name_ = 0, shm_ver_ = 0;  // wl_shm (cursor theme only)
   std::uint32_t seat_name_ = 0, seat_ver_ = 0, ti_name_ = 0, ti_ver_ = 0;
   std::uint32_t ddm_name_ = 0, ddm_ver_ = 0;  // wl_data_device_manager (clipboard)

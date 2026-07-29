@@ -439,12 +439,14 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env, jobject thiz, jint index, jbool
   CodecCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr || index < 0) return;
   ::AHardwareBuffer* ahb = nullptr;
+  std::int64_t rel_pts = 0;
   {
     std::lock_guard<std::mutex> lk(ctx->amu);  // outslots shared with the async driver thread
     if (static_cast<std::size_t>(index) >= ctx->outslots.size()) return;
     auto& s = ctx->outslots[index];
     if (!s.used || s.ahb == nullptr) return;
     ahb = s.ahb;
+    rel_pts = s.pts;
     s = {};
   }
   ctx->acv.notify_one();  // a pool slot freed — resume the backpressured driver
@@ -452,8 +454,8 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env, jobject thiz, jint index, jbool
   if (render == JNI_TRUE) ctx->tot_rel_render++; else ctx->tot_rel_drop++;
   const std::uint64_t tot_rel = ctx->tot_rel_render + ctx->tot_rel_drop;
   if (diag && (tot_rel <= 40 || tot_rel % 30 == 1))
-    log::i(kTag, "app releaseOutputBuffer idx={} render={} timeNs={} (render-tot={} drop-tot={} recv={})",
-           index, render == JNI_TRUE, timeNs, ctx->tot_rel_render, ctx->tot_rel_drop, ctx->tot_recv);
+    log::i(kTag, "app releaseOutputBuffer idx={} render={} pts={}us timeNs={} (render-tot={} drop-tot={} recv={})",
+           index, render == JNI_TRUE, rel_pts, timeNs, ctx->tot_rel_render, ctx->tot_rel_drop, ctx->tot_recv);
   if (render == JNI_TRUE && ctx->out_queue != nullptr) {
     ctx->out_queue->queue_imported(ahb);  // zero-copy: hand the frame to the ImageReader consumer
   } else {

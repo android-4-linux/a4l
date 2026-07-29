@@ -4124,6 +4124,45 @@ public final class HostBootstrap {
         }
     }
 
+    // ACL_MC_DIAG: poll the media3 Player's state/position so we can see WHY video frames render vs
+    // drop (BUFFERING vs READY, playWhenReady, suppression, and whether the position clock advances).
+    // Reflection-only (media3 is app-bundled, not on the framework classpath). No-op without the flag.
+    private static boolean sPlayerDiag = System.getenv("ACL_MC_DIAG") != null;
+    private static int sPlayerDiagN = 0;
+    public static void maybeLogVideoPlayer(android.view.View decor) {
+        if (!sPlayerDiag) return;
+        if ((sPlayerDiagN++ % 60) != 1) return;  // ~once/sec at 60fps
+        try {
+            android.view.SurfaceView sv = findSurfaceView(decor);
+            if (sv == null) return;
+            // Walk up to the media3 PlayerView, then getPlayer().
+            Object playerView = null;
+            for (android.view.ViewParent p = sv.getParent(); p != null; p = p.getParent()) {
+                if (p.getClass().getName().contains("media3.ui.PlayerView")) { playerView = p; break; }
+            }
+            if (playerView == null) return;
+            Object player = playerView.getClass().getMethod("getPlayer").invoke(playerView);
+            if (player == null) { android.util.Log.i("acl.mc", "player=null on PlayerView"); return; }
+            Class<?> pc = player.getClass();
+            Object st  = tryCall(pc, player, "getPlaybackState");
+            Object pwr = tryCall(pc, player, "getPlayWhenReady");
+            Object sup = tryCall(pc, player, "getPlaybackSuppressionReason");
+            Object pos = tryCall(pc, player, "getCurrentPosition");
+            Object dur = tryCall(pc, player, "getDuration");
+            Object playing = tryCall(pc, player, "isPlaying");
+            Object err = tryCall(pc, player, "getPlayerError");
+            android.util.Log.i("acl.mc", "player state=" + st + " (1=IDLE 2=BUF 3=READY 4=END)"
+                    + " playWhenReady=" + pwr + " suppress=" + sup + " isPlaying=" + playing
+                    + " pos=" + pos + "/" + dur + "ms err=" + err);
+        } catch (Throwable t) {
+            android.util.Log.i("acl.mc", "maybeLogVideoPlayer: " + t);
+        }
+    }
+    private static Object tryCall(Class<?> c, Object o, String m) {
+        try { java.lang.reflect.Method mm = c.getMethod(m); mm.setAccessible(true); return mm.invoke(o); }
+        catch (Throwable t) { return "?"; }
+    }
+
     @SuppressWarnings("unchecked")
     private static android.view.SurfaceHolder.Callback[] snapshotCallbacks(Class<?> c, Object sv)
             throws Exception {
