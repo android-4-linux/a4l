@@ -1020,6 +1020,20 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("vibrator".equals(name)) {
+                // acl has no haptics. The framework's own android.os.NullVibrator is the canonical
+                // no-vibrator instance (a complete Vibrator whose methods no-op / report unsupported),
+                // returned on devices without a vibrator. Hand it back rather than null: Jetpack
+                // Compose's ProvideAndroidCompositionLocals does
+                // getSystemService(Vibrator.class).areAllPrimitivesSupported(...) on SDK>=31 with NO
+                // null guard, so a null service NPEs inside setContent — crashing composition (the app
+                // renders blank). NullVibrator is @hide, so reflect getInstance().
+                try {
+                    return Class.forName("android.os.NullVibrator").getMethod("getInstance").invoke(null);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("netstats".equals(name)) {
                 // acl's clean-room android.app.usage.NetworkStatsManager (boot classpath). The real
                 // one lives in the connectivity apex (absent from acl's bcp), and acl has no per-uid
@@ -1255,6 +1269,7 @@ public final class HostBootstrap {
             if ("android.net.wifi.WifiManager".equals(serviceClass.getName())) return "wifi";
             if ("android.net.nsd.NsdManager".equals(serviceClass.getName())) return "servicediscovery";
             if ("android.app.usage.NetworkStatsManager".equals(serviceClass.getName())) return "netstats";
+            if ("android.os.Vibrator".equals(serviceClass.getName())) return "vibrator";
             if ("android.bluetooth.BluetoothManager".equals(serviceClass.getName())) return "bluetooth";
             if (serviceClass == android.os.storage.StorageManager.class) return "storage";
             if (serviceClass == android.os.UserManager.class) return "user";
