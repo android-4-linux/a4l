@@ -60,6 +60,7 @@
 #include "gfx/gl_egl.h"     // GLSurfaceView: host GL device (EGLImpl get_display)
 #include "gfx/ahardware_buffer.h"  // Flutter external textures: AHardwareBuffer EGLImage translation
 #include "gfx/egl10_jni.h"  // GLSurfaceView: com.google.android.gles_jni.EGLImpl natives
+#include "gfx/egl14_jni.h"  // android.opengl.EGL14 natives (ExoPlayer PlaceholderSurface / video)
 #endif
 #include "log/log.h"
 #include "ndk/bionic_runtime.h"
@@ -5106,6 +5107,13 @@ class ArtVm final : public JniVm {
     };
     if (gfx::register_egl10(env, hooks) == JNI_OK)
       log::i(kTag, "egl10: EGLImpl registered (GLThread context + window-surface path live)");
+
+    // android.opengl.EGL14 on host Mesa libEGL. media3/ExoPlayer's PlaceholderSurface builds an
+    // off-screen pbuffer GL context through EGL14 during video-renderer init; without these natives
+    // EGL14.<clinit> UnsatisfiedLinkErrors (No implementation for _nativeClassInit) and the whole
+    // video decode path dies before it starts.
+    if (gfx::register_egl14(env) == JNI_OK)
+      log::i(kTag, "egl14: android.opengl.EGL14 registered (pbuffer/offscreen GL for video)");
 
     // Phase 3: back the app's NATIVE EGL (Flutter/Impeller, via the bionic libEGL forwarders) with
     // the SAME GL session as egl10 — acl's wl_display device + the app's wl_surface. Mirrors the two

@@ -38,6 +38,8 @@ if have_gl
   # libEGL). Needs JNI headers; compiled only when the JVM/JNI is present.
   if have_jni
     gfx_sources += files('egl10_jni.cpp')
+    # android.opengl.EGL14 natives (media3/ExoPlayer PlaceholderSurface + direct EGL14 users).
+    gfx_sources += files('egl14_jni.cpp')
     gfx_deps += jni_dep
   endif
 endif
