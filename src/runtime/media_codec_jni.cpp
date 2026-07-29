@@ -101,6 +101,10 @@ struct CodecCtx {
   struct Packet { std::vector<std::uint8_t> data; std::int64_t pts = 0; bool eos = false; };
   std::deque<Packet> pending;    // input packets from queueInputBuffer, consumed by the driver
   int dbg_sent = 0, dbg_recv = 0;  // ACL_MC_DIAG: log the first few send/receive on the driver
+  std::uint64_t tot_recv = 0, tot_queued = 0, tot_rel_render = 0, tot_rel_drop = 0;  // ACL_MC_DIAG totals
+  std::uint64_t tot_poolfull = 0;                   // ACL_MC_DIAG: driver breaks on a full output pool
+  double recv_ms_sum = 0.0, ahb_ms_sum = 0.0;       // ACL_MC_DIAG: per-30 receive_frame / ahb_import time
+  std::chrono::steady_clock::time_point t0_recv{};  // ACL_MC_DIAG: decode-rate window start
 };
 
 CodecCtx* ctx_of(JNIEnv* env, jobject thiz) {
@@ -214,12 +218,31 @@ void async_driver(CodecCtx* ctx) {
         for (std::size_t i = 0; i < ctx->outslots.size(); ++i)
           if (!ctx->outslots[i].used) { slot = static_cast<int>(i); break; }
       }
-      if (slot < 0) break;  // output pool full — wait for releaseOutputBuffer
+      if (slot < 0) { ctx->tot_poolfull++; break; }  // output pool full — wait for releaseOutputBuffer
       gfx::DmabufFrame f{};
       std::int64_t pts = 0;
+      const auto t_rf = std::chrono::steady_clock::now();
       const int rr = ctx->dec->receive_frame(&f, &pts, &err);
+      if (diag && rr > 0) {
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t_rf).count();
+        ctx->recv_ms_sum += ms;
+      }
       if (diag && ctx->dbg_recv < 6) { log::i(kTag, "async receive_frame={} pts={} {}", rr, pts, err); ctx->dbg_recv++; }
       if (rr <= 0) break;
+      if (diag && (++ctx->tot_recv % 30 == 1)) {
+        const auto now = std::chrono::steady_clock::now();
+        double fps = 0.0;
+        if (ctx->t0_recv.time_since_epoch().count() != 0)
+          fps = 30.0 / std::chrono::duration<double>(now - ctx->t0_recv).count();
+        ctx->t0_recv = now;
+        log::i(kTag, "decode: received {} frames ({:.1f} fps over last 30), queued-to-app {}, "
+                     "released render={}/drop={}, pool-full-breaks={}, avg receive_frame={:.1f}ms "
+                     "avg ahb_import={:.1f}ms",
+               ctx->tot_recv, fps, ctx->tot_queued, ctx->tot_rel_render, ctx->tot_rel_drop,
+               ctx->tot_poolfull, ctx->recv_ms_sum / 30.0, ctx->ahb_ms_sum / 30.0);
+        ctx->recv_ms_sum = 0.0; ctx->ahb_ms_sum = 0.0;
+      }
       // Route decoded VIDEO frames to the app's Wayland HW plane (a wl_subsurface): the compositor
       // scans out the YUV dma-buf on a DRM overlay plane — zero-copy, zero-CPU, no Skia/YCbCr in acl.
       // present_video dups the fd (f is recycled on the next receive_frame). Geometry is the buffer
@@ -228,11 +251,16 @@ void async_driver(CodecCtx* ctx) {
         if (wm::IPresenter* pr = wm::active_video_presenter())
           pr->present_video(f, 0, 0, static_cast<int>(f.width), static_cast<int>(f.height));
       }
+      const auto t_ahb = std::chrono::steady_clock::now();
       ::AHardwareBuffer* ahb = gfx::ahb_import(f);
+      if (diag)
+        ctx->ahb_ms_sum += std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - t_ahb).count();
       if (ahb == nullptr) continue;
       { std::lock_guard<std::mutex> lk(ctx->amu); ctx->outslots[slot] = {ahb, true, pts}; }
       jobject info = env->NewObject(g_bufinfo_cls, g_bufinfo_ctor);
       env->CallVoidMethod(info, g_bufinfo_set, 0, 0, static_cast<jlong>(pts), 0);
+      ctx->tot_queued++;
       post(CB_OUTPUT_AVAILABLE, slot, info);
       if (info) env->DeleteLocalRef(info);
     }
@@ -312,7 +340,7 @@ void JNICALL MC_native_start(JNIEnv* env, jobject thiz) {
                                                                            std::max(ctx->height, 1)));
   ctx->inbufs.resize(4);
   for (auto& b : ctx->inbufs) b.mem.resize(bufsz);
-  ctx->outslots.resize(8);
+  ctx->outslots.resize(std::getenv("ACL_MC_BIGPOOL") != nullptr ? 64 : 8);
   ctx->started = true;
   if (ctx->async && ctx->vm != nullptr && ctx->self != nullptr) {
     ctx->driver = std::thread(async_driver, ctx);  // async mode: the driver delivers callbacks
@@ -407,7 +435,7 @@ jint JNICALL MC_native_dequeueOutputBuffer(JNIEnv* env, jobject thiz, jobject in
 }
 
 void JNICALL MC_releaseOutputBuffer(JNIEnv* env, jobject thiz, jint index, jboolean render,
-                                    jboolean /*updatePTS*/, jlong /*timeNs*/) {
+                                    jboolean /*updatePTS*/, jlong timeNs) {
   CodecCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr || index < 0) return;
   ::AHardwareBuffer* ahb = nullptr;
@@ -420,6 +448,12 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env, jobject thiz, jint index, jbool
     s = {};
   }
   ctx->acv.notify_one();  // a pool slot freed — resume the backpressured driver
+  static const bool diag = std::getenv("ACL_MC_DIAG") != nullptr;
+  if (render == JNI_TRUE) ctx->tot_rel_render++; else ctx->tot_rel_drop++;
+  const std::uint64_t tot_rel = ctx->tot_rel_render + ctx->tot_rel_drop;
+  if (diag && (tot_rel <= 40 || tot_rel % 30 == 1))
+    log::i(kTag, "app releaseOutputBuffer idx={} render={} timeNs={} (render-tot={} drop-tot={} recv={})",
+           index, render == JNI_TRUE, timeNs, ctx->tot_rel_render, ctx->tot_rel_drop, ctx->tot_recv);
   if (render == JNI_TRUE && ctx->out_queue != nullptr) {
     ctx->out_queue->queue_imported(ahb);  // zero-copy: hand the frame to the ImageReader consumer
   } else {

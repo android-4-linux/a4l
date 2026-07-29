@@ -71,6 +71,23 @@ public final class PresentDriver {
     private static native void nTraverse(long s);         // beginFrame -> measure/layout/draw -> submit
     private static native void nClose(long s);            // tear down presenter + release refs
 
+    // Video HW-plane: create a MediaCodec-decodable producer Surface handle (ReaderCtx) for an app's
+    // on-screen video SurfaceView, and position the wl_subsurface plane at that view's on-screen rect.
+    private static native long nMakeVideoSurface(long s, int w, int h);
+    private static native void nSetVideoBounds(long s, int x, int y, int w, int h);
+
+    /** Make a real producer Surface handle (Surface.mNativeObject) for a video SurfaceView; 0 on fail. */
+    public static long makeVideoSurface(int w, int h) {
+        final long s = sSession;
+        return s != 0L ? nMakeVideoSurface(s, w, h) : 0L;
+    }
+
+    /** Position the video HW-plane at the video View's on-screen rect (app-surface coords). */
+    public static void setVideoBounds(int x, int y, int w, int h) {
+        final long s = sSession;
+        if (s != 0L) nSetVideoBounds(s, x, y, w, h);
+    }
+
     // GL present (Flutter / SurfaceView): Mesa renders + commits the toplevel; acl owns the Looper
     // and clocks the real Choreographer's vsync from a timerfd (armed with wp_presentation feedback).
     private static native long nGlOpen(View decor, int w, int h, String title, String appId);
@@ -119,6 +136,10 @@ public final class PresentDriver {
         final Runnable[] traversal = new Runnable[1];
         traversal[0] = new Runnable() {
             @Override public void run() {
+                // Back a lazily-created video SurfaceView (media3 PlayerView) with a real Surface so
+                // ExoPlayer stops rendering to a PlaceholderSurface (which skips every frame) — before
+                // the traversal, so the surfaceCreated it fires is reflected this frame.
+                HostBootstrap.maybeInjectVideoSurface(decor);
                 nTraverse(s);
                 postTraversal(choreo, postCallback, traversal[0]);
             }

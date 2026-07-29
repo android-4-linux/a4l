@@ -242,6 +242,10 @@ class IPresenter {
   virtual void present_video(const gfx::DmabufFrame& /*frame*/, int /*x*/, int /*y*/,
                              int /*w*/, int /*h*/) noexcept {}
   virtual void hide_video() noexcept {}  // detach the video plane's buffer. Default no-op.
+  // Position the video plane at the on-screen bounds of the app's video View (SurfaceView), in the
+  // app surface's coordinates. Overrides the decode-side geometry (which is the encoded buffer size
+  // at origin). `w,h` are the View's on-screen size (for future wp_viewport scaling). Default no-op.
+  virtual void set_video_bounds(int /*x*/, int /*y*/, int /*w*/, int /*h*/) noexcept {}
 
   // IME: show/hide the compositor's text-input (zwp_text_input_v3) on the toplevel, driven by the
   // app's android.view.InputMethodManager show/hide (a focused text field). Default no-op for

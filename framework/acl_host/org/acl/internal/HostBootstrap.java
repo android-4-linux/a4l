@@ -4072,6 +4072,58 @@ public final class HostBootstrap {
         }
     }
 
+    // A video SurfaceView we have already backed with a real Surface (so we fire surfaceCreated once).
+    private static java.lang.ref.WeakReference<android.view.SurfaceView> sVideoSv;
+
+    // Back a video SurfaceView (media3 PlayerView's content SurfaceView) with a REAL,
+    // MediaCodec-decodable Surface in the Skia/Compose present path, and fire surfaceCreated so the
+    // app calls player.setVideoSurface(it). Without this, ExoPlayer keeps rendering to a 64x64
+    // PlaceholderSurface and SKIPS every frame (render=false) → the video never plays and the decoder
+    // stalls. Unlike injectGlSurface (GL path, EGL-window holder, mNativeObject stays 0), here we set
+    // the SurfaceView's Surface.mNativeObject to an acl ReaderCtx whose queue the codec decodes into,
+    // and route those frames to the wl_subsurface HW plane. Called each present frame (view appears
+    // lazily via AndroidView after navigation); injects once, then just refreshes the plane bounds.
+    public static void maybeInjectVideoSurface(android.view.View decor) {
+        try {
+            android.view.SurfaceView sv = findSurfaceView(decor);
+            if (sv == null) return;
+            final int w = sv.getWidth(), h = sv.getHeight();
+            if (w <= 0 || h <= 0) return;  // not laid out yet — wait for real bounds
+            final int[] loc = new int[2];
+            sv.getLocationInWindow(loc);
+            if (sVideoSv != null && sVideoSv.get() == sv) {  // already backed — keep the plane aligned
+                PresentDriver.setVideoBounds(loc[0], loc[1], w, h);
+                return;
+            }
+            final long handle = PresentDriver.makeVideoSurface(w, h);
+            if (handle == 0L) return;
+            Class<?> c = android.view.SurfaceView.class;
+            android.view.Surface surf = (android.view.Surface) getField(c, sv, "mSurface");
+            if (surf == null) return;
+            setField(android.view.Surface.class, surf, "mNativeObject", Long.valueOf(handle));
+            int fmt = getIntField(c, sv, "mRequestedFormat", android.graphics.PixelFormat.RGBX_8888);
+            setField(c, sv, "mHaveFrame", Boolean.TRUE);
+            setField(c, sv, "mVisible", Boolean.TRUE);
+            setField(c, sv, "mRequestedVisible", Boolean.TRUE);
+            setField(c, sv, "mSurfaceCreated", Boolean.TRUE);
+            setIntField(c, sv, "mSurfaceWidth", w);
+            setIntField(c, sv, "mSurfaceHeight", h);
+            setIntField(c, sv, "mFormat", fmt);
+            PresentDriver.setVideoBounds(loc[0], loc[1], w, h);
+            android.view.SurfaceHolder holder = sv.getHolder();
+            for (android.view.SurfaceHolder.Callback cb : snapshotCallbacks(c, sv)) {
+                if (cb == null) continue;
+                cb.surfaceCreated(holder);
+                cb.surfaceChanged(holder, fmt, w, h);
+            }
+            sVideoSv = new java.lang.ref.WeakReference<>(sv);
+            android.util.Log.i("acl", "maybeInjectVideoSurface: video SurfaceView surfaceCreated ("
+                    + w + "x" + h + " @" + loc[0] + "," + loc[1] + ")");
+        } catch (Throwable t) {
+            android.util.Log.w("acl", "maybeInjectVideoSurface failed: " + t);
+        }
+    }
+
     @SuppressWarnings("unchecked")
     private static android.view.SurfaceHolder.Callback[] snapshotCallbacks(Class<?> c, Object sv)
             throws Exception {

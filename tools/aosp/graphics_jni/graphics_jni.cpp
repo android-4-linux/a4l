@@ -2983,6 +2983,19 @@ extern "C" void acl_deliver_vsync(JNIEnv* env, jlong frameTimeNanos) {
     for (auto* r : g_vsync_receivers)
       if (r->pending) { r->pending = false; pend.push_back(r); }
   }
+  static const bool diag = std::getenv("ACL_VSYNC_DIAG") != nullptr;
+  if (diag) {
+    static std::uint64_t n = 0;
+    static struct timespec t0 {};
+    struct timespec now{};
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (t0.tv_sec == 0) t0 = now;
+    if ((++n % 60) == 1) {
+      const double dt = (now.tv_sec - t0.tv_sec) + (now.tv_nsec - t0.tv_nsec) * 1e-9;
+      __android_log_print(4, "acl.vsync", "delivered %llu vsyncs to %zu receiver(s), %.1f Hz avg",
+                          static_cast<unsigned long long>(n), pend.size(), dt > 0 ? n / dt : 0.0);
+    }
+  }
   for (auto* r : pend) dispatch_vsync_to(env, r, frameTimeNanos);
 }
 // Any receiver currently has a pending vsync request (the driver only clocks when someone —

@@ -1608,6 +1608,26 @@ void JNICALL PresentDriver_nMaybeDeliverVsync(JNIEnv* env, jclass, jlong sp) {
   if (diag < 8) { log::i(kTag, "PresentDriver.vsync: ready={} pending={}", rdy, pend); ++diag; }
   if (rdy && pend) s->deliver_vsync(env, static_cast<jlong>(s->presenter->frame_time_ns()));
 }
+// Create a real MediaCodec-decodable producer Surface handle (a ReaderCtx over a BufferQueue) for an
+// app's on-screen video SurfaceView (e.g. media3 PlayerView's content SurfaceView). HostBootstrap
+// assigns this to the SurfaceView's Surface.mNativeObject and fires surfaceCreated, so the app calls
+// player.setVideoSurface(realSurface) — which makes ExoPlayer's video renderer RENDER (not skip to a
+// PlaceholderSurface). The pool size is nominal (MediaCodec queue_imported's external decoder AHBs at
+// the real frame size), so 0,0 (→64×64) is fine. Returns the ReaderCtx as a jlong (0 on failure).
+jlong JNICALL PresentDriver_nMakeVideoSurface(JNIEnv* env, jclass, jlong /*sp*/, jint w, jint h) {
+#if ACL_HAVE_GL
+  return static_cast<jlong>(image_reader_make_producer(env, static_cast<int>(w), static_cast<int>(h)));
+#else
+  (void)env; (void)w; (void)h; return 0;
+#endif
+}
+// Position the video HW-plane (wl_subsurface) at the SurfaceView's on-screen rect (app-surface coords).
+void JNICALL PresentDriver_nSetVideoBounds(JNIEnv*, jclass, jlong sp, jint x, jint y, jint w, jint h) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s == nullptr || !s->presenter) return;
+  s->presenter->set_video_bounds(static_cast<int>(x), static_cast<int>(y),
+                                 static_cast<int>(w), static_cast<int>(h));
+}
 // Build a gfx::DmabufFrame from a produced PresentDmabuf and present it; logs + bumps the presented-
 // frame count. Shared by the immediate path and the deferred RenderThread path. Returns false if the
 // dma-buf is invalid or submit failed (caller keepalives).
@@ -2360,6 +2380,10 @@ void register_present_driver_natives(JNIEnv* env) {
        reinterpret_cast<void*>(PresentDriver_nMaybeDeliverVsync)},
       {const_cast<char*>("nTraverse"), const_cast<char*>("(J)V"),
        reinterpret_cast<void*>(PresentDriver_nTraverse)},
+      {const_cast<char*>("nMakeVideoSurface"), const_cast<char*>("(JII)J"),
+       reinterpret_cast<void*>(PresentDriver_nMakeVideoSurface)},
+      {const_cast<char*>("nSetVideoBounds"), const_cast<char*>("(JIIII)V"),
+       reinterpret_cast<void*>(PresentDriver_nSetVideoBounds)},
       {const_cast<char*>("nPulseForceRecord"), const_cast<char*>("(JI)V"),
        reinterpret_cast<void*>(PresentDriver_nPulseForceRecord)},
       {const_cast<char*>("nClose"), const_cast<char*>("(J)V"),

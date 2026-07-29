@@ -168,11 +168,25 @@ class SubsurfacePlane {
   // Wayland thread (the presenter marshals frames from the decode thread).
   void present(const gfx::DmabufFrame& frame) noexcept {
     if (!created_ || surface_.Get() == nullptr || frame.fd < 0) return;
+    // Throttle to the compositor's frame cadence: present at most one buffer per wl_surface.frame
+    // tick. This both paces the video to vsync (dropping excess decoded frames to the latest) AND
+    // keeps the wl_display fd readable, so the app's looper keeps dispatching + draining even when the
+    // UI is otherwise idle — without it a single frame shows and stalls.
+    if (!frame_ready_) {
+      if (diag_ && (++bail_ready_ % 120 == 1))
+        log::i("acl.wm.dmabuf", "video plane: throttled x{} (awaiting wl_surface.frame tick)", bail_ready_);
+      return;
+    }
     // Prune buffers the compositor has released.
     inflight_.erase(std::remove_if(inflight_.begin(), inflight_.end(),
                                    [](const std::unique_ptr<InFlight>& b) { return !b->busy; }),
                     inflight_.end());
-    if (inflight_.size() >= kMaxInFlight) return;  // compositor lagging — drop this frame
+    if (inflight_.size() >= kMaxInFlight) {
+      if (diag_ && (++bail_full_ % 120 == 1))
+        log::i("acl.wm.dmabuf", "video plane: inflight FULL x{} (compositor not releasing buffers)",
+               bail_full_);
+      return;  // compositor lagging — drop this frame
+    }
     wl_proxy* praw = create_params_();
     if (praw == nullptr) return;
     wl::WlPtr<BufferParamsH> params;
@@ -191,12 +205,23 @@ class SubsurfacePlane {
     if (!wl::SetupHandler(slot->buf, braw)) return;  // wires wl_buffer.release -> busy=false
     slot->buf.Get()->busy = &slot->busy;
     slot->busy = true;
+    // Arm the next-frame tick before commit — its OnDone re-sets frame_ready_, which (via the readable
+    // wl fd) wakes the looper to drain + present the next decoded frame.
+    if (wl_proxy* raw = wl::construct<wl_callback_traits, wl_surface_traits::Op::Frame>(*surface_.Get())) {
+      frame_cb_._SetProxy(raw);
+      frame_cb_.need = &frame_ready_;
+    }
+    frame_ready_ = false;
     surface_.Get()->Attach(slot->buf.Get()->GetProxy(), 0, 0);
     surface_.Get()->DamageBuffer(0, 0, static_cast<std::int32_t>(frame.width),
                                  static_cast<std::int32_t>(frame.height));
     surface_.Get()->Commit();
     inflight_.push_back(std::move(slot));
+    if (diag_ && (++presented_ % 30 == 1))
+      log::i("acl.wm.dmabuf", "video plane: presented {} frames (inflight={}, cb_ready arms)",
+             presented_, inflight_.size());
   }
+  void set_diag(bool d) noexcept { diag_ = d; }
 
   // Detach (hide): attach a null buffer + commit. The plane occupies no pixels until the next present.
   void hide() noexcept {
@@ -213,6 +238,10 @@ class SubsurfacePlane {
   };
   wl::WlPtr<SurfaceH> surface_;
   wl::WlPtr<SubsurfaceH> subsurface_;
+  FrameH frame_cb_;            // wl_surface.frame for the plane; OnDone re-sets frame_ready_
+  bool frame_ready_ = true;    // may present now (true) / waiting for the compositor's frame tick
+  bool diag_ = false;
+  std::uint64_t presented_ = 0, bail_ready_ = 0, bail_full_ = 0;
   std::vector<std::unique_ptr<InFlight>> inflight_;
   std::function<wl_proxy*()> create_params_;
   int x_ = 0, y_ = 0;
@@ -547,10 +576,18 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     video_pending_ = f;
     video_has_pending_ = true;
     video_x_ = x; video_y_ = y; video_w_ = w; video_h_ = h;
+    if (video_diag_ && (++video_enq_ % 30 == 1))
+      log::i(kTag, "video: enqueued {} frames from decode", video_enq_);
   }
   void hide_video() noexcept override {
     std::lock_guard<std::mutex> lk(video_mu_);
     video_hide_req_ = true;
+  }
+  // The video View's on-screen rect (from the Java SurfaceView layout). Overrides the decode-side
+  // origin so the plane sits where the app draws its video, not at (0,0).
+  void set_video_bounds(int x, int y, int w, int h) noexcept override {
+    std::lock_guard<std::mutex> lk(video_mu_);
+    vb_x_ = x; vb_y_ = y; vb_w_ = w; vb_h_ = h; vb_set_ = true;
   }
   // Wayland-thread: lazily create the plane and present the pending video frame. Called each present
   // tick (submit/keepalive/dispatch).
@@ -563,6 +600,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       has = video_has_pending_;   video_has_pending_ = false;
       hide = video_hide_req_;     video_hide_req_ = false;
       frame = video_pending_;     x = video_x_; y = video_y_; w = video_w_; h = video_h_;
+      if (vb_set_) { x = vb_x_; y = vb_y_; w = vb_w_; h = vb_h_; }  // View bounds win over decode origin
     }
     if (hide && video_plane_.created()) video_plane_.hide();
     if (!has) return;
@@ -575,6 +613,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
         return;
       }
       log::i(kTag, "video HW-plane: wl_subsurface created");
+      video_plane_.set_diag(video_diag_);
     }
     (void)w; (void)h;  // on-screen size (wp_viewport scaling) is a follow-up; present at buffer size
     video_plane_.set_position(x, y);
@@ -1171,8 +1210,14 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     const std::uint64_t now =
         static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(ts.tv_nsec);
     if (last_present_ns_ == 0 || refresh_ns_ == 0) return now;
-    std::uint64_t t = last_present_ns_ + refresh_ns_;
-    if (t < now) t += ((now - t) / refresh_ns_ + 1) * refresh_ns_;  // catch up to the vsync grid
+    // Snap to the most recent vsync grid point AT OR BEFORE now. Choreographer.frameTimeNanos is the
+    // vsync that just occurred (the start of the current frame period), never the next one — a future
+    // value makes the framework's FrameDisplayEventReceiver clamp it to `now` and warn ("Frame time is
+    // N ms in the future"), which jitters ExoPlayer's VideoFrameReleaseHelper vsync sampling and wrecks
+    // its render-vs-drop timing (every frame judged mistimed -> dropped). Still advances continuously.
+    std::uint64_t t = last_present_ns_;
+    if (t > now) return now;  // presentation clock read ahead of our own read — just use now
+    t += ((now - t) / refresh_ns_) * refresh_ns_;  // floor to the grid point <= now
     return t;
   }
 
@@ -1231,6 +1276,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   bool video_has_pending_ = false;
   bool video_hide_req_ = false;
   int video_x_ = 0, video_y_ = 0, video_w_ = 0, video_h_ = 0;
+  int vb_x_ = 0, vb_y_ = 0, vb_w_ = 0, vb_h_ = 0;  // video View on-screen bounds (set_video_bounds)
+  bool vb_set_ = false;
+  bool video_diag_ = std::getenv("ACL_VIDEO_DIAG") != nullptr;
+  std::uint64_t video_enq_ = 0;
   BufferH buffer_;  // direct member: stable address for the dispatcher (static path)
   FrameH frame_;    // direct member: stable address for the dispatcher
 
