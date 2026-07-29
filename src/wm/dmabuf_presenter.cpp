@@ -162,14 +162,23 @@ class SubsurfacePlane {
     return true;
   }
 
-  // Scale the plane's buffer to `w`x`h` (the video View's on-screen size) via wp_viewport. Applied on
-  // the child surface's own commit (present()), so no parent commit is needed.
-  void set_dest(int w, int h) noexcept {
-    if (viewport_.Get() != nullptr && w > 0 && h > 0 && (w != dest_w_ || h != dest_h_)) {
-      viewport_.Get()->SetDestination(w, h);
-      dest_w_ = w;
-      dest_h_ = h;
-    }
+  // Fit the decoded buffer (src_w x src_h) into the video View (dst_w x dst_h) with RESIZE_MODE_ZOOM:
+  // scale to FILL the view while preserving the source aspect, cropping the overflow (wp_viewport
+  // set_source = the centered visible source rect, set_destination = the view). Applied on the child
+  // surface's own commit (present()). Without the source crop the buffer is stretched to the view,
+  // distorting a 16:9 video in a portrait window.
+  void set_geometry(int src_w, int src_h, int dst_w, int dst_h) noexcept {
+    if (viewport_.Get() == nullptr || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) return;
+    if (src_w == geo_src_w_ && src_h == geo_src_h_ && dst_w == dest_w_ && dst_h == dest_h_) return;
+    const double scale = std::max(static_cast<double>(dst_w) / src_w, static_cast<double>(dst_h) / src_h);
+    const double vis_w = dst_w / scale;  // visible source width  (<= src_w)
+    const double vis_h = dst_h / scale;  // visible source height (<= src_h)
+    const double src_x = (src_w - vis_w) / 2.0;
+    const double src_y = (src_h - vis_h) / 2.0;
+    viewport_.Get()->SetSource(wl_fixed_from_double(src_x), wl_fixed_from_double(src_y),
+                               wl_fixed_from_double(vis_w), wl_fixed_from_double(vis_h));
+    viewport_.Get()->SetDestination(dst_w, dst_h);
+    geo_src_w_ = src_w; geo_src_h_ = src_h; dest_w_ = dst_w; dest_h_ = dst_h;
   }
 
   bool created() const noexcept { return created_; }
@@ -192,15 +201,10 @@ class SubsurfacePlane {
   // Wayland thread (the presenter marshals frames from the decode thread).
   void present(const gfx::DmabufFrame& frame) noexcept {
     if (!created_ || surface_.Get() == nullptr || frame.fd < 0) return;
-    // Throttle to the compositor's frame cadence: present at most one buffer per wl_surface.frame
-    // tick. This both paces the video to vsync (dropping excess decoded frames to the latest) AND
-    // keeps the wl_display fd readable, so the app's looper keeps dispatching + draining even when the
-    // UI is otherwise idle — without it a single frame shows and stalls.
-    if (!frame_ready_) {
-      if (diag_ && (++bail_ready_ % 120 == 1))
-        log::i("acl.wm.dmabuf", "video plane: throttled x{} (awaiting wl_surface.frame tick)", bail_ready_);
-      return;
-    }
+    // No wl_surface.frame throttle here: the decode side already paces to the source timeline (input
+    // pacing) and the wake eventfd drives commits, so gating on the plane's own frame callback would
+    // just drop frames whenever the compositor's callback lags (it was dropping ~1300/1500 -> ~4fps).
+    // The inflight cap below is the real backpressure (compositor not releasing buffers).
     // Prune buffers the compositor has released.
     inflight_.erase(std::remove_if(inflight_.begin(), inflight_.end(),
                                    [](const std::unique_ptr<InFlight>& b) { return !b->busy; }),
@@ -263,11 +267,11 @@ class SubsurfacePlane {
   wl::WlPtr<SurfaceH> surface_;
   wl::WlPtr<SubsurfaceH> subsurface_;
   wl::WlPtr<ViewportH> viewport_;  // scales the buffer to the View bounds (may be null)
-  int dest_w_ = 0, dest_h_ = 0;
+  int dest_w_ = 0, dest_h_ = 0, geo_src_w_ = 0, geo_src_h_ = 0;
   FrameH frame_cb_;            // wl_surface.frame for the plane; OnDone re-sets frame_ready_
   bool frame_ready_ = true;    // may present now (true) / waiting for the compositor's frame tick
   bool diag_ = false;
-  std::uint64_t presented_ = 0, bail_ready_ = 0, bail_full_ = 0;
+  std::uint64_t presented_ = 0, bail_full_ = 0;
   std::vector<std::unique_ptr<InFlight>> inflight_;
   std::function<wl_proxy*()> create_params_;
   int x_ = 0, y_ = 0;
@@ -656,7 +660,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       video_plane_.set_diag(video_diag_);
     }
     video_plane_.set_position(x, y);
-    video_plane_.set_dest(w, h);  // scale the decoded buffer to the video View's on-screen size
+    // ZOOM the decoded buffer (its own size) into the video View's on-screen rect, preserving aspect.
+    video_plane_.set_geometry(static_cast<int>(frame.width), static_cast<int>(frame.height), w, h);
     video_plane_.present(frame);      // create_immed dups the fd on the wire
     if (frame.fd >= 0) ::close(frame.fd);  // drop our owned dup
     // wl_subsurface.set_position is applied on the PARENT commit; commit it when the position changed.

@@ -12,6 +12,7 @@
 #include <drm_fourcc.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -424,6 +425,14 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime, c
     d->codec->extradata_size = static_cast<int>(csd_size);
   }
   if (!configure_hw_decode(d->codec, codec, &d->hw_device)) return fail("av_hwdevice_ctx_create failed");
+  // Enlarge the HW surface pool: decoded VAAPI surfaces are exported zero-copy and held downstream
+  // (the compositor keeps each wl_buffer until wl_buffer.release). With only the decoder's tight
+  // default pool, those held surfaces starve decode and it drops frames (~1/3 -> a stuttery 16fps).
+  // The extras cover the in-flight plane buffers + a margin. Tunable via ACL_VIDEO_EXTRA_FRAMES.
+  d->codec->extra_hw_frames = [] {
+    if (const char* e = std::getenv("ACL_VIDEO_EXTRA_FRAMES")) { int v = std::atoi(e); if (v >= 0) return v; }
+    return 12;
+  }();
   if (g_ff.avcodec_open2(d->codec, codec, nullptr) < 0) return fail("avcodec_open2 failed");
   d->width = static_cast<std::uint32_t>(width > 0 ? width : d->codec->width);
   d->height = static_cast<std::uint32_t>(height > 0 ? height : d->codec->height);

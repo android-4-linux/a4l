@@ -104,6 +104,7 @@ struct CodecCtx {
   std::deque<Packet> pending;    // input packets from queueInputBuffer, consumed by the driver
   int dbg_sent = 0, dbg_recv = 0;  // ACL_MC_DIAG: log the first few send/receive on the driver
   std::uint64_t tot_sent = 0; std::int64_t last_sent_pts = 0;  // ACL_MC_DIAG: input packet cadence
+  std::chrono::steady_clock::time_point t0_sent{};              // ACL_MC_DIAG: input-rate window start
   std::uint64_t tot_recv = 0, tot_queued = 0, tot_rel_render = 0, tot_rel_drop = 0;  // ACL_MC_DIAG totals
   std::uint64_t tot_poolfull = 0;                   // ACL_MC_DIAG: driver breaks on a full output pool
   double recv_ms_sum = 0.0, ahb_ms_sum = 0.0;       // ACL_MC_DIAG: per-30 receive_frame / ahb_import time
@@ -230,14 +231,31 @@ void async_driver(CodecCtx* ctx) {
     }
     static const bool diag = std::getenv("ACL_MC_DIAG") != nullptr;
     for (int idx : offer) post(CB_INPUT_AVAILABLE, idx, nullptr);  // "buffer idx is free — fill + queue it"
-    for (auto& p : send) {
+    for (std::size_t si = 0; si < send.size(); ++si) {
+      auto& p = send[si];
       int sr;
       if (p.eos) sr = ctx->dec->send_packet(nullptr, 0, p.pts, &err);
       else sr = ctx->dec->send_packet(p.data.data(), p.data.size(), p.pts, &err);
+      if (sr == 1) {
+        // AVERROR(EAGAIN): the decoder's output is full — the packet was NOT accepted. Requeue it (and
+        // the rest) to the FRONT of pending and stop; the drain loop below frees output and the next
+        // tick re-sends them. Dropping them here (the old bug) lost ~1/3 of frames -> 16fps not 24fps.
+        {
+          std::lock_guard<std::mutex> lk(ctx->amu);
+          for (std::size_t j = send.size(); j-- > si;) ctx->pending.push_front(std::move(send[j]));
+        }
+        paced_pending = true;  // re-check promptly (input isn't truly exhausted)
+        break;
+      }
       if (diag && !p.eos) {
-        if (++ctx->tot_sent % 30 == 1)
-          log::i(kTag, "input: sent {} packets, pts={}us (delta from prev={}us)",
-                 ctx->tot_sent, p.pts, p.pts - ctx->last_sent_pts);
+        if (++ctx->tot_sent % 30 == 1) {
+          double fps = 0.0;
+          if (ctx->t0_sent.time_since_epoch().count() != 0)
+            fps = 30.0 / std::chrono::duration<double>(now - ctx->t0_sent).count();
+          ctx->t0_sent = now;
+          log::i(kTag, "input: sent {} packets ({:.1f} pkt/s wall), pts-delta={}us",
+                 ctx->tot_sent, fps, p.pts - ctx->last_sent_pts);
+        }
         ctx->last_sent_pts = p.pts;
       }
       if (diag && ctx->dbg_sent < 4) {
