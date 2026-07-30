@@ -1173,6 +1173,31 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("download".equals(name)) {
+                // android.app.DownloadManager. acl has no download service/provider, but apps do
+                // getSystemService(DOWNLOAD_SERVICE) then a Kotlin/DownloadManager cast — a null NPEs and
+                // aborts composition (flicky's Installer.<init> does `getSystemService("download")
+                // .getClass()`, blanking the app). Construct the real DownloadManager so the object
+                // exists (its ctor only needs getContentResolver()/getPackageName(), which AppContext
+                // provides); actual downloads need the (absent) downloads content provider. Try the
+                // modern Context ctor, else the older ContentResolver+package one.
+                try {
+                    Class<?> dm = Class.forName("android.app.DownloadManager");
+                    try {
+                        java.lang.reflect.Constructor<?> c =
+                                dm.getDeclaredConstructor(android.content.Context.class);
+                        c.setAccessible(true);
+                        return c.newInstance(this);
+                    } catch (NoSuchMethodException e) {
+                        java.lang.reflect.Constructor<?> c = dm.getDeclaredConstructor(
+                                android.content.ContentResolver.class, String.class);
+                        c.setAccessible(true);
+                        return c.newInstance(getContentResolver(), getPackageName());
+                    }
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("bluetooth".equals(name)) {
                 // acl's clean-room android.bluetooth.BluetoothManager (boot classpath, backed by
                 // svc/bluetooth → BlueZ). Reflective for the same reason as connectivity.
