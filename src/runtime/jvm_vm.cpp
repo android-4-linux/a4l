@@ -3173,15 +3173,31 @@ class JniVm : public Vm {
 #endif
 
   void render_content_view(jobject activity) {
-    jclass acls = env_->GetObjectClass(activity);
     jobject view = nullptr;
-    // Prefer acl's helper (view-host demo); real Activities lack it — fall back to the
-    // standard decor view: activity.getWindow().getDecorView().
-    if (jmethodID gcv = env_->GetMethodID(acls, "aclContentView", "()Landroid/view/View;");
-        gcv != nullptr) {
-      view = env_->CallObjectMethod(activity, gcv);
+    // A launcher/trampoline Activity may synchronously start the real Activity and finish() itself
+    // during its own onCreate (e.g. Pandora's LauncherActivity -> Main), BEFORE the presenter opens.
+    // Present the CURRENT top-of-stack decor, not the (now-finished) entry activity's own decor —
+    // otherwise the real screen never shows and we're stuck on the entry activity's frozen splash.
+    // In the ordinary case the top IS the entry activity, so this returns the same decor.
+    if (jclass boot = env_->FindClass("org/acl/internal/HostBootstrap"); boot != nullptr) {
+      if (jmethodID topm =
+              env_->GetStaticMethodID(boot, "currentTopDecorView", "()Landroid/view/View;"))
+        view = env_->CallStaticObjectMethod(boot, topm);
+      clear_exception();
+      env_->DeleteLocalRef(boot);
+    } else {
+      clear_exception();  // JVM backend has no HostBootstrap; fall through to the entry decor
     }
-    clear_exception();
+    jclass acls = env_->GetObjectClass(activity);
+    // Fall back to the entry activity's decor: acl's helper (view-host demo) first, then the
+    // standard activity.getWindow().getDecorView().
+    if (view == nullptr) {
+      if (jmethodID gcv = env_->GetMethodID(acls, "aclContentView", "()Landroid/view/View;");
+          gcv != nullptr) {
+        view = env_->CallObjectMethod(activity, gcv);
+      }
+      clear_exception();
+    }
     if (view == nullptr) {
       if (jmethodID gw = env_->GetMethodID(acls, "getWindow", "()Landroid/view/Window;");
           gw != nullptr) {

@@ -2254,6 +2254,20 @@ public final class HostBootstrap {
     static android.os.IBinder sPendingCallerToken = null;
     static int sPendingRequestCode = -1;
 
+    // The current top-of-stack activity's decor view (null if none). The runtime presents this at
+    // nOpen instead of the entry activity's own decor: a launcher/trampoline Activity (e.g. Pandora's
+    // LauncherActivity) can synchronously start the real Activity and finish() itself DURING its
+    // onCreate — before the presenter opens — so the entry activity is already gone and its decor
+    // would show a frozen splash. Presenting the live top shows the real screen.
+    public static android.view.View currentTopDecorView() {
+        ActivityRecord top = sTask.peek();
+        if (top == null || top.activity == null) return null;
+        try {
+            android.view.Window w = top.activity.getWindow();
+            return w != null ? w.getDecorView() : null;
+        } catch (Throwable t) { return null; }
+    }
+
     // Give an activity a real token and push it as the task's new top. Called from attachActivity, so
     // BOTH the jvm_vm-launched ROOT (via attachActivityContext) and internal startActivity launches are
     // adopted uniformly — the first push is the root (finishing it ends the task -> process exit).
