@@ -837,6 +837,36 @@ public final class HostBootstrap {
         @Override public boolean moveSharedPreferencesFrom(android.content.Context src, String name) { return true; }
         @Override public boolean moveDatabaseFrom(android.content.Context src, String name) { return true; }
         @Override public boolean isRestricted() { return false; }  // TextView.readTextAppearance
+        // Cross-app URI grants are meaningless on acl (one app, no other package to grant to) — and
+        // the default ContextWrapper would NPE on the null base. No-op: an email/share intent carrying
+        // a content:// attachment is serviced by the host portal, which reads the fd directly. ACRA's
+        // EmailIntentSender.grantPermission calls this before startActivity for each attachment.
+        @Override public void grantUriPermission(String toPackage, android.net.Uri uri, int modeFlags) {}
+        @Override public void revokeUriPermission(android.net.Uri uri, int modeFlags) {}
+        @Override public void revokeUriPermission(String toPackage, android.net.Uri uri, int modeFlags) {}
+        // Context.startActivity (as opposed to Activity.startActivity) does NOT route through
+        // Instrumentation, so the NoopInstrumentation suppression/routing never sees it — and the
+        // default ContextWrapper.startActivity would NPE on AppContext's null base (ACRA sends its
+        // crash-report email via the Application context). Route the external intents acl can host
+        // (email -> Email portal, http(s) VIEW -> OpenURI portal) and swallow the rest instead of
+        // crashing — there is no ActivityManager to launch an arbitrary component.
+        @Override public void startActivity(android.content.Intent intent) { startActivity(intent, null); }
+        @Override public void startActivity(android.content.Intent intent, android.os.Bundle options) {
+            if (intent == null) return;
+            if (composeEmailFromIntent(intent)) return;
+            try {
+                android.net.Uri d = intent.getData();
+                String action = intent.getAction();
+                if (android.content.Intent.ACTION_VIEW.equals(action) && d != null) {
+                    String sc = d.getScheme();
+                    if ("http".equalsIgnoreCase(sc) || "https".equalsIgnoreCase(sc)) {
+                        HostShare.openUri(d.toString());
+                        return;
+                    }
+                }
+            } catch (Throwable ignored) { }
+            System.out.println("acl HostBootstrap: Context.startActivity suppressed (no external host): " + intent);
+        }
         @Override public boolean canLoadUnsafeResources() { return true; }  // same, @hide
         // The single acl user (ADR-3). WorkManager's PendingIntent.getBroadcast path calls
         // Context.getUser() on a background thread; without this it delegates to the null base.
@@ -1684,9 +1714,123 @@ public final class HostBootstrap {
         return sParentActivity.get(activityClass);
     }
 
+    // True if the Intent is an email launch acl can service via the xdg Email portal: an ACTION_SENDTO
+    // to a mailto: URI (the canonical compose-email intent), or an ACTION_SEND[_MULTIPLE] carrying
+    // EXTRA_EMAIL recipients or a message/rfc822 type. Drives BOTH the PackageManager resolution (so an
+    // app that checks resolveActivity()!=null before offering "email us" / sending a crash report finds
+    // a handler) and the actual routing in NoopInstrumentation.maybeComposeEmail.
+    static boolean isEmailIntent(android.content.Intent intent) {
+        if (intent == null) return false;
+        try {
+            String action = intent.getAction();
+            android.net.Uri data = intent.getData();
+            if (android.content.Intent.ACTION_SENDTO.equals(action)
+                    && data != null && "mailto".equalsIgnoreCase(data.getScheme())) return true;
+            if (android.content.Intent.ACTION_SEND.equals(action)
+                    || android.content.Intent.ACTION_SEND_MULTIPLE.equals(action)) {
+                if ("message/rfc822".equals(intent.getType())) return true;
+                String[] to = intent.getStringArrayExtra(android.content.Intent.EXTRA_EMAIL);
+                if (to != null && to.length > 0) return true;
+            }
+        } catch (Throwable ignored) { }
+        return false;
+    }
+
+    // Route an email-launch Intent to the host's default mail client via the xdg Email portal
+    // (org.freedesktop.portal.Email.ComposeEmail). Recipient/subject/body come from the mailto: URI
+    // and/or the intent extras (extras win — they are unencoded). Returns true if the intent was an
+    // email launch (consumed), regardless of whether the portal succeeded; false to fall through.
+    static boolean composeEmailFromIntent(android.content.Intent intent) {
+        if (!isEmailIntent(intent)) return false;
+        try {
+            android.net.Uri data = intent.getData();
+            String address = "";
+            String uSubject = null, uBody = null;
+            if (data != null && "mailto".equalsIgnoreCase(data.getScheme())) {
+                String ssp = data.getSchemeSpecificPart();  // "addr?subject=..&body=.."
+                if (ssp != null) {
+                    int q = ssp.indexOf('?');
+                    address = (q >= 0 ? ssp.substring(0, q) : ssp).trim();
+                    if (q >= 0) {
+                        for (String kv : ssp.substring(q + 1).split("&")) {
+                            int eq = kv.indexOf('=');
+                            if (eq < 0) continue;
+                            String k = kv.substring(0, eq);
+                            String v = android.net.Uri.decode(kv.substring(eq + 1));
+                            if ("subject".equalsIgnoreCase(k)) uSubject = v;
+                            else if ("body".equalsIgnoreCase(k)) uBody = v;
+                        }
+                    }
+                }
+            }
+            if (address.isEmpty()) {
+                String[] to = intent.getStringArrayExtra(android.content.Intent.EXTRA_EMAIL);
+                if (to != null && to.length > 0 && to[0] != null) address = to[0];
+            }
+            String subject = intent.getStringExtra(android.content.Intent.EXTRA_SUBJECT);
+            if (subject == null) subject = uSubject;
+            CharSequence text = intent.getCharSequenceExtra(android.content.Intent.EXTRA_TEXT);
+            String body = text != null ? text.toString() : uBody;
+            boolean ok = HostShare.composeEmail(address, subject, body);
+            System.out.println("acl HostBootstrap: email intent -> xdg Email portal ("
+                    + (ok ? "composed" : "portal unavailable") + "): to=" + address
+                    + (subject != null ? " subject=\"" + subject + "\"" : ""));
+            return true;
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: composeEmailFromIntent failed: " + t);
+            return true;  // still an email intent; don't fall through to Share/clipboard
+        }
+    }
+
+    // A synthetic ResolveInfo naming acl's portal-backed email handler, so Intent.resolveActivity() and
+    // queryIntentActivities() report a mail client for an email launch (there is no email Activity on
+    // acl -- the launch is serviced by the xdg Email portal via composeEmailFromIntent).
+    static android.content.pm.ResolveInfo emailResolveInfo() {
+        android.content.pm.ResolveInfo ri = new android.content.pm.ResolveInfo();
+        android.content.pm.ActivityInfo ai = new android.content.pm.ActivityInfo();
+        ai.packageName = "org.acl.email";
+        ai.name = "org.acl.email.ComposeActivity";
+        ai.exported = true;
+        ai.enabled = true;
+        android.content.pm.ApplicationInfo app = new android.content.pm.ApplicationInfo();
+        app.packageName = "org.acl.email";
+        ai.applicationInfo = app;
+        ri.activityInfo = ai;
+        ri.resolvePackageName = "org.acl.email";
+        return ri;
+    }
+
     static final class AppPackageManager extends StubPackageManager {
         private final String pkg;
         AppPackageManager(String pkg) { this.pkg = pkg; }
+        // Report acl's portal-backed email handler for an email launch (Intent.resolveActivity() /
+        // queryIntentActivities()) so callers that gate on a mail client being present proceed; the
+        // launch itself is routed to the xdg Email portal. Everything else stays unresolved (null/empty),
+        // matching StubPackageManager -- acl hosts no other external Activities.
+        @Override public android.content.pm.ResolveInfo resolveActivity(android.content.Intent intent, int flags) {
+            return isEmailIntent(intent) ? emailResolveInfo() : null;
+        }
+        @Override public java.util.List<android.content.pm.ResolveInfo> queryIntentActivities(
+                android.content.Intent intent, int flags) {
+            if (isEmailIntent(intent)) {
+                java.util.List<android.content.pm.ResolveInfo> l = new java.util.ArrayList<>(1);
+                l.add(emailResolveInfo());
+                return l;
+            }
+            return java.util.Collections.emptyList();
+        }
+        // API 33 (Tiramisu) ResolveInfoFlags overloads: ACRA's EmailIntentSender calls these directly
+        // on SDK>=33. StubPackageManager leaves them throwing UnsupportedOperationException (which
+        // aborted the crash-report send with a confusing "queryIntentActivities not implemented"),
+        // so delegate to the int forms above.
+        @Override public android.content.pm.ResolveInfo resolveActivity(android.content.Intent intent,
+                android.content.pm.PackageManager.ResolveInfoFlags flags) {
+            return resolveActivity(intent, 0);
+        }
+        @Override public java.util.List<android.content.pm.ResolveInfo> queryIntentActivities(
+                android.content.Intent intent, android.content.pm.PackageManager.ResolveInfoFlags flags) {
+            return queryIntentActivities(intent, 0);
+        }
         // An app can always query its OWN package (it is installed); other packages resolve as
         // not-installed. Returning null/throwing for the own package broke callers that read their
         // own version/appInfo on a worker (forkyz) — including the API 33 PackageInfoFlags overload,
@@ -2833,6 +2977,10 @@ public final class HostBootstrap {
             sPendingRequestCode = requestCode;
             if (routeInternal(intent)) return null;  // internal transition handled
             sPendingCallerToken = null; sPendingRequestCode = -1;  // not launched; don't leak to the next
+            // An email launch (ACTION_SENDTO mailto:, or a SEND with recipients) -> the host's default
+            // mail client via the xdg Email portal. Checked before Share so an email-share isn't
+            // mistaken for a plain text share. Consumes the intent whether or not the portal succeeds.
+            if (composeEmailFromIntent(intent)) return null;
             // A Share (ACTION_SEND, or ACTION_CHOOSER wrapping it) has no other app to target on acl,
             // but its text/URL is still useful — route it to the host clipboard so it can be pasted.
             String shared = extractShareText(intent);

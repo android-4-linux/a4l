@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: acl host-integration seam; Intent.ACTION_SEND / chooser mapped to
-// xdg-desktop-portal OpenURI. Freedesktop portal spec. No GPL-3.0 sources.
+// Provenance: acl host-integration seam; Intent.ACTION_SEND / chooser mapped to xdg-desktop-portal
+// OpenURI, and ACTION_SENDTO (mailto:) mapped to the Email portal ComposeEmail. Freedesktop portal
+// spec. No GPL-3.0 sources.
 package org.acl.internal;
 
 /**
@@ -16,6 +17,8 @@ public final class HostShare {
 
     // Bound by svc/share (register_share_natives). Returns true if the portal accepted the URI.
     private static native boolean nOpenUri(String uri);
+    // Bound by svc/share. Compose a pre-filled email via org.freedesktop.portal.Email.ComposeEmail.
+    private static native boolean nComposeEmail(String address, String subject, String body);
 
     /** Ask the host portal to open {@code uri}. Returns false if unavailable (native unbound/threw). */
     public static boolean openUri(String uri) {
@@ -24,6 +27,21 @@ public final class HostShare {
             return nOpenUri(uri);
         } catch (Throwable t) {
             return false;  // native not registered (no sdbus-c++ / portal) -> caller uses the clipboard
+        }
+    }
+
+    /**
+     * Ask the host portal to compose an email in the user's default mail client. The desktop-correct
+     * stand-in for an Android ACTION_SENDTO (mailto:) launch, which acl has no email Activity to host.
+     * Any field may be empty. Returns false if the portal is unavailable (native unbound/threw).
+     */
+    public static boolean composeEmail(String address, String subject, String body) {
+        try {
+            return nComposeEmail(address == null ? "" : address,
+                                 subject == null ? "" : subject,
+                                 body == null ? "" : body);
+        } catch (Throwable t) {
+            return false;  // native not registered (no sdbus-c++ / portal)
         }
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: acl native seam binding org.acl.internal.HostShare to xdg-desktop-portal's
-// org.freedesktop.portal.OpenURI.OpenURI (session bus). Freedesktop portal spec. No GPL-3.0 sources.
+// org.freedesktop.portal.OpenURI.OpenURI + org.freedesktop.portal.Email.ComposeEmail (session bus).
+// Freedesktop portal spec. No GPL-3.0 sources.
 #include "svc/share/share_jni.h"
 
 #include <map>
@@ -52,6 +53,48 @@ jboolean JNICALL n_open_uri(JNIEnv* env, jclass, jstring juri) {
   return open_uri(uri) ? JNI_TRUE : JNI_FALSE;
 }
 
+// Ask the host's desktop portal to open a pre-filled email in the user's default mail client, the
+// sandbox-correct stand-in for an Android email-app ACTION_SENDTO (mailto:). Apps' crash reporters
+// (ACRA) and "email us" flows fire such intents; on acl there is no email Activity, so route them to
+// org.freedesktop.portal.Email.ComposeEmail. Only non-empty fields are passed as options.
+bool compose_email(const std::string& address, const std::string& subject, const std::string& body) {
+  try {
+    auto conn = sdbus::createSessionBusConnection();
+    auto proxy = sdbus::createProxy(*conn, sdbus::ServiceName{"org.freedesktop.portal.Desktop"},
+                                    sdbus::ObjectPath{"/org/freedesktop/portal/desktop"});
+    // ComposeEmail(s parent_window, a{sv} options) -> o handle. Keys per the Email portal spec.
+    std::map<std::string, sdbus::Variant> options;
+    if (!address.empty()) options.emplace("address", sdbus::Variant{address});
+    if (!subject.empty()) options.emplace("subject", sdbus::Variant{subject});
+    if (!body.empty()) options.emplace("body", sdbus::Variant{body});
+    sdbus::ObjectPath handle;
+    proxy->callMethod("ComposeEmail")
+        .onInterface(sdbus::InterfaceName{"org.freedesktop.portal.Email"})
+        .withArguments(std::string{} /*parent_window*/, options)
+        .storeResultsTo(handle);
+    log::i(kTag, "ComposeEmail -> host portal (to={}, subject={}B, body={}B)", address,
+           subject.size(), body.size());
+    return true;
+  } catch (const sdbus::Error& e) {
+    log::w(kTag, "ComposeEmail failed ({}); email not composed", e.getMessage());
+    return false;
+  } catch (...) {
+    log::w(kTag, "ComposeEmail failed (unknown); email not composed");
+    return false;
+  }
+}
+
+jboolean JNICALL n_compose_email(JNIEnv* env, jclass, jstring jaddr, jstring jsubj, jstring jbody) {
+  auto str = [env](jstring j) -> std::string {
+    if (j == nullptr) return {};
+    const char* c = env->GetStringUTFChars(j, nullptr);
+    std::string s(c != nullptr ? c : "");
+    if (c != nullptr) env->ReleaseStringUTFChars(j, c);
+    return s;
+  };
+  return compose_email(str(jaddr), str(jsubj), str(jbody)) ? JNI_TRUE : JNI_FALSE;
+}
+
 }  // namespace
 
 void register_share_natives(JNIEnv* env) {
@@ -64,14 +107,17 @@ void register_share_natives(JNIEnv* env) {
   const JNINativeMethod m[] = {
       {const_cast<char*>("nOpenUri"), const_cast<char*>("(Ljava/lang/String;)Z"),
        reinterpret_cast<void*>(&n_open_uri)},
+      {const_cast<char*>("nComposeEmail"),
+       const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z"),
+       reinterpret_cast<void*>(&n_compose_email)},
   };
-  if (env->RegisterNatives(cls, m, 1) != JNI_OK) {
+  if (env->RegisterNatives(cls, m, 2) != JNI_OK) {
     env->ExceptionClear();
     log::w(kTag, "RegisterNatives(HostShare) failed");
     return;
   }
   env->DeleteLocalRef(cls);
-  log::i(kTag, "HostShare.nOpenUri bound (xdg-desktop-portal OpenURI)");
+  log::i(kTag, "HostShare.nOpenUri + nComposeEmail bound (xdg-desktop-portal OpenURI/Email)");
 }
 
 }  // namespace acl::share
