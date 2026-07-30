@@ -1439,12 +1439,16 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env, jclass, jobject view, jint w, jin
   // Publish this as the app's active presenter so decoded video frames can be routed to its HW plane
   // (wm::SubsurfacePlane) via present_video from the media/decode side.
   wm::set_active_video_presenter(s->presenter.get());
-  // Deferred present (UI-thread/RenderThread split): when ACL_PRESENT_RT is set, the present-root
-  // records into an SkPicture replayed on a dedicated RenderThread that owns all GrContext work, so
-  // the UI thread does none (GrDirectContext is single-threaded). Otherwise, the immediate path wraps
-  // the persistent GPU SkCanvas here (begin_frame clears it each tick, same handle) and the
-  // present-root RecordingCanvas draws straight onto it.
-  s->deferred = std::getenv("ACL_PRESENT_RT") != nullptr;
+  // Deferred present (UI-thread/RenderThread split) is the DEFAULT: the present-root records into an
+  // SkPicture replayed on a dedicated RenderThread that owns all GrContext work, so the UI thread does
+  // none (GrDirectContext is single-threaded). This path is required for the WebView draw functor (its
+  // on_sync/CommitFrameOnRT frame-pull has no home on the immediate path) and was validated clean
+  // across the 19-app F-Droid corpus (16 render, 2 libGDX on the GL path, 0 regressions). Opt out with
+  // ACL_PRESENT_IMMEDIATE to get the old immediate path (the UI thread wraps the persistent GPU
+  // SkCanvas here — begin_frame clears it each tick, same handle — and the present-root RecordingCanvas
+  // draws straight onto it). ACL_PRESENT_RT is still honored for back-compat (it now just re-selects
+  // the default).
+  s->deferred = std::getenv("ACL_PRESENT_IMMEDIATE") == nullptr;
   const jlong ch = s->deferred ? 1 : s->gpu_begin(w, h);  // deferred: device inits on the RT's 1st frame
   if (ch != 0) {
     if (s->deferred) {
