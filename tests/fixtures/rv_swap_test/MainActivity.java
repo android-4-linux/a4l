@@ -27,6 +27,7 @@ import android.widget.LinearLayout;
 
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -76,6 +77,7 @@ public class MainActivity extends Activity {
 
     FrameLayout content;
     RecyclerView rv;
+    SwipeRefreshLayout srl;   // podcast's list lives inside a (Multi)SwipeRefreshLayout
     Adapter adapter;
     LinearLayout skeleton;
     boolean showingList = true;
@@ -119,7 +121,10 @@ public class MainActivity extends Activity {
         rv.setLayoutManager(new LinearLayoutManager(this));
         adapter = new Adapter(h);
         rv.setAdapter(adapter);
-        content.addView(rv, new FrameLayout.LayoutParams(
+        srl = new SwipeRefreshLayout(this);
+        srl.addView(rv, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        content.addView(srl, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         populate();
 
@@ -134,15 +139,17 @@ public class MainActivity extends Activity {
     void swap() {
         cycle++;
         if (showingList) {
-            rv.setVisibility(View.GONE);
+            srl.setRefreshing(true);          // show the refresh spinner (podcast's pull-to-refresh)
+            srl.setVisibility(View.GONE);
             skeleton = makeSkeleton();
             content.addView(skeleton);
-            System.out.println("acl rvswap: cycle " + cycle + " -> SKELETON (rv GONE)");
+            System.out.println("acl rvswap: cycle " + cycle + " -> SKELETON (srl GONE, refreshing)");
         } else {
             if (skeleton != null) { content.removeView(skeleton); skeleton = null; }
-            populate();                      // clear + repopulate: rebinds the recycled rows
-            rv.setVisibility(View.VISIBLE);
-            System.out.println("acl rvswap: cycle " + cycle + " -> LIST (repopulated, rv VISIBLE)");
+            populate();                       // clear + repopulate: rebinds the recycled rows
+            srl.setRefreshing(false);
+            srl.setVisibility(View.VISIBLE);
+            System.out.println("acl rvswap: cycle " + cycle + " -> LIST (repopulated, srl VISIBLE)");
         }
         showingList = !showingList;
     }

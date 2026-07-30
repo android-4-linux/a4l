@@ -28,6 +28,7 @@ MAVEN = os.path.join(AOSP, "prebuilts/maven_repo/android/androidx")
 # just includes the classes); missing ones surface as javac/runtime ClassNotFound, add them here.
 DEPS = [
     ("recyclerview/recyclerview", "1.0.0-beta01"),
+    ("swiperefreshlayout/swiperefreshlayout", "1.0.0-beta01"),
     ("core/core", "1.0.0-beta01"),
     ("customview/customview", "1.0.0-beta01"),
     ("collection/collection", "1.0.0-beta01"),
