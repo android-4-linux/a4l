@@ -57,7 +57,11 @@ namespace {
 #define VKD VULKAN_HPP_DEFAULT_DISPATCHER  // the one dispatcher everything uses
 
 constexpr VkFormat kVkFormat = VK_FORMAT_B8G8R8A8_UNORM;
-constexpr uint32_t kDrmFormat = DRM_FORMAT_XRGB8888;
+// ARGB (not XRGB) so the compositor honors the alpha channel: the video SurfaceView hole-punch clears
+// its rect to transparent and the video wl_subsurface below shows through. Same BGRA8888 layout —
+// only the fourcc's X->A differs. Opaque apps render alpha=255 so they look identical; the presenter
+// marks the opaque region (full minus the video hole) so the compositor still skips blending elsewhere.
+constexpr uint32_t kDrmFormat = DRM_FORMAT_ARGB8888;
 
 // One exported, modifier-tiled dma-buf VkImage + its memory/fd/descriptor. The animated
 // present loop ping-pongs two of these so the compositor can hold one for scanout while

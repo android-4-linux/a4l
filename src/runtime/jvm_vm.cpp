@@ -1639,6 +1639,15 @@ void JNICALL PresentDriver_nPumpVideo(JNIEnv*, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
   if (s != nullptr && s->presenter) s->presenter->pump_video();
 }
+// Mark the video SurfaceView's RenderNode as a hole-punch: the graphics_jni walk clears its rect to
+// transparent so the video wl_subsurface (stacked below the ARGB toplevel) shows through, with the app
+// UI compositing on top. `renderNode` is the SurfaceView's View.mRenderNode native handle (an
+// AclRenderNode*); HostBootstrap reads it reflectively. Routed through graphics_jni via dlsym.
+void JNICALL PresentDriver_nSetVideoPunchHole(JNIEnv*, jclass, jlong /*sp*/, jlong renderNode, jboolean on) {
+  static auto f = reinterpret_cast<void (*)(jlong, int)>(
+      ::dlsym(RTLD_DEFAULT, "acl_graphics_set_punch_hole"));
+  if (f != nullptr && renderNode != 0) f(renderNode, on == JNI_TRUE ? 1 : 0);
+}
 // Build a gfx::DmabufFrame from a produced PresentDmabuf and present it; logs + bumps the presented-
 // frame count. Shared by the immediate path and the deferred RenderThread path. Returns false if the
 // dma-buf is invalid or submit failed (caller keepalives).
@@ -2399,6 +2408,8 @@ void register_present_driver_natives(JNIEnv* env) {
        reinterpret_cast<void*>(PresentDriver_nVideoWakeFd)},
       {const_cast<char*>("nPumpVideo"), const_cast<char*>("(J)V"),
        reinterpret_cast<void*>(PresentDriver_nPumpVideo)},
+      {const_cast<char*>("nSetVideoPunchHole"), const_cast<char*>("(JJZ)V"),
+       reinterpret_cast<void*>(PresentDriver_nSetVideoPunchHole)},
       {const_cast<char*>("nPulseForceRecord"), const_cast<char*>("(JI)V"),
        reinterpret_cast<void*>(PresentDriver_nPulseForceRecord)},
       {const_cast<char*>("nClose"), const_cast<char*>("(J)V"),

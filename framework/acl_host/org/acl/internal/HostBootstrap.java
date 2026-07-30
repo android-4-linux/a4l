@@ -4128,9 +4128,22 @@ public final class HostBootstrap {
                 cb.surfaceCreated(holder);
                 cb.surfaceChanged(holder, fmt, w, h);
             }
+            // Punch a transparent hole where the video is, so the video plane (stacked below the ARGB
+            // toplevel) shows through while the app UI composites on top. Compose does NOT draw the
+            // SurfaceView's own RenderNode into the walked tree (it draws the hosting Android view as a
+            // unit), so register the punch on the SurfaceView AND each Android-view ancestor up to the
+            // Compose boundary — whichever node the walk actually draws gets cleared. These are the
+            // PlayerView subtree (video only, no UI), so clearing their rect is safe.
+            int punched = 0;
+            for (Object v = sv; v instanceof android.view.View; v = ((android.view.View) v).getParent()) {
+                String cn = v.getClass().getName();
+                if (cn.contains("androidx.compose.ui.platform")) break;  // reached the Compose host
+                long rn = renderNodeHandle((android.view.View) v);
+                if (rn != 0L) { PresentDriver.setVideoPunchHole(rn, true); punched++; }
+            }
             sVideoSv = new java.lang.ref.WeakReference<>(sv);
             android.util.Log.i("acl", "maybeInjectVideoSurface: video SurfaceView surfaceCreated ("
-                    + w + "x" + h + " @" + loc[0] + "," + loc[1] + ")");
+                    + w + "x" + h + " @" + loc[0] + "," + loc[1] + ") punchHole nodes=" + punched);
         } catch (Throwable t) {
             android.util.Log.w("acl", "maybeInjectVideoSurface failed: " + t);
         }
@@ -4173,6 +4186,23 @@ public final class HostBootstrap {
     private static Object tryCall(Class<?> c, Object o, String m) {
         try { java.lang.reflect.Method mm = c.getMethod(m); mm.setAccessible(true); return mm.invoke(o); }
         catch (Throwable t) { return "?"; }
+    }
+
+    // The native AclRenderNode* behind a View's RenderNode: View.mRenderNode -> RenderNode.mNativeRenderNode.
+    // Used to mark the video SurfaceView's node as a hole-punch. 0 if the fields aren't found.
+    private static long renderNodeHandle(android.view.View v) {
+        try {
+            java.lang.reflect.Field rnf = android.view.View.class.getDeclaredField("mRenderNode");
+            rnf.setAccessible(true);
+            Object rn = rnf.get(v);
+            if (rn == null) return 0L;
+            java.lang.reflect.Field nf = rn.getClass().getDeclaredField("mNativeRenderNode");
+            nf.setAccessible(true);
+            return nf.getLong(rn);
+        } catch (Throwable t) {
+            android.util.Log.w("acl", "renderNodeHandle: " + t);
+            return 0L;
+        }
     }
 
     @SuppressWarnings("unchecked")

@@ -162,6 +162,11 @@ struct AclRenderNode : public SkRefCnt {
   std::vector<DisplayItem> display_list;
   sk_sp<SkPicture> picture;
   bool is_present_root = false;
+  // Video SurfaceView hole-punch: when set, the walk clears this node's rect to TRANSPARENT (kSrc)
+  // at the node's z-position — after the app's opaque background, before the UI drawn on top — so the
+  // video wl_subsurface stacked BELOW the (ARGB) toplevel shows through, with the UI compositing over
+  // the rest. Set via acl_graphics_set_punch_hole for the app's video SurfaceView RenderNode.
+  bool punch_hole = false;
   // Under force_record, the present frame epoch this node last re-recorded in. nIsValid reports the
   // node invalid (forcing a re-record) only ONCE per frame — the first time it is visited — then valid
   // for the rest of that frame. Without this, force_record reports invalid on EVERY visit, and because
@@ -1482,6 +1487,12 @@ void RenderNode_nDiscardDisplayList(jlong node) {
 std::atomic<int> g_force_record{0};
 extern "C" void acl_graphics_set_force_record(int on) {
   g_force_record.store(on, std::memory_order_relaxed);
+}
+// Mark (or unmark) a RenderNode as the video SurfaceView hole: the walk clears its rect to transparent
+// so the video wl_subsurface below the ARGB toplevel shows through. `node` is an AclRenderNode* (the
+// SurfaceView's View.mRenderNode native handle). No-op on a null/zero handle.
+extern "C" void acl_graphics_set_punch_hole(jlong node, int on) {
+  if (auto* n = rnode(node)) n->punch_hole = (on != 0);
 }
 // Present frame epoch — bumped once per frame (acl_graphics_frame_tick, before View.draw). Under
 // force_record, a node is reported invalid (re-record) only until its force_epoch reaches the current
@@ -3892,7 +3903,10 @@ void draw_child_shadow(SkCanvas* c, const AclRenderNode* n) {
 // no boundaries fall through to a plain drawPicture.
 void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
   if (c == nullptr || n == nullptr) return;
-  if (n->display_list.empty() && n->picture == nullptr) return;
+  // A punch-hole node (the video SurfaceView) draws NO content of its own (empty display list) but
+  // must still run — to clear its rect transparent so the video plane below shows through. So don't
+  // take the empty-node fast-out when punch_hole is set.
+  if (n->display_list.empty() && n->picture == nullptr && !n->punch_hole) return;
   const float w = static_cast<float>(n->right - n->left);
   const float h = static_cast<float>(n->bottom - n->top);
   SkAutoCanvasRestore acr(c, true);
@@ -3919,6 +3933,24 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
     lp.setAlphaf(n->alpha);
     if (n->render_effect != nullptr) lp.setImageFilter(n->render_effect);
     c->saveLayer(nullptr, &lp);
+  }
+  // Video SurfaceView hole-punch: overwrite this node's rect with transparent (kSrc, not kClear, so it
+  // works inside a saveLayer) BEFORE its (empty) content, at this z-position. The app's opaque bg was
+  // drawn earlier; the UI drawn after this node composites on top. The ARGB toplevel + subsurface-below
+  // then reveal the video through the hole. (See acl_graphics_set_punch_hole / the wm HW plane.)
+  if (n->punch_hole && w > 0 && h > 0) {
+    SkPaint hp;
+    hp.setBlendMode(SkBlendMode::kSrc);
+    // ACL_PUNCH_DEBUG: opaque magenta instead of transparent, to check whether the clear survives to
+    // the final toplevel buffer (magenta = clear works, black = overdrawn/not surviving).
+    hp.setColor(std::getenv("ACL_PUNCH_DEBUG") != nullptr ? 0x80FF00FFu : SK_ColorTRANSPARENT);
+    c->drawRect(SkRect::MakeWH(w, h), hp);
+    static int punch_dbg = 0;
+    if (std::getenv("ACL_MC_DIAG") != nullptr && (punch_dbg++ % 60 == 0)) {
+      const SkMatrix m = c->getTotalMatrix();
+      __android_log_print(4, "acl.punch", "punch-hole clear #%d node wxh=%.0fx%.0f ctm=[%.1f,%.1f tx=%.1f ty=%.1f]",
+                          punch_dbg, w, h, m.getScaleX(), m.getScaleY(), m.getTranslateX(), m.getTranslateY());
+    }
   }
   static const bool walk_dbg = std::getenv("ACL_WALK_DEBUG") != nullptr;
   static std::atomic<int> walk_dbg_budget{400};
@@ -3978,8 +4010,8 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
       }
       ++i;
     }
-  } else {
-    c->drawPicture(n->picture);
+  } else if (n->picture) {
+    c->drawPicture(n->picture);  // (may be null for a punch-hole node — nothing to draw beyond the clear)
   }
 }
 

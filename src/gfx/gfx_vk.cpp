@@ -62,7 +62,9 @@ namespace {
 // matching kVkFormat below (the same choice the wcs example makes).
 constexpr SkColorType kSkColorType = kBGRA_8888_SkColorType;
 constexpr vk::Format kVkFormat = vk::Format::eB8G8R8A8Unorm;
-constexpr std::uint32_t kDrmFormat = DRM_FORMAT_XRGB8888;  // opaque; matches kVkFormat
+constexpr std::uint32_t kDrmFormat = DRM_FORMAT_XRGB8888;  // opaque; matches kVkFormat (BGRA)
+// (The video hole-punch's ARGB toplevel is on the graphics_jni GPU-present path — tools/aosp/
+// graphics_jni/gpu_dmabuf.cpp — which is what real apps use; this acl-native path stays opaque.)
 }  // namespace
 
 struct VkRenderTarget::Impl {

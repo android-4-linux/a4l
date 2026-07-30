@@ -74,9 +74,10 @@ namespace vp = viewporter::client;
 
 constexpr const char* kTag = "acl.wm.dmabuf";
 
-// DRM_FORMAT_XRGB8888 == fourcc('X','R','2','4') — the opaque 32-bit format the gfx
-// dma-buf export uses. Hardcoded so wm/ needn't pull in libdrm (the value is stable).
-constexpr std::uint32_t kDrmFormatXrgb8888 = 0x34325258u;
+// DRM_FORMAT_ARGB8888 == fourcc('A','R','2','4') — the alpha-capable 32-bit format the gfx dma-buf
+// export uses (same BGRA layout as XRGB, alpha honored). Hardcoded so wm/ needn't pull in libdrm.
+// Alpha lets the video SurfaceView hole-punch (transparent rect) reveal the wl_subsurface below.
+constexpr std::uint32_t kDrmFormatArgb8888 = 0x34325241u;
 
 // Poll timeout / keep-alive self-tick interval (ms) for the animated loop when the
 // compositor withholds frame callbacks (occluded surface). ~30 Hz fallback.
@@ -117,6 +118,7 @@ class SubcompositorH : public CWlSubcompositor<SubcompositorH> {};
 class SubsurfaceH : public CWlSubsurface<SubsurfaceH> {};
 class ViewporterH : public vp::CWpViewporter<ViewporterH> {};  // event-less -> Attach
 class ViewportH : public vp::CWpViewport<ViewportH> {};
+class RegionH : public CWlRegion<RegionH> {};  // wl_region for the toplevel opaque region (video hole)
 
 // ── SubsurfacePlane: a video HW-plane path ─────────────────────────────────────────────────────
 // A wl_subsurface under the app's main wl_surface, onto which a decoded video frame is presented
@@ -150,6 +152,12 @@ class SubsurfacePlane {
     // Desync: the video plane commits its own frames at the decode cadence, independent of the app's
     // UI commits (a synced subsurface would only update when the parent commits).
     subsurface_.Get()->SetDesync();
+    // Stack the video plane BELOW the parent (the app UI surface). The app lays the video out as a
+    // full-screen BACKGROUND (SurfaceView fillMaxSize) with its UI composited on top; the UI surface is
+    // made ARGB and the SurfaceView's rect is punched transparent (see the RenderNode-walk hole-punch),
+    // so the video shows through the hole while the UI draws over the rest. Above the parent (the old
+    // default) the opaque video occluded the whole UI.
+    subsurface_.Get()->PlaceBelow(parent.GetProxy());
     // wp_viewport on the child surface: scale the decoded buffer (its own encoded size) to the video
     // View's on-screen rect. Without it the compositor shows the buffer at 1:1 buffer pixels, so a
     // 1280x720 clip lands as a fixed block in a corner instead of filling the view.
@@ -167,18 +175,19 @@ class SubsurfacePlane {
   // set_source = the centered visible source rect, set_destination = the view). Applied on the child
   // surface's own commit (present()). Without the source crop the buffer is stretched to the view,
   // distorting a 16:9 video in a portrait window.
-  void set_geometry(int src_w, int src_h, int dst_w, int dst_h) noexcept {
-    if (viewport_.Get() == nullptr || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) return;
-    if (src_w == geo_src_w_ && src_h == geo_src_h_ && dst_w == dest_w_ && dst_h == dest_h_) return;
-    const double scale = std::max(static_cast<double>(dst_w) / src_w, static_cast<double>(dst_h) / src_h);
-    const double vis_w = dst_w / scale;  // visible source width  (<= src_w)
-    const double vis_h = dst_h / scale;  // visible source height (<= src_h)
-    const double src_x = (src_w - vis_w) / 2.0;
-    const double src_y = (src_h - vis_h) / 2.0;
-    viewport_.Get()->SetSource(wl_fixed_from_double(src_x), wl_fixed_from_double(src_y),
-                               wl_fixed_from_double(vis_w), wl_fixed_from_double(vis_h));
+  // Set the plane's wp_viewport SOURCE crop (buffer sub-rect, in buffer pixels) and DESTINATION size
+  // (on-screen size). The caller derives these from the app's SurfaceView bounds intersected with the
+  // window (clamp + crop), so the app's resize mode (ZOOM/FIT/FILL — it sizes the SurfaceView) is
+  // honored and any overflow past the window edge is cropped rather than spilling onto the desktop.
+  void set_source_dest(double sx, double sy, double sw, double sh, int dst_w, int dst_h) noexcept {
+    if (viewport_.Get() == nullptr || sw <= 0 || sh <= 0 || dst_w <= 0 || dst_h <= 0) return;
+    if (sx == geo_sx_ && sy == geo_sy_ && sw == geo_sw_ && sh == geo_sh_ &&
+        dst_w == dest_w_ && dst_h == dest_h_)
+      return;
+    viewport_.Get()->SetSource(wl_fixed_from_double(sx), wl_fixed_from_double(sy),
+                               wl_fixed_from_double(sw), wl_fixed_from_double(sh));
     viewport_.Get()->SetDestination(dst_w, dst_h);
-    geo_src_w_ = src_w; geo_src_h_ = src_h; dest_w_ = dst_w; dest_h_ = dst_h;
+    geo_sx_ = sx; geo_sy_ = sy; geo_sw_ = sw; geo_sh_ = sh; dest_w_ = dst_w; dest_h_ = dst_h;
   }
 
   bool created() const noexcept { return created_; }
@@ -267,7 +276,8 @@ class SubsurfacePlane {
   wl::WlPtr<SurfaceH> surface_;
   wl::WlPtr<SubsurfaceH> subsurface_;
   wl::WlPtr<ViewportH> viewport_;  // scales the buffer to the View bounds (may be null)
-  int dest_w_ = 0, dest_h_ = 0, geo_src_w_ = 0, geo_src_h_ = 0;
+  int dest_w_ = 0, dest_h_ = 0;
+  double geo_sx_ = -1, geo_sy_ = -1, geo_sw_ = -1, geo_sh_ = -1;  // last viewport source (dedup)
   FrameH frame_cb_;            // wl_surface.frame for the plane; OnDone re-sets frame_ready_
   bool frame_ready_ = true;    // may present now (true) / waiting for the compositor's frame tick
   bool diag_ = false;
@@ -631,6 +641,28 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     if (display_.Get() != nullptr) { while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {} }
   }
 
+  // Set the toplevel's opaque region to the whole surface MINUS the video hole. Without this hint the
+  // compositor (Mutter) treats the toplevel as opaque and culls the video wl_subsurface stacked below
+  // it — so the transparent hole shows black instead of the video. Copy-semantics: the region may be
+  // destroyed right after set. Applied on the next toplevel commit. `hw<=0` clears the hole (full opaque).
+  void set_toplevel_opaque_hole(int hx, int hy, int hw, int hh) noexcept {
+    if (comp_.Get() == nullptr || surface_.Get() == nullptr || w_ <= 0 || h_ <= 0) return;
+    if (hx == oq_hx_ && hy == oq_hy_ && hw == oq_hw_ && hh == oq_hh_) return;  // unchanged
+    wl_proxy* rraw =
+        wl::construct<wl_region_traits, wl_compositor_traits::Op::CreateRegion>(*comp_.Get());
+    if (rraw == nullptr) return;
+    wl::WlPtr<RegionH> region;
+    region.Attach(rraw);
+    region.Get()->Add(0, 0, w_, h_);
+    if (hw > 0 && hh > 0) region.Get()->Subtract(hx, hy, hw, hh);
+    surface_.Get()->SetOpaqueRegion(region.Get()->GetProxy());
+    oq_hx_ = hx; oq_hy_ = hy; oq_hw_ = hw; oq_hh_ = hh;
+    oq_dirty_ = true;  // needs a toplevel commit to take effect
+    if (video_diag_)
+      log::i(kTag, "toplevel opaque region set: full {}x{} minus hole ({},{},{}x{}) — awaiting commit",
+             w_, h_, hx, hy, hw, hh);
+  }
+
   // Wayland-thread: lazily create the plane and present the pending video frame. Called each present
   // tick (submit/keepalive/dispatch).
   void drain_video() noexcept {
@@ -659,13 +691,39 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
              viewporter_.Get() != nullptr);
       video_plane_.set_diag(video_diag_);
     }
-    video_plane_.set_position(x, y);
-    // ZOOM the decoded buffer (its own size) into the video View's on-screen rect, preserving aspect.
-    video_plane_.set_geometry(static_cast<int>(frame.width), static_cast<int>(frame.height), w, h);
+    // The app places the video SurfaceView at (x,y,w,h) per its resize mode (media3
+    // AspectRatioFrameLayout sizes it larger + offset for ZOOM, e.g. 2560x1440 @ -640,0). The buffer
+    // maps to that full rect; CLAMP it to the window [0,0,w_,h_] and SOURCE-CROP the buffer to the
+    // visible portion, so the video fills the on-screen video area without the subsurface spilling past
+    // the window edges onto the desktop (subsurfaces aren't clipped by the parent).
+    const int winW = w_ > 0 ? w_ : w, winH = h_ > 0 ? h_ : h;
+    const int vx = std::max(x, 0), vy = std::max(y, 0);
+    const int vr = std::min(x + w, winW), vb = std::min(y + h, winH);
+    const int vw = vr - vx, vh = vb - vy;
+    if (vw <= 0 || vh <= 0 || w <= 0 || h <= 0) { if (frame.fd >= 0) ::close(frame.fd); return; }
+    const double sx = static_cast<double>(vx - x) / w * frame.width;
+    const double sy = static_cast<double>(vy - y) / h * frame.height;
+    const double sw = static_cast<double>(vw) / w * frame.width;
+    const double sh = static_cast<double>(vh) / h * frame.height;
+    if (video_diag_) {
+      static std::uint64_t gdbg = 0;
+      if (gdbg++ % 60 == 0)
+        log::i(kTag, "video geometry: app=({},{},{}x{}) -> vis pos=({},{}) dst={}x{} src=({:.0f},{:.0f},{:.0f}x{:.0f}) buf={}x{}",
+               x, y, w, h, vx, vy, vw, vh, sx, sy, sw, sh, frame.width, frame.height);
+    }
+    video_plane_.set_position(vx, vy);
+    video_plane_.set_source_dest(sx, sy, sw, sh, vw, vh);
+    // Tell the compositor the video's on-screen rect is a transparent hole (so it doesn't cull the
+    // subsurface below the toplevel and show black through the punch).
+    set_toplevel_opaque_hole(vx, vy, vw, vh);
     video_plane_.present(frame);      // create_immed dups the fd on the wire
     if (frame.fd >= 0) ::close(frame.fd);  // drop our owned dup
-    // wl_subsurface.set_position is applied on the PARENT commit; commit it when the position changed.
-    if (video_plane_.take_pos_dirty()) surface_.Get()->Commit();
+    // wl_subsurface.set_position/stacking + the opaque region are applied on the PARENT commit. Commit
+    // the toplevel every video frame (ACL_VIDEO_PARENT_COMMIT) so the below-placement stays applied even
+    // when the UI is idle and the main present isn't committing.
+    (void)oq_dirty_; oq_dirty_ = false;
+    surface_.Get()->Commit();
+    (void)video_plane_.take_pos_dirty();
   }
 
   // present_loop_dynamic, minus the poll (the Looper owns the wait).
@@ -678,6 +736,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     const int s = (slot >= 0 && slot < kSlots) ? slot : free_slot();
     if (s < 0 || slots_[s].busy) return false;
     if (!slots_[s].built && !build_slot(s, frame)) return false;
+    // The toplevel is ARGB (for the video hole-punch). Mark it fully OPAQUE by default so a normal app
+    // isn't accidentally alpha-blended (the compositor treats it opaque, as with the old XRGB). The
+    // video path later overrides this with full-minus-hole. Runs once (oq_hx_ starts at -1).
+    if (oq_hx_ < 0 && w_ > 0 && h_ > 0) set_toplevel_opaque_hole(0, 0, 0, 0);
     if (frame_index_ == 0)
       log::i(kTag, "dmabuf present(A): {}x{} {} modifier=0x{:x} {} plane(s), {} buffers",
              frame.width, frame.height, frame.modifier_tiled ? "tiled" : "linear",
@@ -876,8 +938,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     if (!wl::RoundtripWithTimeout(display_.Get())) return false;
     if (feedback_.BoundVersion() < 4) feedback_.CommitLegacy();
 
-    mods_ = feedback_.Current().ModifiersFor(kDrmFormatXrgb8888);
-    log::i(kTag, "dmabuf present: compositor advertises {} modifier(s) for XRGB8888",
+    mods_ = feedback_.Current().ModifiersFor(kDrmFormatArgb8888);
+    log::i(kTag, "dmabuf present: compositor advertises {} modifier(s) for ARGB8888",
            mods_.size());
 
     // The wl_surface is shared by every shell; its role is established below per ShellKind.
@@ -1331,6 +1393,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   int video_x_ = 0, video_y_ = 0, video_w_ = 0, video_h_ = 0;
   int vb_x_ = 0, vb_y_ = 0, vb_w_ = 0, vb_h_ = 0;  // video View on-screen bounds (set_video_bounds)
   bool vb_set_ = false;
+  int oq_hx_ = -1, oq_hy_ = -1, oq_hw_ = -1, oq_hh_ = -1;  // last toplevel opaque-region hole (dedup)
+  bool oq_dirty_ = false;                                  // opaque region set, awaiting a toplevel commit
   int video_wake_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);  // decode thread -> present loop wake
   bool video_diag_ = std::getenv("ACL_VIDEO_DIAG") != nullptr;
   std::uint64_t video_enq_ = 0;

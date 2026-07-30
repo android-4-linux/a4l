@@ -77,6 +77,13 @@ public final class PresentDriver {
     private static native void nSetVideoBounds(long s, int x, int y, int w, int h);
     private static native int nVideoWakeFd(long s);   // decode-thread -> present-loop wake eventfd (-1 if none)
     private static native void nPumpVideo(long s);     // drain the wake fd + commit the pending video frame
+    private static native void nSetVideoPunchHole(long s, long renderNode, boolean on);  // clear SurfaceView rect
+
+    /** Mark a video SurfaceView's RenderNode as a transparent hole so the video plane shows behind the UI. */
+    public static void setVideoPunchHole(long renderNode, boolean on) {
+        final long s = sSession;
+        if (s != 0L && renderNode != 0L) nSetVideoPunchHole(s, renderNode, on);
+    }
 
     /** Make a real producer Surface handle (Surface.mNativeObject) for a video SurfaceView; 0 on fail. */
     public static long makeVideoSurface(int w, int h) {
