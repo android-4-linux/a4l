@@ -697,11 +697,44 @@ unsigned int acl_native_egl_swap_buffers(void* dpy, void* surface) {
 // dlopen host Mesa, resolve the ABI-ordered symbols into two bridges, and write their addresses into
 // the loaded bionic forwarder libs. `rt` is used only to reach the already-loaded forwarder libs via
 // the bionic linker (load() of an already-open lib returns its handle). No-op unless ACL_GL_FORWARD.
+// True once the app has mapped a bionic GL forwarder (libEGL/libGLESv2/libGLESv3) from the sysroot —
+// i.e. it actually uses GL. The forwarders are DT_NEEDED deps of the app's GL lib, so they are mapped
+// by the time load_library() (which then calls install_gl_forwarders) returns. Scans /proc/self/maps.
+static bool gl_forwarder_mapped(const char* sysroot) {
+#if defined(__x86_64__)
+  if (sysroot == nullptr) return false;
+  FILE* f = std::fopen("/proc/self/maps", "re");
+  if (f == nullptr) return false;
+  char line[4096];
+  bool found = false;
+  const std::size_t slen = std::strlen(sysroot);
+  while (std::fgets(line, sizeof line, f) != nullptr) {
+    const char* p = std::strstr(line, sysroot);
+    if (p == nullptr) continue;
+    const char* base = p + slen;  // the path segment right after the sysroot dir
+    if (std::strstr(base, "/libGLESv2.so") != nullptr ||
+        std::strstr(base, "/libGLESv3.so") != nullptr ||
+        std::strstr(base, "/libEGL.so") != nullptr) { found = true; break; }
+  }
+  std::fclose(f);
+  return found;
+#else
+  (void)sysroot;
+  return false;
+#endif
+}
+
 void install_gl_forwarders(BionicRuntime* rt) {
 #if defined(__x86_64__)
-  if (getenv("ACL_GL_FORWARD") == nullptr) return;
   const char* sysroot = getenv("ACL_BIONIC_SYSROOT");
   if (sysroot == nullptr) return;
+  // Wire the host-Mesa GL bridge when the app has actually loaded the forwarder libGLESv2.so (it uses
+  // GL) — or when forced via ACL_GL_FORWARD. The forwarder .so is STAGED for every app, so gating the
+  // bridge purely on the env var meant any GL app that didn't set it crashed inside the forwarder
+  // stubs (they dereference a then-null acl_gl_gles_bridge — e.g. Telegram's GL intro faulting in
+  // glGetShaderiv). Checking the mapping makes GL "just work" with no flag, while non-GL apps (which
+  // never map a forwarder) still skip the Mesa dlopen + donor-thread pool.
+  if (getenv("ACL_GL_FORWARD") == nullptr && !gl_forwarder_mapped(sysroot)) return;
   static std::atomic<bool> done{false};
   if (done.exchange(true)) return;
 
