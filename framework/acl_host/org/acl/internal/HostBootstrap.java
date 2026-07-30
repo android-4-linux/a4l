@@ -844,6 +844,19 @@ public final class HostBootstrap {
         @Override public void grantUriPermission(String toPackage, android.net.Uri uri, int modeFlags) {}
         @Override public void revokeUriPermission(android.net.Uri uri, int modeFlags) {}
         @Override public void revokeUriPermission(String toPackage, android.net.Uri uri, int modeFlags) {}
+        // Single app, single uid: every content:// URI is this app's own, so all access is permitted.
+        // The default ContextWrapper would NPE on the null base — ContentResolver.openFileDescriptor
+        // checks this on its own provider's URI (ACRA opening its report attachment to email it).
+        @Override public int checkUriPermission(android.net.Uri uri, int pid, int uid, int modeFlags) {
+            return android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
+        @Override public int checkUriPermission(android.net.Uri uri, String readPermission,
+                String writePermission, int pid, int uid, int modeFlags) {
+            return android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
+        @Override public int checkCallingUriPermission(android.net.Uri uri, int modeFlags) {
+            return android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
         // Context.startActivity (as opposed to Activity.startActivity) does NOT route through
         // Instrumentation, so the NoopInstrumentation suppression/routing never sees it — and the
         // default ContextWrapper.startActivity would NPE on AppContext's null base (ACRA sends its
@@ -1771,15 +1784,48 @@ public final class HostBootstrap {
             if (subject == null) subject = uSubject;
             CharSequence text = intent.getCharSequenceExtra(android.content.Intent.EXTRA_TEXT);
             String body = text != null ? text.toString() : uBody;
-            boolean ok = HostShare.composeEmail(address, subject, body);
+            int[] fds = openAttachmentFds(intent);  // EXTRA_STREAM content:// -> the portal's attachment_fds
+            boolean ok = HostShare.composeEmail(address, subject, body, fds);
             System.out.println("acl HostBootstrap: email intent -> xdg Email portal ("
                     + (ok ? "composed" : "portal unavailable") + "): to=" + address
-                    + (subject != null ? " subject=\"" + subject + "\"" : ""));
+                    + (subject != null ? " subject=\"" + subject + "\"" : "")
+                    + (fds.length > 0 ? " +" + fds.length + " attachment(s)" : ""));
             return true;
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: composeEmailFromIntent failed: " + t);
             return true;  // still an email intent; don't fall through to Share/clipboard
         }
+    }
+
+    // Open every EXTRA_STREAM attachment of a SEND/SEND_MULTIPLE email intent to a DETACHED fd, for the
+    // portal's attachment_fds. ACRA ships its report as a content:// file (its AcraContentProvider), so
+    // without this the composed mail is empty. Each fd's ownership is transferred to the native (which
+    // adopts + closes it); openFileDescriptor resolves the content:// via the app's ContentResolver.
+    private static int[] openAttachmentFds(android.content.Intent intent) {
+        java.util.List<android.net.Uri> streams = new java.util.ArrayList<>();
+        try {
+            android.os.Parcelable one = intent.getParcelableExtra(android.content.Intent.EXTRA_STREAM);
+            if (one instanceof android.net.Uri) streams.add((android.net.Uri) one);
+            java.util.ArrayList<android.os.Parcelable> many =
+                    intent.getParcelableArrayListExtra(android.content.Intent.EXTRA_STREAM);
+            if (many != null)
+                for (android.os.Parcelable p : many)
+                    if (p instanceof android.net.Uri) streams.add((android.net.Uri) p);
+        } catch (Throwable ignored) { }
+        if (streams.isEmpty() || sAppContext == null) return new int[0];
+        java.util.List<Integer> fds = new java.util.ArrayList<>();
+        android.content.ContentResolver cr = sAppContext.getContentResolver();
+        for (android.net.Uri u : streams) {
+            try {
+                android.os.ParcelFileDescriptor pfd = cr.openFileDescriptor(u, "r");
+                if (pfd != null) fds.add(pfd.detachFd());  // ownership -> native
+            } catch (Throwable t) {
+                System.err.println("acl HostBootstrap: attachment open failed (" + u + "): " + t);
+            }
+        }
+        int[] out = new int[fds.size()];
+        for (int i = 0; i < out.length; i++) out[i] = fds.get(i);
+        return out;
     }
 
     // A synthetic ResolveInfo naming acl's portal-backed email handler, so Intent.resolveActivity() and
