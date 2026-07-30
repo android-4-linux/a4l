@@ -1597,7 +1597,26 @@ struct ToGlibc {
   ~ToGlibc() { ndk_set_fs(bionic_fs); }
 };
 
-#define R() JNIEnv* r = reinterpret_cast<WrapEnv*>(e)->real
+// The real ART env behind a wrapped env, RECOVERING it if the wrap env's `real` slot is null. That
+// slot is normally filled by the down-call trampoline / wrap_java_vm / GetEnv / Attach for the calling
+// thread, but a native lib can reach a wrapper with an unfilled env (observed: YouTube's libelements
+// JNI_OnLoad calling DeleteLocalRef with real==null), and dereferencing null crashes every wrapper.
+// Recover by asking the REAL VM for THIS thread's env (under glibc %fs) and cache it back. Cheap on
+// the hot path (a null check); the GetEnv only runs on the miss.
+inline JNIEnv* wrap_real(JNIEnv* e) {
+  WrapEnv* w = reinterpret_cast<WrapEnv*>(e);
+  if (w->real != nullptr) return w->real;
+  ToGlibc g;  // GetEnv on the real VM must run under glibc %fs
+  if (g_wrap_vm.real != nullptr) {
+    JNIEnv* tmp = nullptr;
+    if (g_wrap_vm.real->functions->GetEnv(g_wrap_vm.real, reinterpret_cast<void**>(&tmp),
+                                          JNI_VERSION_1_6) == JNI_OK && tmp != nullptr)
+      w->real = tmp;
+  }
+  return w->real;
+}
+
+#define R() JNIEnv* r = wrap_real(e)
 #define RF r->functions
 
 // Fixed-signature thunks: run the real slot under glibc %fs, forwarding args unchanged.
@@ -1957,6 +1976,12 @@ jint JNICALL w_GetEnv(JavaVM* vm, void** out, jint ver) {
     ToGlibc g;
     const jint rc = w->real->functions->GetEnv(w->real, reinterpret_cast<void**>(&tmp), ver);
     if (rc != JNI_OK) { *out = nullptr; return rc; }
+    // Fill THIS thread's wrap env with the real env just fetched. A thread that obtains its JNIEnv
+    // via GetEnv (rather than an ART down-call, which the trampoline fills) would otherwise get
+    // back &t_wrap_env with a stale/null `.real`, and the first wrapper it calls (e.g. DeleteLocalRef)
+    // dereferences null. YouTube's libelements JNI_OnLoad hit exactly this. Mirrors AttachCurrentThread.
+    t_wrap_env.functions = &g_env_tbl;
+    t_wrap_env.real = tmp;
     // &t_wrap_env is a glibc TLS access (%fs-relative), so it is only meaningful while ToGlibc
     // holds this thread's glibc %fs. Taking it outside this scope would resolve the same
     // displacement against BIONIC's TCB and hand the caller garbage — a JNIEnv that segfaults on
