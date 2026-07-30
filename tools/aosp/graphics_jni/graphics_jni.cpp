@@ -58,6 +58,7 @@
 #include "SkPathEffect.h"
 #include "SkDashPathEffect.h"
 #include "SkCornerPathEffect.h"
+#include "SkColorMatrixFilter.h"  // MakeLightingFilter (LightingColorFilter)
 #include "SkRuntimeEffect.h"
 #include "SkImage.h"
 #include "SkImageInfo.h"
@@ -1734,6 +1735,16 @@ jlong BlendModeColorFilter_native_Create(JNIEnv*, jclass, jint color, jint blend
                                : SkBlendMode::kSrcOver;
   sk_sp<SkColorFilter> cf = SkColorFilters::Blend(static_cast<SkColor>(color), mode);
   return reinterpret_cast<jlong>(cf.release());  // may be null (no-op blend); Java tolerates it
+}
+// android.graphics.LightingColorFilter(mul, add): dst = src*mul + add (per-RGB, alpha unchanged) —
+// the standard tint used by Material drawable/icon tinting. Maps to Skia's lighting color filter.
+// (This Skia pin predates SkColorFilters::Lighting; MakeLightingFilter is the equivalent older API.)
+// Missing before, so any view that tinted with it threw UnsatisfiedLinkError mid-dispatchDraw, which
+// aborted the view walk and left only the window background painted (apps went "full white").
+jlong LightingColorFilter_native_Create(JNIEnv*, jclass, jint mul, jint add) {
+  sk_sp<SkColorFilter> cf =
+      SkColorMatrixFilter::MakeLightingFilter(static_cast<SkColor>(mul), static_cast<SkColor>(add));
+  return reinterpret_cast<jlong>(cf.release());  // may be null; Java (ColorFilter) tolerates it
 }
 jlong Paint_nSetPathEffect(jlong p, jlong e) {
   // Apply the SkPathEffect (e.g. DashPathEffect) to the paint so dashed strokes actually render;
@@ -3528,6 +3539,10 @@ const JNINativeMethod kColorFilter[] = {
 const JNINativeMethod kBlendModeColorFilter[] = {
     {"native_CreateBlendModeFilter", "(II)J",
      reinterpret_cast<void*>(BlendModeColorFilter_native_Create)},
+};
+const JNINativeMethod kLightingColorFilter[] = {
+    {"native_CreateLightingFilter", "(II)J",
+     reinterpret_cast<void*>(LightingColorFilter_native_Create)},
 };
 
 const JNINativeMethod kNinePatch[] = {
@@ -5787,6 +5802,8 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
   // drawable/icon tinting (e.g. opendrummer's toolbar + vector drawables) goes through it.
   ok = reg(env, "android/graphics/PorterDuffColorFilter", kBlendModeColorFilter,
            n(kBlendModeColorFilter)) && ok;
+  ok = reg(env, "android/graphics/LightingColorFilter", kLightingColorFilter,
+           n(kLightingColorFilter)) && ok;
   ok = reg(env, "android/graphics/animation/NativeInterpolatorFactory",
            kNativeInterpolatorFactory, n(kNativeInterpolatorFactory)) && ok;
   ok = reg(env, "android/graphics/drawable/AnimatedVectorDrawable", kAnimatedVectorDrawable,
