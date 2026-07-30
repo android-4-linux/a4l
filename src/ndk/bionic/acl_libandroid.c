@@ -1140,6 +1140,58 @@ ACL_EXPORT int AHardwareBuffer_lockPlanes(AHardwareBuffer* ahb, uint64_t usage, 
   return AHardwareBuffer_lock(ahb, usage, fence, rect, NULL);
 }
 
+// ── ANativeWindow buffer geometry ─ acl windows use their natural size/format; accept and ignore. ─
+ACL_EXPORT int32_t ANativeWindow_setBuffersGeometry(ANativeWindow* w, int32_t width, int32_t height,
+                                                    int32_t format) {
+  (void)w; (void)width; (void)height; (void)format; return 0;
+}
+ACL_EXPORT int32_t ANativeWindow_setBuffersDataSpace(ANativeWindow* w, int32_t dataSpace) {
+  (void)w; (void)dataSpace; return 0;
+}
+
+// ── ATrace (android/trace.h) ─ systrace markers; acl has no ftrace sink, so these are no-ops. ──────
+ACL_EXPORT void ATrace_beginSection(const char* name) { (void)name; }
+ACL_EXPORT void ATrace_endSection(void) { }
+ACL_EXPORT unsigned char ATrace_isEnabled(void) { return 0; }
+
+// ── ASensor NDK (android/sensor.h) ─ acl exposes sensors via the Java SensorManager, not this C API,
+// so the NDK path reports "no sensors": getInstance returns a sentinel manager, getDefaultSensor is
+// NULL, the event queue drains empty. The symbols must exist (YouTube's libgoogle3.so references them)
+// or its dlopen fails; an app that finds no NDK sensor degrades (skips orientation, etc.). See the
+// Java-backed [[sensor-manager]] for the real path.
+typedef struct ASensorManager { int _u; } ASensorManager;
+typedef struct ASensorEventQueue { int _u; } ASensorEventQueue;
+typedef struct ASensor ASensor;  // opaque — only ever a pointer
+static ASensorManager g_acl_sensor_manager;   // sentinel; address returned, never dereferenced
+static ASensorEventQueue g_acl_sensor_queue;  // sentinel drained-empty queue
+ACL_EXPORT ASensorManager* ASensorManager_getInstance(void) { return &g_acl_sensor_manager; }
+ACL_EXPORT ASensorManager* ASensorManager_getInstanceForPackage(const char* pkg) {
+  (void)pkg; return &g_acl_sensor_manager;
+}
+ACL_EXPORT const ASensor* ASensorManager_getDefaultSensor(ASensorManager* m, int type) {
+  (void)m; (void)type; return NULL;
+}
+ACL_EXPORT ASensorEventQueue* ASensorManager_createEventQueue(ASensorManager* m, ALooper* looper,
+    int ident, ALooper_callbackFunc callback, void* data) {
+  (void)m; (void)looper; (void)ident; (void)callback; (void)data; return &g_acl_sensor_queue;
+}
+ACL_EXPORT int ASensorManager_destroyEventQueue(ASensorManager* m, ASensorEventQueue* q) {
+  (void)m; (void)q; return 0;
+}
+ACL_EXPORT int ASensorEventQueue_enableSensor(ASensorEventQueue* q, const ASensor* s) {
+  (void)q; (void)s; return 0;
+}
+ACL_EXPORT int ASensorEventQueue_disableSensor(ASensorEventQueue* q, const ASensor* s) {
+  (void)q; (void)s; return 0;
+}
+ACL_EXPORT int ASensorEventQueue_setEventRate(ASensorEventQueue* q, const ASensor* s, int32_t usec) {
+  (void)q; (void)s; (void)usec; return 0;
+}
+ACL_EXPORT int ASensorEventQueue_getEvents(ASensorEventQueue* q, void* events, size_t count) {
+  (void)q; (void)events; (void)count; return 0;  // no events available
+}
+ACL_EXPORT int ASensor_getMinDelay(const ASensor* s) { (void)s; return 0; }
+
 // ── NDK multi-network API (android/multinetwork.h) ─────────────────────────────────────────────
 // On real Android these bind a socket/process to a specific Network; acl has a single host network,
 // so per-socket/per-process binding and traffic tagging are no-ops (sockets already use the one

@@ -169,13 +169,17 @@ GLCRTE="$INT/bionic/libc/crtend_so/android_x86_64/obj/bionic/libc/arch-common/bi
 # default GL/software path is unchanged; acl's install wiring handles its absence gracefully.
 VK_FWD=""
 [ -n "${ACL_WEBVIEW_VULKAN:-}" ] && VK_FWD="libvulkan.so:acl_vulkan_fwd.c:$SYS/libEGL.so"
-# libGLESv3.so is the SAME generated forwarder as libGLESv2.so (its symbol table already covers the
-# GLES3 core). A native GL lib that links -lGLESv3 (e.g. librive-android.so) DT_NEEDs libGLESv3.so;
-# without an acl copy in the sysroot the bionic linker falls back to the real /system/lib64
-# /libGLESv3.so, which drags in internal AOSP libEGL C++ symbols (android::egl_get_connection) acl's
-# forwarder does not provide. Staging it here shadows the system lib so the app links acl's forwarder.
+# libGLESv3.so / libGLESv1_CM.so are the SAME generated forwarder as libGLESv2.so (its symbol table
+# covers the GLES2/3 core; nothing acl runs uses GLES1 fixed-function). A native GL lib that links
+# -lGLESv3 (librive-android.so) or -lGLESv1_CM (YouTube's libgoogle3.so) DT_NEEDs those sonames;
+# without an acl copy the bionic linker falls back to the real /system/lib64 one, which drags in
+# internal AOSP libEGL C++ symbols (android::egl_get_connection / egl_get_string_for_current_context)
+# acl's forwarder does not provide. Shadowing them here makes the app link acl's forwarder instead;
+# the app's actual GL calls resolve globally from the GLESv2/3 forwarder regardless of which .so
+# DT_NEEDed it.
 for pair in "libEGL.so:acl_egl_fwd.c:" "libGLESv2.so:acl_gles_fwd.c:$SYS/libEGL.so" \
             "libGLESv3.so:acl_gles_fwd.c:$SYS/libEGL.so" \
+            "libGLESv1_CM.so:acl_gles_fwd.c:$SYS/libEGL.so" \
             "libjnigraphics.so:acl_libjnigraphics.c:" \
             "libwebviewchromium_plat_support.so:acl_libwebviewchromium_plat_support.c:" \
             ${VK_FWD:+"$VK_FWD"}; do

@@ -353,9 +353,9 @@ struct GlBridge {
   std::uintptr_t donor_fs;  // offset 0: the donor glibc %fs (Mesa's per-thread TLS lives here)
   // offset 8: host-Mesa function pointers, indexed to match the forwarders. Sized with headroom over
   // the current symbol counts so adding entries to gl-forwarders.py does not silently overflow.
-  void* fns[256];
+  void* fns[384];
 };
-static_assert(kEglSymCount <= 256 && kGlesSymCount <= 256, "GlBridge::fns too small for symbol table");
+static_assert(kEglSymCount <= 384 && kGlesSymCount <= 384, "GlBridge::fns too small for symbol table");
 
 // A POOL of parked glibc threads whose %fs the app's GL threads borrow (one donor per GL thread), so
 // host Mesa's per-thread state (current context, driver TLS) is never shared between two GL threads.
