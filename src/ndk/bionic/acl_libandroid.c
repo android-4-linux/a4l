@@ -44,6 +44,7 @@
 #include <stdio.h>   // snprintf
 #include <string.h>  // strlen
 #include <sys/uio.h>  // writev
+#include <netdb.h>    // getaddrinfo / struct addrinfo (android_getaddrinfofornetwork)
 
 #define LOG_TAG "acl.libandroid"
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -1096,3 +1097,79 @@ ACL_EXPORT void ASurfaceTransaction_setFrameRateWithChangeStrategy(void* t, void
 }
 ACL_EXPORT void ASurfaceTransaction_setEnableBackPressure(void* t, void* sc, int8_t e) { (void)t; (void)sc; (void)e; }
 ACL_EXPORT void ASurfaceTransaction_setFrameTimeline(void* t, int64_t v) { (void)t; (void)v; }
+
+// ── AAssetDir listing (AAssetManager_openDir + AAssetDir iteration) ─────────────────────────────
+// acl's asset hook opens a single named asset, not a directory, so openDir returns a valid but EMPTY
+// AAssetDir (getNextFileName -> NULL). YouTube's libgoogle3.so references these; without the symbols
+// its dlopen fails. An app enumerating an asset dir gets nothing and falls back.
+typedef struct AAssetDir { int _unused; } AAssetDir;
+ACL_EXPORT AAssetDir* AAssetManager_openDir(AAssetManager* mgr, const char* dirName) {
+  (void)mgr; (void)dirName;
+  AAssetDir* d = (AAssetDir*)malloc(sizeof(AAssetDir));
+  if (d != NULL) d->_unused = 0;
+  return d;  // non-NULL, empty
+}
+ACL_EXPORT const char* AAssetDir_getNextFileName(AAssetDir* dir) { (void)dir; return NULL; }
+ACL_EXPORT void AAssetDir_rewind(AAssetDir* dir) { (void)dir; }
+ACL_EXPORT void AAssetDir_close(AAssetDir* dir) { free(dir); }
+
+// ── AImageDecoder (android/imagedecoder.h) ─ not backed: return "unsupported", keep symbols present.
+// acl decodes images via the Java/graphics_jni path; the NDK AImageDecoder is not wired. Return the
+// unsupported-format result so callers fall back instead of crashing; the symbols must exist so a lib
+// that references them (YouTube's libgoogle3.so) loads. ANDROID_IMAGE_DECODER_UNSUPPORTED_FORMAT=-6.
+typedef struct AImageDecoder AImageDecoder;
+ACL_EXPORT int AImageDecoder_createFromBuffer(const void* data, size_t size, AImageDecoder** out) {
+  (void)data; (void)size; if (out != NULL) *out = NULL; return -6;
+}
+ACL_EXPORT int AImageDecoder_decodeImage(AImageDecoder* dec, void* px, size_t stride, size_t size) {
+  (void)dec; (void)px; (void)stride; (void)size; return -1;
+}
+ACL_EXPORT int AImageDecoder_setAndroidBitmapFormat(AImageDecoder* dec, int format) {
+  (void)dec; (void)format; return -1;
+}
+ACL_EXPORT int AImageDecoder_setTargetSize(AImageDecoder* dec, int width, int height) {
+  (void)dec; (void)width; (void)height; return -1;
+}
+ACL_EXPORT void AImageDecoder_delete(AImageDecoder* dec) { (void)dec; }
+
+// AHardwareBuffer_lockPlanes: delegate to the single-plane lock (the planes struct is left unfilled;
+// callers that need per-plane strides for a multi-plane buffer degrade). Keeps the symbol present.
+ACL_EXPORT int AHardwareBuffer_lockPlanes(AHardwareBuffer* ahb, uint64_t usage, int32_t fence,
+                                          const ARect* rect, AHardwareBuffer_Planes* outPlanes) {
+  (void)outPlanes;
+  return AHardwareBuffer_lock(ahb, usage, fence, rect, NULL);
+}
+
+// ── NDK multi-network API (android/multinetwork.h) ─────────────────────────────────────────────
+// On real Android these bind a socket/process to a specific Network; acl has a single host network,
+// so per-socket/per-process binding and traffic tagging are no-ops (sockets already use the one
+// route). These MUST be exported: YouTube's libgoogle3.so references android_setsocknetwork, and
+// without the symbol its dlopen fails ("cannot locate symbol") and aborts Application.onCreate.
+// DNS-for-network delegates to the host resolver (ignoring the handle); the raw res_* queries are
+// unsupported (rarely used). net_handle_t is a uint64_t — take it by value to match the ABI.
+ACL_EXPORT int android_setsocknetwork(uint64_t network, int fd) { (void)network; (void)fd; return 0; }
+ACL_EXPORT int android_setprocnetwork(uint64_t network) { (void)network; return 0; }
+ACL_EXPORT int android_getprocnetwork(uint64_t* network) { if (network) *network = 0; return 0; }
+ACL_EXPORT int android_setprocdns(uint64_t network) { (void)network; return 0; }
+ACL_EXPORT int android_getprocdns(uint64_t* network) { if (network) *network = 0; return 0; }
+ACL_EXPORT int android_getaddrinfofornetwork(uint64_t network, const char* node, const char* service,
+                                             const struct addrinfo* hints, struct addrinfo** res) {
+  (void)network;  // single host network: resolve via the host resolver
+  return getaddrinfo(node, service, hints, res);
+}
+ACL_EXPORT int android_res_nquery(uint64_t network, const char* dname, int ns_class, int ns_type,
+                                  uint32_t flags) {
+  (void)network; (void)dname; (void)ns_class; (void)ns_type; (void)flags; errno = ENOSYS; return -1;
+}
+ACL_EXPORT int android_res_nsend(uint64_t network, const uint8_t* msg, size_t msglen, uint32_t flags) {
+  (void)network; (void)msg; (void)msglen; (void)flags; errno = ENOSYS; return -1;
+}
+ACL_EXPORT int android_res_nresult(int fd, int* rcode, uint8_t* answer, size_t anslen) {
+  (void)fd; (void)rcode; (void)answer; (void)anslen; errno = ENOSYS; return -1;
+}
+ACL_EXPORT void android_res_cancel(int nsend_fd) { (void)nsend_fd; }
+ACL_EXPORT int android_tag_socket_with_uid(int fd, uint32_t tag, uid_t uid) {
+  (void)fd; (void)tag; (void)uid; return 0;
+}
+ACL_EXPORT int android_tag_socket(int fd, uint32_t tag) { (void)fd; (void)tag; return 0; }
+ACL_EXPORT int android_untag_socket(int fd) { (void)fd; return 0; }

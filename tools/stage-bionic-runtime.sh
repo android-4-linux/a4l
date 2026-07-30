@@ -43,6 +43,7 @@ LINKER="$AOSP/out/target/product/generic_x86_64/apex/com.android.runtime/bin/lin
 BLIBC="$INT/bionic/libc/libc/android_x86_64_shared/libc.so"
 BLIBM="$INT/bionic/libm/libm/android_x86_64_shared/libm.so"
 BLIBDL="$INT/bionic/libdl/libdl/android_x86_64_shared/libdl.so"
+BLIBDLANDROID="$INT/bionic/libdl/libdl_android/android_x86_64_shared/libdl_android.so"
 BLIBLOG="$INT/system/logging/liblog/liblog/android_x86_64_shared/liblog.so"
 LDANDROID="$INT/bionic/linker/ld-android/android_x86_64_shared/ld-android.so"
 BLIBCXX="$INT/external/libcxx/libc++/android_x86_64_shared/libc++.so"
@@ -85,8 +86,23 @@ cp -f "$BLIBM" "$SYS/libm.so"
 cp -f "$BLIBDL" "$SYS/libdl.so"
 cp -f "$BLIBLOG" "$SYS/liblog.so"
 cp -f "$LDANDROID" "$SYS/ld-android.so"
+# libdl_android.so: a linker-provided bionic stub (android_dlopen_ext / namespace fns). In the target
+# /system/lib64 it is only a symlink into /apex/com.android.runtime, which the run-apk bwrap sandbox
+# does NOT bind, so it dangles — and a media lib that NEEDs it (YouTube's libelements.so ->
+# /system/lib64/libstagefright.so -> libdl_android.so) fails to load. Stage the real .so by soname.
+[ -f "$BLIBDLANDROID" ] && cp -f "$BLIBDLANDROID" "$SYS/libdl_android.so"
 cp -f "$BLIBCXX" "$SYS/libc++.so"
 cp -f "$BLIBZ" "$SYS/libz.so"    # real bionic zlib; app libs (crashlytics/webp) NEED it
+# Android ICU (libandroidicu.so + libicuuc/libicui18n): lives in the com.android.i18n APEX, not
+# /system/lib64. /system/lib64/libmedia.so DT_NEEDEDs libandroidicu.so, so an app native lib that
+# transitively pulls in libmedia (YouTube's libelements.so) fails to load with UnsatisfiedLinkError
+# ("libandroidicu.so not found") — aborting Application.onCreate — without these. There is no host
+# ld.config.txt to map the apex into the default namespace, so stage the three by soname (their other
+# deps — libbase in /system/lib64, liblog/libc++ here — already resolve). Best-effort.
+ICUDIR="$AOSP/out/target/product/generic_x86_64/apex/com.android.i18n/lib64"
+for icu in libandroidicu.so libicuuc.so libicui18n.so; do
+  [ -f "$ICUDIR/$icu" ] && cp -f "$ICUDIR/$icu" "$SYS/$icu"
+done
 # libOpenSLES.so: Android's OpenSL ES audio. App native libs DT_NEEDED it (Telegram's
 # libtmessages.49.so) and the whole lib fails to load if it's absent, taking the app down. acl has
 # no audio HAL to back the real one (it needs AudioFlinger/Binder); the NDK's stub .so carries the
