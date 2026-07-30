@@ -252,6 +252,9 @@ class IPresenter {
   virtual int video_wake_fd() const noexcept { return -1; }
   // Present-thread: drain the eventfd + commit any pending video frame + flush. Default no-op.
   virtual void pump_video() noexcept {}
+  // Activity transition (decor swap): hide the video plane and mark the toplevel fully opaque again, so
+  // the new screen isn't left with a stale video frame or an empty opaque-region hole. Default no-op.
+  virtual void reset_video_overlay() noexcept {}
 
   // IME: show/hide the compositor's text-input (zwp_text_input_v3) on the toplevel, driven by the
   // app's android.view.InputMethodManager show/hide (a focused text field). Default no-op for

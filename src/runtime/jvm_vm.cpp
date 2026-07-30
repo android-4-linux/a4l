@@ -1561,6 +1561,10 @@ void JNICALL PresentDriver_nSetContentView(JNIEnv* env, jclass, jlong sp, jobjec
   jobject old = s->view;
   s->view = env->NewGlobalRef(view);
   if (old != nullptr) env->DeleteGlobalRef(old);
+  // The old screen's video SurfaceView (if any) is gone — hide the stale video plane and restore a
+  // full opaque region so the new screen isn't left with a video hole. A new screen's video re-arms
+  // via maybeInjectVideoSurface.
+  if (s->presenter) s->presenter->reset_video_overlay();
   log::i(kTag, "PresentDriver.nSetContentView: decor swapped (activity transition)");
 }
 // Force the whole view tree to re-record for the next `frames` traversals. Called on an activity

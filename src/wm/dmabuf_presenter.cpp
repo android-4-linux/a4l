@@ -632,6 +632,21 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     std::lock_guard<std::mutex> lk(video_mu_);
     vb_x_ = x; vb_y_ = y; vb_w_ = w; vb_h_ = h; vb_set_ = true;
   }
+  // Activity transition: the old screen's video SurfaceView is gone. Hide the (stale) video plane,
+  // drop any pending frame, and mark the toplevel fully OPAQUE again — otherwise the empty
+  // opaque-region hole from the video persists on the new (non-video) screen. Runs on the present
+  // thread (nSetContentView). If the new screen has its own video, maybeInjectVideoSurface re-arms it.
+  void reset_video_overlay() noexcept override {
+    if (video_plane_.created()) video_plane_.hide();
+    {
+      std::lock_guard<std::mutex> lk(video_mu_);
+      if (video_has_pending_ && video_pending_.fd >= 0) ::close(video_pending_.fd);
+      video_has_pending_ = false;
+      vb_set_ = false;
+    }
+    set_toplevel_opaque_hole(0, 0, 0, 0);  // full opaque
+    if (surface_.Get() != nullptr && oq_dirty_) { surface_.Get()->Commit(); oq_dirty_ = false; }
+  }
   int video_wake_fd() const noexcept override { return video_wake_fd_; }
   // Present-thread: drain the wake eventfd, commit the pending video frame, flush the display. Driven
   // by the present loop's epoll on video_wake_fd() so video advances independently of UI/input.

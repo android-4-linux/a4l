@@ -4075,6 +4075,9 @@ public final class HostBootstrap {
     // A video SurfaceView we have already backed with a real Surface (so we fire surfaceCreated once).
     private static java.lang.ref.WeakReference<android.view.SurfaceView> sVideoSv;
 
+    /** Forget the injected video SurfaceView (activity transition): the next screen re-arms fresh. */
+    public static void forgetVideoSurface() { sVideoSv = null; }
+
     // Back a video SurfaceView (media3 PlayerView's content SurfaceView) with a REAL,
     // MediaCodec-decodable Surface in the Skia/Compose present path, and fire surfaceCreated so the
     // app calls player.setVideoSurface(it). Without this, ExoPlayer keeps rendering to a 64x64

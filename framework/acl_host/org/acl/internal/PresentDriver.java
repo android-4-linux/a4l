@@ -48,6 +48,7 @@ public final class PresentDriver {
     public static boolean setContentView(View decor) {
         final long s = sSession;
         if (s == 0L || decor == null) return false;
+        HostBootstrap.forgetVideoSurface();  // the old screen's video SurfaceView is gone; re-arm fresh
         nSetContentView(s, decor);
         return true;
     }
