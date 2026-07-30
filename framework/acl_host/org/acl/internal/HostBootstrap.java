@@ -224,12 +224,63 @@ public final class HostBootstrap {
         if (sWebViewInstalled) return;
         final String apkPath = System.getenv("ACL_WEBVIEW_APK");
         if (apkPath == null || apkPath.isEmpty()) return;  // not configured
+        if (!new java.io.File(apkPath).exists()) {
+            System.err.println("acl WebView: ACL_WEBVIEW_APK not found: " + apkPath);
+            return;
+        }
         sWebViewInstalled = true;
+        // LAZY arm: publish a Proxy over WebViewFactoryProvider as sProviderInstance now, but defer the
+        // heavy work (extract + load the ~96MB libwebviewchromium.so, spin up chromium's browser process)
+        // until the app actually TOUCHES WebView — the first provider method call (WebView.<init> ->
+        // createWebView, or WebSettings/CookieManager/WebStorage). Non-WebView apps that merely reference
+        // android.webkit.* (many do, via bundled libraries) never call a provider method, so they pay
+        // nothing. That makes it safe for run-apk to auto-set ACL_WEBVIEW_APK for EVERY app — no manual
+        // env, no cost to non-WebView apps. On the first call, loadWebViewProviderReal() builds the real
+        // provider AND replaces sProviderInstance with it, so getProvider() bypasses this proxy for good.
+        try {
+            Class<?> ifaceCls = Class.forName("android.webkit.WebViewFactoryProvider");
+            Object proxy = java.lang.reflect.Proxy.newProxyInstance(
+                    ifaceCls.getClassLoader(), new Class<?>[]{ifaceCls},
+                    new LazyWebViewProvider(apkPath));
+            setStaticField(Class.forName("android.webkit.WebViewFactory"), "sProviderInstance", proxy);
+            System.err.println("acl WebView: lazy provider armed (chromium loads on first WebView use)");
+        } catch (Throwable t) {
+            System.err.println("acl WebView: lazy provider arm failed: " + t);
+            t.printStackTrace();
+        }
+    }
+
+    // The InvocationHandler behind the lazy WebView provider proxy: on the first method call it loads the
+    // real chromium provider (serialized so the ~96MB engine loads exactly once), then delegates to it.
+    private static final class LazyWebViewProvider implements java.lang.reflect.InvocationHandler {
+        private final String apkPath;
+        private Object real;
+        private boolean tried;
+        LazyWebViewProvider(String apkPath) { this.apkPath = apkPath; }
+        @Override public Object invoke(Object proxy, java.lang.reflect.Method m, Object[] args)
+                throws Throwable {
+            synchronized (this) {
+                if (!tried) { tried = true; real = loadWebViewProviderReal(apkPath); }
+            }
+            if (real == null)
+                throw new UnsupportedOperationException("acl: WebView provider failed to load");
+            try {
+                return m.invoke(real, args);
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                throw e.getCause();
+            }
+        }
+    }
+
+    // Heavy body (run lazily by LazyWebViewProvider): extract the engine, load it under the WebView
+    // classloader, build the chromium provider, publish it as sProviderInstance, and RETURN it (null on
+    // failure). Publishing the real provider means getProvider() no longer routes through the proxy.
+    private static Object loadWebViewProviderReal(final String apkPath) {
         try {
             java.io.File apk = new java.io.File(apkPath);
             if (!apk.exists()) {
                 System.err.println("acl WebView: ACL_WEBVIEW_APK not found: " + apkPath);
-                return;
+                return null;
             }
             // Host is x86_64; match the APK's lib/<abi>/.
             final String abi = "x86_64";
@@ -255,7 +306,7 @@ public final class HostBootstrap {
             }
             if (soFile == null) {
                 System.err.println("acl WebView: lib/" + abi + "/libwebviewchromium.so not in APK");
-                return;
+                return null;
             }
             // ClassLoader over the WebView APK's classes.dex; parent = the framework (boot) loader so
             // android.webkit.* resolves. Native search path = the extracted lib dir.
@@ -329,9 +380,11 @@ public final class HostBootstrap {
             Class<?> wvf = Class.forName("android.webkit.WebViewFactory");
             setStaticField(wvf, "sProviderInstance", provider);
             System.err.println("acl WebView: provider installed (" + factoryCls.getName() + ")");
+            return provider;
         } catch (Throwable t) {
             System.err.println("acl WebView: provider install failed: " + t);
             t.printStackTrace();
+            return null;
         }
     }
 

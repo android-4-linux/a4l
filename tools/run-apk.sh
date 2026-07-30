@@ -237,6 +237,19 @@ RGFONT=$(first "$ROOT"/external/roboto-fonts/Roboto-Regular.ttf)
 [ -f "$HOME_DIR/lib64/libacl_graphics_jni.so" ] && RUNNER+=(ACL_ART_GRAPHICS_LIB="$HOME_DIR/lib64/libacl_graphics_jni.so")
 # android.opengl.GLES20/GLES30 natives (GLSurfaceView path); binds to host Mesa libGLESv2.
 [ -f "$HOME_DIR/lib64/libacl_gles_jni.so" ] && RUNNER+=(ACL_ART_GLES_LIB="$HOME_DIR/lib64/libacl_gles_jni.so")
+# WebView: auto-discover the vendored Chromium WebView prebuilt from the AOSP tree so WebView apps
+# need NO manual ACL_WEBVIEW_APK. Safe to set for every app because HostBootstrap arms the provider
+# LAZILY — it only extracts/loads the ~96MB libwebviewchromium.so when the app FIRST constructs a
+# WebView, so non-WebView apps (even ones that merely reference android.webkit) pay nothing. An
+# explicit ACL_WEBVIEW_APK in the environment wins. The APK is readable in the sandbox (/mnt is bound).
+if [ -z "${ACL_WEBVIEW_APK:-}" ]; then
+  WVAPK=$(first "$ROOT"/external/chromium-webview/prebuilt/x86_64/webview.apk)
+  [ -n "${WVAPK:-}" ] && ACL_WEBVIEW_APK="$WVAPK"
+fi
+if [ -n "${ACL_WEBVIEW_APK:-}" ]; then
+  RUNNER+=(ACL_WEBVIEW_APK="$ACL_WEBVIEW_APK")
+  printf 'run-apk: WebView provider available (lazy load on first use) -> %s\n' "$ACL_WEBVIEW_APK" >&2
+fi
 [ "$TIMEOUT" != "0" ] && RUNNER+=(timeout "$TIMEOUT")
 
 # System fonts for the NATIVE (Flutter/Skia) engine. Skia's SkFontMgr_Android reads a HARDCODED
