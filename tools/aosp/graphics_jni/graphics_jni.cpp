@@ -322,6 +322,12 @@ inline AclRasterCanvas* raster_of(jlong h) {
   return reinterpret_cast<AclRasterCanvas*>(h & ~kRasterTag);
 }
 SkCanvas* recorder_seg_canvas(jlong h);  // current segment canvas; defined with NodeRecorder
+// Keep a NodeRecorder's per-save-level CTM stack in sync with the app's save/restore calls, so a
+// segment split inside a save scope can reconstruct each level's ORIGINAL restore-CTM (defined with
+// NodeRecorder). No-ops for non-recorder handles.
+void recorder_note_save(jlong h);
+void recorder_note_restore(jlong h);
+void recorder_note_restore_to(jlong h, int count);
 inline SkCanvas* canvas_sk(jlong h) {
   if (h == 0) return nullptr;
   if (h & (kRasterTag | kRecorderTag)) {
@@ -1071,25 +1077,31 @@ jint Path_nGetFillType(jlong p) {
 // ── Canvas transform/clip — all @CriticalNative (handle-only, no JNIEnv/jclass) ──
 jint Canvas_nSave(jlong canvas, jint /*saveFlags*/) {
   auto* c = canvas_sk(canvas);
-  return c != nullptr ? c->save() : 0;
+  if (c == nullptr) return 0;
+  recorder_note_save(canvas);
+  return c->save();
 }
 // Canvas.saveLayerAlpha — an offscreen layer composited back at `alpha` (fades/cross-fades,
 // Compose graphicsLayer alpha). @CriticalNative (handle-only, no env). Returns the save count.
 jint Canvas_nSaveLayerAlpha(jlong canvas, jfloat l, jfloat t, jfloat r, jfloat b, jint alpha) {
   auto* c = canvas_sk(canvas);
   if (c == nullptr) return 0;
+  recorder_note_save(canvas);
   const SkRect bounds = SkRect::MakeLTRB(l, t, r, b);
   return c->saveLayerAlpha(&bounds, static_cast<U8CPU>(alpha & 0xff));
 }
 jboolean Canvas_nRestore(jlong canvas) {
   auto* c = canvas_sk(canvas);
   if (c == nullptr || c->getSaveCount() <= 1) return JNI_FALSE;
+  recorder_note_restore(canvas);
   c->restore();
   return JNI_TRUE;
 }
 void Canvas_nRestoreToCount(jlong canvas, jint saveCount) {
   auto* c = canvas_sk(canvas);
-  if (c != nullptr) c->restoreToCount(saveCount);
+  if (c == nullptr) return;
+  recorder_note_restore_to(canvas, saveCount);
+  c->restoreToCount(saveCount);
 }
 // View fading edges: saveUnclippedLayer saves a layer over a rect WITHOUT clipping subsequent draws
 // to it; restoreUnclippedLayer composites it with a gradient paint that fades the edge to transparent.
@@ -1098,11 +1110,13 @@ void Canvas_nRestoreToCount(jlong canvas, jint saveCount) {
 // that took down ANY fading-edge ScrollView/ListView/RecyclerView/EditText. Both @CriticalNative.
 jint Canvas_nSaveUnclippedLayer(jlong canvas, jint, jint, jint, jint) {
   auto* c = canvas_sk(canvas);
-  return c != nullptr ? c->save() : 1;
+  if (c == nullptr) return 1;
+  recorder_note_save(canvas);
+  return c->save();
 }
 void Canvas_nRestoreUnclippedLayer(jlong canvas, jint saveCount, jlong /*paint*/) {
   auto* c = canvas_sk(canvas);
-  if (c != nullptr && saveCount >= 1) c->restoreToCount(saveCount);
+  if (c != nullptr && saveCount >= 1) { recorder_note_restore_to(canvas, saveCount); c->restoreToCount(saveCount); }
 }
 jint Canvas_nGetSaveCount(jlong canvas) {
   auto* c = canvas_sk(canvas);
@@ -3620,6 +3634,12 @@ struct NodeRecorder {
   int w = 1, h = 1;
   SkMatrix carry_m = SkMatrix::I();  // CTM at the last boundary, re-applied to the next segment
   int carry_saves = 0;               // unbalanced save() depth carried across the boundary
+  // CTM captured at each outstanding save() (the value its restore returns to), mirroring the seg's
+  // save stack above the base. A single carry_m can only restore the TOP CTM after a split — these
+  // per-level baselines let begin_seg re-save each level at its ORIGINAL restore-CTM, so a translate
+  // that straddles a child boundary is undone by the post-boundary restore instead of leaking into
+  // the next sibling (the setup-button rightward drift).
+  std::vector<SkMatrix> save_ctms;
   bool z_enabled = false;            // inside a RecordingCanvas.enableZ() region (children are Z-sorted)
   std::vector<DisplayItem> items;
 
@@ -3633,8 +3653,19 @@ struct NodeRecorder {
   void begin_seg() {
     seg = rec.beginRecording(SkRect::MakeIWH(w, h));
     if (seg == nullptr) return;
-    if (!carry_m.isIdentity()) seg->setMatrix(carry_m);
-    for (int i = 0; i < carry_saves; ++i) seg->save();
+    // Rebuild the save stack, giving each level its ORIGINAL restore-CTM (save_ctms) rather than the
+    // post-boundary carry_m — otherwise a translate issued after a save but before the boundary is
+    // baked into every re-saved level's baseline and leaks into later siblings. The COUNT is driven
+    // by carry_saves (authoritative from getSaveCount); any level we didn't track falls back to
+    // carry_m (the old behavior), so the save depth stays balanced regardless. Playback composes each
+    // recorded setMatrix with the walk CTM, so these compose correctly under the live walk.
+    const int tracked = static_cast<int>(save_ctms.size());
+    for (int i = 0; i < carry_saves; ++i) {
+      const SkMatrix& base = (i < tracked) ? save_ctms[i] : carry_m;
+      seg->setMatrix(base);
+      seg->save();
+    }
+    if (carry_saves > 0 || !carry_m.isIdentity()) seg->setMatrix(carry_m);
   }
   // Finalize the current segment into a Picture item (dropped if it recorded nothing).
   void flush_seg() {
@@ -3678,6 +3709,7 @@ struct NodeRecorder {
     items.clear();
     carry_m = SkMatrix::I();
     carry_saves = 0;
+    save_ctms.clear();
     z_enabled = false;
     w = W > 0 ? W : 1;
     h = H > 0 ? H : 1;
@@ -3697,6 +3729,26 @@ SkCanvas* recorder_seg_canvas(jlong h) {
   return nr != nullptr ? nr->seg : nullptr;
 }
 void free_node_recorder(jlong h) { delete recorder_of(h); }
+
+// Keep a recorder's per-save-level CTM stack in step with the app's save/restore calls (see
+// NodeRecorder::save_ctms / begin_seg). No-ops for non-recorder (present / raster) canvas handles.
+void recorder_note_save(jlong h) {
+  if (!is_recorder_handle(h)) return;
+  if (auto* nr = recorder_of(h))
+    if (nr->seg != nullptr) nr->save_ctms.push_back(nr->seg->getTotalMatrix());
+}
+void recorder_note_restore(jlong h) {
+  if (!is_recorder_handle(h)) return;
+  if (auto* nr = recorder_of(h))
+    if (!nr->save_ctms.empty()) nr->save_ctms.pop_back();
+}
+void recorder_note_restore_to(jlong h, int count) {
+  if (!is_recorder_handle(h)) return;
+  if (auto* nr = recorder_of(h)) {
+    const int target = count > 1 ? count - 1 : 0;  // outstanding saves above the base level
+    while (static_cast<int>(nr->save_ctms.size()) > target) nr->save_ctms.pop_back();
+  }
+}
 
 // ── Deferred present (Step 1 of the UI-thread/RenderThread split) ─────────────────────────────
 // Normally the present-root RecordingCanvas draws IMMEDIATELY onto the GPU SkCanvas, so View.draw
