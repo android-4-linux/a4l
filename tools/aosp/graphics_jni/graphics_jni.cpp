@@ -3793,7 +3793,11 @@ SkCanvas* g_present_record_canvas = nullptr;      // stable across begin/finish/
 // list is snapshotted (vector copy) at take_for_render for the same top-level thread-safety the immutable
 // picture gave; child nodes stay live-resolved at the walk (unchanged). Opt-in until verified.
 bool present_walk() {
-  static const bool on = std::getenv("ACL_PRESENT_WALK") != nullptr;
+  // DEFAULT ON (in deferred present): walk the present-root directly so WebView functors z-order
+  // correctly (map renders + native overlays on top). Opt out with ACL_PRESENT_NOWALK to revert to the
+  // legacy flat-picture drawPicture replay (functors drawn last — overlays covered). ACL_PRESENT_WALK
+  // is still honored to force it on. Verified crash-free + render-parity across the F-Droid corpus.
+  static const bool on = std::getenv("ACL_PRESENT_NOWALK") == nullptr;
   return on;
 }
 AclRenderNode* g_present_root_node = nullptr;   // the present-root node (walk mode)
@@ -4640,7 +4644,8 @@ void RecordingCanvas_nDrawWebViewFunctor(jlong canvas, jint functor) {
   // the boundary under the legacy drawPicture replay too (overlays fix, but the functor paints blank —
   // diagnostic only).
   static const bool z_order = std::getenv("ACL_WEBVIEW_ZORDER") != nullptr;
-  if ((present_walk() || z_order) && is_recorder_handle(canvas)) {
+  const bool walk = present_walk() && g_present_defer.load(std::memory_order_relaxed);
+  if ((walk || z_order) && is_recorder_handle(canvas)) {
     recorder_of(canvas)->boundary_functor(static_cast<int>(functor));
     return;
   }
