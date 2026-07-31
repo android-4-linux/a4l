@@ -1929,6 +1929,38 @@ acl_ndk_attach_thunk:
 )");
 extern "C" std::uintptr_t acl_ndk_attach_thunk();
 
+// ── JNI down-call profiler (ACL_NDK_CALLPROF) ──────────────────────────────────────────────────
+// A gated per-call counter emitted into the down-call trampoline (lock incq), plus a logger thread
+// that prints the count each 250ms. Correlate the rate with an app-log window (e.g. libGDX's
+// findDisjunctAreas) to see whether a stall is JNI-down-call-bound (millions of native calls) vs
+// pure Java/native compute. Off by default: the incq is only emitted when the env var is set.
+std::atomic<std::uint64_t> g_ndk_downcall_count{0};
+bool ndk_callprof() {
+  static const bool on = std::getenv("ACL_NDK_CALLPROF") != nullptr;
+  return on;
+}
+void* callprof_logger(void*) {
+  std::uint64_t prev = 0;
+  for (;;) {
+    usleep(250000);
+    const std::uint64_t now = g_ndk_downcall_count.load(std::memory_order_relaxed);
+    log::i(kTag, "ndk down-calls: +{} (total {}) in 250ms = {}/s", now - prev, now,
+           (now - prev) * 4);
+    prev = now;
+  }
+  return nullptr;
+}
+void maybe_start_callprof_logger() {
+  if (!ndk_callprof()) return;
+  static std::atomic<bool> armed{false};
+  if (armed.exchange(true)) return;
+  pthread_t t;
+  if (pthread_create(&t, nullptr, callprof_logger, nullptr) == 0) {
+    pthread_detach(t);
+    log::i(kTag, "ACL_NDK_CALLPROF: JNI down-call profiler armed");
+  }
+}
+
 // Down-call trampoline: ART invokes a registered native under GLIBC %fs, but the native is bionic
 // code expecting bionic %fs + a wrapped JNIEnv. We emit, per native, a tiny stub that gives the
 // calling thread its wrapped env, swaps to that thread's bionic %fs (wrfsbase — no register
@@ -1970,6 +2002,10 @@ void* make_downcall(void* real_native) {
   constexpr int kStackSlots = 32;
   emit({0x55});                                         // push %rbp        (save ART's rbp; rsp ≡ 0)
   emit({0x48, 0x89, 0xE5});                             // mov %rsp,%rbp    ([rbp+8]=ret, [rbp+16+8k]=args)
+  if (ndk_callprof()) {                                 // ACL_NDK_CALLPROF: count this down-call (r10 free here)
+    emit({0x49, 0xBA}); imm64(reinterpret_cast<std::uintptr_t>(&g_ndk_downcall_count));  // movabs cnt,%r10
+    emit({0xF0, 0x49, 0xFF, 0x02});                     // lock incq (%r10)
+  }
   emit({0x64, 0x4C, 0x8B, 0x1C, 0x25});                 // mov %fs:disp32,%r11  (this thread's
   imm32(static_cast<std::int32_t>(g_tls_disp));         //   bionic TCB, or 0 = unattached)
   emit({0x4D, 0x85, 0xDB});                             // test %r11,%r11
@@ -2456,6 +2492,7 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
   // glibc %fs — otherwise ART's handler crashes on it before the shim is even installed. Idempotent.
   install_signal_shims();
   maybe_install_crashpad_shim_keeper(abs_path);  // re-assert acl's fault shim over chromium's crashpad
+  maybe_start_callprof_logger();                 // ACL_NDK_CALLPROF: JNI down-call rate profiler
   maybe_install_wv_fault_catch();  // ACL_WV_FAULT_CATCH: opt-in diagnostic to see chromium's real crash
   // The calling thread need not be the main thread: an app can call System.loadLibrary off a
   // background Java thread (e.g. Sentry's "SentryNdkLoadLi" loader thread doing
