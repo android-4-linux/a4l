@@ -1250,6 +1250,10 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
     // doodledudette etc.) are playable on a desktop with no real accelerometer. A held arrow = a lean;
     // the arrow is consumed here (a tilt game reads the sensor, not the D-pad). DPAD U/D/L/R = 19/20/21/22.
     static const bool tilt_keys = std::getenv("ACL_TILT_KEYS") != nullptr;
+    static const bool tilt_dbg = std::getenv("ACL_TILT_DEBUG") != nullptr;
+    if (tilt_dbg)
+      std::fprintf(stderr, "[acl.tilt] key evdev=%u keysym=0x%x -> keycode=%d down=%d\n", k->keycode,
+                   k->keysym, keycode, key_down ? 1 : 0);
     if (tilt_keys && (keycode == 19 || keycode == 20 || keycode == 21 || keycode == 22)) {
       static std::atomic<bool> up{false}, down{false}, left{false}, right{false};
       switch (keycode) {
@@ -1264,6 +1268,7 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
       const float ty = (down.load(std::memory_order_relaxed) ? kAmt : 0.0f) -
                        (up.load(std::memory_order_relaxed) ? kAmt : 0.0f);
       acl_sensor_kbd_tilt(tx, ty);  // svc/sensor, same binary (see the extern "C" decl near the top)
+      if (tilt_dbg) std::fprintf(stderr, "[acl.tilt] -> accel tilt tx=%.2f ty=%.2f\n", tx, ty);
       return;  // consume the arrow
     }
     // KEYCODE_BACK: acl drives the system back action itself (HostBootstrap.dispatchBack -> top
