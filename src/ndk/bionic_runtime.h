@@ -198,7 +198,9 @@ class BionicRuntime {
   // normal "this native isn't exported by name" case) or on unsupported arch. load_library must
   // have run first (the trampoline needs the wrapped env). Used to bind natives by NAME —
   // JNI_OnLoad's RegisterNatives path gets its trampolines inside the wrapped RegisterNatives.
-  void* downcall_symbol(void* handle, const char* sym);
+  // `sig` is the method's JNI signature ("(...)ret"), used to size the trampoline's stack-arg copy;
+  // pass nullptr if unknown (falls back to the safe max).
+  void* downcall_symbol(void* handle, const char* sym, const char* sig = nullptr);
 
   // True if a JNI_OnLoad already RegisterNatives'd (name, sig) on `klass`. Those bindings are the
   // app's explicit choice, so name resolution must not overwrite them (a .so may both export

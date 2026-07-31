@@ -210,12 +210,12 @@ int bind_class_natives(BionicRuntime& rt, void* handle, JNIEnv* env, jclass klas
     std::string mangled_m;
     if (m_name.empty() || !mangle(m_name, mangled_m)) continue;
     sym += mangled_m;
-    void* tramp = rt.downcall_symbol(handle, sym.c_str());
+    void* tramp = rt.downcall_symbol(handle, sym.c_str(), sig.c_str());
     if (tramp == nullptr) {
       std::string mangled_args;
       if (!mangle(args, mangled_args)) continue;
       const std::string long_sym = sym + "__" + mangled_args;
-      tramp = rt.downcall_symbol(handle, long_sym.c_str());
+      tramp = rt.downcall_symbol(handle, long_sym.c_str(), sig.c_str());
     }
     if (tramp == nullptr) continue;  // not exported by name (e.g. bound via JNI_OnLoad, or absent)
 

@@ -1961,6 +1961,46 @@ void maybe_start_callprof_logger() {
   }
 }
 
+// How many 8-byte STACK argument slots a native with this JNI signature receives, on the x86_64 SysV
+// ABI, so the down-call trampoline copies only what it must (register-only natives — the JNI norm,
+// incl. libGDX's per-pixel Pixmap ops — get 0). The native is called as (JNIEnv*, jclass/jobject, <args>):
+// the first 6 INTEGER/pointer args go in registers, the first 8 FLOAT/DOUBLE in xmm; the rest spill to
+// the stack in declaration order. Arrays and objects are one pointer (integer) arg; long is one integer
+// slot. Returns an EVEN count (16-byte call alignment) capped at kDowncallMaxSlots. A null/garbage sig
+// falls back to the cap (safe: over-copying is harmless, it just reads the caller's own mapped stack).
+constexpr int kDowncallMaxSlots = 32;
+int downcall_stack_slots(const char* sig) {
+  if (sig == nullptr) return kDowncallMaxSlots;
+  int int_args = 2;  // JNIEnv*, jclass/jobject
+  int flt_args = 0;
+  const char* p = sig;
+  if (*p == '(') ++p;
+  for (; *p != '\0' && *p != ')'; ) {
+    switch (*p) {
+      case 'F': case 'D': ++flt_args; ++p; break;               // float / double -> xmm
+      case 'L':                                                  // object -> pointer (integer)
+        ++int_args;
+        while (*p != '\0' && *p != ';') ++p;
+        if (*p == ';') ++p;
+        break;
+      case '[':                                                  // array -> one pointer, whatever the element
+        ++int_args;
+        ++p;
+        while (*p == '[') ++p;                                   // multi-dim
+        if (*p == 'L') { while (*p != '\0' && *p != ';') ++p; if (*p == ';') ++p; }
+        else if (*p != '\0') ++p;                                // primitive element type char
+        break;
+      default: ++int_args; ++p; break;                          // I Z B C S J -> one integer slot
+    }
+  }
+  const int istk = int_args > 6 ? int_args - 6 : 0;
+  const int fstk = flt_args > 8 ? flt_args - 8 : 0;
+  int slots = istk + fstk;
+  slots = (slots + 1) & ~1;  // round up to even so the trampoline's `call` stays 16-byte aligned
+  if (slots > kDowncallMaxSlots) slots = kDowncallMaxSlots;
+  return slots;
+}
+
 // Down-call trampoline: ART invokes a registered native under GLIBC %fs, but the native is bionic
 // code expecting bionic %fs + a wrapped JNIEnv. We emit, per native, a tiny stub that gives the
 // calling thread its wrapped env, swaps to that thread's bionic %fs (wrfsbase — no register
@@ -1978,7 +2018,7 @@ void maybe_start_callprof_logger() {
 //     A JNIEnv belongs to one thread, so this cannot be a global.
 // Only %rax/%r10/%r11 are clobbered: all caller-saved, none an argument register, and %al carries
 // no varargs count (JNI natives are not variadic).
-void* make_downcall(void* real_native) {
+void* make_downcall(void* real_native, int stack_slots = kDowncallMaxSlots) {
   auto* p = static_cast<unsigned char*>(
       ::mmap(nullptr, kPage, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
   if (p == MAP_FAILED) return nullptr;
@@ -1998,8 +2038,13 @@ void* make_downcall(void* real_native) {
   // fresh call. Entry: %rsp ≡ 8 (mod 16), [rsp]=ret, stack args at [rsp+8+8k]. Copying kStackSlots
   // (even, so the call stays 16-aligned) covers up to 6+kStackSlots integer args; natives with fewer
   // just copy unused slots (harmless reads of the caller's own stack, always mapped — it is ART's
-  // frame). 32 covers the 24-stack-arg worst case above with margin.
-  constexpr int kStackSlots = 32;
+  // frame). The caller passes the exact even slot count from the JNI signature (downcall_stack_slots)
+  // — 0 for the register-only norm, so a per-pixel getPixel/setPixel loop pays no copy — falling back
+  // to the 32-slot cap (the 24-stack-arg worst case above, with margin) for the by-name path that has
+  // no signature. Must be EVEN and <= kDowncallMaxSlots (downcall_stack_slots guarantees both).
+  const int kStackSlots = (stack_slots < 0 || stack_slots > kDowncallMaxSlots || (stack_slots & 1))
+                              ? kDowncallMaxSlots
+                              : stack_slots;
   emit({0x55});                                         // push %rbp        (save ART's rbp; rsp ≡ 0)
   emit({0x48, 0x89, 0xE5});                             // mov %rsp,%rbp    ([rbp+8]=ret, [rbp+16+8k]=args)
   if (ndk_callprof()) {                                 // ACL_NDK_CALLPROF: count this down-call (r10 free here)
@@ -2062,7 +2107,10 @@ jint JNICALL w_RegisterNatives(JNIEnv* e, jclass c, const JNINativeMethod* m, ji
   R();
   ToGlibc g;  // glibc %fs for the host allocator + the real RegisterNatives
   std::vector<JNINativeMethod> wrapped(m, m + n);
-  for (auto& wm : wrapped) wm.fnPtr = make_downcall(wm.fnPtr);  // ART calls the trampoline, not the raw native
+  // ART calls the trampoline, not the raw native. Size each trampoline's stack-arg copy to the method's
+  // JNI signature (downcall_stack_slots) — register-only natives (the norm) copy nothing, cutting the
+  // per-call cost that dominates JNI-heavy paths (e.g. libGDX's millions of per-pixel Pixmap calls).
+  for (auto& wm : wrapped) wm.fnPtr = make_downcall(wm.fnPtr, downcall_stack_slots(wm.signature));
   const jint rc = RF->RegisterNatives(r, c, wrapped.data(), n);
   static const bool diag = std::getenv("ACL_NDK_JNI_DIAG") != nullptr;
   if (diag) {
@@ -2595,13 +2643,13 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
 #endif
 }
 
-void* BionicRuntime::downcall_symbol(void* handle, const char* sym) {
+void* BionicRuntime::downcall_symbol(void* handle, const char* sym, const char* sig) {
 #if defined(__x86_64__)
   void* raw = symbol(handle, sym);
   if (raw == nullptr) return nullptr;  // not exported by name — the common, non-error case
-  return make_downcall(raw);
+  return make_downcall(raw, downcall_stack_slots(sig));  // size the stack-arg copy to the signature
 #else
-  (void)handle; (void)sym;
+  (void)handle; (void)sym; (void)sig;
   return nullptr;
 #endif
 }
