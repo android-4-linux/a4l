@@ -981,6 +981,67 @@ void install_signal_shims() {
   log::i(kTag, "signal fs-shim installed over {} ART handler(s)", wrapped);
 }
 
+// ── crashpad shim-keeper (WebView) ─────────────────────────────────────────────────────────────
+// Chromium's crashpad installs its OWN SIGSEGV/SIGBUS/… handlers during WebView GPU-process init,
+// DISPLACING acl_signal_trampoline. A fault that ART would recover (a JIT implicit null-check on an
+// ART/JIT thread — the exact %fs-boundary case the shim exists for) then lands on crashpad instead,
+// which treats it as a crash and _exit()s the process. The app dies silently mid-init — no core
+// (crashpad consumed the signal), no acl fault log (the shim was displaced). Empirically this is the
+// openmaps "stall": without an incidental background poker it renders ~0 frames; with one it renders
+// thousands (the ACL_WV_FAULT_CATCH correlation). Re-assert acl's trampoline over any handler crashpad
+// stole, chaining to ART's ORIGINAL handler (g_saved_sig, captured before crashpad existed) — never to
+// crashpad's. Leaves g_saved_sig untouched so the chain target stays ART's. Returns how many taken back.
+int reassert_fault_shims() {
+  if (!g_shims_installed.load(std::memory_order_acquire)) return 0;
+  // ONLY the memory-fault signals ART recovers (implicit null-checks). Deliberately NOT SIGTRAP/
+  // SIGILL/SIGFPE/SIGABRT: chromium/v8 use SIGTRAP (breakpoints/traps) and SIGABRT (CHECK) for their
+  // own control flow, and stealing those back to ART's handler breaks chromium (observed: onCreate
+  // failures). SIGSEGV/SIGBUS are the ones crashpad turns fatal that ART would otherwise recover.
+  static const int sigs[] = {SIGSEGV, SIGBUS};
+  int retaken = 0;
+  for (const int sig : sigs) {
+    if (g_saved_sig[sig].handler == nullptr) continue;  // acl never wrapped this one
+    KSigaction cur{};
+    if (raw_rt_sigaction(sig, nullptr, &cur) != 0) continue;
+    if (cur.handler == reinterpret_cast<void*>(&acl_signal_trampoline)) continue;   // still ours
+    if (cur.handler == nullptr || cur.handler == reinterpret_cast<void*>(1)) continue;  // DFL/IGN — leave
+    KSigaction neu = cur;                          // keep crashpad's valid kernel restorer/mask/altstack
+    neu.handler = reinterpret_cast<void*>(&acl_signal_trampoline);
+    neu.flags |= SA_SIGINFO;                        // our trampoline is a 3-arg sigaction
+    if (raw_rt_sigaction(sig, &neu, nullptr) == 0) ++retaken;
+  }
+  return retaken;
+}
+std::atomic<bool> g_crashpad_keeper_armed{false};
+void* crashpad_shim_keeper(void*) {
+  // Re-assert every ~20ms for ~60s — covers crashpad's (repeated) GPU-process init installs. A normal
+  // thread (not a signal handler), so log/syscalls here are fine. Cheap; exits after the window.
+  bool announced = false;
+  for (int i = 0; i < 6000; ++i) {  // ~60s at 10ms cadence (matches the ACL_WV_FAULT_CATCH poker)
+    const int n = reassert_fault_shims();
+    if (n > 0 && !announced) {
+      announced = true;
+      log::i(kTag, "crashpad shim-keeper: reclaimed {} fault handler(s) from crashpad", n);
+    }
+    usleep(10000);
+  }
+  return nullptr;
+}
+// Arm the keeper when the chromium WebView lib loads (the only thing that ships crashpad). On by
+// default; opt out with ACL_NO_CRASHPAD_SHIM_KEEPER.
+void maybe_install_crashpad_shim_keeper(const char* lib) {
+  if (lib == nullptr) return;
+  if (std::strstr(lib, "webviewchromium") == nullptr && std::strstr(lib, "libmonochrome") == nullptr)
+    return;
+  if (std::getenv("ACL_NO_CRASHPAD_SHIM_KEEPER") != nullptr) return;
+  if (g_crashpad_keeper_armed.exchange(true)) return;  // one keeper, not one per (re)load
+  pthread_t t;
+  if (pthread_create(&t, nullptr, crashpad_shim_keeper, nullptr) == 0) {
+    pthread_detach(t);
+    log::i(kTag, "crashpad shim-keeper armed (re-asserting acl's fault shim over crashpad during WebView init)");
+  }
+}
+
 // ── Scoped, opt-in WebView fault interceptor (ACL_WV_FAULT_CATCH) ──────────────────────────────
 // Chromium's crashpad installs its OWN SIGSEGV/SIGBUS handler during GPU-process init — AFTER acl's
 // %fs shim — so the kernel calls crashpad first for a chromium GPU-thread fault, acl's ACL_FAULT_DEBUG
@@ -2394,6 +2455,7 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
   // bionic-spawned threads (a real fault, or ART's all-thread crash dump) must be serviced with a
   // glibc %fs — otherwise ART's handler crashes on it before the shim is even installed. Idempotent.
   install_signal_shims();
+  maybe_install_crashpad_shim_keeper(abs_path);  // re-assert acl's fault shim over chromium's crashpad
   maybe_install_wv_fault_catch();  // ACL_WV_FAULT_CATCH: opt-in diagnostic to see chromium's real crash
   // The calling thread need not be the main thread: an app can call System.loadLibrary off a
   // background Java thread (e.g. Sentry's "SentryNdkLoadLi" loader thread doing
