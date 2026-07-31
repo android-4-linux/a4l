@@ -4631,27 +4631,21 @@ void RecordingCanvas_nDrawRipple(jlong, jlong, jlong, jlong, jlong, jlong, jlong
 // area is then left unpainted rather than crashing.
 extern "C" void acl_graphics_present_record_functor(void* sk_canvas, int functor);
 void RecordingCanvas_nDrawWebViewFunctor(jlong canvas, jint functor) {
-  // Z-ordering the WebView functor (EXPERIMENTAL, opt-in ACL_WEBVIEW_ZORDER=1): record it as an
-  // in-order boundary (like nDrawTextureLayer) so the walk reaches it AT ITS Z-POSITION and native
-  // overlays (toolbar, FAB) drawn after it compose ON TOP. Overlay z-order is fixed this way, BUT the
-  // functor itself currently paints BLANK when drawn through the walk's AclRenderNodeDrawable.onDraw
-  // (inside drawPicture): a Vulkan AwDrawFn secondary-command-buffer draw needs the DIRECT present
-  // canvas + its on_sync timing, which only present_replay_onto's draw-last path provides. So the
-  // DEFAULT stays draw-last (map renders, overlays covered) until the present replay can walk the tree
-  // directly. See webview-renderthread-fix.
-  // In ACL_PRESENT_WALK mode the replay walks the tree on the DIRECT GPU canvas, so an in-order functor
-  // boundary draws correctly there (map renders AND overlays compose on top). ACL_WEBVIEW_ZORDER forces
-  // the boundary under the legacy drawPicture replay too (overlays fix, but the functor paints blank —
-  // diagnostic only).
-  static const bool z_order = std::getenv("ACL_WEBVIEW_ZORDER") != nullptr;
+  // Default deferred present (ACL_PRESENT_WALK, the default — see present_walk): record the functor as
+  // an in-order boundary (like nDrawTextureLayer) so the replay's direct tree walk reaches it AT ITS
+  // Z-POSITION on the DIRECT GPU canvas — the map renders AND native overlays (toolbar, FAB) drawn after
+  // it compose ON TOP. This only works because present_replay_onto walks the tree directly; a Vulkan
+  // AwDrawFn secondary-command-buffer draw needs the direct present canvas + its on_sync timing, which
+  // the legacy drawPicture replay (ACL_PRESENT_NOWALK) cannot give — there the functor falls through to
+  // the draw-last path below (map renders, overlays covered). See webview-renderthread-fix.
   const bool walk = present_walk() && g_present_defer.load(std::memory_order_relaxed);
-  if ((walk || z_order) && is_recorder_handle(canvas)) {
+  if (walk && is_recorder_handle(canvas)) {
     recorder_of(canvas)->boundary_functor(static_cast<int>(functor));
     return;
   }
-  // Default (draw-last) + present-root immediate: resolve the handle and draw straight onto the GPU
-  // canvas. `canvas` may be a bit-tagged raster handle, so canvas_sk() before the functor helpers
-  // dereference it (getDeviceClipBounds on a tagged pointer SIGSEGVs in topDevice()).
+  // Legacy (ACL_PRESENT_NOWALK, draw-last) + present-root immediate: resolve the handle and draw straight
+  // onto the GPU canvas. `canvas` may be a bit-tagged raster handle, so canvas_sk() before the functor
+  // helpers dereference it (getDeviceClipBounds on a tagged pointer SIGSEGVs in topDevice()).
   SkCanvas* sk = canvas_sk(canvas);
   if (sk == nullptr) return;
   if (g_present_defer.load(std::memory_order_relaxed))
