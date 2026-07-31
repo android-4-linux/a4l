@@ -22,6 +22,12 @@
 #include "log/log.h"
 
 namespace acl::svc::sensor {
+// Keyboard-driven tilt (ACL_TILT_KEYS): the input path (present) sets a normalized tilt in [-1,1] from
+// the arrow keys, and the synthetic accelerometer turns it into a tilted gravity vector — so tilt games
+// (libGDX doodledudette etc.) are playable on a desktop with no real accelerometer. External linkage so
+// the exported C setter below can reach it; read unqualified by SyntheticSource in the anon namespace.
+std::atomic<float> g_kbd_tilt_x{0.0f};
+std::atomic<float> g_kbd_tilt_y{0.0f};
 namespace {
 constexpr const char* kTag = "acl.svc.sensor";
 
@@ -74,12 +80,25 @@ class SyntheticSource final : public SensorSource {
   }
   bool read(int type, SensorSample* out) override {
     if (type != kTypeAccelerometer) return false;
-    const double t = static_cast<double>(now_ns()) / 1e9;
-    const float wob = 0.15f * static_cast<float>(std::sin(t));  // gentle sway
+    constexpr float kG = 9.80665f;
+    const float tx = g_kbd_tilt_x.load(std::memory_order_relaxed);
+    const float ty = g_kbd_tilt_y.load(std::memory_order_relaxed);
     out->value_count = 3;
-    out->values[0] = wob;
-    out->values[1] = wob * 0.5f;
-    out->values[2] = 9.80665f;  // gravity, device face-up
+    if (tx != 0.0f || ty != 0.0f) {
+      // Keyboard tilt (ACL_TILT_KEYS): report gravity as if the device were tilted. tx/ty in [-1,1] are
+      // the sine of the lean about the Y/X axes; Z keeps whatever gravity is left so |g| stays ~9.8.
+      const float cx = std::sqrt(std::max(0.0f, 1.0f - tx * tx - ty * ty));
+      out->values[0] = kG * tx;
+      out->values[1] = kG * ty;
+      out->values[2] = kG * cx;
+    } else {
+      // No tilt input: device face-up with a small time-varying sway so the stream is visibly live.
+      const double t = static_cast<double>(now_ns()) / 1e9;
+      const float wob = 0.15f * static_cast<float>(std::sin(t));
+      out->values[0] = wob;
+      out->values[1] = wob * 0.5f;
+      out->values[2] = kG;
+    }
     out->accuracy = 3;
     return true;
   }
@@ -286,3 +305,14 @@ void SensorHub::poll_loop() {
 }
 
 }  // namespace acl::svc::sensor
+
+// Exported for the input path (present) to drive the synthetic accelerometer from the arrow keys
+// (ACL_TILT_KEYS). nx/ny in [-1,1]: left/right and up/down lean. dlsym'd by src/runtime (jvm_vm) so the
+// runtime need not link svc/sensor directly. No-op effect unless the synthetic source is the active
+// accelerometer (i.e. no real IIO sensor), which is the desktop case these tilt games hit.
+extern "C" void acl_sensor_kbd_tilt(float nx, float ny) {
+  const float cx = nx < -1.0f ? -1.0f : nx > 1.0f ? 1.0f : nx;
+  const float cy = ny < -1.0f ? -1.0f : ny > 1.0f ? 1.0f : ny;
+  acl::svc::sensor::g_kbd_tilt_x.store(cx, std::memory_order_relaxed);
+  acl::svc::sensor::g_kbd_tilt_y.store(cy, std::memory_order_relaxed);
+}

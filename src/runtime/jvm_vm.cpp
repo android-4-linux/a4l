@@ -201,6 +201,7 @@ jlong st_handle_of(JNIEnv* env, jobject surface_texture) {
 // path) — in both the app's GL context is current on the caller, so glReadPixels reads the finished
 // back buffer. The GlWindow::swap does the gbm lock/release dance Mesa's raw swap would skip.
 extern "C" void acl_gl_run_on_donor(void (*fn)(void*), void* arg);  // bionic_runtime.cpp
+extern "C" void acl_sensor_kbd_tilt(float nx, float ny);            // svc/sensor (ACL_TILT_KEYS)
 bool st_readback_and_swap(void* egl_surface) {
   gfx::GlWindow* win = nullptr;
   std::vector<std::uint8_t>* buf = nullptr;
@@ -1245,6 +1246,26 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
     // Android keycode: prefer the evdev scancode, fall back to the keysym (synthetic / keymap-less).
     jint keycode = acl_evdev_to_android_keycode(k->keycode);
     if (keycode == 0) keycode = acl_keysym_to_android_keycode(k->keysym);
+    // ACL_TILT_KEYS: drive the synthetic accelerometer from the arrow keys so tilt games (libGDX
+    // doodledudette etc.) are playable on a desktop with no real accelerometer. A held arrow = a lean;
+    // the arrow is consumed here (a tilt game reads the sensor, not the D-pad). DPAD U/D/L/R = 19/20/21/22.
+    static const bool tilt_keys = std::getenv("ACL_TILT_KEYS") != nullptr;
+    if (tilt_keys && (keycode == 19 || keycode == 20 || keycode == 21 || keycode == 22)) {
+      static std::atomic<bool> up{false}, down{false}, left{false}, right{false};
+      switch (keycode) {
+        case 19: up.store(key_down, std::memory_order_relaxed); break;
+        case 20: down.store(key_down, std::memory_order_relaxed); break;
+        case 21: left.store(key_down, std::memory_order_relaxed); break;
+        case 22: right.store(key_down, std::memory_order_relaxed); break;
+      }
+      constexpr float kAmt = 0.6f;  // ~37° lean while a key is held — responsive without pinning to 1g
+      const float tx = (right.load(std::memory_order_relaxed) ? kAmt : 0.0f) -
+                       (left.load(std::memory_order_relaxed) ? kAmt : 0.0f);
+      const float ty = (down.load(std::memory_order_relaxed) ? kAmt : 0.0f) -
+                       (up.load(std::memory_order_relaxed) ? kAmt : 0.0f);
+      acl_sensor_kbd_tilt(tx, ty);  // svc/sensor, same binary (see the extern "C" decl near the top)
+      return;  // consume the arrow
+    }
     // KEYCODE_BACK: acl drives the system back action itself (HostBootstrap.dispatchBack -> top
     // activity onBackPressed -> app interception or finish() -> Activity task-stack pop). The raw-key
     // onKeyUp back-tracking doesn't carry through acl's direct dispatch, so route it here on the press
