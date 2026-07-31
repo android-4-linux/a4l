@@ -981,6 +981,88 @@ void install_signal_shims() {
   log::i(kTag, "signal fs-shim installed over {} ART handler(s)", wrapped);
 }
 
+// ── Scoped, opt-in WebView fault interceptor (ACL_WV_FAULT_CATCH) ──────────────────────────────
+// Chromium's crashpad installs its OWN SIGSEGV/SIGBUS handler during GPU-process init — AFTER acl's
+// %fs shim — so the kernel calls crashpad first for a chromium GPU-thread fault, acl's ACL_FAULT_DEBUG
+// never sees it, and crashpad itself faults while handling (the core's top frame is crashpad, hiding the
+// original PC). When ACL_WV_FAULT_CATCH is set, a bounded background thread repeatedly re-installs this
+// diagnostic handler over SIGSEGV/SIGBUS so it wins the race against crashpad's install. It acts ONLY on
+// a fault whose PC lies in a chromium/GPU library (webview/chromium/vulkan/radeon/mesa/GL/EGL): it logs
+// the PC + covering /proc/self/maps line (signal-safe, no TLS/malloc/stdio), then restores SIG_DFL and
+// returns so the OS cores at the ORIGINAL faulting instruction — symbolize the offset against
+// out/webview-x64/lib.unstripped/libwebviewchromium.so. Any OTHER fault (ART/JIT implicit null-check,
+// app libs) is delegated verbatim to acl_signal_trampoline, so the JIT %fs default path is UNTOUCHED.
+std::atomic<bool> g_wv_caught{false};
+void acl_wv_fault_catch(int sig, siginfo_t* info, void* uctx) {
+  const auto* uc = static_cast<const ucontext_t*>(uctx);
+  const std::uintptr_t rip =
+      uc != nullptr ? static_cast<std::uintptr_t>(uc->uc_mcontext.gregs[REG_RIP]) : 0;
+  // Scan /proc/self/maps for the line covering rip; capture it and decide if it's a chromium/GPU lib.
+  char covline[512]; std::size_t covlen = 0; bool is_target = false;
+  int fd = open("/proc/self/maps", O_RDONLY);
+  if (fd >= 0) {
+    char m[4096], line[512]; std::size_t ll = 0; ssize_t r;
+    auto covers = [&]() {
+      std::uintptr_t lo = 0, hi = 0; std::size_t i = 0;
+      auto rd = [&](std::uintptr_t& out) { out = 0; for (; i < ll; ++i) { char c = line[i]; int d = (c>='0'&&c<='9')?c-'0':(c>='a'&&c<='f')?c-'a'+10:-1; if (d<0) break; out = out*16+d; } };
+      rd(lo); if (i < ll && line[i] == '-') { ++i; rd(hi); }
+      return hi != 0 && rip >= lo && rip < hi;
+    };
+    while ((r = read(fd, m, sizeof m)) > 0) {
+      for (ssize_t i = 0; i < r && !is_target; ++i) {
+        if (m[i] == '\n') {
+          if (covers()) { covlen = ll < sizeof covline ? ll : sizeof covline; for (std::size_t k = 0; k < covlen; ++k) covline[k] = line[k]; }
+          ll = 0;
+        } else if (ll < sizeof line - 1) { line[ll++] = m[i]; }
+      }
+      if (covlen) break;
+    }
+    close(fd);
+  }
+  // substring test on the covering map line (signal-safe, no libc str fns needed)
+  auto contains = [&](const char* n) {
+    for (std::size_t i = 0; i < covlen; ++i) { std::size_t j = 0; while (n[j] && i + j < covlen && covline[i+j] == n[j]) ++j; if (!n[j]) return true; }
+    return false;
+  };
+  is_target = contains("chromium") || contains("webview") || contains("vulkan") || contains("radeon") ||
+              contains("radv") || contains("gallium") || contains("libGL") || contains("libEGL") ||
+              contains("dri") || contains("mesa") || contains("libacl_graphics");
+  if (!is_target) { acl_signal_trampoline(sig, info, uctx); return; }  // ART/app fault: default path
+  // Our target: log PC + covering map, then SIG_DFL + return -> clean core at the ORIGINAL fault.
+  g_wv_caught.store(true, std::memory_order_release);
+  auto hex = [](char* p, std::uintptr_t v) { *p++='0';*p++='x'; for (int i=15;i>=0;--i){int d=(v>>(i*4))&0xf;*p++=d<10?'0'+d:'a'+d-10;} return p; };
+  char hdr[96]; char* q = hdr;
+  const char* h0 = "[acl.wvfault] sig="; while (*h0) *q++ = *h0++; *q++ = '0'+sig/10; *q++ = '0'+sig%10;
+  const char* h1 = " rip="; while (*h1) *q++ = *h1++; q = hex(q, rip); *q++ = '\n';
+  write(2, hdr, q - hdr);
+  const char* mp = "[acl.wvfault] map: "; write(2, mp, 19); write(2, covline, covlen); write(2, "\n", 1);
+  KSigaction dfl{}; raw_rt_sigaction(sig, nullptr, &dfl);
+  dfl.handler = nullptr;  // SIG_DFL — keep the kernel restorer/mask/flags so x86_64 sigreturn is valid
+  raw_rt_sigaction(sig, &dfl, nullptr);
+}
+void* wv_fault_catch_installer(void*) {
+  for (int i = 0; i < 3000 && !g_wv_caught.load(std::memory_order_acquire); ++i) {  // ~30s, 10ms cadence
+    for (int sig : {SIGSEGV, SIGBUS}) {
+      KSigaction cur{}; if (raw_rt_sigaction(sig, nullptr, &cur) != 0) continue;
+      if (cur.handler == reinterpret_cast<void*>(&acl_wv_fault_catch)) continue;  // already ours
+      KSigaction neu = cur; neu.handler = reinterpret_cast<void*>(&acl_wv_fault_catch); neu.flags |= SA_SIGINFO;
+      raw_rt_sigaction(sig, &neu, nullptr);
+    }
+    usleep(10000);
+  }
+  return nullptr;
+}
+void maybe_install_wv_fault_catch() {
+  if (std::getenv("ACL_WV_FAULT_CATCH") == nullptr) return;
+  static std::atomic<bool> armed{false};
+  if (armed.exchange(true)) return;  // one installer thread, not one per bionic-lib load
+  pthread_t t;
+  if (pthread_create(&t, nullptr, wv_fault_catch_installer, nullptr) == 0) {
+    pthread_detach(t);
+    log::i(kTag, "ACL_WV_FAULT_CATCH: diagnostic SIGSEGV/BUS catch armed over crashpad (chromium-lib faults only)");
+  }
+}
+
 struct Mapped {
   std::uintptr_t base = 0, entry = 0, phdr = 0;
   std::uint16_t phnum = 0;
@@ -2312,6 +2394,7 @@ void* BionicRuntime::load_library(const char* abs_path, JavaVM* real_vm, JNIEnv*
   // bionic-spawned threads (a real fault, or ART's all-thread crash dump) must be serviced with a
   // glibc %fs — otherwise ART's handler crashes on it before the shim is even installed. Idempotent.
   install_signal_shims();
+  maybe_install_wv_fault_catch();  // ACL_WV_FAULT_CATCH: opt-in diagnostic to see chromium's real crash
   // The calling thread need not be the main thread: an app can call System.loadLibrary off a
   // background Java thread (e.g. Sentry's "SentryNdkLoadLi" loader thread doing
   // SentryNdk.loadNativeLibraries). Loading runs bionic code — dlopen, the lib's .init_array
