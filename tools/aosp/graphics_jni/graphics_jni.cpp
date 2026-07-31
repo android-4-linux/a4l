@@ -3785,6 +3785,23 @@ void recorder_note_restore_to(jlong h, int count) {
 std::atomic<int> g_present_defer{0};
 SkPictureRecorder* g_present_recorder = nullptr;  // owns the present-root recording canvas (UI thread)
 SkCanvas* g_present_record_canvas = nullptr;      // stable across begin/finish/begin
+// ACL_PRESENT_WALK: record the present-root into a NodeRecorder (like every other node) and, at replay,
+// WALK it directly on the GPU canvas instead of drawPicture(flat present picture). This lets WebView
+// functors draw at their z-position on the DIRECT present canvas (native overlays above the WebView then
+// compose on top), which the drawPicture path cannot do — a Vulkan AwDrawFn secondary-command-buffer
+// draw only works on the direct canvas, not replayed from inside a picture. The present-root's display
+// list is snapshotted (vector copy) at take_for_render for the same top-level thread-safety the immutable
+// picture gave; child nodes stay live-resolved at the walk (unchanged). Opt-in until verified.
+bool present_walk() {
+  static const bool on = std::getenv("ACL_PRESENT_WALK") != nullptr;
+  return on;
+}
+AclRenderNode* g_present_root_node = nullptr;   // the present-root node (walk mode)
+jlong g_present_root_rec = 0;                    // its NodeRecorder handle (walk mode)
+int g_present_walk_w = 1, g_present_walk_h = 1;  // present size, for the replay temp-root bounds
+std::vector<DisplayItem> g_present_dl_ready;      // display list recorded this tick (UI thread)
+std::vector<DisplayItem> g_present_dl_rendering;  // snapshot handed to the RenderThread
+void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n);  // defined below; used by replay (walk)
 // Double-buffered picture handoff for the one-frame-behind RenderThread: the UI thread records into
 // `ready`; at post time (still UI thread) it snapshots ready->rendering; the RenderThread replays
 // `rendering`. Pictures from finishRecordingAsPicture are immutable, so the RT only reads immutable
@@ -3823,7 +3840,16 @@ bool present_defer_debug() {
   return on;
 }
 extern "C" void acl_graphics_present_begin_record(int w, int h) {
-  if (!g_present_defer.load(std::memory_order_relaxed) || g_present_recorder == nullptr) return;
+  if (!g_present_defer.load(std::memory_order_relaxed)) return;
+  if (present_walk()) {
+    g_present_walk_w = w > 0 ? w : 1;
+    g_present_walk_h = h > 0 ? h : 1;
+    if (g_present_root_rec != 0) recorder_of(g_present_root_rec)->reset(w, h);
+    std::lock_guard<std::mutex> lk(g_present_pic_mu);
+    g_present_functors_ready.clear();
+    return;
+  }
+  if (g_present_recorder == nullptr) return;
   SkCanvas* c = g_present_recorder->beginRecording(SkRect::MakeIWH(w > 0 ? w : 1, h > 0 ? h : 1));
   // The cached canvas pointer is handed to Java once (nCreate) and reused every frame. If
   // beginRecording ever returns a DIFFERENT canvas, Java records into a canvas nobody finishes and
@@ -3856,7 +3882,16 @@ extern "C" void acl_graphics_present_record_functor(void* sk_canvas, int functor
 }
 // Called each frame after overlays (UI thread): finalize the picture into `ready`.
 extern "C" void acl_graphics_present_finish_record() {
-  if (!g_present_defer.load(std::memory_order_relaxed) || g_present_recorder == nullptr) return;
+  if (!g_present_defer.load(std::memory_order_relaxed)) return;
+  if (present_walk()) {
+    if (g_present_root_rec == 0 || g_present_root_node == nullptr) return;
+    std::vector<DisplayItem> items = recorder_of(g_present_root_rec)->finish();
+    g_present_root_node->display_list = items;  // keep the node's own copy (child refs) for parity
+    std::lock_guard<std::mutex> lk(g_present_pic_mu);
+    g_present_dl_ready = std::move(items);
+    return;
+  }
+  if (g_present_recorder == nullptr) return;
   sk_sp<SkPicture> pic = g_present_recorder->finishRecordingAsPicture();
   if (present_defer_debug())
     std::fprintf(stderr, "[acl.present] finish_record: picture=%p ops=%d\n",
@@ -3868,6 +3903,10 @@ extern "C" void acl_graphics_present_finish_record() {
 // replay (Step 1/2 synchronous). Hands the current frame's immutable picture to the RT.
 extern "C" void acl_graphics_present_take_for_render() {
   std::lock_guard<std::mutex> lk(g_present_pic_mu);
+  if (present_walk()) {
+    g_present_dl_rendering = g_present_dl_ready;  // vector copy: stable top-level for the RT walk
+    return;
+  }
   g_present_picture_rendering = g_present_picture_ready;
   g_present_functors_rendering = g_present_functors_ready;
 }
@@ -3875,6 +3914,32 @@ extern "C" void acl_graphics_present_take_for_render() {
 // each WebView functor directly onto the GPU canvas (so its snap handler fires — see PresentFunctor).
 extern "C" void acl_graphics_present_replay_onto(void* sk_canvas) {
   if (!g_present_defer.load(std::memory_order_relaxed)) return;
+  if (present_walk()) {
+    std::vector<DisplayItem> dl;
+    {
+      std::lock_guard<std::mutex> lk(g_present_pic_mu);
+      dl = g_present_dl_rendering;
+    }
+    auto* c = reinterpret_cast<SkCanvas*>(sk_canvas);
+    if (present_defer_debug())
+      std::fprintf(stderr, "[acl.present] replay_onto (walk): canvas=%p items=%zu\n",
+                   static_cast<void*>(c), dl.size());
+    if (c == nullptr) return;
+    // Walk the present-root's snapshot directly on the GPU canvas. A reused temp root (RT-only, single
+    // thread) with the present bounds — draw_rendernode_immediate reads it without touching its refcount.
+    // Functor boundaries in the tree now draw on THIS direct canvas, in z-order.
+    static AclRenderNode* root = nullptr;
+    if (root == nullptr) root = new AclRenderNode();  // one instance, reused; refcount stays 1
+    root->left = 0;
+    root->top = 0;
+    root->right = g_present_walk_w;
+    root->bottom = g_present_walk_h;
+    root->clipToBounds = true;
+    root->display_list = std::move(dl);
+    draw_rendernode_immediate(c, root);
+    root->display_list.clear();  // release this frame's child refs held by the temp root
+    return;
+  }
   sk_sp<SkPicture> pic;
   std::vector<PresentFunctor> functors;
   {
@@ -4463,6 +4528,16 @@ jlong RecordingCanvas_nCreate(jlong node, jint w, jint h) {
     // Deferred present: record into a picture (replayed at gpu_end). The recorder is created once
     // and its canvas ptr is stable across begin/finish; nTraverse drives begin/finish each frame.
     if (g_present_defer.load(std::memory_order_relaxed)) {
+      // ACL_PRESENT_WALK: record the present-root into a NodeRecorder (like every other node) so the
+      // replay can walk it directly on the GPU canvas (functors draw in z-order). The handle is stable
+      // across begin/finish (begin_record reset()s it); finish_record snapshots its display list.
+      if (present_walk()) {
+        if (g_present_root_rec == 0) {
+          g_present_root_rec = reinterpret_cast<jlong>(new NodeRecorder(w, h)) | kRecorderTag;
+          g_present_root_node = n;
+        }
+        return g_present_root_rec;
+      }
       if (g_present_recorder == nullptr) {
         g_present_recorder = new SkPictureRecorder();
         g_present_record_canvas =
@@ -4560,8 +4635,12 @@ void RecordingCanvas_nDrawWebViewFunctor(jlong canvas, jint functor) {
   // canvas + its on_sync timing, which only present_replay_onto's draw-last path provides. So the
   // DEFAULT stays draw-last (map renders, overlays covered) until the present replay can walk the tree
   // directly. See webview-renderthread-fix.
+  // In ACL_PRESENT_WALK mode the replay walks the tree on the DIRECT GPU canvas, so an in-order functor
+  // boundary draws correctly there (map renders AND overlays compose on top). ACL_WEBVIEW_ZORDER forces
+  // the boundary under the legacy drawPicture replay too (overlays fix, but the functor paints blank —
+  // diagnostic only).
   static const bool z_order = std::getenv("ACL_WEBVIEW_ZORDER") != nullptr;
-  if (z_order && is_recorder_handle(canvas)) {
+  if ((present_walk() || z_order) && is_recorder_handle(canvas)) {
     recorder_of(canvas)->boundary_functor(static_cast<int>(functor));
     return;
   }
