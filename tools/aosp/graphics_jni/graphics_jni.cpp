@@ -4526,10 +4526,15 @@ extern "C" void acl_graphics_present_record_functor(void* sk_canvas, int functor
 void RecordingCanvas_nDrawWebViewFunctor(jlong canvas, jint functor) {
   // Deferred present: the functor SkDrawable would be lost in the picture snapshot (its onDraw is a
   // no-op), so capture its placement now and draw it directly onto the GPU canvas at replay.
+  // `canvas` is the Java RecordingCanvas handle — under the live-boundary model it is a bit-tagged
+  // NodeRecorder (or raster) handle, NOT a raw SkCanvas*, so resolve it via canvas_sk() before the
+  // functor helpers dereference it (getDeviceClipBounds on the tagged pointer SIGSEGVs in topDevice()).
+  SkCanvas* sk = canvas_sk(canvas);
+  if (sk == nullptr) return;
   if (g_present_defer.load(std::memory_order_relaxed))
-    acl_graphics_present_record_functor(reinterpret_cast<void*>(canvas), static_cast<int>(functor));
+    acl_graphics_present_record_functor(reinterpret_cast<void*>(sk), static_cast<int>(functor));
   else
-    acl_graphics_draw_webview_functor(reinterpret_cast<void*>(canvas), static_cast<int>(functor));
+    acl_graphics_draw_webview_functor(reinterpret_cast<void*>(sk), static_cast<int>(functor));
 }
 // nPunchHole (SurfaceView transparency) is @FastNative on BaseRecordingCanvas -> keep env/jclass.
 void BaseRecordingCanvas_nPunchHole(JNIEnv*, jclass, jlong, jfloat, jfloat, jfloat, jfloat, jfloat, jfloat) {}
