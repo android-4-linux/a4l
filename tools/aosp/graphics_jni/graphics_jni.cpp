@@ -123,11 +123,12 @@ struct AclPaint {
 struct AclRenderNode;      // self-reference in a child boundary
 struct AclTextureLayer;    // TextureView layer boundary (defined with the SurfaceTexture natives)
 struct DisplayItem {
-  enum class Kind : std::uint8_t { Picture, Child, Layer } kind = Kind::Picture;
+  enum class Kind : std::uint8_t { Picture, Child, Layer, Functor } kind = Kind::Picture;
   sk_sp<SkPicture> picture;          // Picture: a segment of the node's own recorded ops
   sk_sp<AclRenderNode> child;        // Child: live reference to a child node (resolved at walk)
   AclTextureLayer* layer = nullptr;  // Layer: a TextureView's layer (Java-owned; not reffed here)
-  SkMatrix matrix = SkMatrix::I();   // node-local CTM captured at the boundary (Child/Layer)
+  int functor = -1;                  // Functor: a WebView AwDrawFn functor id, drawn in-order at the walk
+  SkMatrix matrix = SkMatrix::I();   // node-local CTM captured at the boundary (Child/Layer/Functor)
   bool z_ordered = false;            // Child recorded inside an enableZ region: sort by Z + cast shadow
 };
 
@@ -3719,6 +3720,15 @@ struct NodeRecorder {
     it.layer = layer;
     split(std::move(it));
   }
+  // A WebView Vulkan functor, recorded as an in-order boundary (NOT baked into a segment picture, whose
+  // no-op onDraw would drop it) so the walk draws it at its z-position on the GPU canvas — native views
+  // above the WebView then composite on top instead of the functor painting over them.
+  void boundary_functor(int functor) {
+    DisplayItem it;
+    it.kind = DisplayItem::Kind::Functor;
+    it.functor = functor;
+    split(std::move(it));
+  }
   void reset(int W, int H) {
     if (seg != nullptr) { rec.finishRecordingAsPicture(); seg = nullptr; }
     items.clear();
@@ -4072,6 +4082,24 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
           SkAutoCanvasRestore bcr(c, true);
           c->concat(it.matrix);
           draw_texture_layer_immediate(c, it.layer);
+          break;
+        }
+        case DisplayItem::Kind::Functor: {
+          // WebView Vulkan functor at its z-position: draw straight onto the GPU canvas `c` (the walk
+          // runs on it at present), so onSnapGpuDrawHandler fires and Chromium records into the frame's
+          // secondary command buffer here — in-order, so overlays walked after this compose on top.
+          SkAutoCanvasRestore bcr(c, true);
+          c->concat(it.matrix);
+          static const bool zdbg = std::getenv("ACL_WEBVIEW_ZDEBUG") != nullptr;
+          if (zdbg) {
+            static std::atomic<int> n_fx{0};
+            if (n_fx.fetch_add(1, std::memory_order_relaxed) % 120 == 0) {
+              const SkIRect cb = c->getDeviceClipBounds();
+              std::fprintf(stderr, "[acl.wvz] functor %d in-order clip=(%d,%d,%d,%d)\n", it.functor,
+                           cb.fLeft, cb.fTop, cb.fRight, cb.fBottom);
+            }
+          }
+          acl_graphics_draw_webview_functor(c, it.functor);
           break;
         }
       }
@@ -4524,11 +4552,22 @@ void RecordingCanvas_nDrawRipple(jlong, jlong, jlong, jlong, jlong, jlong, jlong
 // area is then left unpainted rather than crashing.
 extern "C" void acl_graphics_present_record_functor(void* sk_canvas, int functor);
 void RecordingCanvas_nDrawWebViewFunctor(jlong canvas, jint functor) {
-  // Deferred present: the functor SkDrawable would be lost in the picture snapshot (its onDraw is a
-  // no-op), so capture its placement now and draw it directly onto the GPU canvas at replay.
-  // `canvas` is the Java RecordingCanvas handle — under the live-boundary model it is a bit-tagged
-  // NodeRecorder (or raster) handle, NOT a raw SkCanvas*, so resolve it via canvas_sk() before the
-  // functor helpers dereference it (getDeviceClipBounds on the tagged pointer SIGSEGVs in topDevice()).
+  // Z-ordering the WebView functor (EXPERIMENTAL, opt-in ACL_WEBVIEW_ZORDER=1): record it as an
+  // in-order boundary (like nDrawTextureLayer) so the walk reaches it AT ITS Z-POSITION and native
+  // overlays (toolbar, FAB) drawn after it compose ON TOP. Overlay z-order is fixed this way, BUT the
+  // functor itself currently paints BLANK when drawn through the walk's AclRenderNodeDrawable.onDraw
+  // (inside drawPicture): a Vulkan AwDrawFn secondary-command-buffer draw needs the DIRECT present
+  // canvas + its on_sync timing, which only present_replay_onto's draw-last path provides. So the
+  // DEFAULT stays draw-last (map renders, overlays covered) until the present replay can walk the tree
+  // directly. See webview-renderthread-fix.
+  static const bool z_order = std::getenv("ACL_WEBVIEW_ZORDER") != nullptr;
+  if (z_order && is_recorder_handle(canvas)) {
+    recorder_of(canvas)->boundary_functor(static_cast<int>(functor));
+    return;
+  }
+  // Default (draw-last) + present-root immediate: resolve the handle and draw straight onto the GPU
+  // canvas. `canvas` may be a bit-tagged raster handle, so canvas_sk() before the functor helpers
+  // dereference it (getDeviceClipBounds on a tagged pointer SIGSEGVs in topDevice()).
   SkCanvas* sk = canvas_sk(canvas);
   if (sk == nullptr) return;
   if (g_present_defer.load(std::memory_order_relaxed))
