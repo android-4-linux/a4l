@@ -502,19 +502,27 @@ extern "C" long acl_graphics_gpu_begin_frame(int w, int h) {
 // Flush the shared optimal surface and copy it into dma-buf image `buffer_index` (0..1),
 // returning that buffer's descriptor. The animated loop alternates buffer_index so the
 // compositor can hold one image while the next is rendered — no in-flight overwrite.
-// DIAG: dump the just-flushed optimal surface to a PPM at $ACL_GPU_DUMP (overwritten each frame, so
-// the file holds the most-recent presented frame). PPM keeps this encoder-free; convert externally.
+// DIAG: dump the just-flushed optimal surface to a PPM. Two modes (either/both):
+//   ACL_GPU_DUMP=<file>      — single file overwritten each frame (most-recent presented frame).
+//   ACL_GPU_DUMP_SEQ=<dir>   — a RING of complete per-frame PPMs (frame-NN.ppm, NN = count % ring), so
+//     consecutive frames survive to be compared — the ONLY way to capture a per-frame FLICKER (a single
+//     overwritten file yields torn reads). Ring size = ACL_GPU_DUMP_SEQ_N (default 30). Reconstruct the
+//     chronological order by mtime (newest N files = the last N presents). PPM is encoder-free.
 static void maybe_dump_frame() {
   const char* path = std::getenv("ACL_GPU_DUMP");
-  if (path == nullptr || *path == '\0' || !g.opt) return;
+  const char* seqdir = std::getenv("ACL_GPU_DUMP_SEQ");
+  const bool single = path != nullptr && *path != '\0';
+  const bool seq = seqdir != nullptr && *seqdir != '\0';
+  if ((!single && !seq) || !g.opt) return;
   const int w = g.w, h = g.h;
   std::vector<std::uint32_t> px(static_cast<std::size_t>(w) * h);
   SkImageInfo info = SkImageInfo::Make(w, h, kBGRA_8888_SkColorType, kUnpremul_SkAlphaType);
   if (!g.opt->readPixels(info, px.data(), static_cast<std::size_t>(w) * 4, 0, 0)) return;
   // The PPM below is RGB-only, which hides the failure mode this dump is usually chasing: the
   // surface is cleared to SK_ColorTRANSPARENT, so a frame with perfect color but ZERO alpha dumps
-  // as a flawless image and composites as an invisible (blank) window. Report alpha separately.
-  {
+  // as a flawless image and composites as an invisible (blank) window. Report alpha separately (single
+  // mode only — the seq ring runs every frame, so its alpha spam would be relentless).
+  if (single) {
     std::size_t opaque = 0, clear = 0, partial = 0;
     for (std::uint32_t p : px) {
       const std::uint8_t a = static_cast<std::uint8_t>((p >> 24) & 0xff);
@@ -523,20 +531,41 @@ static void maybe_dump_frame() {
     std::fprintf(stderr, "[acl.gpu] frame alpha: opaque=%zu clear=%zu partial=%zu (%dx%d)\n", opaque,
                  clear, partial, w, h);
   }
-  FILE* f = std::fopen(path, "wb");
-  if (f == nullptr) return;
-  std::fprintf(f, "P6\n%d %d\n255\n", w, h);
-  std::vector<std::uint8_t> row(static_cast<std::size_t>(w) * 3);
-  for (int y = 0; y < h; ++y) {
-    for (int x = 0; x < w; ++x) {
-      std::uint32_t p = px[static_cast<std::size_t>(y) * w + x];  // BGRA in memory (little-endian)
-      row[x * 3 + 0] = static_cast<std::uint8_t>((p >> 16) & 0xff);  // R
-      row[x * 3 + 1] = static_cast<std::uint8_t>((p >> 8) & 0xff);   // G
-      row[x * 3 + 2] = static_cast<std::uint8_t>(p & 0xff);          // B
+  // Build the RGB PPM once into a buffer, then write it to whichever target(s) are enabled — a whole-file
+  // write per frame, so each file is either the previous complete frame or this complete frame (never a
+  // torn mix, unlike a row-by-row write racing a reader).
+  std::vector<std::uint8_t> buf;
+  {
+    char hdr[64];
+    const int hn = std::snprintf(hdr, sizeof hdr, "P6\n%d %d\n255\n", w, h);
+    buf.reserve(static_cast<std::size_t>(hn) + static_cast<std::size_t>(w) * h * 3);
+    buf.insert(buf.end(), hdr, hdr + hn);
+    for (int y = 0; y < h; ++y) {
+      for (int x = 0; x < w; ++x) {
+        const std::uint32_t p = px[static_cast<std::size_t>(y) * w + x];  // BGRA (little-endian)
+        buf.push_back(static_cast<std::uint8_t>((p >> 16) & 0xff));  // R
+        buf.push_back(static_cast<std::uint8_t>((p >> 8) & 0xff));   // G
+        buf.push_back(static_cast<std::uint8_t>(p & 0xff));          // B
+      }
     }
-    std::fwrite(row.data(), 1, row.size(), f);
   }
-  std::fclose(f);
+  auto write_all = [&](const char* p) {
+    FILE* f = std::fopen(p, "wb");
+    if (f == nullptr) return;
+    std::fwrite(buf.data(), 1, buf.size(), f);
+    std::fclose(f);
+  };
+  if (single) write_all(path);
+  if (seq) {
+    static std::uint64_t count = 0;  // present thread is single-threaded here
+    int ring = 30;
+    if (const char* n = std::getenv("ACL_GPU_DUMP_SEQ_N")) { const int v = std::atoi(n); if (v > 0) ring = v; }
+    char name[1024];
+    std::snprintf(name, sizeof name, "%s/frame-%03llu.ppm", seqdir,
+                  static_cast<unsigned long long>(count % static_cast<std::uint64_t>(ring)));
+    write_all(name);
+    ++count;
+  }
 }
 
 // Deferred-present replay: when the UI thread records the frame into an SkPicture (ACL_PRESENT_RT),
