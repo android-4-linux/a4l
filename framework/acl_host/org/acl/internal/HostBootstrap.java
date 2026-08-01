@@ -3043,6 +3043,63 @@ public final class HostBootstrap {
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: ensureResumed (androidx path) skipped: " + t);
         }
+        // Obfuscation-proof fallback (SHAPE-based). Some apps (areada) rename LifecycleOwner.getLifecycle()
+        // -> g() and androidx.lifecycle.* wholesale, so both paths above miss and the Lifecycle never
+        // leaves CREATED — Compose's WindowRecomposer stays paused, so the app renders its FIRST frame
+        // then never recomposes (clicks fire but nothing updates). Reach the LifecycleRegistry by the
+        // SHAPE of handleLifecycleEvent(Event) — the only 1-arg method whose enum parameter has the 7
+        // Lifecycle.Event constants — and drive ON_CREATE/ON_START/ON_RESUME by ORDINAL (names are
+        // obfuscated; ordinals are stable). Idempotent: skips when already at/above STARTED.
+        try { resumeLifecycleByShape(activity); } catch (Throwable ignored) {}
+    }
+
+    // Find the app's LifecycleRegistry by scanning the activity's field hierarchy for an object whose
+    // class exposes a handleLifecycleEvent(Event)-shaped method, then drive it to RESUMED by ordinal.
+    private static void resumeLifecycleByShape(Object activity) {
+        Object reg = null; java.lang.reflect.Method handle = null; Object[] events = null;
+        for (Class<?> c = activity.getClass(); c != null && c != Object.class && reg == null; c = c.getSuperclass()) {
+            for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                Object val;
+                try { f.setAccessible(true); val = f.get(activity); } catch (Throwable ignored) { continue; }
+                if (val == null) continue;
+                java.lang.reflect.Method h = findEventHandle(val.getClass());
+                if (h != null) { reg = val; handle = h; events = h.getParameterTypes()[0].getEnumConstants(); break; }
+            }
+        }
+        if (reg == null || handle == null || events == null || events.length != 7) return;
+        // Guard: if a getCurrentState()-shaped method (no-arg, returns a 5-constant State enum) already
+        // reports >= STARTED (ordinal 3), don't churn the state machine.
+        try {
+            for (java.lang.reflect.Method m : reg.getClass().getMethods()) {
+                if (m.getParameterCount() != 0) continue;
+                Class<?> rt = m.getReturnType();
+                if (rt.isEnum() && rt.getEnumConstants() != null && rt.getEnumConstants().length == 5) {
+                    m.setAccessible(true);
+                    Object st = m.invoke(reg);
+                    if (st instanceof Enum && ((Enum<?>) st).ordinal() >= 3) return;  // already STARTED/RESUMED
+                    break;
+                }
+            }
+        } catch (Throwable ignored) {}
+        handle.setAccessible(true);
+        for (int i = 0; i <= 2; i++) {  // Event ordinals: ON_CREATE=0, ON_START=1, ON_RESUME=2
+            try { handle.invoke(reg, events[i]); } catch (Throwable ignored) {}
+        }
+        System.out.println("acl HostBootstrap: lifecycle resumed by shape (" + reg.getClass().getName() + ")");
+    }
+
+    // A LifecycleRegistry exposes exactly one method taking a single enum whose type has the 7
+    // Lifecycle.Event constants (ON_CREATE..ON_ANY): that's handleLifecycleEvent(Event).
+    private static java.lang.reflect.Method findEventHandle(Class<?> cls) {
+        for (java.lang.reflect.Method m : cls.getMethods()) {
+            Class<?>[] p = m.getParameterTypes();
+            if (p.length == 1 && p[0].isEnum()) {
+                Object[] consts = p[0].getEnumConstants();
+                if (consts != null && consts.length == 7) return m;
+            }
+        }
+        return null;
     }
 
     // Run the Activity's registered ActivityLifecycleCallbacks in lifecycle order, via the
@@ -3216,6 +3273,27 @@ public final class HostBootstrap {
             java.util.List<?> views = new java.util.ArrayList<>((java.util.List<?>) getField(wmgCls, wmg, "mViews"));
             java.util.List<?> params = new java.util.ArrayList<>((java.util.List<?>) getField(wmgCls, wmg, "mParams"));
             java.util.List<?> roots = new java.util.ArrayList<>((java.util.List<?>) getField(wmgCls, wmg, "mRoots"));
+            if (OVERLAY_DIAG) {
+                android.view.View md = currentTopDecorView();
+                StringBuilder sig = new StringBuilder();
+                for (int i = 0; i < views.size(); i++) {
+                    android.view.View vv = (android.view.View) views.get(i);
+                    android.view.WindowManager.LayoutParams pp = i < params.size()
+                            ? (android.view.WindowManager.LayoutParams) params.get(i) : null;
+                    sig.append(i).append(':').append(vv == null ? "null" : vv.getClass().getSimpleName());
+                    sig.append('#').append(vv == null ? 0 : System.identityHashCode(vv));
+                    if (vv != null && vv == md) sig.append("=TOPDECOR");
+                    if (pp != null) sig.append('[').append(pp.width).append('x').append(pp.height)
+                            .append(" type=").append(pp.type).append(" fl=0x").append(Integer.toHexString(pp.flags)).append(']');
+                    sig.append(' ');
+                }
+                String s = sig.toString();
+                if (!s.equals(sOverlayRosterSig)) {
+                    sOverlayRosterSig = s;
+                    System.err.println("acl OVERLAY_ROSTER (" + views.size() + " windows; topDecor#"
+                            + (md == null ? 0 : System.identityHashCode(md)) + "): " + s);
+                }
+            }
             android.view.View top = null; android.graphics.Rect topRect = null; boolean topModal = false;
             for (int i = 0; i < views.size() && i < params.size(); i++) {
                 android.view.View v = (android.view.View) views.get(i);
@@ -3247,6 +3325,14 @@ public final class HostBootstrap {
     private static volatile android.view.View sTopOverlay;
     private static volatile android.graphics.Rect sTopOverlayRect;
     private static volatile boolean sTopOverlayModal;
+
+    // Overlay drop diagnostic (ACL_OVERLAY_DIAG=1): log only on a per-view DRAWN<->DROPPED transition
+    // (the flicker signature) so it stays cheap even at the present loop's frame rate.
+    private static final boolean OVERLAY_DIAG = System.getenv("ACL_OVERLAY_DIAG") != null
+            && !System.getenv("ACL_OVERLAY_DIAG").isEmpty() && !"0".equals(System.getenv("ACL_OVERLAY_DIAG"));
+    private static final java.util.Map<android.view.View, Integer> sOverlayDiagState =
+            new java.util.WeakHashMap<>();
+    private static volatile String sOverlayRosterSig = "";
 
     // Route a pointer event to the topmost Dialog/PopupWindow overlay. acl gravity-places the decor
     // at sTopOverlayRect, so translate the event into the decor's local space before dispatch.
@@ -3320,6 +3406,18 @@ public final class HostBootstrap {
         int hspec = measureSpec(lp.height, h, MATCH, WRAP);
         v.measure(wspec, hspec);
         int mw = v.getMeasuredWidth(), mh = v.getMeasuredHeight();
+        if (OVERLAY_DIAG) {
+            int st = (mw <= 0 || mh <= 0) ? 0 : 1;
+            Integer prev = sOverlayDiagState.get(v);
+            if (prev == null || prev.intValue() != st) {
+                sOverlayDiagState.put(v, Integer.valueOf(st));
+                System.err.println("acl OVERLAY_DIAG: " + v.getClass().getName()
+                        + " -> " + (st == 1 ? "DRAWN " + mw + "x" + mh : "DROPPED (measured " + mw + "x" + mh + ")")
+                        + " wspec=" + android.view.View.MeasureSpec.toString(wspec)
+                        + " hspec=" + android.view.View.MeasureSpec.toString(hspec)
+                        + " lp=" + lp.width + "x" + lp.height);
+            }
+        }
         if (mw <= 0 || mh <= 0) return null;
         v.layout(0, 0, mw, mh);
         int gravity = lp.gravity == 0 ? android.view.Gravity.CENTER : lp.gravity;
