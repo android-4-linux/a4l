@@ -3604,6 +3604,26 @@ public final class HostBootstrap {
             // no system bars/IME insets to animate).
             try {
                 Class<?> hostCls = Class.forName("android.view.InsetsController$Host");
+                // When the overlay requests the IME (a focusable Compose field / a sheet grabbing focus),
+                // InsetsController.show(ime) -> ImeInsetsSourceConsumer.requestShow calls
+                // host.getInputMethodManager().requestImeShow(...) — a null IMM here throws an UNCAUGHT
+                // NPE inside the Choreographer doFrame callback, killing the Looper thread and the whole
+                // app (the areada settings sheet "opens then vanishes"). Provide a PLAIN stub IMM: its
+                // stub mService no-ops requestImeShow, so the null-check is satisfied WITHOUT actually
+                // showing the IME. (Using the getSystemService IMM instead routes requestImeShow ->
+                // setImeVisible, whose IME-inset animation makes the sheet toggle in/out — a slow flicker.)
+                Object hostImm = null;
+                try {
+                    java.lang.reflect.Method csi = android.view.inputmethod.InputMethodManager.class
+                            .getDeclaredMethod("createStubInstance", int.class, android.os.Looper.class);
+                    csi.setAccessible(true);
+                    hostImm = csi.invoke(null, 0 /* Display.DEFAULT_DISPLAY */, android.os.Looper.getMainLooper());
+                } catch (Throwable ignored) {}
+                if (hostImm == null) {  // fallback: any non-null IMM beats an NPE
+                    try { hostImm = ctx.getSystemService(android.view.inputmethod.InputMethodManager.class); }
+                    catch (Throwable ignored) {}
+                }
+                final Object fHostImm = hostImm;
                 Object host = java.lang.reflect.Proxy.newProxyInstance(
                         hostCls.getClassLoader(), new Class<?>[]{hostCls},
                         (p, m, a) -> {
@@ -3614,6 +3634,7 @@ public final class HostBootstrap {
                                 case "getSystemBarsBehavior": return 0;
                                 case "dipToPx": return (a != null && a.length > 0) ? a[0] : Integer.valueOf(0);
                                 case "getRootViewTitle": return "acl";
+                                case "getInputMethodManager": return fHostImm;
                                 default: return defaultValue(m.getReturnType());
                             }
                         });
