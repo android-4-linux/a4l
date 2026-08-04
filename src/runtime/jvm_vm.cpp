@@ -1640,7 +1640,23 @@ void JNICALL PresentDriver_nMaybeDeliverVsync(JNIEnv* env, jclass, jlong sp) {
   const bool pend = (s->vsync_pending == nullptr || s->vsync_pending() != 0);
   static int diag = 0;
   if (diag < 8) { log::i(kTag, "PresentDriver.vsync: ready={} pending={}", rdy, pend); ++diag; }
-  if (rdy && pend) s->deliver_vsync(env, static_cast<jlong>(s->presenter->frame_time_ns()));
+  if (!(rdy && pend)) return;
+  // Cap delivery to at most one per refresh period. The normal path already paces on the compositor's
+  // wl_surface.frame callback (>= refresh), but ready()'s ACL_IGNORE_SUSPEND / occlusion branch bypasses
+  // that gate (dmabuf_presenter.cpp) and would free-run at ~1000fps — which beats the app's ~60fps
+  // recomposition into a visible overlay shimmer. This wall-clock floor bounds it to the display rate in
+  // every path (a no-op when the frame-callback already spaced the vsyncs). Opt out with ACL_NO_VSYNC_CAP.
+  static const bool cap = std::getenv("ACL_NO_VSYNC_CAP") == nullptr;
+  if (cap) {
+    static std::uint64_t last_deliver_ns = 0;
+    const std::uint64_t now = present_now_ns();
+    const std::uint32_t rns = s->pf_refresh_ns.load(std::memory_order_relaxed);
+    const std::uint64_t refresh = rns > 0 ? rns : 16'666'667ull;
+    const std::uint64_t min_gap = refresh - refresh / 8;  // 7/8 refresh: caps free-run, still passes 60Hz
+    if (last_deliver_ns != 0 && now - last_deliver_ns < min_gap) return;
+    last_deliver_ns = now;
+  }
+  s->deliver_vsync(env, static_cast<jlong>(s->presenter->frame_time_ns()));
 }
 // Create a real MediaCodec-decodable producer Surface handle (a ReaderCtx over a BufferQueue) for an
 // app's on-screen video SurfaceView (e.g. media3 PlayerView's content SurfaceView). HostBootstrap

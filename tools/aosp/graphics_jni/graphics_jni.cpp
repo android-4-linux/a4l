@@ -177,6 +177,47 @@ struct AclRenderNode : public SkRefCnt {
   std::uint64_t force_epoch = 0;
 };
 
+// Deep-copy a render-node subtree into an IMMUTABLE snapshot for the deferred RenderThread. The overlay
+// pass force-records its decor every present, REPLACING the live node's display_list vector each frame;
+// the RT walks the deferred snapshot one frame behind, so a Child holding a LIVE reference to that node
+// races the replacement — a torn read where the RT sees frame N's vector or N+1's at random, which
+// presents as the whole overlay pulsing/flickering. Freezing the subtree at record time (in
+// boundary_child, ONLY under force_record) hands the RT its own copy: SkPictures are immutable (shared
+// by ref), child nodes are copied recursively, so nothing the RT reads is mutated by the next re-record.
+static sk_sp<AclRenderNode> freeze_subtree(AclRenderNode* n) {
+  if (n == nullptr) return nullptr;
+  auto c = sk_make_sp<AclRenderNode>();
+  c->left = n->left; c->top = n->top; c->right = n->right; c->bottom = n->bottom;
+  c->alpha = n->alpha; c->cameraDistance = n->cameraDistance;
+  c->translationX = n->translationX; c->translationY = n->translationY;
+  c->translationZ = n->translationZ; c->elevation = n->elevation;
+  c->rotation = n->rotation; c->rotationX = n->rotationX; c->rotationY = n->rotationY;
+  c->scaleX = n->scaleX; c->scaleY = n->scaleY;
+  c->pivotX = n->pivotX; c->pivotY = n->pivotY; c->pivotExplicit = n->pivotExplicit;
+  c->layerType = n->layerType;
+  c->spotShadowColor = n->spotShadowColor; c->ambientShadowColor = n->ambientShadowColor;
+  c->clipToBounds = n->clipToBounds; c->clipToOutline = n->clipToOutline;
+  c->allowForceDark = n->allowForceDark; c->hasOverlappingRendering = n->hasOverlappingRendering;
+  c->outline_kind = n->outline_kind; c->outline_rect = n->outline_rect;
+  c->outline_radius = n->outline_radius; c->outline_path = n->outline_path;
+  c->render_effect = n->render_effect;
+  c->picture = n->picture;      // SkPicture is immutable — shared by ref, safe to read cross-thread
+  c->punch_hole = n->punch_hole;
+  c->is_present_root = false;
+  c->display_list.reserve(n->display_list.size());
+  for (const DisplayItem& it : n->display_list) {
+    DisplayItem d;
+    d.kind = it.kind; d.picture = it.picture; d.layer = it.layer;
+    d.functor = it.functor; d.matrix = it.matrix; d.z_ordered = it.z_ordered;
+    if (it.kind == DisplayItem::Kind::Child && it.child)
+      d.child = freeze_subtree(it.child.get());  // recurse: no live child refs survive in the copy
+    else
+      d.child = it.child;
+    c->display_list.push_back(std::move(d));
+  }
+  return c;
+}
+
 // ── Native handle guard ──────────────────────────────────────────────────────
 // The framework stores every native object as a bare jlong in a Java field, so a native can
 // be handed a pointer acl never minted and has no way to tell from the value alone. Two ways
@@ -3710,7 +3751,19 @@ struct NodeRecorder {
   void boundary_child(AclRenderNode* child) {
     DisplayItem it;
     it.kind = DisplayItem::Kind::Child;
-    it.child = sk_ref_sp(child);
+    // Under force_record (the overlay pass), the child is re-recorded every present, so a live reference
+    // would race the RenderThread's deferred walk (see freeze_subtree). Snapshot it immutably instead.
+    // Cached main content (force_record off) stays a cheap live reference — the hwui model. Opt out with
+    // ACL_NO_OVERLAY_FREEZE.
+    static const bool no_freeze = [] {
+      const char* v = std::getenv("ACL_NO_OVERLAY_FREEZE");
+      return v != nullptr && *v != '\0' && *v != '0';
+    }();
+    if (!no_freeze && child != nullptr && g_force_record.load(std::memory_order_relaxed) &&
+        !child->is_present_root)
+      it.child = freeze_subtree(child);
+    else
+      it.child = sk_ref_sp(child);
     it.z_ordered = z_enabled;
     split(std::move(it));
   }
