@@ -336,7 +336,7 @@ All native windowing in acl goes through **wayland-cxx-scanner (wcs)** bindings;
 
 ## A02.2 ADR-4 (revised) — Skia-direct committed; hwui dropped
 
-The Phase-2 hwui-vs-Skia spike is **cancelled**. hwui is not vendored; no BufferQueue/RenderThread/SurfaceFlinger machinery enters the tree. Rationale beyond the constraint itself: AOSP's `android.graphics` JNI is already a thin Skia wrapper, so the vendored framework's Canvas/Paint/Bitmap/Path/Typeface bindings re-target host Skia with a shim rather than a rewrite — hwui's value was HW-layer/damage orchestration, which we own natively instead.
+The Phase-2 hwui-vs-Skia spike is **canceled**. hwui is not vendored; no BufferQueue/RenderThread/SurfaceFlinger machinery enters the tree. Rationale beyond the constraint itself: AOSP's `android.graphics` JNI is already a thin Skia wrapper, so the vendored framework's Canvas/Paint/Bitmap/Path/Typeface bindings re-target host Skia with a shim rather than a rewrite — hwui's value was HW-layer/damage orchestration, which we own natively instead.
 
 What we re-own natively (spec sources: SDK docs + CTS + Flutter-engine damage lessons, per base plan):
 - **RenderThread-equivalent:** one render thread per toplevel (ivi-homescreen reactor discipline), Choreographer driven by frame callbacks + `wp_presentation` feedback.

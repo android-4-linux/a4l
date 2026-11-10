@@ -427,7 +427,7 @@ class DataDevMgrH : public CWlDataDeviceManager<DataDevMgrH> {};
 class DataDeviceH : public CWlDataDevice<DataDeviceH> {};
 // wl_data_source — serves the clipboard text. The compositor sends OnSend(mime, fd) when another
 // client pastes; write the UTF-8 text to the fd and close it. `text` lives with the handler (stable
-// across the WlPtr) so it survives until the selection is replaced or cancelled.
+// across the WlPtr) so it survives until the selection is replaced or canceled.
 class DataSourceH : public CWlDataSource<DataSourceH> {
  public:
   std::string text;

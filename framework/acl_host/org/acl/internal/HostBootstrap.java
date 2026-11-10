@@ -2009,7 +2009,7 @@ public final class HostBootstrap {
         // PackageManager.buildRequestPermissionsIntent() calls this to address the permission
         // controller, and the AOSP base throws "Not implemented. Must override in a subclass." That
         // throw escapes Activity.requestPermissions() on the main thread and kills whatever called it
-        // -- for castlab it cancelled the coroutine expo requests permissions in, leaving the app on
+        // -- for castlab it canceled the coroutine expo requests permissions in, leaving the app on
         // its spinner. Name the AOSP controller package; nothing launches it (NoopInstrumentation
         // answers the request with GRANTED), it just has to be a non-throwing, non-null name.
         @Override public String getPermissionControllerPackageName() {

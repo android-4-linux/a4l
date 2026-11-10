@@ -11,7 +11,7 @@ which has deep `gui/` (BufferQueue/SurfaceFlinger) coupling. Addendum A02 commit
 windowing to **wcs** bindings and all rasterization to **Skia** — no GTK/Qt, no hard Flutter dep.
 
 ## Decision
-**Skia-direct is committed; the hwui-vs-Skia spike is cancelled and hwui is not vendored.**
+**Skia-direct is committed; the hwui-vs-Skia spike is canceled and hwui is not vendored.**
 `android.graphics` JNI (already a thin Skia wrapper in AOSP) re-targets host Skia via a shim.
 Render backends are the wcs Skia canvases only: `skia-shm` (guaranteed), `skia-egl`,
 `skia-vulkan-dmabuf` (preferred on RK3588/SA8155P/RADV).

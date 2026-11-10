@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Provenance: original acl status doc; observations from acl runs of redistributable F-Droid
      APKs on this host. No app screenshots are checked in — several corpus apps are GPL-3.0, which
-     this tree does not carry (CONTRIBUTING.md license hygiene); regenerate locally with
+     this tree does not carry (license hygiene); regenerate locally with
      tools/shot-app.sh. No GPL-3.0 sources. -->
 
 # App corpus — what runs today
@@ -11,8 +11,7 @@ android.graphics natives on Android's host Skia. What follows was observed on sc
 compositor.
 
 **No screenshots are checked in.** Several of these apps are GPL-3.0 (a2dp.Vol, opendrummer), and a
-screenshot carries their rendered UI — which this Apache-2.0 tree does not carry (CONTRIBUTING.md,
-license hygiene; note the CI license gate scans source, not images, so this is a judgment call, not
+screenshot carries their rendered UI — which this Apache-2.0 tree does not carry (license hygiene; note the CI license gate scans source, not images, so this is a judgment call, not
 a gate). Regenerate them locally instead:
 
 ```sh

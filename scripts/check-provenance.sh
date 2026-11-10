@@ -13,7 +13,7 @@ fail=0
 
 # --- 1. denylist -------------------------------------------------------------------
 # Files allowed to name the forbidden project (they define/enforce the ban).
-allow_re='^(\./)?(PROVENANCE\.md|README\.md|CONTRIBUTING\.md|plan\.md|CONTRIBUTING\.md|docs/clean-room\.md|scripts/check-provenance\.sh|\.github/workflows/ci\.yml)$'
+allow_re='^(\./)?(PROVENANCE\.md|README\.md|plan\.md|CONTRIBUTING\.md|docs/clean-room\.md|scripts/check-provenance\.sh|\.github/workflows/ci\.yml)$'
 atl_re='the GPL-3.0 predecessor|gitlab\.com/[^ ]*android[_-]translation[_-]layer'
 
 while IFS= read -r -d '' f; do

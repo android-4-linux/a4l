@@ -9,7 +9,7 @@ first-class target and reaches a useful milestone ahead of the phone/View path.
 
 > **Status: Phase 0 (skeleton).** This tree currently builds a stub executable and enforces the
 > clean-room / license discipline in CI. Real subsystems land per the phase plan. The
-> authoritative design is [`plan.md`](plan.md); day-to-day orientation is in
+> authoritative design is [`plan.md`](plan.md); contributor guidance is in
 > [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Read these first
