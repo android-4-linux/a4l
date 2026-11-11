@@ -1,0 +1,10 @@
+# Revisions to skip when reading git blame: tree-wide mechanical reformats, which
+# otherwise show up as the last author of every line they touched.
+#
+# Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub honors this file automatically in its blame view.
+
+# style: adopt ivi-homescreen's clang-format and reformat the tree (179 files)
+8e0170b88cd2f1b59f9ff13fe8854dfce26e73fb
