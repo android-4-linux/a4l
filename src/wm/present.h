@@ -231,7 +231,7 @@ class IPresenter {
   virtual void* gl_display() noexcept { return nullptr; }  // raw wl_display* for the GlDevice
   virtual void* gl_surface() noexcept { return nullptr; }  // toplevel wl_surface* Mesa renders into
   virtual void arm_present() noexcept {}                   // request wp_presentation feedback for the next commit
-  virtual bool wait_configured(int timeout_ms) noexcept { return true; }  // pump until first configure
+  virtual bool wait_configured(int /*timeout_ms*/) noexcept { return true; }  // pump until first configure
 
   // Video HW-plane path: present a decoded video frame (a distinct dma-buf per frame) DIRECTLY on a
   // wl_subsurface under the app's surface at the given on-screen rect — the compositor scans it out on

@@ -4629,7 +4629,7 @@ class ArtVm final : public JniVm {
     // SIGSEGV on any window/overlay teardown (dismissing a Dialog/Popup/menu). No-op it: the small
     // native receiver + its InputChannel leak per torn-down window instead of crashing the process.
     if (jclass ier = env->FindClass("android/view/InputEventReceiver")) {
-      const JNINativeMethod m = {"nativeDispose", "(J)V",
+      const JNINativeMethod m = {const_cast<char*>("nativeDispose"), const_cast<char*>("(J)V"),
                                  reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) {})};
       if (env->RegisterNatives(ier, &m, 1) == JNI_OK)
         log::i(kTag, "InputEventReceiver.nativeDispose -> acl no-op (avoids AndroidRuntime::getJNIEnv)");

@@ -445,22 +445,35 @@ bool register_soundpool(JNIEnv* env) {
     if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
     env->DeleteLocalRef(fdc);
   }
+  // JNINativeMethod declares name and signature as char*, not const char*, so a string
+  // literal needs a cast to be stored in one. JNI only reads through them. This matches
+  // the other registration tables in the tree.
   const JNINativeMethod m[] = {
-      {"native_setup", "(ILjava/lang/Object;Ljava/lang/String;)I", reinterpret_cast<void*>(SP_native_setup)},
-      {"native_release", "()V", reinterpret_cast<void*>(SP_native_release)},
-      {"_load", "(Ljava/io/FileDescriptor;JJI)I", reinterpret_cast<void*>(SP__load)},
-      {"_play", "(IFFIIF)I", reinterpret_cast<void*>(SP__play)},
-      {"_setVolume", "(IFF)V", reinterpret_cast<void*>(SP__setVolume)},
-      {"_mute", "(Z)V", reinterpret_cast<void*>(SP__mute)},
-      {"unload", "(I)Z", reinterpret_cast<void*>(SP_unload)},
-      {"stop", "(I)V", reinterpret_cast<void*>(SP_stop)},
-      {"pause", "(I)V", reinterpret_cast<void*>(SP_pause)},
-      {"resume", "(I)V", reinterpret_cast<void*>(SP_resume)},
-      {"autoPause", "()V", reinterpret_cast<void*>(SP_autoPause)},
-      {"autoResume", "()V", reinterpret_cast<void*>(SP_autoResume)},
-      {"setLoop", "(II)V", reinterpret_cast<void*>(SP_setLoop)},
-      {"setRate", "(IF)V", reinterpret_cast<void*>(SP_setRate)},
-      {"setPriority", "(II)V", reinterpret_cast<void*>(SP_setPriority)},
+      {const_cast<char*>("native_setup"), const_cast<char*>("(ILjava/lang/Object;Ljava/lang/String;)I"),
+       reinterpret_cast<void*>(SP_native_setup)},
+      {const_cast<char*>("native_release"), const_cast<char*>("()V"),
+       reinterpret_cast<void*>(SP_native_release)},
+      {const_cast<char*>("_load"), const_cast<char*>("(Ljava/io/FileDescriptor;JJI)I"),
+       reinterpret_cast<void*>(SP__load)},
+      {const_cast<char*>("_play"), const_cast<char*>("(IFFIIF)I"),
+       reinterpret_cast<void*>(SP__play)},
+      {const_cast<char*>("_setVolume"), const_cast<char*>("(IFF)V"),
+       reinterpret_cast<void*>(SP__setVolume)},
+      {const_cast<char*>("_mute"), const_cast<char*>("(Z)V"), reinterpret_cast<void*>(SP__mute)},
+      {const_cast<char*>("unload"), const_cast<char*>("(I)Z"), reinterpret_cast<void*>(SP_unload)},
+      {const_cast<char*>("stop"), const_cast<char*>("(I)V"), reinterpret_cast<void*>(SP_stop)},
+      {const_cast<char*>("pause"), const_cast<char*>("(I)V"), reinterpret_cast<void*>(SP_pause)},
+      {const_cast<char*>("resume"), const_cast<char*>("(I)V"), reinterpret_cast<void*>(SP_resume)},
+      {const_cast<char*>("autoPause"), const_cast<char*>("()V"),
+       reinterpret_cast<void*>(SP_autoPause)},
+      {const_cast<char*>("autoResume"), const_cast<char*>("()V"),
+       reinterpret_cast<void*>(SP_autoResume)},
+      {const_cast<char*>("setLoop"), const_cast<char*>("(II)V"),
+       reinterpret_cast<void*>(SP_setLoop)},
+      {const_cast<char*>("setRate"), const_cast<char*>("(IF)V"),
+       reinterpret_cast<void*>(SP_setRate)},
+      {const_cast<char*>("setPriority"), const_cast<char*>("(II)V"),
+       reinterpret_cast<void*>(SP_setPriority)},
   };
   const bool ok = g_ctx_field != nullptr &&
                   env->RegisterNatives(cls, m, sizeof(m) / sizeof(m[0])) == JNI_OK;
