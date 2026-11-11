@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# wayland-cxx-scanner (wcs, MIT, Joel Winarske) - the CRTP Wayland bindings wm/ is built on:
+# a scanner tool that generates C++ protocol headers, plus the header-only wl/ framework.
+# plan.md Addendum A02. Pinned to the commit tag v1.0.1 points at (2026-10-01); bump the
+# revision here, never float it. The commit rather than the tag name: v1.0.1 is an annotated
+# tag, and a shallow clone of one makes git warn that the ref "is not a commit".
+#
+# Only used when neither -Dwcs_root= nor a ../wayland-cxx-scanner sibling checkout resolves
+# (see the wcs block in /meson.build). For local development against a sibling checkout
+# instead of cloning, symlink ../wayland-cxx-scanner into subprojects/wayland-cxx-scanner.
+[wrap-git]
+directory = wayland-cxx-scanner
+url = https://github.com/jwinarske/wayland-cxx-scanner.git
+revision = e3459c9799513f5c2d92df529060d1f716201ce9
+depth = 1

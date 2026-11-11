@@ -105,35 +105,72 @@ xkbcommon_dep = dependency('xkbcommon', required : false)  # wcs KeyboardHandler
 wl_scanner_dep = dependency('wayland-scanner', required : false)
 wp_dep = dependency('wayland-protocols', required : false)
 fs = import('fs')
+# wcs is resolved in three steps, first hit wins:
+#   1. -Dwcs_root=<path>                      an out-of-tree checkout
+#   2. ../wayland-cxx-scanner                 a sibling checkout
+#   3. subprojects/wayland-cxx-scanner.wrap   the pinned wrap, built by Meson
+# 1 and 2 are the wcs-developer paths (edit wcs, rebuild it, rebuild acl against it) and
+# need a scanner binary already built at <root>/build/src/wayland-cxx-scanner. 3 is what
+# every other checkout gets and needs nothing on the machine beyond the wayland, wayland-
+# protocols and xkbcommon dev packages — Meson clones the pin and builds the scanner.
 wcs_root = get_option('wcs_root')
+wcs_origin = ''
+wcs_include = ''
 if wcs_root == ''
-  # Auto-detect a sibling checkout next to this repo.
   cand = meson.project_source_root() / '..' / 'wayland-cxx-scanner'
   if fs.exists(cand / 'include' / 'wl' / 'proxy_impl.hpp')
     wcs_root = cand
   endif
 endif
-if wcs_root != '' and wayland_dep.found() and wl_scanner_dep.found() and wp_dep.found() and xkbcommon_dep.found()
-  wcs_scanner_bin = wcs_root / 'build' / 'src' / 'wayland-cxx-scanner'
-  if fs.exists(wcs_scanner_bin) and fs.exists(wcs_root / 'include' / 'wl' / 'proxy_impl.hpp')
-    wcs_scanner = find_program(wcs_scanner_bin, required : false)
-    if wcs_scanner.found()
-      have_wcs = true
-      # wcs is an external sibling checkout; pass its header-only wl/ framework
-      # include dir as a -I compile arg (like jni_dep for the external JDK) — an
-      # absolute out-of-tree path can't go through include_directories().
-      wcs_dep = declare_dependency(compile_args : ['-I' + wcs_root / 'include'])
-      wl_proto_dir = wp_dep.get_variable('pkgdatadir')
-      wl_core_xml = wl_scanner_dep.get_variable('pkgdatadir') / 'wayland.xml'
-      xdg_shell_xml = wl_proto_dir / 'stable' / 'xdg-shell' / 'xdg-shell.xml'
-      presentation_time_xml = wl_proto_dir / 'stable' / 'presentation-time' / 'presentation-time.xml'
-      linux_dmabuf_xml = wl_proto_dir / 'unstable' / 'linux-dmabuf' / 'linux-dmabuf-unstable-v1.xml'
-      text_input_v3_xml = wl_proto_dir / 'unstable' / 'text-input' / 'text-input-unstable-v3.xml'
-      fractional_scale_xml = wl_proto_dir / 'staging' / 'fractional-scale' / 'fractional-scale-v1.xml'
-      viewporter_xml = wl_proto_dir / 'stable' / 'viewporter' / 'viewporter.xml'
-      message('wm/ Wayland presenter enabled: wcs at ' + wcs_root)
+if wayland_dep.found() and wl_scanner_dep.found() and wp_dep.found() and xkbcommon_dep.found()
+  if wcs_root != ''
+    wcs_scanner_bin = wcs_root / 'build' / 'src' / 'wayland-cxx-scanner'
+    if fs.exists(wcs_scanner_bin) and fs.exists(wcs_root / 'include' / 'wl' / 'proxy_impl.hpp')
+      wcs_scanner = find_program(wcs_scanner_bin, required : false)
+      if wcs_scanner.found()
+        have_wcs = true
+        wcs_include = wcs_root / 'include'
+        wcs_origin = wcs_root
+      endif
+    else
+      warning('wcs checkout at ' + wcs_root
+        + ' has no built scanner (build/src/wayland-cxx-scanner); using the pinned wrap instead')
     endif
   endif
+  if not have_wcs
+    # required : false so an offline setup, or one run with --wrap-mode=nodownload, still
+    # configures: wm/ falls back to the stub presenter instead of failing the build.
+    wcs_sp = subproject(
+      'wayland-cxx-scanner',
+      required : false,
+      default_options : [
+        'tests=false', 'examples=false', 'install_tool=false',
+        'ime_backend=text-input-v3',  # acl selects the facade itself (src/wm/meson.build)
+        'werror=false',               # an upstream warning must not fail a consumer build
+      ],
+    )
+    if wcs_sp.found()
+      wcs_scanner = wcs_sp.get_variable('scanner_exe')
+      have_wcs = true
+      wcs_include = meson.project_source_root() / 'subprojects' / 'wayland-cxx-scanner' / 'include'
+      wcs_origin = 'subprojects/wayland-cxx-scanner (pinned wrap)'
+    endif
+  endif
+endif
+if have_wcs
+  # wcs's wl/ framework is header-only; pass its include dir as a -I compile arg (like
+  # jni_dep for the external JDK) — an absolute out-of-tree path can't go through
+  # include_directories().
+  wcs_dep = declare_dependency(compile_args : ['-I' + wcs_include])
+  wl_proto_dir = wp_dep.get_variable('pkgdatadir')
+  wl_core_xml = wl_scanner_dep.get_variable('pkgdatadir') / 'wayland.xml'
+  xdg_shell_xml = wl_proto_dir / 'stable' / 'xdg-shell' / 'xdg-shell.xml'
+  presentation_time_xml = wl_proto_dir / 'stable' / 'presentation-time' / 'presentation-time.xml'
+  linux_dmabuf_xml = wl_proto_dir / 'unstable' / 'linux-dmabuf' / 'linux-dmabuf-unstable-v1.xml'
+  text_input_v3_xml = wl_proto_dir / 'unstable' / 'text-input' / 'text-input-unstable-v3.xml'
+  fractional_scale_xml = wl_proto_dir / 'staging' / 'fractional-scale' / 'fractional-scale-v1.xml'
+  viewporter_xml = wl_proto_dir / 'stable' / 'viewporter' / 'viewporter.xml'
+  message('wm/ Wayland presenter enabled: wcs at ' + wcs_origin)
 endif
 
 # ADR-4 / A02.2: the single pinned Skia build, shared with wcs (no ODR duplication),
@@ -143,7 +180,24 @@ have_skia = false
 skia_dep = declare_dependency()   # empty no-op placeholder
 skia_prefix = get_option('skia_prefix')
 if skia_prefix == ''
-  foreach cand : ['/home/joel/.local/skia-m150']
+  # No vendored Skia and no pkg-config for it, so the prefix is searched for. Order:
+  # $ACL_SKIA_PREFIX, then the conventional install locations. Build one with wcs's
+  # scripts/build-skia.sh (chrome/m150 — the shared pin, see third_party/skia/METADATA).
+  _env_skia = run_command('sh', '-c', 'printf %s "${ACL_SKIA_PREFIX:-}"', check : false).stdout()
+  _home = run_command('sh', '-c', 'printf %s "${HOME:-}"', check : false).stdout()
+  _skia_cands = []
+  if _env_skia != ''
+    _skia_cands += _env_skia
+  endif
+  if _home != ''
+    _skia_cands += [_home / '.local' / 'skia-m150', _home / '.local' / 'skia']
+  endif
+  _skia_cands += [
+    meson.project_source_root() / '..' / 'skia-m150',
+    '/opt/skia-m150',
+    '/usr/local/skia-m150',
+  ]
+  foreach cand : _skia_cands
     if skia_prefix == '' and fs.exists(cand / 'include' / 'core' / 'SkCanvas.h')
       skia_prefix = cand
     endif

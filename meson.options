@@ -27,7 +27,7 @@ option(
   'wcs_root',
   type : 'string',
   value : '',
-  description : 'Path to the wayland-cxx-scanner (wcs) checkout providing the CRTP Wayland bindings (scanner tool + wl/ header framework). Empty auto-detects a sibling checkout. When wcs + wayland-client are found, wm/ builds the real Wayland presenter; otherwise wm/ is a stub. Consumed as a prebuilt artifact per plan.md Addendum A02.',
+  description : 'Path to an out-of-tree wayland-cxx-scanner (wcs) checkout providing the CRTP Wayland bindings (scanner tool + wl/ header framework), already configured and built — the scanner is expected at <path>/build/src/wayland-cxx-scanner. Empty tries a ../wayland-cxx-scanner sibling, then falls back to subprojects/wayland-cxx-scanner.wrap, which Meson clones at the pinned tag and builds. When wcs + wayland-client + wayland-protocols + xkbcommon are all found, wm/ builds the real Wayland presenter; otherwise wm/ is a stub. plan.md Addendum A02.',
 )
 
 option(
@@ -41,5 +41,5 @@ option(
   'skia_prefix',
   type : 'string',
   value : '',
-  description : 'Path to a pinned Skia install prefix (lib/*.a + include/core/...), shared with wcs (ADR-4/A02.2). Empty auto-detects the standalone install (~/.local/skia-m150). Enables the Skia-backed gfx Surface (ACL_HAVE_SKIA).',
+  description : 'Path to a pinned Skia install prefix (lib/*.a + include/core/...), shared with wcs (ADR-4/A02.2). Empty searches $ACL_SKIA_PREFIX, then ~/.local/skia-m150, ~/.local/skia, ../skia-m150, /opt/skia-m150 and /usr/local/skia-m150. Skia is not built by Meson; produce a prefix with wcs scripts/build-skia.sh at the shared chrome/m150 pin (third_party/skia/METADATA). Enables the Skia-backed gfx Surface (ACL_HAVE_SKIA) and, with vulkan + vulkan-hpp + libdrm, the Ganesh Vulkan present path.',
 )
