@@ -100,3 +100,50 @@ samples it on the present thread and, on the RenderThread before the functor dra
 (Chromium's bionic `getenv` does not see acl-injected env vars; the getter returning 0 when the feature
 is off is what keeps Chromium on its draw-time fallback). Confirmed end-to-end: Chromium reads acl's
 real timestamp + a ~4.167 ms (240 Hz) interval.
+
+## `libcore-host-musl-sigrtmin.patch` (musl host ART)
+
+On a **musl** host, `libjavacore`'s async-close monitor picks a signal musl refuses to let anyone
+handle, so the handler is never installed and the signal it later sends has no handler to catch it.
+`luni/src/main/native/AsynchronousCloseMonitor.cpp` selects the signal at compile time:
+
+```c
+#if defined(__Fuchsia__)
+static const int BLOCKED_THREAD_SIGNAL = SIGRTMIN + 2;     // dynamic: 37 on musl
+#else
+static const int BLOCKED_THREAD_SIGNAL = __SIGRTMIN + 2;   // raw: 34
+#endif
+```
+
+`__SIGRTMIN` is not a musl symbol — AOSP's own overlay supplies it
+(`external/musl/android/include/signal.h:33`, `#define __SIGRTMIN 32`), so the `#else` branch
+compiles and resolves to **34**. musl reserves 32/33/34 for its own use (`SIGTIMER`/`SIGCANCEL`/
+`SIGSYNCCALL`, `src/internal/pthread_impl.h:129-131`) and rejects all three outright:
+`src/signal/sigaction.c:64` is `if (sig-32U < 3 || …) { errno = EINVAL; }`. Its public `SIGRTMIN`
+is `__libc_current_sigrtmin()`, a function returning **35** (`src/signal/sigrtmin.c`), so the
+Fuchsia branch lands clear of the reservation.
+
+The patch adds `ANDROID_HOST_MUSL` to that first branch. The macro is a Soong musl-toolchain define
+(`build/soong/cc/config/x86_linux_host.go:48`, in `linuxMuslCflags`), and it reaches **both** musl
+hosts: the shipped `linux_musl_x86_64` and B2's `linux_musl_arm64`, because `toolchainMusl.Cflags()`
+returns `${config.LinuxMuslCflags}` and B2's arm64 factory composes that mixin
+(`tools/aosp/b2-musl-arm64/arm64_musl_host.go:47`). One file, one `#if`, no behavior change on
+glibc or bionic hosts.
+
+**Failure shape, unpatched.** `init()` logs and continues — `sigaction` returning -1 only produces
+`ALOGE("setting blocked thread signal handler failed: …")` (line 88), so startup looks healthy.
+The damage appears later: `signalBlockedThreads()` calls `pthread_kill(thread, 34)` whenever one
+thread closes an fd another is blocked on, and musl's `pthread_kill` passes the signal straight to
+`tkill` with no reservation check (`src/thread/pthread_kill.c`). With no handler installed, the
+default disposition of a realtime signal terminates the process. **This chain is traced from the
+musl and libcore sources, not observed under a debugger** — what is directly confirmed is the
+`sigaction` rejection and the absent handler.
+
+Apply into the AOSP checkout:
+
+```sh
+git -C $ACL_AOSP_ROOT/libcore apply .../libcore-host-musl-sigrtmin.patch
+```
+
+Pinned against `libcore` at `android-13.0.0_r84` (`df86e79006a`). See
+`tools/aosp/b2-musl-arm64/README.md` for the musl host ART bring-up this belongs to.

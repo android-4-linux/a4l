@@ -1,0 +1,15 @@
+diff --git a/luni/src/main/native/AsynchronousCloseMonitor.cpp b/luni/src/main/native/AsynchronousCloseMonitor.cpp
+index 7fea9367f5b..31649261374 100644
+--- a/luni/src/main/native/AsynchronousCloseMonitor.cpp
++++ b/luni/src/main/native/AsynchronousCloseMonitor.cpp
+@@ -64,7 +64,9 @@ static AsynchronousCloseMonitorImpl* blockedThreadList = NULL;
+  * The specific signal chosen here is arbitrary, but bionic needs to know so that SIGRTMIN
+  * starts at a higher value.
+  */
+-#if defined(__Fuchsia__)
++#if defined(__Fuchsia__) || defined(ANDROID_HOST_MUSL)
++// musl reserves __SIGRTMIN..__SIGRTMIN+2 (SIGTIMER/SIGCANCEL/SIGSYNCCALL) internally, so the
++// raw __SIGRTMIN+2 (34) is rejected by sigaction; use the dynamic SIGRTMIN (35+ on musl).
+ static const int BLOCKED_THREAD_SIGNAL = SIGRTMIN + 2;
+ #else
+ static const int BLOCKED_THREAD_SIGNAL = __SIGRTMIN + 2;

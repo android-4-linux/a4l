@@ -51,7 +51,7 @@ for pf in "$tmp"/*.patch; do
   repo=$(basename "$pf" .patch | tr '_' '/')
   git -C "$AOSP/$repo" apply --whitespace=nowarn "$pf" 2>/dev/null \
     && echo "  applied: $repo" \
-    || echo "  SKIP/партial (already applied or offset): $repo"
+    || echo "  SKIP/partial (already applied or offset): $repo"
 done
 rm -rf "$tmp"
 
