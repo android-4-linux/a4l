@@ -7,10 +7,19 @@ native Wayland clients on desktop and embedded Linux, comparable in function to
 is **Apache-2.0**. The automotive profile (media apps + Car App Library templates) is a
 first-class target and reaches a useful milestone ahead of the phone/View path.
 
-> **Status: Phase 0 (skeleton).** This tree currently builds a stub executable and enforces the
-> clean-room / license discipline in CI. Real subsystems land per the phase plan. The
-> authoritative design is [`plan.md`](plan.md); contributor guidance is in
-> [`CONTRIBUTING.md`](CONTRIBUTING.md).
+> **Status: unmodified APKs render.** Of 18 F-Droid apps run headless on `acl run --vm=art`, 15
+> reach layout and 3 fail; reaching layout means the app booted without an `onCreate` crash and its
+> decor measured and laid out, which is not a pixel check. Rendering is verified on screen for
+> Jetpack Compose (`SVS.pdfinspector`), Views/Material (`opendrummer`, `a2dp.Vol`,
+> `batterytemperature`) and a custom-View clock (`octalsuntime`). A real app needs
+> `ACL_PRESENT_GPU=1`, the zero-copy path that draws through Skia (Ganesh Vulkan) into a dma-buf
+> with a tiled format modifier; the default shm path can only present acl's own Bitmap shim. CI
+> enforces the clean-room and license discipline.
+>
+> Not built, and none of them small: `SurfaceView` (a GL, video or camera app's region shows
+> through as a hole), `WebView`, and the legacy `gles_jni` EGL bindings that `GLSurfaceView`
+> initializes. `docs/app-corpus-status.md` tracks the corpus app by app. The authoritative design
+> is [`plan.md`](plan.md); contributor guidance is in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Read these first
 
