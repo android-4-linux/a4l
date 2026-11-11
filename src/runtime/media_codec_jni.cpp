@@ -10,7 +10,11 @@
 
 #include "acl_config.h"
 
-#if ACL_GL_PRESENT
+// The real body needs both halves: the present path (wcs presenter + Ganesh Vulkan device)
+// to put a decoded frame on a Surface, and FFmpeg for media::CodecDecoder to produce one.
+#define ACL_MEDIA_CODEC_JNI (ACL_GL_PRESENT && ACL_HAVE_FFMPEG)
+
+#if ACL_MEDIA_CODEC_JNI
 
 #include <algorithm>
 #include <atomic>
@@ -690,12 +694,13 @@ void register_media_codec_natives(JNIEnv* env) {
 
 }  // namespace acl::runtime
 
-#endif  // ACL_GL_PRESENT
+#endif  // ACL_MEDIA_CODEC_JNI
 
-#if ACL_HAVE_GL && !ACL_GL_PRESENT
-// Host GL without the wcs presenter and the Ganesh Vulkan device: the decode-to-plane path above
-// is not built, but the libmedia_jni load path still registers the ImageReader and MediaCodecList
-// natives beside this one, so the entry point has to stay linkable.
+#if ACL_HAVE_GL && !ACL_MEDIA_CODEC_JNI
+// Host GL without one of the two halves above: either no wcs presenter and Ganesh Vulkan
+// device, or no FFmpeg, so the decode-to-plane path is not built. The libmedia_jni load path
+// in jvm_vm.cpp still registers the ImageReader and MediaCodecList natives beside this one,
+// under ACL_HAVE_GL alone, so the entry point has to stay linkable.
 namespace acl::runtime {
 void register_media_codec_natives(JNIEnv*) {}
 }  // namespace acl::runtime
