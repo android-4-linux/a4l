@@ -58,10 +58,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
+        # The runner's mirror list periodically serves an index whose pool has already moved on,
+        # and every fetch 404s ("Unable to fetch some archives"). Re-running update before each
+        # attempt picks up the rotated mirror instead of failing the build on infrastructure.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y meson ninja-build g++ pkg-config \
-                                  libfmt-dev zlib1g-dev python3 default-jdk
+          for attempt in 1 2 3; do
+            sudo apt-get update -qq
+            if sudo apt-get install -y -o Acquire::Retries=3 \
+                 meson ninja-build g++ pkg-config \
+                 libfmt-dev zlib1g-dev python3 default-jdk; then
+              exit 0
+            fi
+            echo "apt attempt ${attempt} failed; retrying"
+            sleep 15
+          done
+          echo "apt failed three times" >&2
+          exit 1
       - name: Export JAVA_HOME for the JVM backend detection
         run: echo "JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))" >> "$GITHUB_ENV"
       - name: Fetch Catch2 (Tier A tests)
