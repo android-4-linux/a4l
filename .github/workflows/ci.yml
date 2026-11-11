@@ -55,21 +55,31 @@ jobs:
   build:
     name: Build & test (Meson, stub presenter / no Skia)
     runs-on: ubuntu-latest
+    # A hung mirror once held Install toolchain open for 87 minutes with no output. The job
+    # cap bounds the damage; the step cap and the per-attempt timeout below are what actually
+    # turn a hang into a retry.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        # The runner's mirror list periodically serves an index whose pool has already moved on,
-        # and every fetch 404s ("Unable to fetch some archives"). Re-running update before each
-        # attempt picks up the rotated mirror instead of failing the build on infrastructure.
+        # The runner's mirror list periodically serves an index whose pool has already moved on.
+        # Two failure modes, both infrastructure rather than build: every fetch 404s ("Unable to
+        # fetch some archives"), or the mirror accepts the connection and never answers. Re-running
+        # update before each attempt picks up the rotated mirror; the Acquire timeouts and the
+        # outer `timeout` bound the silent case, which retries alone cannot reach.
+        timeout-minutes: 15
         run: |
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
           for attempt in 1 2 3; do
-            sudo apt-get update -qq
-            if sudo apt-get install -y -o Acquire::Retries=3 \
+            # shellcheck disable=SC2086
+            timeout 240 sudo apt-get update -qq $apt_opts || true
+            # shellcheck disable=SC2086
+            if timeout 240 sudo apt-get install -y $apt_opts \
                  meson ninja-build g++ pkg-config \
                  libfmt-dev zlib1g-dev python3 default-jdk; then
               exit 0
             fi
-            echo "apt attempt ${attempt} failed; retrying"
+            echo "apt attempt ${attempt} failed or timed out; retrying"
             sleep 15
           done
           echo "apt failed three times" >&2
