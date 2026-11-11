@@ -47,8 +47,13 @@ jobs:
           done < <(git rev-list "$range")
           exit $bad
 
+  # This job builds the configuration a bare runner can reach: no pinned Skia, so no Ganesh
+  # Vulkan, and no wcs checkout, so wm/ is the stub presenter. The Skia + Vulkan + wcs
+  # configuration -- the one that actually presents an app -- needs a 151 MB prebuilt Skia m150
+  # prefix and is NOT covered here. Adding it means caching that prefix; until then, a green run
+  # means the stub configuration compiles and its tests pass, nothing more.
   build:
-    name: Build & test (Meson)
+    name: Build & test (Meson, stub presenter / no Skia)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

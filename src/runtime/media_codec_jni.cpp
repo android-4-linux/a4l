@@ -10,7 +10,7 @@
 
 #include "acl_config.h"
 
-#if ACL_HAVE_GL
+#if ACL_GL_PRESENT
 
 #include <algorithm>
 #include <atomic>
@@ -690,4 +690,13 @@ void register_media_codec_natives(JNIEnv* env) {
 
 }  // namespace acl::runtime
 
-#endif  // ACL_HAVE_GL
+#endif  // ACL_GL_PRESENT
+
+#if ACL_HAVE_GL && !ACL_GL_PRESENT
+// Host GL without the wcs presenter and the Ganesh Vulkan device: the decode-to-plane path above
+// is not built, but the libmedia_jni load path still registers the ImageReader and MediaCodecList
+// natives beside this one, so the entry point has to stay linkable.
+namespace acl::runtime {
+void register_media_codec_natives(JNIEnv*) {}
+}  // namespace acl::runtime
+#endif
