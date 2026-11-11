@@ -8,13 +8,19 @@ and `plan.md` disagree, fix one to match — they must not drift.
 
 ## The one rule that overrides everything
 
-**Do not open, read, fetch, quote, or paraphrase the `the GPL-3.0 predecessor` (the predecessor)
-tree, the predecessor's merge requests, or the predecessor diffs — from this date forward, no exceptions.** Prior
-prior analysis notes are quarantined spec inputs only and must never be pasted into `src/`.
+**Do not open, read, fetch, quote, or paraphrase the GPL-3.0 predecessor's tree, its merge
+requests, or its diffs — from this date forward, no exceptions.** Prior analysis notes on it
+are quarantined spec inputs only and must never be pasted into `src/`.
 See `docs/clean-room.md` for the compartment model and the §1.4 posture.
 
+The predecessor is deliberately not named anywhere in this repository. The names and repository
+URLs that `scripts/check-provenance.sh` rejects live in an untracked local denylist, so the tree
+does not itself carry the strings it exists to exclude. Point the gate at your copy with
+`ACL_PROVENANCE_DENYLIST=<path>`; without one it says so and checks only the provenance comments.
+
 Strategy: **AOSP-down, not GPL-across.** Every component has a permissively-licensed
-ancestor; we take the Android API surface from its Apache-2.0 AOSP upstream, never from the predecessor.
+ancestor; we take the Android API surface from its Apache-2.0 AOSP upstream, never from the
+predecessor.
 
 ## Reference matrix (plan.md Appendix A, §A01.6)
 
@@ -28,8 +34,8 @@ ancestor; we take the Android API surface from its Apache-2.0 AOSP upstream, nev
 | androidx.car.app (Jetpack), AOSP car-samples, AIDL VHAL defs | ✅ Apache-2.0 |
 | vsomeip | ✅ MPL-2.0, dynamic link only |
 | Waydroid | ❌ GPL-3.0 code; ✅ published docs/blog posts (record here) |
-| **predecessor's tree, predecessor MRs/diffs** | ❌ from this date forward |
-| Prior prior analysis notes (G1–G13, per-file symbol counts) | ⚠️ quarantined spec inputs only; never in `src/` |
+| **The GPL-3.0 predecessor's tree, its MRs and diffs** | ❌ from this date forward |
+| Prior analysis notes on it (G1–G13, per-file symbol counts) | ⚠️ quarantined spec inputs only; never in `src/` |
 | GAS binaries / OEM-proprietary VHAL / NDA docs | ❌ |
 
 ## License policy

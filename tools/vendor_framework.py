@@ -44,8 +44,12 @@ SHIM_ROOT = os.path.join(REPO_ROOT, "framework", "shim")
 # many files carry NO per-file header, so we do not require one. We only REFUSE files
 # that carry a forbidden copyleft marker (a stray GPL/LGPL-3/AGPL file); everything
 # else inherits the pinned repo license (third_party/aosp/METADATA + REUSE.toml).
-FORBIDDEN_MARKERS = (
-    "GPL-3.0", "LGPL-3.0", "AGPL",
+# A copyleft token counts as a declaration only on a license-identifier line. A bare
+# substring search cannot tell a real identifier from a provenance comment stating that a
+# file has no GPL-3.0 sources in it, and the second is the opposite claim.
+FORBIDDEN_SPDX = ("GPL-3.0", "LGPL-3.0", "AGPL")
+# Full licence notices are prose, not tags, so they count wherever they appear.
+FORBIDDEN_NOTICES = (
     "GNU General Public License", "GNU Affero General Public License",
     "GNU Lesser General Public License, Version 3",
 )
@@ -172,9 +176,18 @@ def read_head(path):
     return open(path, encoding="utf-8", errors="replace").read(4096)
 
 
+# REUSE-IgnoreStart  (the tag name below is the thing being searched for, not our header)
+SPDX_TAG = "SPDX-License" "-Identifier:"
+# REUSE-IgnoreEnd
+
+
 def has_forbidden_license(path):
     head = read_head(path)
-    return any(m in head for m in FORBIDDEN_MARKERS)
+    for line in head.splitlines():
+        before, tag, after = line.partition(SPDX_TAG)
+        if tag and any(tok in after for tok in FORBIDDEN_SPDX):
+            return True
+    return any(m in head for m in FORBIDDEN_NOTICES)
 
 
 def has_apache_header(path):

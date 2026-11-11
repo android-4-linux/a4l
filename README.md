@@ -3,7 +3,7 @@
 
 A clean-room, **C++23-first** Android compatibility layer: it runs unmodified Android APKs as
 native Wayland clients on desktop and embedded Linux, comparable in function to
-`the GPL-3.0 predecessor` (the predecessor) but sharing **none** of the predecessor's GPL-3.0 source. Output license
+the GPL-3.0 project that preceded it while sharing **none** of its source. Output license
 is **Apache-2.0**. The automotive profile (media apps + Car App Library templates) is a
 first-class target and reaches a useful milestone ahead of the phone/View path.
 
@@ -25,8 +25,8 @@ first-class target and reaches a useful milestone ahead of the phone/View path.
 
 - [`plan.md`](plan.md) — full design, ADRs, phases, risk register (source of truth).
 - [`PROVENANCE.md`](PROVENANCE.md) — **enforced** source/license policy. The overriding rule:
-  never open the predecessor's tree; take the Android API surface from Apache-2.0 AOSP (AOSP-down, not
-  GPL-across).
+  never open the GPL-3.0 predecessor's tree; take the Android API surface from Apache-2.0 AOSP
+  (AOSP-down, not GPL-across).
 - [`docs/clean-room.md`](docs/clean-room.md) — the clean-room protocol and current posture.
 - [`docs/adr/`](docs/adr/) — architecture decision records.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — SPDX + provenance + DCO requirements.

@@ -2,7 +2,7 @@
 
 **Status:** Draft v1 — 2026-07-09
 **Codename (working):** `acl` (rename at will)
-**Goal:** A GPLv3-free, C++23-first runtime that executes unmodified Android APKs on desktop/embedded Linux (Wayland-native), functionally comparable to the GPL-3.0 predecessor (the predecessor), without incorporating or deriving from the predecessor's GPL-3.0-or-later source.
+**Goal:** A GPLv3-free, C++23-first runtime that executes unmodified Android APKs on desktop/embedded Linux (Wayland-native), functionally comparable to the GPL-3.0 predecessor, without incorporating or deriving from the predecessor's GPL-3.0-or-later source.
 **License target for output:** Apache-2.0 (maximizes AOSP code reuse; MIT dual-license optional).
 
 ---
@@ -25,7 +25,7 @@
 
 ### 1.1 What GPLv3 actually reaches
 
-the predecessor's copyright covers its **expression**: its C source, its hand-written Java shims, comments, file structure, and non-trivial organizational choices. It does not cover:
+The predecessor's copyright covers its **expression**: its C source, its hand-written Java shims, comments, file structure, and non-trivial organizational choices. It does not cover:
 
 - The **Android API surface** (`android.*` signatures) — authored by Google, published in AOSP under Apache-2.0 and in SDK stubs. *Google v. Oracle* (2021) resolved Google's API copying as fair use rather than declaring APIs uncopyrightable, so the defensible position is not "APIs are free" but "we took the API from its Apache-2.0 upstream, not from the predecessor."
 - **Ideas and methods**: "map ANativeWindow to wl_surface," "translate Looper to epoll," "run DEX on host ART." Reimplementing these from independent design is not infringement.
@@ -62,7 +62,7 @@ Standard two-compartment (Chinese wall) model, adapted for a small team:
 
 ### 1.4 The known contamination problem — handle explicitly
 
-Prior work on the the predecessor→Wayland plan involved **detailed, documented reading of the predecessor's source** (GTK dependency inventory G1–G13, per-file symbol counts across 49 files, backend-seam analysis). Under a strict protocol, the person who did that reading is a **spec author, not an implementer**, for any module whose predecessor's counterpart they studied.
+Prior work on the predecessor→Wayland plan involved **detailed, documented reading of the predecessor's source** (GTK dependency inventory G1–G13, per-file symbol counts across 49 files, backend-seam analysis). Under a strict protocol, the person who did that reading is a **spec author, not an implementer**, for any module whose predecessor's counterpart they studied.
 
 Practical options, in descending order of defensibility:
 
