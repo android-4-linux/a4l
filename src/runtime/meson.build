@@ -16,10 +16,11 @@ if have_jni
     # android.media.ImageReader native underside over gfx::BufferQueue (Flutter external textures).
     runtime_sources += files('image_reader_jni.cpp')
     # android.media.MediaCodec native underside over media::CodecDecoder (zero-copy video decode).
-    # Needs CodecDecoder, which is built only when FFmpeg is present (acl_media, at final link).
-    if have_ffmpeg
-      runtime_sources += files('media_codec_jni.cpp')
-    endif
+    # Compiled whenever the GL path is, and guarded internally: the real body needs CodecDecoder,
+    # which exists only with FFmpeg, and the file supplies a no-op registration otherwise. It must
+    # not be gated here, because jvm_vm.cpp calls register_media_codec_natives under ACL_HAVE_GL
+    # alone -- leaving the file out of a GL build without FFmpeg takes both definitions with it.
+    runtime_sources += files('media_codec_jni.cpp')
     # MediaCodecList: advertise acl's HW decoder to ExoPlayer's codec discovery (no FFmpeg dep).
     runtime_sources += files('media_codec_list_jni.cpp')
   endif
