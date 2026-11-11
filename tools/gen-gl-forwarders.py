@@ -196,7 +196,9 @@ __attribute__((visibility("default"))) int eglDupNativeFenceFDANDROID(void* dpy,
 
 def forwarders(syms, bridge, soname, with_support):
     out = [
+        # REUSE-IgnoreStart
         "// SPDX-License-Identifier: Apache-2.0",
+        # REUSE-IgnoreEnd
         "// Provenance: original acl design. bionic->host-Mesa GL forwarders; see",
         "// tools/gen-gl-forwarders.py and docs/ndk-scope.md. No GPL-3.0 sources.",
         f"// {BANNER}",
@@ -257,7 +259,9 @@ def sym_table(egl, gles):
         lines.append("};")
         return "\n".join(lines)
     return (
+        # REUSE-IgnoreStart
         "// SPDX-License-Identifier: Apache-2.0\n"
+        # REUSE-IgnoreEnd
         "// Provenance: original acl design; standard Khronos EGL/GLES entrypoint names. No GPL-3.0 sources.\n"
         f"// {BANNER} The ORDER is the ABI contract with acl_egl_fwd.c / acl_gles_fwd.c:\n"
         "// host-Mesa symbol N is what forwarder N calls. Regenerate both from the same source.\n"
