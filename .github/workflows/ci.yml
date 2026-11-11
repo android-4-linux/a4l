@@ -6,6 +6,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:   # re-run the present job by hand after a cache eviction
 
 permissions:
   contents: read
@@ -116,3 +117,131 @@ jobs:
         run: meson compile -C build-phone
       - name: Automotive nm-diff gate (symbols present when ON, absent when OFF)
         run: scripts/check-automotive-symbols.sh build build-phone
+
+  # The configuration the stub job deliberately leaves out: pinned Skia, the Ganesh Vulkan
+  # present path and the real wcs Wayland presenter -- together, the path that actually puts an
+  # app's pixels on a surface. It needs a Skia prefix, which no distribution ships, so the job
+  # builds one with the recipe both projects share (wcs scripts/build-skia.sh) and caches it.
+  # A cache hit costs a ~150 MB restore and the job behaves like any other; a miss costs a full
+  # Skia build from source, which is what the timeout allows for.
+  present:
+    name: Build & test (Meson, Skia + Vulkan + wcs present path)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the wcs and Skia pins
+        # Neither pin is repeated here. The wcs commit has one home, the wrap; the Skia
+        # milestone has one home, SKIA_REF in that commit's build-skia.sh. Reading them out is
+        # what keeps the cache key honest when either one moves -- a stale prefix would
+        # otherwise be restored against a bumped pin and the job would test the wrong Skia.
+        id: pins
+        run: |
+          wcs_rev=$(sed -n 's/^revision *= *\([0-9a-f]\{40\}\) *$/\1/p' \
+                    subprojects/wayland-cxx-scanner.wrap)
+          test -n "$wcs_rev" || {
+            echo "no 40-char revision in subprojects/wayland-cxx-scanner.wrap" >&2; exit 1; }
+          git clone --filter=blob:none --no-checkout \
+            https://github.com/jwinarske/wayland-cxx-scanner.git "$RUNNER_TEMP/wcs"
+          git -C "$RUNNER_TEMP/wcs" checkout --quiet "$wcs_rev"
+          skia_ref=$(sed -n 's/^SKIA_REF="\(.*\)"$/\1/p' "$RUNNER_TEMP/wcs/scripts/build-skia.sh")
+          test -n "$skia_ref" || {
+            echo "no SKIA_REF in wcs scripts/build-skia.sh" >&2; exit 1; }
+          echo "wcs_rev=$wcs_rev" >> "$GITHUB_OUTPUT"
+          echo "skia_key=${skia_ref//\//-}" >> "$GITHUB_OUTPUT"
+          echo "wcs $wcs_rev, skia $skia_ref"
+
+      - name: Restore the Skia prefix
+        id: skia-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/skia-prefix
+          key: skia-${{ runner.os }}-x86_64-${{ steps.pins.outputs.skia_key }}-${{ steps.pins.outputs.wcs_rev }}
+
+      - name: Free disk for the Skia build
+        # Only on a miss, and only then because the checkout plus its synced third_party plus
+        # an is_official_build out/ tree does not comfortably fit beside the image's preinstalled
+        # language toolchains. Printed both ways so a future disk failure is readable.
+        if: steps.skia-cache.outputs.cache-hit != 'true'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
+
+      - name: Install toolchain
+        # Same mirror defences as the stub job. The extra packages are all small dev headers:
+        # wayland + wayland-protocols + xkbcommon are what have_wcs needs, vulkan + libdrm are
+        # what the Ganesh present path needs, and pugixml is wcs's own parser (installing it
+        # saves the subproject a download).
+        timeout-minutes: 20
+        run: |
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          for attempt in 1 2 3; do
+            # shellcheck disable=SC2086
+            timeout 300 sudo apt-get update -qq $apt_opts || true
+            # shellcheck disable=SC2086
+            if timeout 300 sudo apt-get install -y $apt_opts \
+                 meson ninja-build g++ pkg-config libfmt-dev zlib1g-dev python3 \
+                 libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
+                 libvulkan-dev libdrm-dev libgbm-dev libegl-dev libgles-dev \
+                 libpugixml-dev; then
+              exit 0
+            fi
+            echo "apt attempt ${attempt} failed or timed out; retrying"
+            sleep 15
+          done
+          echo "apt failed three times" >&2
+          exit 1
+
+      - name: Build Skia at the pin
+        if: steps.skia-cache.outputs.cache-hit != 'true'
+        run: |
+          "$RUNNER_TEMP/wcs/scripts/build-skia.sh" \
+            --prefix "$HOME/skia-prefix" \
+            --src "$RUNNER_TEMP/skia-src" \
+            --jobs "$(nproc)"
+          du -sh "$HOME/skia-prefix"
+          # The source tree is several GB and nothing after this reads it; the cache stores the
+          # prefix alone, so dropping it here keeps the rest of the job clear of a full disk.
+          rm -rf "$RUNNER_TEMP/skia-src"
+          df -h /
+
+      - name: Export JAVA_HOME for the JVM backend detection
+        run: |
+          jh="${JAVA_HOME_21_X64:-$JAVA_HOME}"
+          test -f "$jh/include/jni.h" || { echo "no jni.h under $jh" >&2; exit 1; }
+          echo "JAVA_HOME=$jh" >> "$GITHUB_ENV"
+
+      - name: Fetch Catch2 (Tier A tests)
+        run: meson wrap install catch2 || true
+
+      - name: Configure, and assert this is the configuration the job is named for
+        # Every one of these is optional in meson.build and degrades silently when its
+        # dependencies are missing -- which is correct for a developer and useless for a CI job
+        # whose entire purpose is to cover them. Without the assertion a missing libvulkan would
+        # leave this job green while testing exactly what the stub job already tests.
+        run: |
+          set -o pipefail
+          meson setup build-present -Dskia_prefix="$HOME/skia-prefix" 2>&1 | tee setup.log
+          missing=0
+          while IFS= read -r want; do
+            if ! grep -qF "$want" setup.log; then
+              echo "NOT ENABLED: $want" >&2
+              missing=1
+            fi
+          done <<'WANTED'
+          gfx/ Skia backend enabled
+          gfx/ Ganesh Vulkan present path enabled
+          wm/ Wayland presenter enabled
+          WANTED
+          exit $missing
+
+      - name: Compile
+        run: meson compile -C build-present
+
+      - name: Run the stub
+        run: ./build-present/src/shell/acl
+
+      - name: Test
+        run: meson test -C build-present --print-errorlogs
