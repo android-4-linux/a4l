@@ -133,9 +133,14 @@ jobs:
 
       - name: Resolve the wcs and Skia pins
         # Neither pin is repeated here. The wcs commit has one home, the wrap; the Skia
-        # milestone has one home, SKIA_REF in that commit's build-skia.sh. Reading them out is
+        # commit has one home, SKIA_REF in that commit's build-skia.sh. Reading them out is
         # what keeps the cache key honest when either one moves -- a stale prefix would
         # otherwise be restored against a bumped pin and the job would test the wrong Skia.
+        #
+        # SKIA_REF has to be a commit, and this step fails if it is not. A branch name in the
+        # key does not change when the branch moves, so the first saved prefix would be served
+        # under that key forever, and a rebuild after a cache eviction would quietly use a
+        # different Skia with nothing in the key to show it.
         id: pins
         run: |
           wcs_rev=$(sed -n 's/^revision *= *\([0-9a-f]\{40\}\) *$/\1/p' \
@@ -145,11 +150,22 @@ jobs:
           git clone --filter=blob:none --no-checkout \
             https://github.com/jwinarske/wayland-cxx-scanner.git "$RUNNER_TEMP/wcs"
           git -C "$RUNNER_TEMP/wcs" checkout --quiet "$wcs_rev"
-          skia_ref=$(sed -n 's/^SKIA_REF="\(.*\)"$/\1/p' "$RUNNER_TEMP/wcs/scripts/build-skia.sh")
+          skia_ref=$(sed -n 's/^SKIA_REF="\([0-9a-f]\{40\}\)"$/\1/p' \
+                     "$RUNNER_TEMP/wcs/scripts/build-skia.sh")
           test -n "$skia_ref" || {
-            echo "no SKIA_REF in wcs scripts/build-skia.sh" >&2; exit 1; }
+            echo "wcs scripts/build-skia.sh does not pin SKIA_REF to a 40-char commit sha." >&2
+            echo "A milestone branch there makes this cache key meaningless; see the note" >&2
+            echo "on this step." >&2; exit 1; }
+          metadata_sha=$(sed -n 's/^sha: *"\([0-9a-f]\{40\}\)" *$/\1/p' \
+                         third_party/skia/METADATA)
+          test "$metadata_sha" = "$skia_ref" || {
+            echo "third_party/skia/METADATA and the wcs SKIA_REF disagree:" >&2
+            echo "  METADATA: ${metadata_sha:-<unset, or not a 40-char sha>}" >&2
+            echo "  wcs     : $skia_ref" >&2
+            echo "Both name the commit this prefix is built from, so they have to match." >&2
+            exit 1; }
           echo "wcs_rev=$wcs_rev" >> "$GITHUB_OUTPUT"
-          echo "skia_key=${skia_ref//\//-}" >> "$GITHUB_OUTPUT"
+          echo "skia_key=$skia_ref" >> "$GITHUB_OUTPUT"
           echo "wcs $wcs_rev, skia $skia_ref"
 
       - name: Restore the Skia prefix
