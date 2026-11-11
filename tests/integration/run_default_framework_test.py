@@ -8,17 +8,22 @@
 # Runs activity.apk (MainActivity extends android.app.Activity, so it needs the
 # framework to even load) and asserts the lifecycle ran off the default classpath.
 #
-# Usage: run_default_framework_test.py <acl_binary> <activity.apk>
+# Usage: run_default_framework_test.py <acl_binary> <activity.apk> <staged_framework_dir>
+#
+# The staged directory is passed in rather than assumed: it lives under whatever the build
+# directory is called, and hardcoding "build/" failed this test in every tree configured as
+# anything else (CI builds the present-path configuration in build-present).
 import os
 import subprocess
 import sys
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        sys.stderr.write("usage: run_default_framework_test.py <acl> <activity.apk>\n")
+    if len(sys.argv) != 4:
+        sys.stderr.write(
+            "usage: run_default_framework_test.py <acl> <activity.apk> <staged_framework_dir>\n")
         return 2
-    acl, apk = sys.argv[1], sys.argv[2]
+    acl, apk, framework_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 
     env = dict(os.environ)
     env.pop("ACL_FRAMEWORK", None)  # force the baked-in default, not an env override
@@ -31,7 +36,7 @@ def main() -> int:
         sys.stderr.write(f"FAIL: exit {p.returncode}\n")
     checks = [
         "framework boot classpath:",                     # a default was picked up
-        "build/framework/classes",                       # ...including the staged shim dir
+        framework_dir,                                   # ...including the staged shim dir
         "launching Activity com.acl.hello.MainActivity",  # loaded (needs android.*)
         "MainActivity.onCreate ran",                     # lifecycle drove onCreate
     ]

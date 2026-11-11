@@ -154,7 +154,7 @@ jobs:
 
       - name: Restore the Skia prefix
         id: skia-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/skia-prefix
           key: skia-${{ runner.os }}-x86_64-${{ steps.pins.outputs.skia_key }}-${{ steps.pins.outputs.wcs_rev }}
@@ -209,6 +209,18 @@ jobs:
           # prefix alone, so dropping it here keeps the rest of the job clear of a full disk.
           rm -rf "$RUNNER_TEMP/skia-src"
           df -h /
+
+      - name: Save the Skia prefix
+        # Saved here rather than at the end of the job. The combined cache action only writes on
+        # a job that succeeds, and two runs in a row built Skia for 25 minutes, failed later in
+        # acl's own compile and test steps, and threw the prefix away. Splitting restore from save
+        # banks the expensive artifact the moment it exists, so a failure after this point costs
+        # one run instead of one run plus the next rebuild.
+        if: steps.skia-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/skia-prefix
+          key: ${{ steps.skia-cache.outputs.cache-primary-key }}
 
       - name: Export JAVA_HOME for the JVM backend detection
         run: |

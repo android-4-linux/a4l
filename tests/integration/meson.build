@@ -280,7 +280,8 @@ if py3.found() and have_jni
     test(
       'run-apk-default-framework',
       py3,
-      args : [files('run_default_framework_test.py'), acl_exe, activity_apk],
+      args : [files('run_default_framework_test.py'), acl_exe, activity_apk,
+              meson.project_build_root() / 'framework' / 'classes'],
       depends : [acl_exe, activity_apk, framework_shim],
       timeout : 120,
     )

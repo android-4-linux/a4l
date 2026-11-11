@@ -25,6 +25,12 @@
 // Use the ResultValue (.result/.value) API — no C++ exceptions — as the wcs example
 // does; must precede <vulkan/vulkan.hpp>.
 #define VULKAN_HPP_NO_EXCEPTIONS
+// With exceptions off, vulkan-hpp still asserts on every non-success Result before handing
+// it back, so the assert fires inside the call and the `.result` checks below never run. On a
+// machine with no Vulkan driver that turns "Create() returns an error the caller reports" into
+// SIGABRT inside vkCreateInstance. Every call site here checks its own Result, so the library's
+// assert is not a safety net, it is a second opinion that aborts first.
+#define VULKAN_HPP_ASSERT_ON_RESULT(expr) ((void)0)
 #include <vulkan/vulkan.hpp>
 
 #include "include/core/SkAlphaType.h"
