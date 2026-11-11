@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: docs/framework-bootstrap.md §A3; JNI Functions docs (RegisterNatives,
-// GetStringUTFChars). android.util.Log priority model from Android SDK docs (also
-// mirrored by acl::log::Level). No GPL-3.0 sources.
+// Provenance: docs/framework-bootstrap.md §A3; JNI Functions docs
+// (RegisterNatives, GetStringUTFChars). android.util.Log priority model from
+// Android SDK docs (also mirrored by acl::log::Level). No GPL-3.0 sources.
 //
 // The JNI "native underside": acl C++ implementations of android.* native
 // methods, registered against the vendored framework classes on the boot
 // classpath. This is the seam by which the Java framework reaches the acl
-// native core (svc/, gfx/, wm/, log/). G2.b wires the first one: android.util.Log
+// native core (svc/, gfx/, wm/, log/). G2.b wires the first one:
+// android.util.Log
 // -> acl::log.
 
 #include "runtime/framework_natives.h"
@@ -29,22 +30,29 @@ namespace acl::runtime {
 namespace {
 
 std::string to_utf8(JNIEnv* env, jstring s) {
-  if (s == nullptr) return {};
+  if (s == nullptr)
+    return {};
   const char* chars = env->GetStringUTFChars(s, nullptr);
   std::string out(chars != nullptr ? chars : "");
-  if (chars != nullptr) env->ReleaseStringUTFChars(s, chars);
+  if (chars != nullptr)
+    env->ReleaseStringUTFChars(s, chars);
   return out;
 }
 
 // android.util.Log.write0(priority, tag, msg) -> acl::log::write. Priorities
 // are identical between android.util.Log and acl::log::Level (2..7).
-jint JNICALL Log_write0(JNIEnv* env, jclass /*cls*/, jint priority, jstring tag,
+jint JNICALL Log_write0(JNIEnv* env,
+                        jclass /*cls*/,
+                        jint priority,
+                        jstring tag,
                         jstring msg) {
   const std::string tag_s = to_utf8(env, tag);
   const std::string msg_s = to_utf8(env, msg);
   int p = priority;
-  if (p < static_cast<int>(log::Level::Verbose)) p = static_cast<int>(log::Level::Verbose);
-  if (p > static_cast<int>(log::Level::Fatal)) p = static_cast<int>(log::Level::Fatal);
+  if (p < static_cast<int>(log::Level::Verbose))
+    p = static_cast<int>(log::Level::Verbose);
+  if (p > static_cast<int>(log::Level::Fatal))
+    p = static_cast<int>(log::Level::Fatal);
   log::write(static_cast<log::Level>(p), tag_s, msg_s);
   return static_cast<jint>(msg_s.size());
 }
@@ -52,14 +60,16 @@ jint JNICALL Log_write0(JNIEnv* env, jclass /*cls*/, jint priority, jstring tag,
 // --- android.media.AudioTrack: 16-bit PCM -> acl::audio::Sink ---------------
 // The sink pointer is carried across JNI as the AudioTrack.nativeHandle jlong.
 
-jlong JNICALL AudioTrack_nativeOpen(JNIEnv* /*env*/, jclass /*cls*/, jint sample_rate,
+jlong JNICALL AudioTrack_nativeOpen(JNIEnv* /*env*/,
+                                    jclass /*cls*/,
+                                    jint sample_rate,
                                     jint channels) {
   auto sink = audio::make_sink();
   audio::Format fmt{sample_rate, channels};
   if (!sink->open(fmt)) {
-    // A selected device backend (e.g. PipeWire with no reachable daemon) failed to
-    // open; fall back to the deterministic null sink so playback degrades to a
-    // frame count instead of failing or hanging.
+    // A selected device backend (e.g. PipeWire with no reachable daemon) failed
+    // to open; fall back to the deterministic null sink so playback degrades to
+    // a frame count instead of failing or hanging.
     log::write(log::Level::Warn, "acl.audio",
                "AudioTrack open failed; falling back to null sink");
     sink = audio::make_null_sink();
@@ -68,28 +78,44 @@ jlong JNICALL AudioTrack_nativeOpen(JNIEnv* /*env*/, jclass /*cls*/, jint sample
   return reinterpret_cast<jlong>(sink.release());  // handle owns the sink
 }
 
-jint JNICALL AudioTrack_nativeWrite(JNIEnv* env, jclass /*cls*/, jlong handle,
-                                    jshortArray data, jint offset, jint size) {
+jint JNICALL AudioTrack_nativeWrite(JNIEnv* env,
+                                    jclass /*cls*/,
+                                    jlong handle,
+                                    jshortArray data,
+                                    jint offset,
+                                    jint size) {
   auto* sink = reinterpret_cast<audio::Sink*>(handle);
-  if (sink == nullptr || data == nullptr || size <= 0) return 0;
+  if (sink == nullptr || data == nullptr || size <= 0)
+    return 0;
   const jsize len = env->GetArrayLength(data);
-  if (offset < 0 || size > len - offset) return -1;  // AudioTrack.ERROR_BAD_VALUE-ish
+  if (offset < 0 || size > len - offset)
+    return -1;  // AudioTrack.ERROR_BAD_VALUE-ish
   jshort* elems = env->GetShortArrayElements(data, nullptr);
-  if (elems == nullptr) return 0;
-  const int written = sink->write(reinterpret_cast<std::int16_t*>(elems) + offset, size);
-  env->ReleaseShortArrayElements(data, elems, JNI_ABORT);  // read-only, no copy-back
+  if (elems == nullptr)
+    return 0;
+  const int written =
+      sink->write(reinterpret_cast<std::int16_t*>(elems) + offset, size);
+  env->ReleaseShortArrayElements(data, elems,
+                                 JNI_ABORT);  // read-only, no copy-back
   return written;
 }
 
-void JNICALL AudioTrack_nativeStart(JNIEnv* /*env*/, jclass /*cls*/, jlong /*handle*/) {
+void JNICALL AudioTrack_nativeStart(JNIEnv* /*env*/,
+                                    jclass /*cls*/,
+                                    jlong /*handle*/) {
   // The sink streams as data arrives; play() is a no-op for this backend.
 }
 
-void JNICALL AudioTrack_nativeStop(JNIEnv* /*env*/, jclass /*cls*/, jlong handle) {
-  if (auto* sink = reinterpret_cast<audio::Sink*>(handle)) sink->drain();
+void JNICALL AudioTrack_nativeStop(JNIEnv* /*env*/,
+                                   jclass /*cls*/,
+                                   jlong handle) {
+  if (auto* sink = reinterpret_cast<audio::Sink*>(handle))
+    sink->drain();
 }
 
-void JNICALL AudioTrack_nativeRelease(JNIEnv* /*env*/, jclass /*cls*/, jlong handle) {
+void JNICALL AudioTrack_nativeRelease(JNIEnv* /*env*/,
+                                      jclass /*cls*/,
+                                      jlong handle) {
   if (auto* sink = reinterpret_cast<audio::Sink*>(handle)) {
     sink->close();
     delete sink;
@@ -97,52 +123,83 @@ void JNICALL AudioTrack_nativeRelease(JNIEnv* /*env*/, jclass /*cls*/, jlong han
 }
 
 // --- android.media.AudioManager -> acl::svc::AudioService (in-process hub) ---
-jint JNICALL AudioManager_getStreamVolume(JNIEnv* /*e*/, jclass /*c*/, jint stream) {
+jint JNICALL AudioManager_getStreamVolume(JNIEnv* /*e*/,
+                                          jclass /*c*/,
+                                          jint stream) {
   return svc::audio().stream_volume(stream);
 }
-void JNICALL AudioManager_setStreamVolume(JNIEnv* /*e*/, jclass /*c*/, jint stream,
+void JNICALL AudioManager_setStreamVolume(JNIEnv* /*e*/,
+                                          jclass /*c*/,
+                                          jint stream,
                                           jint index) {
   svc::audio().set_stream_volume(stream, index);
 }
-jint JNICALL AudioManager_getStreamMaxVolume(JNIEnv* /*e*/, jclass /*c*/, jint stream) {
+jint JNICALL AudioManager_getStreamMaxVolume(JNIEnv* /*e*/,
+                                             jclass /*c*/,
+                                             jint stream) {
   return svc::audio().stream_max_volume(stream);
 }
 jboolean JNICALL AudioManager_isMusicActive(JNIEnv* /*e*/, jclass /*c*/) {
   return svc::audio().music_active() ? JNI_TRUE : JNI_FALSE;
 }
 
-// --- android.content.SharedPreferences(.Editor) -> acl::svc::PreferencesService
-void JNICALL Prefs_nativePutString(JNIEnv* env, jclass /*c*/, jstring name, jstring key,
+// --- android.content.SharedPreferences(.Editor) ->
+// acl::svc::PreferencesService
+void JNICALL Prefs_nativePutString(JNIEnv* env,
+                                   jclass /*c*/,
+                                   jstring name,
+                                   jstring key,
                                    jstring value) {
-  svc::prefs().put_string(to_utf8(env, name), to_utf8(env, key), to_utf8(env, value));
+  svc::prefs().put_string(to_utf8(env, name), to_utf8(env, key),
+                          to_utf8(env, value));
 }
-void JNICALL Prefs_nativePutInt(JNIEnv* env, jclass /*c*/, jstring name, jstring key,
+void JNICALL Prefs_nativePutInt(JNIEnv* env,
+                                jclass /*c*/,
+                                jstring name,
+                                jstring key,
                                 jint value) {
   svc::prefs().put_int(to_utf8(env, name), to_utf8(env, key), value);
 }
-jstring JNICALL Prefs_nativeGetString(JNIEnv* env, jclass /*c*/, jstring name, jstring key) {
-  const std::string* v = svc::prefs().find_string(to_utf8(env, name), to_utf8(env, key));
-  return v != nullptr ? env->NewStringUTF(v->c_str()) : nullptr;  // null -> shim uses default
+jstring JNICALL Prefs_nativeGetString(JNIEnv* env,
+                                      jclass /*c*/,
+                                      jstring name,
+                                      jstring key) {
+  const std::string* v =
+      svc::prefs().find_string(to_utf8(env, name), to_utf8(env, key));
+  return v != nullptr ? env->NewStringUTF(v->c_str())
+                      : nullptr;  // null -> shim uses default
 }
-jint JNICALL Prefs_nativeGetInt(JNIEnv* env, jclass /*c*/, jstring name, jstring key,
+jint JNICALL Prefs_nativeGetInt(JNIEnv* env,
+                                jclass /*c*/,
+                                jstring name,
+                                jstring key,
                                 jint def_value) {
   return svc::prefs().get_int(to_utf8(env, name), to_utf8(env, key), def_value);
 }
 
-// --- ActivityManager / WindowManager.Display / MediaSessionManager -> svc/ ------
+// --- ActivityManager / WindowManager.Display / MediaSessionManager -> svc/
+// ------
 jint JNICALL ActivityManager_getMemoryClass(JNIEnv*, jclass) {
   return svc::activity().memory_class();
 }
 jboolean JNICALL ActivityManager_isLowRamDevice(JNIEnv*, jclass) {
   return svc::activity().low_ram_device() ? JNI_TRUE : JNI_FALSE;
 }
-jint JNICALL Display_getWidth(JNIEnv*, jclass) { return svc::window().display_width(); }
-jint JNICALL Display_getHeight(JNIEnv*, jclass) { return svc::window().display_height(); }
-jint JNICALL Display_getRotation(JNIEnv*, jclass) { return svc::window().rotation(); }
+jint JNICALL Display_getWidth(JNIEnv*, jclass) {
+  return svc::window().display_width();
+}
+jint JNICALL Display_getHeight(JNIEnv*, jclass) {
+  return svc::window().display_height();
+}
+jint JNICALL Display_getRotation(JNIEnv*, jclass) {
+  return svc::window().rotation();
+}
 jint JNICALL MediaSessionManager_activeCount(JNIEnv*, jclass) {
   return svc::media_sessions().active_sessions();
 }
-void JNICALL MediaSession_register(JNIEnv*, jclass) { svc::media_sessions().register_session(); }
+void JNICALL MediaSession_register(JNIEnv*, jclass) {
+  svc::media_sessions().register_session();
+}
 
 // --- android.graphics.Bitmap / Canvas -> acl::gfx::Surface ------------------
 jlong JNICALL Bitmap_nativeCreate(JNIEnv*, jclass, jint w, jint h) {
@@ -154,40 +211,57 @@ jint JNICALL Bitmap_nativeGetPixel(JNIEnv*, jclass, jlong ptr, jint x, jint y) {
 }
 void JNICALL Bitmap_nativeDescribe(JNIEnv*, jclass, jlong ptr) {
   auto* s = reinterpret_cast<gfx::Surface*>(ptr);
-  if (s == nullptr) return;
+  if (s == nullptr)
+    return;
   log::i("acl.gfx", "bitmap {}x{} pixel(0,0)={:#010x} pixel({},{})={:#010x}",
-         s->width(), s->height(), s->pixel(0, 0), s->width() / 2, s->height() / 2,
-         s->pixel(s->width() / 2, s->height() / 2));
+         s->width(), s->height(), s->pixel(0, 0), s->width() / 2,
+         s->height() / 2, s->pixel(s->width() / 2, s->height() / 2));
 }
 void JNICALL Canvas_nativeDrawColor(JNIEnv*, jclass, jlong ptr, jint color) {
   if (auto* s = reinterpret_cast<gfx::Surface*>(ptr))
     s->draw_color(static_cast<std::uint32_t>(color));
 }
-void JNICALL Canvas_nativeDrawRect(JNIEnv*, jclass, jlong ptr, jfloat l, jfloat t,
-                                   jfloat r, jfloat b, jint color) {
+void JNICALL Canvas_nativeDrawRect(JNIEnv*,
+                                   jclass,
+                                   jlong ptr,
+                                   jfloat l,
+                                   jfloat t,
+                                   jfloat r,
+                                   jfloat b,
+                                   jint color) {
   if (auto* s = reinterpret_cast<gfx::Surface*>(ptr)) {
     s->fill_rect(static_cast<int>(l), static_cast<int>(t), static_cast<int>(r),
                  static_cast<int>(b), static_cast<std::uint32_t>(color));
   }
 }
 
-// --- android.hardware.HardwareBuffer (the REAL vendored AOSP class) -> gfx AHardwareBuffer -------
-// acl vendors the real android.hardware.HardwareBuffer (framework-graphics), so we implement its
-// native underside, not a shim. mNativeObject is a gfx::AHardwareBuffer* (a refcounted gbm dma-buf).
-// Signatures mirror frameworks/base/core/java/android/hardware/HardwareBuffer.java (docs/AOSP).
+// --- android.hardware.HardwareBuffer (the REAL vendored AOSP class) -> gfx
+// AHardwareBuffer ------- acl vendors the real android.hardware.HardwareBuffer
+// (framework-graphics), so we implement its native underside, not a shim.
+// mNativeObject is a gfx::AHardwareBuffer* (a refcounted gbm dma-buf).
+// Signatures mirror
+// frameworks/base/core/java/android/hardware/HardwareBuffer.java (docs/AOSP).
 #if ACL_HAVE_GL
 ::AHardwareBuffer_Desc ahb_desc_of(jlong ptr) {
   ::AHardwareBuffer_Desc d{};
   gfx::ahb_describe(reinterpret_cast<::AHardwareBuffer*>(ptr), &d);
   return d;
 }
-// The NativeAllocationRegistry free function: releases one ref when the Java HardwareBuffer is GC'd.
-// Called on ART's (glibc) cleaner thread, so the free is on a valid glibc %fs.
-void ahb_native_finalize(void* ptr) { gfx::ahb_release(static_cast<::AHardwareBuffer*>(ptr)); }
+// The NativeAllocationRegistry free function: releases one ref when the Java
+// HardwareBuffer is GC'd. Called on ART's (glibc) cleaner thread, so the free
+// is on a valid glibc %fs.
+void ahb_native_finalize(void* ptr) {
+  gfx::ahb_release(static_cast<::AHardwareBuffer*>(ptr));
+}
 #endif
 
-jlong JNICALL HardwareBuffer_nCreateHardwareBuffer(JNIEnv*, jclass, jint w, jint h, jint format,
-                                                   jint layers, jlong usage) {
+jlong JNICALL HardwareBuffer_nCreateHardwareBuffer(JNIEnv*,
+                                                   jclass,
+                                                   jint w,
+                                                   jint h,
+                                                   jint format,
+                                                   jint layers,
+                                                   jlong usage) {
 #if ACL_HAVE_GL
   ::AHardwareBuffer_Desc d{};
   d.width = static_cast<std::uint32_t>(w);
@@ -197,7 +271,11 @@ jlong JNICALL HardwareBuffer_nCreateHardwareBuffer(JNIEnv*, jclass, jint w, jint
   d.usage = static_cast<std::uint64_t>(usage);
   return reinterpret_cast<jlong>(gfx::ahb_allocate(d));
 #else
-  (void)w; (void)h; (void)format; (void)layers; (void)usage;
+  (void)w;
+  (void)h;
+  (void)format;
+  (void)layers;
+  (void)usage;
   return 0;
 #endif
 }
@@ -212,21 +290,24 @@ jint JNICALL HardwareBuffer_nGetWidth(JNIEnv*, jclass, jlong ptr) {
 #if ACL_HAVE_GL
   return static_cast<jint>(ahb_desc_of(ptr).width);
 #else
-  (void)ptr; return 0;
+  (void)ptr;
+  return 0;
 #endif
 }
 jint JNICALL HardwareBuffer_nGetHeight(JNIEnv*, jclass, jlong ptr) {
 #if ACL_HAVE_GL
   return static_cast<jint>(ahb_desc_of(ptr).height);
 #else
-  (void)ptr; return 0;
+  (void)ptr;
+  return 0;
 #endif
 }
 jint JNICALL HardwareBuffer_nGetFormat(JNIEnv*, jclass, jlong ptr) {
 #if ACL_HAVE_GL
   return static_cast<jint>(ahb_desc_of(ptr).format);
 #else
-  (void)ptr; return 0;
+  (void)ptr;
+  return 0;
 #endif
 }
 jint JNICALL HardwareBuffer_nGetLayers(JNIEnv*, jclass, jlong ptr) {
@@ -234,80 +315,120 @@ jint JNICALL HardwareBuffer_nGetLayers(JNIEnv*, jclass, jlong ptr) {
   const jint l = static_cast<jint>(ahb_desc_of(ptr).layers);
   return l > 0 ? l : 1;
 #else
-  (void)ptr; return 1;
+  (void)ptr;
+  return 1;
 #endif
 }
 jlong JNICALL HardwareBuffer_nGetUsage(JNIEnv*, jclass, jlong ptr) {
 #if ACL_HAVE_GL
   return static_cast<jlong>(ahb_desc_of(ptr).usage);
 #else
-  (void)ptr; return 0;
+  (void)ptr;
+  return 0;
 #endif
 }
-jboolean JNICALL HardwareBuffer_nIsSupported(JNIEnv*, jclass, jint, jint, jint, jint, jlong) {
+jboolean JNICALL
+HardwareBuffer_nIsSupported(JNIEnv*, jclass, jint, jint, jint, jint, jlong) {
   return JNI_TRUE;
 }
 jlong JNICALL HardwareBuffer_nEstimateSize(JNIEnv*, jclass, jlong ptr) {
 #if ACL_HAVE_GL
   if (std::getenv("ACL_IR_DIAG") != nullptr)
-    log::write(log::Level::Info, "acl.gfx", "nEstimateSize ptr=" + std::to_string(ptr) +
-               " tid=" + std::to_string(static_cast<long>(::syscall(SYS_gettid))));
+    log::write(log::Level::Info, "acl.gfx",
+               "nEstimateSize ptr=" + std::to_string(ptr) + " tid=" +
+                   std::to_string(static_cast<long>(::syscall(SYS_gettid))));
   const ::AHardwareBuffer_Desc d = ahb_desc_of(ptr);
-  return static_cast<jlong>(d.width) * d.height * 4;  // conservative RGBA estimate
+  return static_cast<jlong>(d.width) * d.height *
+         4;  // conservative RGBA estimate
 #else
-  (void)ptr; return 0;
+  (void)ptr;
+  return 0;
 #endif
 }
-// Not backed (no GraphicBuffer / Parcel marshalling on acl); exported so the class links.
-jlong JNICALL HardwareBuffer_nCreateFromGraphicBuffer(JNIEnv*, jclass, jobject) { return 0; }
+// Not backed (no GraphicBuffer / Parcel marshalling on acl); exported so the
+// class links.
+jlong JNICALL HardwareBuffer_nCreateFromGraphicBuffer(JNIEnv*,
+                                                      jclass,
+                                                      jobject) {
+  return 0;
+}
 void JNICALL HardwareBuffer_nWriteToParcel(JNIEnv*, jclass, jlong, jobject) {}
-jlong JNICALL HardwareBuffer_nReadFromParcel(JNIEnv*, jclass, jobject) { return 0; }
+jlong JNICALL HardwareBuffer_nReadFromParcel(JNIEnv*, jclass, jobject) {
+  return 0;
+}
 
-// --- android.hardware.SyncFence -> trivial (acl has no real GPU fences) -------
-// The engine's ImageReader acquire path wraps each buffer's fence in a SyncFence; acl's CPU-produced
-// buffers are already signaled, so a fence is a no-op. nGetDestructor is called from SyncFence's
-// <clinit> (a NativeAllocationRegistry), so these must be registered before it is used.
+// --- android.hardware.SyncFence -> trivial (acl has no real GPU fences)
+// ------- The engine's ImageReader acquire path wraps each buffer's fence in a
+// SyncFence; acl's CPU-produced buffers are already signaled, so a fence is a
+// no-op. nGetDestructor is called from SyncFence's <clinit> (a
+// NativeAllocationRegistry), so these must be registered before it is used.
 void syncfence_noop_free(void*) {}
 jlong JNICALL SyncFence_nGetDestructor(JNIEnv*, jclass) {
   return reinterpret_cast<jlong>(&syncfence_noop_free);
 }
-jlong JNICALL SyncFence_nCreate(JNIEnv*, jclass, jint /*fd*/) { return 0; }  // no native fence object
-jboolean JNICALL SyncFence_nIsValid(JNIEnv*, jclass, jlong p) { return p != 0 ? JNI_TRUE : JNI_FALSE; }
-jint JNICALL SyncFence_nGetFd(JNIEnv*, jclass, jlong) { return -1; }
-jboolean JNICALL SyncFence_nWait(JNIEnv*, jclass, jlong, jlong) { return JNI_TRUE; }  // already signaled
-jlong JNICALL SyncFence_nGetSignalTime(JNIEnv*, jclass, jlong) { return 0; }
+jlong JNICALL SyncFence_nCreate(JNIEnv*, jclass, jint /*fd*/) {
+  return 0;
+}  // no native fence object
+jboolean JNICALL SyncFence_nIsValid(JNIEnv*, jclass, jlong p) {
+  return p != 0 ? JNI_TRUE : JNI_FALSE;
+}
+jint JNICALL SyncFence_nGetFd(JNIEnv*, jclass, jlong) {
+  return -1;
+}
+jboolean JNICALL SyncFence_nWait(JNIEnv*, jclass, jlong, jlong) {
+  return JNI_TRUE;
+}  // already signaled
+jlong JNICALL SyncFence_nGetSignalTime(JNIEnv*, jclass, jlong) {
+  return 0;
+}
 
-// Bind `n` static natives on class `name`; returns false (cleared) if the class or
-// registration is absent.
-bool bind(JNIEnv* env, const char* name, const JNINativeMethod* methods, int n) {
+// Bind `n` static natives on class `name`; returns false (cleared) if the class
+// or registration is absent.
+bool bind(JNIEnv* env,
+          const char* name,
+          const JNINativeMethod* methods,
+          int n) {
   jclass cls = env->FindClass(name);
-  if (cls == nullptr) { env->ExceptionClear(); return false; }
+  if (cls == nullptr) {
+    env->ExceptionClear();
+    return false;
+  }
   const bool ok = env->RegisterNatives(cls, methods, n) == JNI_OK;
-  if (!ok) env->ExceptionClear();
+  if (!ok)
+    env->ExceptionClear();
   env->DeleteLocalRef(cls);
   return ok;
 }
 
-// android.os.SystemClock — the boot classpath declares these native (the api-33 stub layer keeps
-// the modifier), and on a device they come from libandroid_runtime. Without the real native floor
-// (ADR-0008, ACL_ART_NATIVE) nothing binds them, and the very first framework call an app makes
-// tends to be one of these: a real app died on "No implementation found for
-// android.os.SystemClock.uptimeMillis()" before it reached its own code. They are pure clock
-// reads with no device dependency, so acl can answer them honestly on the host.
+// android.os.SystemClock — the boot classpath declares these native (the api-33
+// stub layer keeps the modifier), and on a device they come from
+// libandroid_runtime. Without the real native floor (ADR-0008, ACL_ART_NATIVE)
+// nothing binds them, and the very first framework call an app makes tends to
+// be one of these: a real app died on "No implementation found for
+// android.os.SystemClock.uptimeMillis()" before it reached its own code. They
+// are pure clock reads with no device dependency, so acl can answer them
+// honestly on the host.
 //
-// uptimeMillis is CLOCK_MONOTONIC — Android's contract is "milliseconds since boot, not counting
-// deep sleep", and a host has no deep sleep, so monotonic is exactly right. elapsedRealtime counts
-// deep sleep too, which likewise makes it the same clock here (CLOCK_BOOTTIME on device).
+// uptimeMillis is CLOCK_MONOTONIC — Android's contract is "milliseconds since
+// boot, not counting deep sleep", and a host has no deep sleep, so monotonic is
+// exactly right. elapsedRealtime counts deep sleep too, which likewise makes it
+// the same clock here (CLOCK_BOOTTIME on device).
 jlong clock_ms(clockid_t id) {
   timespec ts{};
-  if (::clock_gettime(id, &ts) != 0) return 0;
+  if (::clock_gettime(id, &ts) != 0)
+    return 0;
   return static_cast<jlong>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
 }
-jlong JNICALL SystemClock_uptimeMillis(JNIEnv*, jclass) { return clock_ms(CLOCK_MONOTONIC); }
-jlong JNICALL SystemClock_elapsedRealtime(JNIEnv*, jclass) { return clock_ms(CLOCK_BOOTTIME); }
+jlong JNICALL SystemClock_uptimeMillis(JNIEnv*, jclass) {
+  return clock_ms(CLOCK_MONOTONIC);
+}
+jlong JNICALL SystemClock_elapsedRealtime(JNIEnv*, jclass) {
+  return clock_ms(CLOCK_BOOTTIME);
+}
 jlong JNICALL SystemClock_elapsedRealtimeNanos(JNIEnv*, jclass) {
   timespec ts{};
-  if (::clock_gettime(CLOCK_BOOTTIME, &ts) != 0) return 0;
+  if (::clock_gettime(CLOCK_BOOTTIME, &ts) != 0)
+    return 0;
   return static_cast<jlong>(ts.tv_sec) * 1000000000 + ts.tv_nsec;
 }
 // Per-thread CPU time, as on device (CLOCK_THREAD_CPUTIME_ID).
@@ -317,14 +438,17 @@ jlong JNICALL SystemClock_currentThreadTimeMillis(JNIEnv*, jclass) {
 
 }  // namespace
 
-// acl-supplied framework natives that the host libandroid_runtime does NOT provide (its host build
-// omits graphics-buffer/gralloc natives). Registered in BOTH the shim-floor path and the ART-native
-// path (after libandroid_runtime's registrars), so classes like the vendored android.hardware.
-// HardwareBuffer get their native underside from acl (backed by gfx::ahb / a gbm dma-buf).
+// acl-supplied framework natives that the host libandroid_runtime does NOT
+// provide (its host build omits graphics-buffer/gralloc natives). Registered in
+// BOTH the shim-floor path and the ART-native path (after libandroid_runtime's
+// registrars), so classes like the vendored android.hardware. HardwareBuffer
+// get their native underside from acl (backed by gfx::ahb / a gbm dma-buf).
 void register_acl_supplemental_natives(JNIEnv* env) {
-  if (env == nullptr) return;
+  if (env == nullptr)
+    return;
   const JNINativeMethod hwb_m[] = {
-      {const_cast<char*>("nCreateHardwareBuffer"), const_cast<char*>("(IIIIJ)J"),
+      {const_cast<char*>("nCreateHardwareBuffer"),
+       const_cast<char*>("(IIIIJ)J"),
        reinterpret_cast<void*>(&HardwareBuffer_nCreateHardwareBuffer)},
       {const_cast<char*>("nGetNativeFinalizer"), const_cast<char*>("()J"),
        reinterpret_cast<void*>(&HardwareBuffer_nGetNativeFinalizer)},
@@ -342,17 +466,21 @@ void register_acl_supplemental_natives(JNIEnv* env) {
        reinterpret_cast<void*>(&HardwareBuffer_nIsSupported)},
       {const_cast<char*>("nEstimateSize"), const_cast<char*>("(J)J"),
        reinterpret_cast<void*>(&HardwareBuffer_nEstimateSize)},
-      {const_cast<char*>("nCreateFromGraphicBuffer"), const_cast<char*>("(Landroid/graphics/GraphicBuffer;)J"),
+      {const_cast<char*>("nCreateFromGraphicBuffer"),
+       const_cast<char*>("(Landroid/graphics/GraphicBuffer;)J"),
        reinterpret_cast<void*>(&HardwareBuffer_nCreateFromGraphicBuffer)},
-      {const_cast<char*>("nWriteHardwareBufferToParcel"), const_cast<char*>("(JLandroid/os/Parcel;)V"),
+      {const_cast<char*>("nWriteHardwareBufferToParcel"),
+       const_cast<char*>("(JLandroid/os/Parcel;)V"),
        reinterpret_cast<void*>(&HardwareBuffer_nWriteToParcel)},
-      {const_cast<char*>("nReadHardwareBufferFromParcel"), const_cast<char*>("(Landroid/os/Parcel;)J"),
+      {const_cast<char*>("nReadHardwareBufferFromParcel"),
+       const_cast<char*>("(Landroid/os/Parcel;)J"),
        reinterpret_cast<void*>(&HardwareBuffer_nReadFromParcel)},
   };
   const bool ok = bind(env, "android/hardware/HardwareBuffer", hwb_m, 12);
   log::write(ok ? log::Level::Info : log::Level::Warn, "acl.runtime.jvm",
              ok ? "acl supplemental natives bound: HardwareBuffer (12)"
-                : "HardwareBuffer native bind failed (class absent or signature mismatch)");
+                : "HardwareBuffer native bind failed (class absent or "
+                  "signature mismatch)");
   const JNINativeMethod sf_m[] = {
       {const_cast<char*>("nGetDestructor"), const_cast<char*>("()J"),
        reinterpret_cast<void*>(&SyncFence_nGetDestructor)},
@@ -368,13 +496,15 @@ void register_acl_supplemental_natives(JNIEnv* env) {
        reinterpret_cast<void*>(&SyncFence_nGetSignalTime)},
   };
   bind(env, "android/hardware/SyncFence", sf_m, 6);
-  // NB: android.media.ImageReader natives are NOT registered here — its <clinit> loadLibrary(
-  // "media_jni") is intercepted in jvm_vm's nativeLoad override (which calls
-  // register_image_reader_natives before nativeClassInit runs), matching the real lib's JNI_OnLoad.
+  // NB: android.media.ImageReader natives are NOT registered here — its
+  // <clinit> loadLibrary( "media_jni") is intercepted in jvm_vm's nativeLoad
+  // override (which calls register_image_reader_natives before nativeClassInit
+  // runs), matching the real lib's JNI_OnLoad.
 }
 
 void register_framework_natives(JNIEnv* env) {
-  if (env == nullptr) return;
+  if (env == nullptr)
+    return;
 
   if (jclass cls = env->FindClass("android/os/SystemClock"); cls != nullptr) {
     const std::array<JNINativeMethod, 4> methods{{
@@ -387,7 +517,8 @@ void register_framework_natives(JNIEnv* env) {
         {const_cast<char*>("currentThreadTimeMillis"), const_cast<char*>("()J"),
          reinterpret_cast<void*>(&SystemClock_currentThreadTimeMillis)},
     }};
-    if (env->RegisterNatives(cls, methods.data(), static_cast<jint>(methods.size())) != JNI_OK) {
+    if (env->RegisterNatives(cls, methods.data(),
+                             static_cast<jint>(methods.size())) != JNI_OK) {
       env->ExceptionClear();
       log::write(log::Level::Warn, "acl.runtime.jvm",
                  "RegisterNatives(android.os.SystemClock) failed");
@@ -418,11 +549,13 @@ void register_framework_natives(JNIEnv* env) {
     }
     env->DeleteLocalRef(log_cls);
   } else {
-    env->ExceptionClear();  // no framework on the boot classpath -> nothing to bind
+    env->ExceptionClear();  // no framework on the boot classpath -> nothing to
+                            // bind
   }
 
   // android.media.AudioTrack -> acl::audio (PipeWire / counting sink).
-  if (jclass at_cls = env->FindClass("android/media/AudioTrack"); at_cls != nullptr) {
+  if (jclass at_cls = env->FindClass("android/media/AudioTrack");
+      at_cls != nullptr) {
     const std::array<JNINativeMethod, 5> methods{{
         {const_cast<char*>("nativeOpen"), const_cast<char*>("(II)J"),
          reinterpret_cast<void*>(&AudioTrack_nativeOpen)},
@@ -449,14 +582,17 @@ void register_framework_natives(JNIEnv* env) {
     env->ExceptionClear();
   }
 
-  // android.media.AudioManager -> acl::svc::AudioService (the svc/ hub boundary).
-  if (jclass am_cls = env->FindClass("android/media/AudioManager"); am_cls != nullptr) {
+  // android.media.AudioManager -> acl::svc::AudioService (the svc/ hub
+  // boundary).
+  if (jclass am_cls = env->FindClass("android/media/AudioManager");
+      am_cls != nullptr) {
     const std::array<JNINativeMethod, 4> methods{{
         {const_cast<char*>("nativeGetStreamVolume"), const_cast<char*>("(I)I"),
          reinterpret_cast<void*>(&AudioManager_getStreamVolume)},
         {const_cast<char*>("nativeSetStreamVolume"), const_cast<char*>("(II)V"),
          reinterpret_cast<void*>(&AudioManager_setStreamVolume)},
-        {const_cast<char*>("nativeGetStreamMaxVolume"), const_cast<char*>("(I)I"),
+        {const_cast<char*>("nativeGetStreamMaxVolume"),
+         const_cast<char*>("(I)I"),
          reinterpret_cast<void*>(&AudioManager_getStreamMaxVolume)},
         {const_cast<char*>("nativeIsMusicActive"), const_cast<char*>("()Z"),
          reinterpret_cast<void*>(&AudioManager_isMusicActive)},
@@ -475,32 +611,39 @@ void register_framework_natives(JNIEnv* env) {
     env->ExceptionClear();
   }
 
-  // android.content.SharedPreferences (getters) + .Editor (putters) -> svc/ prefs.
-  if (jclass sp_cls = env->FindClass("android/content/SharedPreferences"); sp_cls != nullptr) {
+  // android.content.SharedPreferences (getters) + .Editor (putters) -> svc/
+  // prefs.
+  if (jclass sp_cls = env->FindClass("android/content/SharedPreferences");
+      sp_cls != nullptr) {
     const std::array<JNINativeMethod, 2> methods{{
         {const_cast<char*>("nativeGetString"),
-         const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
+         const_cast<char*>(
+             "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
          reinterpret_cast<void*>(&Prefs_nativeGetString)},
         {const_cast<char*>("nativeGetInt"),
          const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;I)I"),
          reinterpret_cast<void*>(&Prefs_nativeGetInt)},
     }};
-    if (env->RegisterNatives(sp_cls, methods.data(), 2) != JNI_OK) env->ExceptionClear();
+    if (env->RegisterNatives(sp_cls, methods.data(), 2) != JNI_OK)
+      env->ExceptionClear();
     env->DeleteLocalRef(sp_cls);
   } else {
     env->ExceptionClear();
   }
-  if (jclass ed_cls = env->FindClass("android/content/SharedPreferences$Editor");
+  if (jclass ed_cls =
+          env->FindClass("android/content/SharedPreferences$Editor");
       ed_cls != nullptr) {
     const std::array<JNINativeMethod, 2> methods{{
         {const_cast<char*>("nativePutString"),
-         const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+         const_cast<char*>(
+             "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
          reinterpret_cast<void*>(&Prefs_nativePutString)},
         {const_cast<char*>("nativePutInt"),
          const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;I)V"),
          reinterpret_cast<void*>(&Prefs_nativePutInt)},
     }};
-    if (env->RegisterNatives(ed_cls, methods.data(), 2) != JNI_OK) env->ExceptionClear();
+    if (env->RegisterNatives(ed_cls, methods.data(), 2) != JNI_OK)
+      env->ExceptionClear();
     env->DeleteLocalRef(ed_cls);
     log::write(log::Level::Info, "acl.runtime.jvm",
                "framework native bound: android.content.SharedPreferences");
@@ -508,7 +651,8 @@ void register_framework_natives(JNIEnv* env) {
     env->ExceptionClear();
   }
 
-  // More svc/ Managers (ActivityManager, WindowManager.Display, MediaSessionManager).
+  // More svc/ Managers (ActivityManager, WindowManager.Display,
+  // MediaSessionManager).
   const JNINativeMethod am_m[] = {
       {const_cast<char*>("nativeGetMemoryClass"), const_cast<char*>("()I"),
        reinterpret_cast<void*>(&ActivityManager_getMemoryClass)},
@@ -537,7 +681,8 @@ void register_framework_natives(JNIEnv* env) {
   };
   if (bind(env, "android/media/session/MediaSession", ms_m, 1)) {
     log::write(log::Level::Info, "acl.runtime.jvm",
-               "framework natives bound: ActivityManager, Display, MediaSession(Manager)");
+               "framework natives bound: ActivityManager, Display, "
+               "MediaSession(Manager)");
   }
 
   // android.graphics.Bitmap / Canvas -> gfx/ rasterizer.
@@ -557,8 +702,9 @@ void register_framework_natives(JNIEnv* env) {
        reinterpret_cast<void*>(&Canvas_nativeDrawRect)},
   };
   if (bind(env, "android/graphics/Canvas", canvas_m, 2)) {
-    log::write(log::Level::Info, "acl.runtime.jvm",
-               "framework natives bound: android.graphics.Canvas/Bitmap -> gfx");
+    log::write(
+        log::Level::Info, "acl.runtime.jvm",
+        "framework natives bound: android.graphics.Canvas/Bitmap -> gfx");
   }
 }
 

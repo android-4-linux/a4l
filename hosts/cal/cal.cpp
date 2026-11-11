@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: plan.md §A01.2 (CAL template host), §A01.3 (Gate G1.5b), ADR-7 /
 // A02.3; androidx.car.app model docs (ListTemplate/ItemList/Row) +
-// ConstraintManager content-limit semantics (public androidx). No GPL-3.0 sources.
+// ConstraintManager content-limit semantics (public androidx). No GPL-3.0
+// sources.
 //
-// The native Car App Library template host: a deserialized template model rendered
-// to a structural line layout, with the Tier-1 content-limit distraction rule
-// enforced. Pixel-backend independent — the native-Skia renderer (A02.3) consumes
-// these lines; here they are the testable substrate.
+// The native Car App Library template host: a deserialized template model
+// rendered to a structural line layout, with the Tier-1 content-limit
+// distraction rule enforced. Pixel-backend independent — the native-Skia
+// renderer (A02.3) consumes these lines; here they are the testable substrate.
 
 #include "hosts/cal/cal.h"
 
@@ -22,18 +23,25 @@ std::string header_line(const Template& t) {
 
 const char* template_kind_name(TemplateKind k) noexcept {
   switch (k) {
-    case TemplateKind::List: return "List";
-    case TemplateKind::Grid: return "Grid";
-    case TemplateKind::Pane: return "Pane";
-    case TemplateKind::Message: return "Message";
-    case TemplateKind::LongMessage: return "LongMessage";
-    case TemplateKind::Unknown: return "Unknown";
+    case TemplateKind::List:
+      return "List";
+    case TemplateKind::Grid:
+      return "Grid";
+    case TemplateKind::Pane:
+      return "Pane";
+    case TemplateKind::Message:
+      return "Message";
+    case TemplateKind::LongMessage:
+      return "LongMessage";
+    case TemplateKind::Unknown:
+      return "Unknown";
   }
   return "Unknown";
 }
 
 CalHost::CalHost(int content_limit)
-    : content_limit_(content_limit > 0 ? content_limit : kDefaultContentLimit) {}
+    : content_limit_(content_limit > 0 ? content_limit : kDefaultContentLimit) {
+}
 
 const std::vector<std::string>& CalHost::render(const Template& t) {
   lines_.clear();
@@ -44,7 +52,8 @@ const std::vector<std::string>& CalHost::render(const Template& t) {
   switch (t.kind) {
     case TemplateKind::Message:
     case TemplateKind::LongMessage:
-      if (!t.message.empty()) lines_.push_back("  " + t.message);
+      if (!t.message.empty())
+        lines_.push_back("  " + t.message);
       break;
     default: {
       // List / Grid / Pane: enforce the ConstraintManager content limit — rows
@@ -55,7 +64,8 @@ const std::vector<std::string>& CalHost::render(const Template& t) {
       visible_rows_ = shown;
       for (int i = 0; i < shown; ++i) {
         std::string line = "  • " + t.rows[i].title;
-        if (!t.rows[i].text.empty()) line += " — " + t.rows[i].text;
+        if (!t.rows[i].text.empty())
+          line += " — " + t.rows[i].text;
         lines_.push_back(std::move(line));
       }
       break;
@@ -69,6 +79,8 @@ CalHost& CalHost::instance() {
   return host;
 }
 
-const char* module_name() noexcept { return "hosts/cal"; }
+const char* module_name() noexcept {
+  return "hosts/cal";
+}
 
 }  // namespace acl::hosts::cal

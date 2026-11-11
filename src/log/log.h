@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: specs/log.md (pending), Android SDK android.util.Log priority model,
-// ihs_shared three-layer facade design. No GPL-3.0 sources.
+// Provenance: specs/log.md (pending), Android SDK android.util.Log priority
+// model, ihs_shared three-layer facade design. No GPL-3.0 sources.
 #ifndef ACL_LOG_LOG_H
 #define ACL_LOG_LOG_H
 
-// Three-layer logging facade (public API -> dispatch -> pluggable backend sink),
-// following the ihs_shared design. Priorities match android.util.Log so the
-// framework's Log JNI can forward straight through in Phase 2+.
+// Three-layer logging facade (public API -> dispatch -> pluggable backend
+// sink), following the ihs_shared design. Priorities match android.util.Log so
+// the framework's Log JNI can forward straight through in Phase 2+.
 
 #include <memory>
 #include <string_view>
@@ -35,7 +35,8 @@ char level_char(Level) noexcept;
 class Sink {
  public:
   virtual ~Sink() = default;
-  virtual void write(Level level, std::string_view tag,
+  virtual void write(Level level,
+                     std::string_view tag,
                      std::string_view message) noexcept = 0;
 };
 
@@ -49,13 +50,18 @@ void set_min_level(Level level) noexcept;
 Level min_level() noexcept;
 
 // Dispatch layer. Pre-formatted; never throws.
-void write(Level level, std::string_view tag, std::string_view message) noexcept;
+void write(Level level,
+           std::string_view tag,
+           std::string_view message) noexcept;
 
 // Public API. Formatting is skipped entirely when level < min_level().
 template <typename... Args>
-void logf(Level level, std::string_view tag,
-          fmt::format_string<Args...> format, Args&&... args) {
-  if (static_cast<int>(level) < static_cast<int>(min_level())) return;
+void logf(Level level,
+          std::string_view tag,
+          fmt::format_string<Args...> format,
+          Args&&... args) {
+  if (static_cast<int>(level) < static_cast<int>(min_level()))
+    return;
   // fmt::format may throw only on a bad format string, which is a programming
   // error caught at build time via the compile-time checked format_string.
   write(level, tag, fmt::format(format, std::forward<Args>(args)...));

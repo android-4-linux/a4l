@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: original acl spike. See bionic_bootstrap.cpp / README.md. No GPL-3.0 sources.
+// Provenance: original acl spike. See bionic_bootstrap.cpp / README.md. No
+// GPL-3.0 sources.
 //
-// Harness for the in-process bionic-linker bootstrap: load a bionic .so and call nativeAnswer().
-// Paths come from argv (the build script fills them). Success = "42".
+// Harness for the in-process bionic-linker bootstrap: load a bionic .so and
+// call nativeAnswer(). Paths come from argv (the build script fills them).
+// Success = "42".
 
 #include <cstdio>
 #include <cstdlib>
@@ -12,7 +14,9 @@
 int main(int argc, char** argv) {
   if (argc != 6) {
     std::fprintf(stderr,
-                 "usage: %s <linker64> <stub-exe> <bionic-libdir> <target.so> <symbol>\n", argv[0]);
+                 "usage: %s <linker64> <stub-exe> <bionic-libdir> <target.so> "
+                 "<symbol>\n",
+                 argv[0]);
     return 2;
   }
   acl::ndk::spike::Config cfg;
@@ -27,6 +31,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "SPIKE FAILED: bootstrap error %d\n", r);
     return 1;
   }
-  std::printf("SPIKE: nativeAnswer() = %d %s\n", r, r == 42 ? "(PASS)" : "(unexpected)");
+  std::printf("SPIKE: nativeAnswer() = %d %s\n", r,
+              r == 42 ? "(PASS)" : "(unexpected)");
   return r == 42 ? 0 : 1;
 }

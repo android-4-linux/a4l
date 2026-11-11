@@ -50,27 +50,27 @@ struct DexTryHandler {
   std::uint32_t end_addr = 0;      // code-unit offset just past the try range
   std::uint32_t handler_addr = 0;  // code-unit offset of the handler
   bool catch_all = false;          // true = finally / catch-all
-  std::uint32_t type_idx = 0;      // caught class (type_ids index) if !catch_all
+  std::uint32_t type_idx = 0;  // caught class (type_ids index) if !catch_all
 };
 
 // A method's Dalvik code_item (bytecode), when present.
 struct DexCode {
-  std::uint16_t registers_size = 0;   // total registers used by the method
-  std::uint16_t ins_size = 0;         // registers occupied by incoming args
-  std::uint16_t outs_size = 0;        // registers for outgoing-arg area
-  std::vector<std::uint16_t> insns;   // instruction stream (16-bit code units)
+  std::uint16_t registers_size = 0;  // total registers used by the method
+  std::uint16_t ins_size = 0;        // registers occupied by incoming args
+  std::uint16_t outs_size = 0;       // registers for outgoing-arg area
+  std::vector<std::uint16_t> insns;  // instruction stream (16-bit code units)
   std::vector<DexTryHandler> handlers;
 };
 
 struct DexMethod {
-  std::string name;                     // e.g. "main", "<init>"
-  std::string return_type;              // Java type, e.g. "void", "int" (display)
-  std::vector<std::string> param_types; // Java types (display)
+  std::string name;         // e.g. "main", "<init>"
+  std::string return_type;  // Java type, e.g. "void", "int" (display)
+  std::vector<std::string> param_types;  // Java types (display)
   // Raw type descriptors (JVM == Dalvik form): "V", "I", "[Ljava/lang/String;".
   std::string return_descriptor;
   std::vector<std::string> param_descriptors;
   std::uint32_t access_flags = 0;
-  std::optional<DexCode> code;          // present iff code_off != 0
+  std::optional<DexCode> code;  // present iff code_off != 0
 
   bool is_static() const noexcept { return access_flags & kAccStatic; }
   bool has_code() const noexcept { return code.has_value(); }
@@ -80,56 +80,59 @@ struct DexMethod {
 };
 
 struct DexField {
-  std::string name;              // e.g. "value"
+  std::string name;             // e.g. "value"
   std::string type_descriptor;  // e.g. "I", "Ljava/lang/String;"
   std::uint32_t access_flags = 0;
 };
 
 struct DexClass {
-  std::string descriptor;                   // "Lcom/example/Foo;"
-  std::string java_name;                    // "com.example.Foo"
-  std::optional<std::string> super_name;    // "java.lang.Object"
-  std::vector<std::string> interfaces;      // directly-implemented, java names
+  std::string descriptor;                 // "Lcom/example/Foo;"
+  std::string java_name;                  // "com.example.Foo"
+  std::optional<std::string> super_name;  // "java.lang.Object"
+  std::vector<std::string> interfaces;    // directly-implemented, java names
   std::uint32_t access_flags = 0;
   std::vector<DexField> static_fields;
   std::vector<DexField> instance_fields;
-  std::vector<DexMethod> direct_methods;    // static/private/ctor
+  std::vector<DexMethod> direct_methods;  // static/private/ctor
   std::vector<DexMethod> virtual_methods;
 };
 
 // A resolved method reference (from the method_ids table), for translating
 // invoke-* instructions.
 struct MethodRef {
-  std::string owner_internal;             // e.g. "java/lang/Integer"
-  std::string name;                       // e.g. "parseInt"
-  std::string descriptor;                 // e.g. "(Ljava/lang/String;)I"
-  std::string return_descriptor;          // e.g. "I"
+  std::string owner_internal;     // e.g. "java/lang/Integer"
+  std::string name;               // e.g. "parseInt"
+  std::string descriptor;         // e.g. "(Ljava/lang/String;)I"
+  std::string return_descriptor;  // e.g. "I"
   std::vector<std::string> param_descriptors;
 };
 
 // A resolved field reference (from the field_ids table), for sget/sput/etc.
 struct FieldRef {
-  std::string owner_internal;    // e.g. "java/lang/System"
-  std::string name;              // e.g. "out"
-  std::string type_descriptor;   // e.g. "Ljava/io/PrintStream;"
+  std::string owner_internal;   // e.g. "java/lang/System"
+  std::string name;             // e.g. "out"
+  std::string type_descriptor;  // e.g. "Ljava/io/PrintStream;"
 };
 
 class DexFile {
  public:
   // Parse `data` (copied in). On failure returns nullopt and fills `out_error`.
-  static std::optional<DexFile> parse(const std::uint8_t* data, std::size_t size,
+  static std::optional<DexFile> parse(const std::uint8_t* data,
+                                      std::size_t size,
                                       DexError& out_error);
   static std::optional<DexFile> parse(const std::vector<std::uint8_t>& bytes,
                                       DexError& out_error);
 
   const std::vector<DexClass>& classes() const noexcept { return classes_; }
 
-  // Resolve a method_ids index (as referenced by invoke-* operands), or nullptr.
+  // Resolve a method_ids index (as referenced by invoke-* operands), or
+  // nullptr.
   const MethodRef* method_ref(std::uint32_t index) const noexcept {
     return index < method_refs_.size() ? &method_refs_[index] : nullptr;
   }
 
-  // Resolve a string_ids index (as referenced by const-string operands), or null.
+  // Resolve a string_ids index (as referenced by const-string operands), or
+  // null.
   const std::string* string_at(std::uint32_t index) const noexcept {
     return index < strings_.size() ? &strings_[index] : nullptr;
   }
@@ -141,7 +144,8 @@ class DexFile {
 
   // Resolve a type_ids index (as referenced by new-instance/etc.), or nullptr.
   const std::string* type_at(std::uint32_t index) const noexcept {
-    return index < type_descriptors_.size() ? &type_descriptors_[index] : nullptr;
+    return index < type_descriptors_.size() ? &type_descriptors_[index]
+                                            : nullptr;
   }
 
  private:

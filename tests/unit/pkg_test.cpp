@@ -13,8 +13,8 @@ using namespace acl::pkg;
 
 namespace {
 
-// Path to the build-time-generated fixture APK (see make_fixture_apk.py), passed
-// via the test environment by meson.
+// Path to the build-time-generated fixture APK (see make_fixture_apk.py),
+// passed via the test environment by meson.
 std::string fixture_path() {
   const char* p = std::getenv("ACL_FIXTURE_APK");
   return p ? p : std::string{};
@@ -28,7 +28,8 @@ std::string as_text(const std::vector<std::uint8_t>& bytes) {
 
 TEST_CASE("Apk opens a zip and indexes its central directory", "[pkg]") {
   const std::string path = fixture_path();
-  if (path.empty()) SKIP("ACL_FIXTURE_APK not set");
+  if (path.empty())
+    SKIP("ACL_FIXTURE_APK not set");
 
   ZipError err;
   auto apk = Apk::open(path, err);
@@ -41,7 +42,8 @@ TEST_CASE("Apk opens a zip and indexes its central directory", "[pkg]") {
 
 TEST_CASE("Apk inflates DEFLATE and copies STORED entries", "[pkg]") {
   const std::string path = fixture_path();
-  if (path.empty()) SKIP("ACL_FIXTURE_APK not set");
+  if (path.empty())
+    SKIP("ACL_FIXTURE_APK not set");
 
   ZipError err;
   auto apk = Apk::open(path, err);
@@ -67,7 +69,8 @@ TEST_CASE("Apk inflates DEFLATE and copies STORED entries", "[pkg]") {
 
 TEST_CASE("Apk enumerates distinct native ABIs, sorted", "[pkg]") {
   const std::string path = fixture_path();
-  if (path.empty()) SKIP("ACL_FIXTURE_APK not set");
+  if (path.empty())
+    SKIP("ACL_FIXTURE_APK not set");
 
   ZipError err;
   auto apk = Apk::open(path, err);
@@ -87,7 +90,8 @@ TEST_CASE("Apk reports errors for missing files and entries", "[pkg]") {
   CHECK(err.status == ZipStatus::Io);
 
   const std::string path = fixture_path();
-  if (path.empty()) SKIP("ACL_FIXTURE_APK not set");
+  if (path.empty())
+    SKIP("ACL_FIXTURE_APK not set");
   auto apk = Apk::open(path, err);
   REQUIRE(apk.has_value());
 

@@ -40,6 +40,16 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "The acl Authors"
 SPDX-License-Identifier = "Apache-2.0"
 
+# .clang-format is taken verbatim from toyota-connected/ivi-homescreen (Apache-2.0), which
+# derives it from Chromium's style. It is kept byte-identical to that file so it stays
+# diffable against its origin, which is why the attribution lives here rather than as a
+# comment header inside it.
+[[annotations]]
+path = [".clang-format"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright 2020 Toyota Connected North America"
+SPDX-License-Identifier = "Apache-2.0"
+
 # Our own bookkeeping inside third_party/ (not the vendored code itself).
 [[annotations]]
 path = ["third_party/README.md", "third_party/**/METADATA"]

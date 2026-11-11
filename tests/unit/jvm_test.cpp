@@ -40,10 +40,12 @@ std::vector<std::uint8_t> read_bytes(const std::string& p) {
 
 }  // namespace
 
-TEST_CASE("JVM backend executes real Java, including a DEX->JVM converted class",
-          "[runtime][jvm]") {
+TEST_CASE(
+    "JVM backend executes real Java, including a DEX->JVM converted class",
+    "[runtime][jvm]") {
   const std::string dir = env("ACL_JVM_CLASSES");
-  if (dir.empty()) SKIP("ACL_JVM_CLASSES not set (fixtures not built)");
+  if (dir.empty())
+    SKIP("ACL_JVM_CLASSES not set (fixtures not built)");
 
   VmConfig cfg;
   cfg.classpath = {dir};
@@ -94,13 +96,15 @@ TEST_CASE("JVM backend executes real Java, including a DEX->JVM converted class"
   // 4. An uncaught exception in main() maps to RuntimeError.
   CHECK(vm->call_static_main("Boom", {}).status == Status::RuntimeError);
 
-  // 5. DEX->JVM translation: the converted HelloDex.main was Dalvik return-void,
+  // 5. DEX->JVM translation: the converted HelloDex.main was Dalvik
+  // return-void,
   //    translated to a real JVM `return` — so it runs cleanly (no longer a stub
   //    that throws). And HelloDex.answer() was `const/16 42; return v0`,
   //    translated to executing bytecode: Runner reflectively calls it and must
   //    observe an actual 42. This proves real bytecode ran, not a stub.
   if (!converted_dir.empty()) {
-    CHECK(vm->call_static_main("HelloDex", {}).is_ok());  // translated return-void
+    CHECK(vm->call_static_main("HelloDex", {})
+              .is_ok());  // translated return-void
 
     const std::filesystem::path answer =
         std::filesystem::temp_directory_path() / "acl_answer.txt";
@@ -108,7 +112,9 @@ TEST_CASE("JVM backend executes real Java, including a DEX->JVM converted class"
     Error rr = vm->call_static_main("Runner", {answer.string()});
     CHECK(rr.is_ok());
     // answer()=42 (const/return); loopSum()=55 (translated loop with branches).
-    CHECK(read_file(answer) == "42,55,97,5,17,42,99,10,5,2,10,10,10,42,42,42,42,5,42,5,42,42,42,77,21,42,42,42,42,42,42");
+    CHECK(read_file(answer) ==
+          "42,55,97,5,17,42,99,10,5,2,10,10,10,42,42,42,42,5,42,5,42,42,42,77,"
+          "21,42,42,42,42,42,42");
     std::filesystem::remove(answer, ec);
   }
 

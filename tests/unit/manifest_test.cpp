@@ -40,7 +40,8 @@ void check_known_manifest(const Manifest& m) {
   CHECK(*m.compile_sdk == 33);
 
   REQUIRE(m.activities.size() == 2);
-  CHECK(m.activities[0].name == "com.example.app.MainActivity");  // ".MainActivity"
+  CHECK(m.activities[0].name ==
+        "com.example.app.MainActivity");  // ".MainActivity"
   CHECK(m.activities[0].launcher);
   CHECK(m.activities[1].name == "com.example.app.OtherActivity");
   CHECK_FALSE(m.activities[1].launcher);
@@ -52,7 +53,8 @@ void check_known_manifest(const Manifest& m) {
 
 }  // namespace
 
-TEST_CASE("resolve_class_name applies Android shorthand rules", "[pkg][manifest]") {
+TEST_CASE("resolve_class_name applies Android shorthand rules",
+          "[pkg][manifest]") {
   CHECK(resolve_class_name("com.x", ".Main") == "com.x.Main");
   CHECK(resolve_class_name("com.x", "Main") == "com.x.Main");
   CHECK(resolve_class_name("com.x", "a.b.Main") == "a.b.Main");
@@ -61,7 +63,8 @@ TEST_CASE("resolve_class_name applies Android shorthand rules", "[pkg][manifest]
 
 TEST_CASE("parse a UTF-8 AXML manifest read from the APK", "[pkg][manifest]") {
   const std::string apk = env("ACL_FIXTURE_APK");
-  if (apk.empty()) SKIP("ACL_FIXTURE_APK not set");
+  if (apk.empty())
+    SKIP("ACL_FIXTURE_APK not set");
 
   ZipError zerr;
   auto a = Apk::open(apk, zerr);
@@ -78,7 +81,8 @@ TEST_CASE("parse a UTF-8 AXML manifest read from the APK", "[pkg][manifest]") {
 TEST_CASE("parse a UTF-16 AXML manifest (exercises UTF-16 string pool)",
           "[pkg][manifest]") {
   const std::string path = env("ACL_AXML_UTF16");
-  if (path.empty()) SKIP("ACL_AXML_UTF16 not set");
+  if (path.empty())
+    SKIP("ACL_AXML_UTF16 not set");
 
   const std::vector<std::uint8_t> bytes = read_file(path);
   REQUIRE_FALSE(bytes.empty());
@@ -90,7 +94,8 @@ TEST_CASE("parse a UTF-16 AXML manifest (exercises UTF-16 string pool)",
 }
 
 TEST_CASE("parse_manifest rejects non-AXML input", "[pkg][manifest]") {
-  const std::vector<std::uint8_t> junk = {'n', 'o', 't', ' ', 'a', 'x', 'm', 'l'};
+  const std::vector<std::uint8_t> junk = {'n', 'o', 't', ' ',
+                                          'a', 'x', 'm', 'l'};
   Manifest m;
   AxmlError err = parse_manifest(junk, m);
   CHECK_FALSE(err.is_ok());

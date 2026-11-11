@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: android.media.ImageReader / BufferQueue semantics (public SDK docs — pool, produce,
-// acquire-latest, recycle). Implementation is acl-original over gfx::AHardwareBuffer. No GPL-3.0 sources.
+// Provenance: android.media.ImageReader / BufferQueue semantics (public SDK
+// docs — pool, produce, acquire-latest, recycle). Implementation is
+// acl-original over gfx::AHardwareBuffer. No GPL-3.0 sources.
 
 #include "gfx/buffer_queue.h"
 
@@ -16,10 +17,14 @@ namespace {
 constexpr const char* kTag = "gfx.bufqueue";
 }
 
-std::unique_ptr<BufferQueue> BufferQueue::create(std::uint32_t width, std::uint32_t height,
-                                                 std::uint32_t format, std::uint64_t usage,
-                                                 int count, std::string* error) {
-  if (count < 1) count = 1;
+std::unique_ptr<BufferQueue> BufferQueue::create(std::uint32_t width,
+                                                 std::uint32_t height,
+                                                 std::uint32_t format,
+                                                 std::uint64_t usage,
+                                                 int count,
+                                                 std::string* error) {
+  if (count < 1)
+    count = 1;
   auto q = std::unique_ptr<BufferQueue>(new BufferQueue());
   q->width_ = width;
   q->height_ = height;
@@ -34,7 +39,8 @@ std::unique_ptr<BufferQueue> BufferQueue::create(std::uint32_t width, std::uint3
     d.usage = usage;
     AHardwareBuffer* b = ahb_allocate(d);
     if (b == nullptr) {
-      if (error) *error = "BufferQueue: ahb_allocate failed";
+      if (error)
+        *error = "BufferQueue: ahb_allocate failed";
       return nullptr;  // q's destructor releases what was allocated
     }
     q->slots_.push_back(Slot{b, State::Free, 0, false});
@@ -45,14 +51,16 @@ std::unique_ptr<BufferQueue> BufferQueue::create(std::uint32_t width, std::uint3
 
 BufferQueue::~BufferQueue() {
   for (auto& s : slots_)
-    if (s.buf != nullptr) ahb_release(s.buf);
+    if (s.buf != nullptr)
+      ahb_release(s.buf);
 }
 
 AHardwareBuffer* BufferQueue::dequeue() {
   std::lock_guard<std::mutex> lk(mtx_);
   for (auto& s : slots_) {
     if (s.state == State::Free) {
-      s.state = State::Acquired;  // "owned by producer" — distinct from FREE/READY; released by queue()
+      s.state = State::Acquired;  // "owned by producer" — distinct from
+                                  // FREE/READY; released by queue()
       s.seq = 0;
       return s.buf;
     }
@@ -73,34 +81,46 @@ void BufferQueue::queue(AHardwareBuffer* buffer) {
       }
     }
   }
-  if (cb) cb();  // outside the lock: the listener may re-enter (acquire) on another thread
+  if (cb)
+    cb();  // outside the lock: the listener may re-enter (acquire) on another
+           // thread
 }
 
 void BufferQueue::queue_imported(AHardwareBuffer* imported) {
-  if (imported == nullptr) return;
+  if (imported == nullptr)
+    return;
   std::function<void()> cb;
   {
     std::lock_guard<std::mutex> lk(mtx_);
-    slots_.push_back(Slot{imported, State::Ready, next_seq_++, /*imported=*/true});  // takes the ref
+    slots_.push_back(Slot{imported, State::Ready, next_seq_++,
+                          /*imported=*/true});  // takes the ref
     cb = on_frame_available_;
   }
-  if (cb) cb();  // outside the lock: the listener may re-enter (acquire) on another thread
+  if (cb)
+    cb();  // outside the lock: the listener may re-enter (acquire) on another
+           // thread
 }
 
 AHardwareBuffer* BufferQueue::acquire_latest() {
   std::lock_guard<std::mutex> lk(mtx_);
   Slot* latest = nullptr;
   for (auto& s : slots_)
-    if (s.state == State::Ready && (latest == nullptr || s.seq > latest->seq)) latest = &s;
-  if (latest == nullptr) return nullptr;
+    if (s.state == State::Ready && (latest == nullptr || s.seq > latest->seq))
+      latest = &s;
+  if (latest == nullptr)
+    return nullptr;
   latest->state = State::Acquired;
   AHardwareBuffer* result = latest->buf;
-  // Recycle older READY buffers (acquireLatestImage drops the backlog): a pooled buffer returns to
-  // FREE; an imported (decoder) buffer is transient, so drop the queue's ref and empty its slot.
+  // Recycle older READY buffers (acquireLatestImage drops the backlog): a
+  // pooled buffer returns to FREE; an imported (decoder) buffer is transient,
+  // so drop the queue's ref and empty its slot.
   for (auto& s : slots_) {
     if (s.state == State::Ready) {  // latest is now Acquired, so excluded
-      if (s.imported) { ahb_release(s.buf); s.buf = nullptr; }
-      else s.state = State::Free;
+      if (s.imported) {
+        ahb_release(s.buf);
+        s.buf = nullptr;
+      } else
+        s.state = State::Free;
     }
   }
   slots_.erase(std::remove_if(slots_.begin(), slots_.end(),
@@ -114,7 +134,8 @@ void BufferQueue::release(AHardwareBuffer* buffer) {
   for (auto it = slots_.begin(); it != slots_.end(); ++it) {
     if (it->buf == buffer && it->state == State::Acquired) {
       if (it->imported) {
-        ahb_release(it->buf);  // drop the queue's ref (any consumer HardwareBuffer keeps its own)
+        ahb_release(it->buf);  // drop the queue's ref (any consumer
+                               // HardwareBuffer keeps its own)
         slots_.erase(it);      // imported buffers aren't reused
       } else {
         it->state = State::Free;

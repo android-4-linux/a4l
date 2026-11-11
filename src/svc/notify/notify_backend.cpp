@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: Android NotificationManager mapped to the freedesktop Desktop
-// Notifications spec (org.freedesktop.Notifications); sdbus-cpp usage pattern after
-// jwinarske/sdbus-cpp-examples (Apache-2.0). No GPL-3.0 sources.
+// Notifications spec (org.freedesktop.Notifications); sdbus-cpp usage pattern
+// after jwinarske/sdbus-cpp-examples (Apache-2.0). No GPL-3.0 sources.
 #include "svc/notify/notify_backend.h"
 
 #include "acl_config.h"
@@ -11,9 +11,9 @@
 #include <string_view>
 
 #if ACL_HAVE_SDBUS
+#include <sdbus-c++/sdbus-c++.h>
 #include <map>
 #include <vector>
-#include <sdbus-c++/sdbus-c++.h>
 #endif
 
 namespace acl::notify {
@@ -25,8 +25,12 @@ constexpr std::string_view kTag = "svc.notify";
 class NullBackend final : public INotifyBackend {
  public:
   const char* name() const noexcept override { return "null"; }
-  uint32_t notify(const std::string&, uint32_t, const std::string&,
-                  const std::string&) override { return 0; }
+  uint32_t notify(const std::string&,
+                  uint32_t,
+                  const std::string&,
+                  const std::string&) override {
+    return 0;
+  }
   void close(uint32_t) override {}
   void set_sink(std::function<void(const NotifyEvent&)>) override {}
 };
@@ -42,11 +46,13 @@ class FreedesktopBackend final : public INotifyBackend {
       : conn_(std::move(conn)) {
     proxy_ = sdbus::createProxy(*conn_, sdbus::ServiceName{kService},
                                 sdbus::ObjectPath{kPath});
-    proxy_->uponSignal("ActionInvoked").onInterface(sdbus::InterfaceName{kIface})
+    proxy_->uponSignal("ActionInvoked")
+        .onInterface(sdbus::InterfaceName{kIface})
         .call([this](const uint32_t id, const std::string& action_key) {
           emit({NotifyEvent::Kind::kActionInvoked, id, action_key, 0});
         });
-    proxy_->uponSignal("NotificationClosed").onInterface(sdbus::InterfaceName{kIface})
+    proxy_->uponSignal("NotificationClosed")
+        .onInterface(sdbus::InterfaceName{kIface})
         .call([this](const uint32_t id, const uint32_t reason) {
           emit({NotifyEvent::Kind::kClosed, id, std::string{}, reason});
         });
@@ -55,15 +61,18 @@ class FreedesktopBackend final : public INotifyBackend {
 
   const char* name() const noexcept override { return "freedesktop"; }
 
-  uint32_t notify(const std::string& app, uint32_t replaces_id,
-                  const std::string& summary, const std::string& body) override {
-    std::vector<std::string> actions;               // no actions mapped yet
+  uint32_t notify(const std::string& app,
+                  uint32_t replaces_id,
+                  const std::string& summary,
+                  const std::string& body) override {
+    std::vector<std::string> actions;  // no actions mapped yet
     std::map<std::string, sdbus::Variant> hints;
     uint32_t id = 0;
     try {
-      proxy_->callMethod("Notify").onInterface(sdbus::InterfaceName{kIface})
-          .withArguments(app, replaces_id, std::string{} /*icon*/, summary, body,
-                         actions, hints, int32_t{-1} /*default timeout*/)
+      proxy_->callMethod("Notify")
+          .onInterface(sdbus::InterfaceName{kIface})
+          .withArguments(app, replaces_id, std::string{} /*icon*/, summary,
+                         body, actions, hints, int32_t{-1} /*default timeout*/)
           .storeResultsTo(id);
     } catch (const sdbus::Error& e) {
       log::w(kTag, "Notify failed: {}", e.getMessage());
@@ -73,7 +82,8 @@ class FreedesktopBackend final : public INotifyBackend {
 
   void close(uint32_t id) override {
     try {
-      proxy_->callMethod("CloseNotification").onInterface(sdbus::InterfaceName{kIface})
+      proxy_->callMethod("CloseNotification")
+          .onInterface(sdbus::InterfaceName{kIface})
           .withArguments(id);
     } catch (const sdbus::Error& e) {
       log::w(kTag, "CloseNotification failed: {}", e.getMessage());
@@ -92,7 +102,8 @@ class FreedesktopBackend final : public INotifyBackend {
       std::lock_guard<std::mutex> lk(m_);
       cb = sink_;
     }
-    if (cb) cb(ev);
+    if (cb)
+      cb(ev);
   }
 
   std::unique_ptr<sdbus::IConnection> conn_;
@@ -103,11 +114,14 @@ class FreedesktopBackend final : public INotifyBackend {
 
 bool name_has_owner(sdbus::IConnection& conn, const char* bus_name) {
   try {
-    auto dbus = sdbus::createProxy(conn, sdbus::ServiceName{"org.freedesktop.DBus"},
-                                   sdbus::ObjectPath{"/org/freedesktop/DBus"});
+    auto dbus =
+        sdbus::createProxy(conn, sdbus::ServiceName{"org.freedesktop.DBus"},
+                           sdbus::ObjectPath{"/org/freedesktop/DBus"});
     bool owned = false;
-    dbus->callMethod("NameHasOwner").onInterface(sdbus::InterfaceName{"org.freedesktop.DBus"})
-        .withArguments(std::string{bus_name}).storeResultsTo(owned);
+    dbus->callMethod("NameHasOwner")
+        .onInterface(sdbus::InterfaceName{"org.freedesktop.DBus"})
+        .withArguments(std::string{bus_name})
+        .storeResultsTo(owned);
     return owned;
   } catch (const sdbus::Error&) {
     return false;
@@ -119,7 +133,8 @@ bool name_has_owner(sdbus::IConnection& conn, const char* bus_name) {
 
 std::unique_ptr<INotifyBackend> make_notify_backend() {
 #if ACL_HAVE_SDBUS
-  // Desktop notifications live on the SESSION bus (unlike svc/net's system bus).
+  // Desktop notifications live on the SESSION bus (unlike svc/net's system
+  // bus).
   std::unique_ptr<sdbus::IConnection> conn;
   try {
     conn = sdbus::createSessionBusConnection();
@@ -128,10 +143,13 @@ std::unique_ptr<INotifyBackend> make_notify_backend() {
     return std::make_unique<NullBackend>();
   }
   if (name_has_owner(*conn, kService)) {
-    log::i(kTag, "notification backend: freedesktop (org.freedesktop.Notifications)");
+    log::i(kTag,
+           "notification backend: freedesktop (org.freedesktop.Notifications)");
     return std::make_unique<FreedesktopBackend>(std::move(conn));
   }
-  log::i(kTag, "no org.freedesktop.Notifications on the session bus; notifications dropped");
+  log::i(kTag,
+         "no org.freedesktop.Notifications on the session bus; notifications "
+         "dropped");
 #endif
   return std::make_unique<NullBackend>();
 }

@@ -10,8 +10,8 @@ namespace acl::battery {
 
 // Create the host battery backend (make_battery_backend) and RegisterNatives on
 // org.acl.internal.BatteryBridge (nSnapshot / nTechnology). Best-effort: on any
-// failure the class keeps no native and BatteryBridge falls back to defaults. Safe
-// to call once at host-ART boot, after the acl boot classpath is up.
+// failure the class keeps no native and BatteryBridge falls back to defaults.
+// Safe to call once at host-ART boot, after the acl boot classpath is up.
 void register_battery_natives(JNIEnv* env);
 
 }  // namespace acl::battery

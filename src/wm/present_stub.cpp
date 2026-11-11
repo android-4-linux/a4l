@@ -15,18 +15,29 @@ constexpr const char* kMsg =
     "Wayland presentation unavailable: built without wcs/wayland-client "
     "(-Dwcs_root=<path>); the frame was rendered but not shown";
 
-bool wayland_available() noexcept { return false; }
+bool wayland_available() noexcept {
+  return false;
+}
 
-bool query_display(int&, int&, int&) noexcept { return false; }
+bool query_display(int&, int&, int&) noexcept {
+  return false;
+}
 
-bool present_surface(const gfx::Surface&, std::string_view, std::string_view,
+bool present_surface(const gfx::Surface&,
+                     std::string_view,
+                     std::string_view,
                      int) noexcept {
   log::w("acl.wm", kMsg);
   return false;
 }
 
-bool present_loop(int, int, std::string_view, std::string_view,
-                  const FrameCallback&, const InputCallback&, bool,
+bool present_loop(int,
+                  int,
+                  std::string_view,
+                  std::string_view,
+                  const FrameCallback&,
+                  const InputCallback&,
+                  bool,
                   std::uint64_t) noexcept {
   log::w("acl.wm", kMsg);
   return false;

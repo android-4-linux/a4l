@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: acl dev tool; prints the svc/bluetooth backend + derived adapter state.
-// No GPL-3.0 sources.
+// Provenance: acl dev tool; prints the svc/bluetooth backend + derived adapter
+// state. No GPL-3.0 sources.
 //
-// Prints which host Bluetooth daemon acl selects and the derived BluetoothAdapter
-// state (power/address/name/discovering + bonded devices), so the BlueZ -> android.bluetooth
-// mapping can be eyeballed on desktop/device.
+// Prints which host Bluetooth daemon acl selects and the derived
+// BluetoothAdapter state (power/address/name/discovering + bonded devices), so
+// the BlueZ -> android.bluetooth mapping can be eyeballed on desktop/device.
 #include <cstdio>
 
 #include "svc/bluetooth/bt_backend.h"
@@ -20,7 +20,8 @@ int main() {
   std::printf("  discovering  = %s\n", s.discovering ? "true" : "false");
   std::printf("  devices (%zu):\n", s.devices.size());
   for (const acl::bt::BtDevice& d : s.devices)
-    std::printf("    %s  \"%s\"  class=0x%x  bond=%d  connected=%s\n", d.address.c_str(),
-                d.name.c_str(), d.cls, d.bond_state, d.connected ? "y" : "n");
+    std::printf("    %s  \"%s\"  class=0x%x  bond=%d  connected=%s\n",
+                d.address.c_str(), d.name.c_str(), d.cls, d.bond_state,
+                d.connected ? "y" : "n");
   return 0;
 }

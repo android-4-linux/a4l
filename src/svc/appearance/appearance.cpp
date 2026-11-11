@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: XDG Desktop Portal Settings spec (org.freedesktop.portal.Settings.Read,
-// namespace org.freedesktop.appearance, key color-scheme). sdbus-cpp usage after
-// jwinarske/sdbus-cpp-examples (Apache-2.0) and svc/battery. No GPL-3.0 sources.
+// Provenance: XDG Desktop Portal Settings spec
+// (org.freedesktop.portal.Settings.Read, namespace org.freedesktop.appearance,
+// key color-scheme). sdbus-cpp usage after jwinarske/sdbus-cpp-examples
+// (Apache-2.0) and svc/battery. No GPL-3.0 sources.
 #include "svc/appearance/appearance.h"
 
 #include "acl_config.h"
@@ -24,17 +25,19 @@ constexpr std::string_view kTag = "svc.appearance";
 
 int query_color_scheme() noexcept {
   try {
-    auto conn = sdbus::createSessionBusConnection();  // the portal lives on the session bus
+    auto conn = sdbus::createSessionBusConnection();  // the portal lives on the
+                                                      // session bus
     auto portal = sdbus::createProxy(
         *conn, sdbus::ServiceName{"org.freedesktop.portal.Desktop"},
         sdbus::ObjectPath{"/org/freedesktop/portal/desktop"});
     sdbus::Variant value;
     portal->callMethod("Read")
         .onInterface(sdbus::InterfaceName{"org.freedesktop.portal.Settings"})
-        .withArguments(std::string{"org.freedesktop.appearance"}, std::string{"color-scheme"})
+        .withArguments(std::string{"org.freedesktop.appearance"},
+                       std::string{"color-scheme"})
         .storeResultsTo(value);
-    // Read returns (v); the color-scheme value is a u, but some portal versions double-wrap it
-    // in another variant — accept either shape.
+    // Read returns (v); the color-scheme value is a u, but some portal versions
+    // double-wrap it in another variant — accept either shape.
     std::uint32_t scheme = 0;
     try {
       scheme = value.get<std::uint32_t>();
@@ -53,7 +56,9 @@ int query_color_scheme() noexcept {
 
 #else
 
-int query_color_scheme() noexcept { return -1; }
+int query_color_scheme() noexcept {
+  return -1;
+}
 
 #endif
 

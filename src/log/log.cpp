@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: specs/log.md (pending), ihs_shared facade design, fmt docs. No GPL-3.0 sources.
+// Provenance: specs/log.md (pending), ihs_shared facade design, fmt docs. No
+// GPL-3.0 sources.
 
 #include "log/log.h"
 
@@ -14,7 +15,8 @@ namespace {
 // Default backend: one line per record on stderr, "<L>/<tag>: <message>".
 class StderrSink final : public Sink {
  public:
-  void write(Level level, std::string_view tag,
+  void write(Level level,
+             std::string_view tag,
              std::string_view message) noexcept override {
     // fmt::print to stderr; swallow any I/O error — logging must never throw.
     try {
@@ -45,12 +47,18 @@ std::atomic<int>& level_slot() {
 
 char level_char(Level level) noexcept {
   switch (level) {
-    case Level::Verbose: return 'V';
-    case Level::Debug:   return 'D';
-    case Level::Info:    return 'I';
-    case Level::Warn:    return 'W';
-    case Level::Error:   return 'E';
-    case Level::Fatal:   return 'F';
+    case Level::Verbose:
+      return 'V';
+    case Level::Debug:
+      return 'D';
+    case Level::Info:
+      return 'I';
+    case Level::Warn:
+      return 'W';
+    case Level::Error:
+      return 'E';
+    case Level::Fatal:
+      return 'F';
   }
   return '?';
 }
@@ -75,7 +83,9 @@ Level min_level() noexcept {
   return static_cast<Level>(level_slot().load(std::memory_order_relaxed));
 }
 
-void write(Level level, std::string_view tag, std::string_view message) noexcept {
+void write(Level level,
+           std::string_view tag,
+           std::string_view message) noexcept {
   if (static_cast<int>(level) < level_slot().load(std::memory_order_relaxed)) {
     return;
   }
@@ -84,7 +94,8 @@ void write(Level level, std::string_view tag, std::string_view message) noexcept
     std::lock_guard<std::mutex> lock(sink_mutex());
     active = sink_slot();
   }
-  if (active) active->write(level, tag, message);
+  if (active)
+    active->write(level, tag, message);
 }
 
 }  // namespace acl::log

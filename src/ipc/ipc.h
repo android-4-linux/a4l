@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: original acl design (docs/split-process-art.md). Buffer-centric transport between the
-// bionic art-host process and the glibc acl process — SOCK_SEQPACKET + SCM_RIGHTS fd passing. Not an
-// Android-visible interface (no Binder, no IDL). Low-dependency so both libc worlds link it. No GPL-3.0 sources.
+// Provenance: original acl design (docs/split-process-art.md). Buffer-centric
+// transport between the bionic art-host process and the glibc acl process —
+// SOCK_SEQPACKET + SCM_RIGHTS fd passing. Not an Android-visible interface (no
+// Binder, no IDL). Low-dependency so both libc worlds link it. No GPL-3.0
+// sources.
 #ifndef ACL_IPC_IPC_H
 #define ACL_IPC_IPC_H
 
@@ -13,14 +15,16 @@
 
 namespace acl::ipc {
 
-// Wire message tags. The set is small and fixed on purpose (see docs/split-process-art.md).
+// Wire message tags. The set is small and fixed on purpose (see
+// docs/split-process-art.md).
 enum class MsgType : std::uint32_t {
-  Hello = 1,      // handshake (protocol version)
-  Bye,            // orderly shutdown
-  Log,            // art-host stdout/stderr forwarded to acl (extra = UTF-8 text)
+  Hello = 1,  // handshake (protocol version)
+  Bye,        // orderly shutdown
+  Log,        // art-host stdout/stderr forwarded to acl (extra = UTF-8 text)
   SurfaceCreate,  // art-host -> acl
   SurfaceResize,  // art-host -> acl
-  PresentFrame,   // art-host -> acl (carries a dma-buf fd + optional acquire-fence fd)
+  PresentFrame,   // art-host -> acl (carries a dma-buf fd + optional
+                  // acquire-fence fd)
   FrameReleased,  // acl -> art-host (buffer returned; release-fence fd)
   Input,          // acl -> art-host
   Lifecycle,      // both directions (resumed/paused/stopped + config)
@@ -36,13 +40,14 @@ struct SurfaceInfo {  // Create/Resize payload
 
 struct PresentFrame {
   std::uint32_t surface_id;
-  std::uint32_t buffer_id;   // echoed back in FrameReleased
+  std::uint32_t buffer_id;  // echoed back in FrameReleased
   std::uint32_t w, h;
   std::uint32_t drm_format;  // fourcc
   std::uint64_t modifier;    // DRM format modifier (tiling)
   std::uint32_t stride, offset;
   std::int32_t damage_x, damage_y, damage_w, damage_h;
-  // the dma-buf fd (and, if >=0, an acquire-fence fd) travel as SCM_RIGHTS ancillary data.
+  // the dma-buf fd (and, if >=0, an acquire-fence fd) travel as SCM_RIGHTS
+  // ancillary data.
 };
 
 struct FrameReleased {
@@ -74,9 +79,10 @@ struct AudioWrite {
   std::uint32_t frames;        // frames in this advance
 };
 
-// One datagram = a fixed header + optional trailing bytes (in `extra`) + up to two ancillary fds.
-// The union keeps the header POD and copyable; `extra_len` tells the receiver how much trailer
-// followed the header inside the same SEQPACKET datagram.
+// One datagram = a fixed header + optional trailing bytes (in `extra`) + up to
+// two ancillary fds. The union keeps the header POD and copyable; `extra_len`
+// tells the receiver how much trailer followed the header inside the same
+// SEQPACKET datagram.
 struct Message {
   MsgType type;
   std::uint32_t extra_len;  // bytes of trailing payload after this header
@@ -97,11 +103,13 @@ struct Message {
 struct Received {
   Message msg;
   std::vector<std::byte> extra;  // extra_len bytes
-  int fd0 = -1;                  // first ancillary fd (dma-buf / shm / release-fence), -1 if none
-  int fd1 = -1;                  // second ancillary fd (acquire-fence), -1 if none
+  int fd0 =
+      -1;  // first ancillary fd (dma-buf / shm / release-fence), -1 if none
+  int fd1 = -1;  // second ancillary fd (acquire-fence), -1 if none
 };
 
-// A SEQPACKET endpoint. Owns its fd; move-only. Errors are reported via return value + errno.
+// A SEQPACKET endpoint. Owns its fd; move-only. Errors are reported via return
+// value + errno.
 class Channel {
  public:
   Channel() = default;
@@ -116,14 +124,20 @@ class Channel {
   int native_handle() const { return fd_; }
   void close();
 
-  // Send `m` plus `extra` trailing bytes plus up to two fds, as one datagram. `extra.size()` must
-  // equal `m.extra_len` (asserted). Returns false on error (errno set).
-  bool send(const Message& m, std::span<const std::byte> extra = {}, int fd0 = -1, int fd1 = -1);
+  // Send `m` plus `extra` trailing bytes plus up to two fds, as one datagram.
+  // `extra.size()` must equal `m.extra_len` (asserted). Returns false on error
+  // (errno set).
+  bool send(const Message& m,
+            std::span<const std::byte> extra = {},
+            int fd0 = -1,
+            int fd1 = -1);
 
-  // Receive one datagram. Returns false on EOF (peer closed) or error (errno set; 0 on clean EOF).
+  // Receive one datagram. Returns false on EOF (peer closed) or error (errno
+  // set; 0 on clean EOF).
   bool recv(Received& out);
 
-  // A connected pair of endpoints (art-host end, acl end). Returns {invalid, invalid} on failure.
+  // A connected pair of endpoints (art-host end, acl end). Returns {invalid,
+  // invalid} on failure.
   static std::pair<Channel, Channel> make_pair();
 
  private:

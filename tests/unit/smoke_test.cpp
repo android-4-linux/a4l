@@ -9,15 +9,33 @@
 
 #include "acl_config.h"
 
-namespace acl::runtime { const char* module_name() noexcept; }
-namespace acl::pkg     { const char* module_name() noexcept; }
-namespace acl::gfx     { const char* module_name() noexcept; }
-namespace acl::wm      { const char* module_name() noexcept; }
-namespace acl::input   { const char* module_name() noexcept; }
-namespace acl::audio   { const char* module_name() noexcept; }
-namespace acl::media   { const char* module_name() noexcept; }
-namespace acl::svc     { const char* module_name() noexcept; }
-namespace acl::ndk     { const char* module_name() noexcept; }
+namespace acl::runtime {
+const char* module_name() noexcept;
+}
+namespace acl::pkg {
+const char* module_name() noexcept;
+}
+namespace acl::gfx {
+const char* module_name() noexcept;
+}
+namespace acl::wm {
+const char* module_name() noexcept;
+}
+namespace acl::input {
+const char* module_name() noexcept;
+}
+namespace acl::audio {
+const char* module_name() noexcept;
+}
+namespace acl::media {
+const char* module_name() noexcept;
+}
+namespace acl::svc {
+const char* module_name() noexcept;
+}
+namespace acl::ndk {
+const char* module_name() noexcept;
+}
 
 TEST_CASE("native-core modules link and report their names", "[smoke]") {
   CHECK(std::strcmp(acl::runtime::module_name(), "runtime") == 0);
@@ -32,11 +50,18 @@ TEST_CASE("native-core modules link and report their names", "[smoke]") {
 }
 
 #if ACL_PROFILE_AUTOMOTIVE
-namespace acl::svc::car     { const char* module_name() noexcept; }
-namespace acl::hosts::cal   { const char* module_name() noexcept; }
-namespace acl::hosts::media { const char* module_name() noexcept; }
+namespace acl::svc::car {
+const char* module_name() noexcept;
+}
+namespace acl::hosts::cal {
+const char* module_name() noexcept;
+}
+namespace acl::hosts::media {
+const char* module_name() noexcept;
+}
 
-TEST_CASE("automotive-profile modules link when the profile is ON", "[smoke][automotive]") {
+TEST_CASE("automotive-profile modules link when the profile is ON",
+          "[smoke][automotive]") {
   CHECK(std::strcmp(acl::svc::car::module_name(), "svc/car") == 0);
   CHECK(std::strcmp(acl::hosts::cal::module_name(), "hosts/cal") == 0);
   CHECK(std::strcmp(acl::hosts::media::module_name(), "hosts/media") == 0);
