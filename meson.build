@@ -323,6 +323,10 @@ conf.set10('ACL_HAVE_SKIA', have_skia)
 conf.set10('ACL_HAVE_VULKAN', have_vulkan)
 conf.set10('ACL_HAVE_GL', have_gl)
 conf.set10('ACL_HAVE_SDBUS', have_sdbus)
+# The GLSurfaceView present path (jvm_vm.cpp, media_codec_jni.cpp) calls wm::present_gl_loop,
+# wm::active_video_presenter and create_gl_session_core, which exist only with the wcs
+# presenter and the Ganesh Vulkan device. Host GL alone is not enough to compile it.
+conf.set10('ACL_GL_PRESENT', have_gl and have_vulkan and have_wcs)
 conf.set10('ACL_HAVE_SECRET', have_secret)
 # Connectivity backend build mode: auto (compile all, probe the bus) | networkd |
 # networkmanager | connman | null. Backends whose macro is 0 are compiled out.

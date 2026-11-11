@@ -42,12 +42,15 @@
 #include "svc/nsd/nsd_jni.h"
 #include "svc/share/share_jni.h"
 #include "svc/bluetooth/bt_jni.h"
-#include "svc/location/location_jni.h"
 #include "svc/net/connectivity_jni.h"
 #include "svc/notify/notify_jni.h"
-#include "svc/sensor/sensor_jni.h"
 #include "svc/storage/storage_jni.h"
 #endif
+
+// The sensor and location hubs register unconditionally -- their D-Bus sources are gated inside
+// the modules -- so their headers must not sit behind ACL_HAVE_SDBUS.
+#include "svc/location/location_jni.h"
+#include "svc/sensor/sensor_jni.h"
 #if ACL_HAVE_PIPEWIRE
 #include "audio/audio_jni.h"
 #endif
@@ -690,21 +693,6 @@ jlong (*g_acl_typeface_from_path)(const char*) = nullptr;
 // like the real Binder thread-local; no Binder, so it just round-trips in-process.
 thread_local jint g_strict_mode_policy = 0;
 
-#if ACL_HAVE_VULKAN && ACL_HAVE_WCS
-// ── Looper-driven present (approach A): native seam for org.acl.internal.PresentDriver ──
-// The Java driver owns Looper.loop() and the Choreographer; these natives expose the wm
-// presenter primitives, the GPU begin/end-frame, and the vsync-delivery hooks so a real
-// Android frame loop drives dma-buf submission. See docs/looper-driven-present.md.
-
-// Mirror of libacl_graphics_jni's AclDmabuf (the GPU end-frame output descriptor).
-struct PresentDmabuf {
-  int fd;
-  std::uint32_t width, height, plane_count;
-  std::uint32_t offsets[4], strides[4];
-  std::uint64_t modifier;
-  std::uint32_t drm_format;
-};
-
 // Map a Linux evdev scancode to an Android KeyEvent keycode (a small practical subset;
 // unmapped keys become KEYCODE_UNKNOWN=0). Mirrors Android's Generic.kl.
 jint acl_evdev_to_android_keycode(std::uint32_t evdev) {
@@ -807,6 +795,21 @@ int acl_density_dpi() {
   }();
   return ov != 0 ? ov : static_cast<int>(svc::window().density_dpi());
 }
+
+#if ACL_HAVE_VULKAN && ACL_HAVE_WCS
+// ── Looper-driven present (approach A): native seam for org.acl.internal.PresentDriver ──
+// The Java driver owns Looper.loop() and the Choreographer; these natives expose the wm
+// presenter primitives, the GPU begin/end-frame, and the vsync-delivery hooks so a real
+// Android frame loop drives dma-buf submission. See docs/looper-driven-present.md.
+
+// Mirror of libacl_graphics_jni's AclDmabuf (the GPU end-frame output descriptor).
+struct PresentDmabuf {
+  int fd;
+  std::uint32_t width, height, plane_count;
+  std::uint32_t offsets[4], strides[4];
+  std::uint64_t modifier;
+  std::uint32_t drm_format;
+};
 
 // Per-window native state for PresentDriver; its address is the jlong `s` handed to Java.
 struct RenderThread;  // per-window GPU render thread (deferred-present split); defined below
@@ -3071,7 +3074,7 @@ class JniVm : public Vm {
   // against the WindowManager display metrics, into a Bitmap-backed Canvas — and
   // describe the resulting pixels. Proves View(Context) + a real measure/layout/draw
   // traversal over the app's view tree renders verifiable output (no compositor).
-#if ACL_HAVE_GL
+#if ACL_GL_PRESENT
   // Stage 3 routing: does the decor tree host an android.view.SurfaceView (e.g. a GLSurfaceView)?
   bool has_surface_view(jobject view) {
     jclass boot = env_->FindClass("org/acl/internal/HostBootstrap");
@@ -3305,7 +3308,7 @@ class JniVm : public Vm {
     // once the loop's doFrame pumps it (chicken-and-egg).
     if (config_.present) {
       if (const char* gpu = std::getenv("ACL_PRESENT_GPU"); gpu != nullptr && *gpu != '\0') {
-#if ACL_HAVE_GL
+#if ACL_GL_PRESENT
         // GLSurfaceView (Stage 3): if the content hosts a SurfaceView, its own GLThread renders
         // GL to a wl_surface — route to the dedicated GL present (the toplevel IS the GL surface),
         // not the Skia View-tree present, which cannot show the GL content.
@@ -5160,7 +5163,7 @@ class ArtVm final : public JniVm {
   // wl_surface) is Stage 3, so it reports the gap for now. GL apps only — the device is created
   // lazily on the first eglGetDisplay, so non-GL apps pay nothing.
   void load_acl_egl10([[maybe_unused]] JNIEnv* env) {
-#if ACL_HAVE_GL
+#if ACL_GL_PRESENT
     g_gl_main_thread = std::this_thread::get_id();  // boot thread = app main/UI thread
     env->GetJavaVM(&g_present_vm);                   // for the get_display in-place session creation
     g_present_app_id = config_.package_name.empty() ? "org.acl.app" : config_.package_name;

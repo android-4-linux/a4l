@@ -47,18 +47,58 @@ jobs:
           done < <(git rev-list "$range")
           exit $bad
 
+  # This job builds the configuration a bare runner can reach: no pinned Skia, so no Ganesh
+  # Vulkan, and no wcs checkout, so wm/ is the stub presenter. The Skia + Vulkan + wcs
+  # configuration -- the one that actually presents an app -- needs a 151 MB prebuilt Skia m150
+  # prefix and is NOT covered here. Adding it means caching that prefix; until then, a green run
+  # means the stub configuration compiles and its tests pass, nothing more.
   build:
-    name: Build & test (Meson)
+    name: Build & test (Meson, stub presenter / no Skia)
     runs-on: ubuntu-latest
+    # A hung mirror once held Install toolchain open for 87 minutes with no output. The job
+    # cap bounds the damage; the step cap and the per-attempt timeout below are what actually
+    # turn a hang into a retry.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
+        # The runner's mirror list periodically serves an index whose pool has already moved on.
+        # Two failure modes, both infrastructure rather than build: every fetch 404s ("Unable to
+        # fetch some archives"), or the mirror accepts the connection and goes slow or silent.
+        # Re-running update before each attempt picks up the rotated mirror; the Acquire timeouts
+        # and the outer `timeout` bound the silent case, which retries alone cannot reach. The
+        # third defence is wanting less: default-jdk pulled a full JDK plus the X11 dev chain,
+        # 135 MB over 33 packages, and the run that failed this way stalled on one 46.7 MB openjdk
+        # archive until all three attempts timed out. The image already has g++, python3, zlib and
+        # two Temurin JDKs, so what is left to fetch is Meson, Ninja, pkg-config and libfmt.
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y meson ninja-build g++ pkg-config \
-                                  libfmt-dev zlib1g-dev python3 default-jdk
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          for attempt in 1 2 3; do
+            # shellcheck disable=SC2086
+            timeout 240 sudo apt-get update -qq $apt_opts || true
+            # shellcheck disable=SC2086
+            if timeout 240 sudo apt-get install -y $apt_opts \
+                 meson ninja-build g++ pkg-config \
+                 libfmt-dev zlib1g-dev python3; then
+              exit 0
+            fi
+            echo "apt attempt ${attempt} failed or timed out; retrying"
+            sleep 15
+          done
+          echo "apt failed three times" >&2
+          exit 1
       - name: Export JAVA_HOME for the JVM backend detection
-        run: echo "JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))" >> "$GITHUB_ENV"
+        # The runner image ships Temurin JDKs, so none is installed above. meson.build does not
+        # read JAVA_HOME -- it runs `java -XshowSettings:properties` and takes java.home from it
+        # -- so this only has to agree with the `java` on PATH. Assert jni.h is there: without
+        # it the JVM backend compiles out silently and the job would still go green while
+        # testing less than it claims to.
+        run: |
+          jh="${JAVA_HOME_21_X64:-$JAVA_HOME}"
+          test -f "$jh/include/jni.h" || { echo "no jni.h under $jh" >&2; exit 1; }
+          echo "JAVA_HOME=$jh" >> "$GITHUB_ENV"
+          java -XshowSettings:properties -version 2>&1 | grep 'java.home'
       - name: Fetch Catch2 (Tier A tests)
         run: meson wrap install catch2 || true
       - name: Configure (automotive profile, default ON)
