@@ -12,13 +12,14 @@ origin_url: "https://skia.googlesource.com/skia"
 # Pin the milestone to the branch used by the vendored frameworks/base tag (api-33 => that
 # release's Skia m-branch), or carry a gfx/skia_compat.h shim if wcs wants a newer milestone.
 milestone: "chrome/m150"
-# The build this repo is developed against. Not a fixed commit: build-skia.sh checks out the
-# chrome/m150 branch, so two builds weeks apart are not bit-identical. Pin a sha here before
-# anything ships binaries.
-sha: "TODO: record the chrome/m150 commit the shared prefix was built from"
+# The exact commit the shared prefix is built from. build-skia.sh checks this sha out
+# directly, and CI fails the present job if this value and the script's SKIA_REF disagree,
+# so the two cannot drift apart silently. It is the chrome/m150 tip, unchanged on that
+# branch since 2026-06-02.
+sha: "59690b53c2d37dd7a3dc7cc8e5718384f51ca200"
 
 # How to produce the prefix -Dskia_prefix= points at (lib/*.a + include/core/...):
-#   wayland-cxx-scanner/scripts/build-skia.sh   (MIT, SKIA_REF="chrome/m150")
+#   wayland-cxx-scanner/scripts/build-skia.sh   (MIT; SKIA_REF is the sha above)
 # That script is the single recipe for both projects, which is what keeps the A02.2
 # one-Skia rule true rather than merely stated.
 build_recipe: "https://github.com/jwinarske/wayland-cxx-scanner/blob/main/scripts/build-skia.sh"

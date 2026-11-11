@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # wayland-cxx-scanner (wcs, MIT, Joel Winarske) - the CRTP Wayland bindings wm/ is built on:
 # a scanner tool that generates C++ protocol headers, plus the header-only wl/ framework.
-# plan.md Addendum A02. Pinned to the commit tag v1.0.1 points at (2026-10-01); bump the
-# revision here, never float it. The commit rather than the tag name: v1.0.1 is an annotated
-# tag, and a shallow clone of one makes git warn that the ref "is not a commit".
+# plan.md Addendum A02. Pinned to a commit, never floated: a sha here, never a branch or tag
+# name. A tag would also be wrong mechanically, since v1.0.1 is annotated and a shallow clone
+# of one makes git warn that the ref "is not a commit".
+#
+# This is v1.0.1 plus the Skia pin fix (wcs #133). acl reads SKIA_REF out of this commit's
+# scripts/build-skia.sh to key its Skia cache, so the wcs pin and the Skia pin move together
+# by construction, and CI fails if that value and third_party/skia/METADATA disagree.
 #
 # Only used when neither -Dwcs_root= nor a ../wayland-cxx-scanner sibling checkout resolves
 # (see the wcs block in /meson.build). For local development against a sibling checkout
@@ -11,5 +15,5 @@
 [wrap-git]
 directory = wayland-cxx-scanner
 url = https://github.com/jwinarske/wayland-cxx-scanner.git
-revision = e3459c9799513f5c2d92df529060d1f716201ce9
+revision = 8778c1c394170f0f48dd3205d2b4b0b3c691bf68
 depth = 1
