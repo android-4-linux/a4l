@@ -27,6 +27,14 @@ jobs:
         run: ./scripts/check-provenance.sh
       - name: REUSE lint
         run: reuse lint
+      - name: AOSP pin is single-sourced (Gate G2.c)
+        # third_party/aosp/METADATA is the one home of the AOSP tag. Four other places
+        # have to restate it to be readable on their own -- the pinned manifest's
+        # filename, that manifest's own default revision, the automotive pairing and the
+        # Skia pairing -- and nothing but this step holds them to it. It needs no AOSP
+        # checkout and no build, which is the point: a half-done retag fails here in
+        # seconds rather than on the one machine that has the 1145 projects synced.
+        run: python3 tools/vendor_framework.py pin
 
   dco:
     name: DCO sign-off
