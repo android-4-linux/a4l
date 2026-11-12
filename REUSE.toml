@@ -36,7 +36,7 @@ SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
 path = [".gitignore", "**/.gitignore", "**/.gitkeep", "**.wrap", "**.ini",
-        ".git-blame-ignore-revs"]
+        ".git-blame-ignore-revs", ".clang-format-version"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "The acl Authors"
 SPDX-License-Identifier = "Apache-2.0"

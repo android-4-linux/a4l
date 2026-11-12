@@ -36,6 +36,60 @@ jobs:
         # seconds rather than on the one machine that has the 1145 projects synced.
         run: python3 tools/vendor_framework.py pin
 
+  # The tree is a fixed point of ONE clang-format version, so the check is only meaningful
+  # at that version -- which is why .clang-format-version exists and why this job asserts
+  # it got what it asked for rather than trusting PATH.
+  format:
+    name: Format (clang-format at the pinned version)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format at .clang-format-version
+        # Pinned because the runner's own clang-format is not the one this tree is
+        # formatted with: the version apt serves on ubuntu-latest is 18, and it disagrees
+        # with the committed tree in 32 places across 5 files (`struct stat st{}` and C
+        # function-pointer casts, mostly). Measured 2026-11-12: 22.1.8 and 23.1.5 both
+        # agree with the tree exactly, so it is the floor that matters here rather than
+        # the ceiling -- but an unpinned install drifts into a disagreement with no
+        # warning, and the gate would then be failing on its own version instead of on
+        # the contributor's patch.
+        run: pipx install "clang-format==$(cat .clang-format-version)"
+      - name: Check every tracked C and C++ file
+        run: |
+          want=$(cat .clang-format-version)
+          got=$(clang-format --version)
+          # The image ships a clang-format of its own under /usr/bin. If that one wins on
+          # PATH the gate still goes green or red, just against the wrong formatter, so
+          # the version is asserted rather than assumed.
+          case "$got" in
+            *"$want"*) echo "$got" ;;
+            *) echo "wanted clang-format $want, PATH has: $got" >&2
+               type -a clang-format >&2 || true
+               exit 1 ;;
+          esac
+          mapfile -d '' -t files < <(git ls-files -z \
+            '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hh' '*.hpp')
+          echo "checking ${#files[@]} file(s)"
+          if clang-format --dry-run -Werror "${files[@]}"; then
+            exit 0
+          fi
+          {
+            echo
+            echo "Formatting differs from .clang-format. Reformat at the same version:"
+            echo "    pipx install clang-format==$want"
+            echo "    git ls-files -z '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hh' '*.hpp' \\"
+            echo "      | xargs -0 clang-format -i"
+            echo
+            echo "clang-format does not reach a fixed point in one pass on this tree:"
+            echo "trailing-comment alignment oscillates and settles on the second pass, so"
+            echo "run that until 'git diff' comes back empty. If a macro-invocation table"
+            echo "keeps being repacked differently on every pass, fence it with a bare"
+            echo "'// clang-format off' / '// clang-format on' -- a trailing explanation on"
+            echo "that comment is NOT recognized and the fence then silently does nothing."
+            echo "See src/ndk/bionic_runtime.cpp for the three that needed it."
+          } >&2
+          exit 1
+
   dco:
     name: DCO sign-off
     runs-on: ubuntu-latest
