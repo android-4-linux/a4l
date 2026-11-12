@@ -121,10 +121,26 @@ jobs:
         with:
           fetch-depth: 0
       - name: Every commit is Signed-off-by
+        # Dependabot cannot put a trailer in its own commits, so a version-update pull
+        # request would fail this gate permanently and no action would ever be updated.
+        # The exemption is deliberately two conditions wide. The pull request has to have
+        # been opened by dependabot[bot] -- which GitHub sets and a contributor cannot
+        # forge -- AND the individual commit has to be authored by it. Author identity on
+        # its own is self-reported, so matching only on that would let anyone opt out of
+        # DCO with one `git config user.email`. A human commit in a Dependabot branch is
+        # still checked.
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          bot='dependabot[bot]'
           bad=0
           while read -r sha; do
+            if [[ "$PR_AUTHOR" == "$bot" ]] \
+               && [[ "$(git show -s --format=%an "$sha")" == "$bot" ]]; then
+              echo "skip: $sha authored by $bot (see .github/dependabot.yml)"
+              continue
+            fi
             if ! git show -s --format=%B "$sha" | grep -qE '^Signed-off-by: .+ <.+@.+>'; then
               echo "FAIL: commit $sha missing DCO Signed-off-by" >&2
               bad=1
