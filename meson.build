@@ -360,7 +360,14 @@ core_inc = include_directories('src')
 # behind an interface until it lands.
 #
 # Phase 1 runtime-spine dependencies (present on a normal Linux host):
-fmt_dep  = dependency('fmt')      # log facade backend (spdlog/DLT sinks come later)
+# fmt's floor is stated here rather than inherited from whatever the host happens to
+# ship. Unbounded, `dependency('fmt')` resolved to 9.1.0 on the pinned runner image and
+# 11.2.0 on a current Fedora -- two majors apart -- and the only reason that was safe is
+# that nobody had moved either one. The floor is the oldest version this tree is actually
+# built against, on every push, not the oldest that might work. There is deliberately no
+# ceiling: an upper bound would be a guess about fmt 12, and a packager cannot satisfy a
+# guess.
+fmt_dep  = dependency('fmt', version : '>= 9.1.0')  # log facade backend (spdlog/DLT sinks come later)
 zlib_dep = dependency('zlib')     # APK (zip) inflate in pkg/
 
 # Later subsystems add their system libs here as they are implemented, e.g.:
