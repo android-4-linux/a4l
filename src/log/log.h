@@ -12,7 +12,11 @@
 #include <string_view>
 #include <utility>
 
-#include <fmt/core.h>
+// fmt/format.h, not fmt/core.h: this header calls fmt::format
+// itself, and upstream now ships core.h only as a compatibility
+// shim that includes format.h and says of itself that it "may be
+// removed in future versions".
+#include <fmt/format.h>
 
 namespace acl::log {
 
