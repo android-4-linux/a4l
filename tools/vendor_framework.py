@@ -110,7 +110,7 @@ SHIM_ROOT = os.path.join(REPO_ROOT, "framework", "shim")
 # substring search cannot tell a real identifier from a provenance comment stating that a
 # file has no GPL-3.0 sources in it, and the second is the opposite claim.
 FORBIDDEN_SPDX = ("GPL-3.0", "LGPL-3.0", "AGPL")
-# Full licence notices are prose, not tags, so they count wherever they appear.
+# Full license notices are prose, not tags, so they count wherever they appear.
 FORBIDDEN_NOTICES = (
     "GNU General Public License", "GNU Affero General Public License",
     "GNU Lesser General Public License, Version 3",
