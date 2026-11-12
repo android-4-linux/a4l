@@ -1,0 +1,10 @@
+acl-cxx
+Copyright 2026 Contributors to acl-cxx
+
+Licensed under the Apache License, Version 2.0. The license text is in LICENSE.
+
+This repository also carries files whose copyright is held by others, under
+Apache-2.0 and under MIT. Every such file declares its own license with an SPDX
+identifier, and REUSE.toml records the copyright holder for the files that cannot
+carry a header of their own; `reuse lint` verifies that no file is unaccounted for.
+PROVENANCE.md governs what may enter this tree and under which license.
