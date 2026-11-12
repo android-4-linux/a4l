@@ -8,21 +8,36 @@ description: "Vendored AOSP components: art (host), frameworks/base subset, liba
 license: "Apache-2.0"   # bionic subtree is BSD; record per-component below when vendored.
 
 # Platform pinning. Target API level 33 (Tiramisu) per ADR-0002. The pinned tag is
-# a real AOSP release; the manifest sha is platform/manifest at that tag. All
-# projects (frameworks/base, external/skia, ...) inherit the tag as their default
-# revision, so a single tag pins the whole tree. Resolved 2026-07-10 from
+# a real AOSP release. All projects (frameworks/base, external/skia, ...) inherit the
+# tag as their default revision, so the tag alone pins the whole tree for as long as
+# nobody re-points it; tools/aosp/manifests/android-13.0.0_r84-pinned.xml removes that "as long as"
+# by recording all 1145 projects at an explicit commit. Verified 2026-11-11: every
+# project's HEAD equals its own refs/tags/android-13.0.0_r84^{}, 0 local commits, so
+# every pinned sha is fetchable upstream. Resolved 2026-07-10 from
 # android.googlesource.com/platform/manifest/+refs/tags.
+#
+# The tag is ANNOTATED, so it has two shas and both are recorded: comparing one against
+# the other reads as a mismatch when nothing is wrong. See the README beside the manifest.
 platform:
   api_level: 33
   manifest_url: "https://android.googlesource.com/platform/manifest"
   branch: "android-13.0.0_r84"
-  manifest_sha: "05bc4f23cd577692d879cb1ab7ec1c0a583d2f83"
+  manifest_tag_object_sha: "05bc4f23cd577692d879cb1ab7ec1c0a583d2f83"
+  manifest_commit_sha: "45b33a9a1241420dd45e562da0798f3f8e971f3b"
+  pinned_manifest: "tools/aosp/manifests/android-13.0.0_r84-pinned.xml"
+  # The pinned manifest does NOT reproduce this tree on its own: libcore and
+  # external/skia are modified in the working tree, and those edits are not commits.
+  # Apply tools/aosp/patches/libcore-host-musl-sigrtmin.patch and
+  # tools/aosp/patches/external-skia-host-vulkan.patch after syncing. Both verified to
+  # 'git apply --check -R' clean against the checkout on 2026-11-11.
   # Local checkout the extraction/vendoring tooling runs against. Configurable via
   # $ACL_AOSP_ROOT; tools/vendor_framework.py defaults to this path.
   local_checkout: "/mnt/dev/aosp"
-  # Create it (repo init -b <branch> -u <url>, then a partial sync of the java trees):
+  # Create it from the pinned manifest rather than from the tag, so the result is the
+  # same tree rather than the same release. Full recipe in tools/aosp/manifests/README.md:
   #   repo init -u https://android.googlesource.com/platform/manifest -b android-13.0.0_r84
-  #   repo sync platform/frameworks/base platform/external/skia   # (partial sync)
+  #   cp <acl>/tools/aosp/manifests/android-13.0.0_r84-pinned.xml .repo/manifests/
+  #   repo init -m android-13.0.0_r84-pinned.xml && repo sync -c -j8
 
 # Automotive Car API is versioned INDEPENDENTLY of the platform API (plan.md §A01.1).
 # Record the platform-tag <-> car-tag pairing here when the automotive path is vendored.

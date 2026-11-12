@@ -58,6 +58,15 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "The acl Authors"
 SPDX-License-Identifier = "Apache-2.0"
 
+# The pinned AOSP manifest is 'repo manifest -r' output: AOSP's own project list with a
+# commit recorded per project. The project names and structure are upstream's, so it is
+# attributed to AOSP rather than to this repository, even though acl generated the file.
+[[annotations]]
+path = ["tools/aosp/manifests/*.xml"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "The Android Open Source Project"
+SPDX-License-Identifier = "Apache-2.0"
+
 # Vendored Wayland shell protocol definitions (unmodified upstream XML, MIT). Consumed by
 # the wcs scanner to generate the agl/ivi/fullscreen client bindings for ACL_WL_SHELL. Each
 # carries its own upstream copyright in-file; declared here for REUSE. Origins in METADATA.
