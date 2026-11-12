@@ -68,5 +68,11 @@ scripts/, .github/workflows/                                CI license/provenanc
 
 ## License
 
-Apache-2.0 — see [`LICENSE`](LICENSE) and [`LICENSES/`](LICENSES/). The tree is
-[REUSE](https://reuse.software)-compliant (`reuse lint`).
+Apache-2.0. Copyright 2026 Contributors to acl-cxx, stated in [`NOTICE`](NOTICE).
+
+[`LICENSE`](LICENSE) holds the license text verbatim, because automated license
+detection matches that file by content rather than by what it claims; [`LICENSES/`](LICENSES/)
+holds the same text under its SPDX identifier, where the [REUSE](https://reuse.software)
+specification looks for it. Every file in the tree declares its own license with an SPDX
+tag, `REUSE.toml` records the copyright holder for files that cannot carry a header, and
+`reuse lint` verifies that nothing is unaccounted for.
