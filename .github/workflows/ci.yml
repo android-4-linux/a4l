@@ -6,6 +6,15 @@
 # honors and force-migrates to node24 with a deprecation warning on every job, so staying
 # on v4 bought a warning per job and nothing else. Both majors need runner 2.327.1+, which
 # the hosted images are well past; a self-hosted runner would have to be checked.
+#
+# `runs-on` names an image rather than ubuntu-latest, which began migrating to Ubuntu 26 on
+# 2026-10-19. The distinction matters because this build's toolchain IS whatever the image
+# ships -- today GCC 13.3.0 and fmt 9.1.0 from noble -- while meson.build asks for
+# `dependency('fmt')` with no version bound and builds at warning_level=2 with
+# werror=false. Floating the label would therefore have landed a two-major GCC jump and an
+# fmt major as a silent change in what CI compiles, and would have quietly given up the
+# zero-warning state, which was measured on GCC 13 and is not enforced. Moving this pin is
+# a deliberate commit with a run behind it.
 name: ci
 
 on:
@@ -20,7 +29,7 @@ permissions:
 jobs:
   gates:
     name: Clean-room & license gates (Gate G0)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Install REUSE
@@ -47,7 +56,7 @@ jobs:
   # it got what it asked for rather than trusting PATH.
   format:
     name: Format (clang-format at the pinned version)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Install clang-format at .clang-format-version
@@ -98,7 +107,7 @@ jobs:
 
   dco:
     name: DCO sign-off
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v7
@@ -123,7 +132,7 @@ jobs:
   # means the stub configuration compiles and its tests pass, nothing more.
   build:
     name: Build & test (Meson, stub presenter / no Skia)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A hung mirror once held Install toolchain open for 87 minutes with no output. The job
     # cap bounds the damage; the step cap and the per-attempt timeout below are what actually
     # turn a hang into a retry.
@@ -194,7 +203,7 @@ jobs:
   # Skia build from source, which is what the timeout allows for.
   present:
     name: Build & test (Meson, Skia + Vulkan + wcs present path)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
@@ -232,16 +241,24 @@ jobs:
             echo "  wcs     : $skia_ref" >&2
             echo "Both name the commit this prefix is built from, so they have to match." >&2
             exit 1; }
+          # The image goes in the key too. The prefix is a compiled artifact: one built on
+          # noble and restored onto a newer image would link against a different libstdc++,
+          # freetype and fontconfig, and the old key -- which carried only `runner.os`, so
+          # `Linux` -- had nothing in it to show that. Same failure as a branch name in the
+          # key, one layer down.
+          os_id=$(. /etc/os-release && echo "${ID}${VERSION_ID}")
+          test -n "$os_id" || { echo "/etc/os-release names no ID/VERSION_ID" >&2; exit 1; }
+          echo "os_id=$os_id" >> "$GITHUB_OUTPUT"
           echo "wcs_rev=$wcs_rev" >> "$GITHUB_OUTPUT"
           echo "skia_key=$skia_ref" >> "$GITHUB_OUTPUT"
-          echo "wcs $wcs_rev, skia $skia_ref"
+          echo "$os_id, wcs $wcs_rev, skia $skia_ref"
 
       - name: Restore the Skia prefix
         id: skia-cache
         uses: actions/cache/restore@v6
         with:
           path: ~/skia-prefix
-          key: skia-${{ runner.os }}-x86_64-${{ steps.pins.outputs.skia_key }}-${{ steps.pins.outputs.wcs_rev }}
+          key: skia-${{ steps.pins.outputs.os_id }}-x86_64-${{ steps.pins.outputs.skia_key }}-${{ steps.pins.outputs.wcs_rev }}
 
       - name: Free disk for the Skia build
         # Only on a miss, and only then because the checkout plus its synced third_party plus
