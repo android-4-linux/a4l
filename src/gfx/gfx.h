@@ -5,11 +5,12 @@
 #define ACL_GFX_GFX_H
 
 // The rasterization seam: android.graphics.Canvas draws into a gfx::Surface (an
-// ARGB_8888 buffer). This build has a self-contained software rasterizer (always
-// available, deterministic, headless-verifiable — the null-sink of gfx); a
-// pinned-Skia backend (ADR-4, hwui dropped) replaces the raster ops behind the
-// same Surface when vendored. Wayland presentation of a Surface (wcs bindings,
-// wl_surface/wp_presentation) is a separate seam (wm/), not built here.
+// ARGB_8888 buffer). This build has a self-contained software rasterizer
+// (always available, deterministic, headless-verifiable — the null-sink of
+// gfx); a pinned-Skia backend (ADR-4, hwui dropped) replaces the raster ops
+// behind the same Surface when vendored. Wayland presentation of a Surface (wcs
+// bindings, wl_surface/wp_presentation) is a separate seam (wm/), not built
+// here.
 
 #include <algorithm>
 #include <cstdint>
@@ -50,12 +51,18 @@ class Surface {
 const char* module_name() noexcept;
 
 #if ACL_HAVE_SKIA
-// The pinned-Skia raster backend (ADR-4 / A02.2), compiled only when a pinned Skia
-// prefix is present. Same ARGB_8888 Surface, real SkCanvas underneath — the seam
-// android.graphics Canvas/Bitmap natives re-target onto host Skia. See gfx_skia.cpp.
+// The pinned-Skia raster backend (ADR-4 / A02.2), compiled only when a pinned
+// Skia prefix is present. Same ARGB_8888 Surface, real SkCanvas underneath —
+// the seam android.graphics Canvas/Bitmap natives re-target onto host Skia. See
+// gfx_skia.cpp.
 bool skia_backend_available() noexcept;
-bool skia_render_rect(Surface& out, std::uint32_t bg_argb, int left, int top,
-                      int right, int bottom, std::uint32_t rect_argb);
+bool skia_render_rect(Surface& out,
+                      std::uint32_t bg_argb,
+                      int left,
+                      int top,
+                      int right,
+                      int bottom,
+                      std::uint32_t rect_argb);
 #endif
 
 }  // namespace acl::gfx

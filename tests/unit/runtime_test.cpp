@@ -10,7 +10,8 @@
 
 using namespace acl::runtime;
 
-TEST_CASE("backend name parsing round-trips and is case-insensitive", "[runtime]") {
+TEST_CASE("backend name parsing round-trips and is case-insensitive",
+          "[runtime]") {
   Backend b;
   REQUIRE(parse_backend("art", b));
   CHECK(b == Backend::Art);
@@ -26,8 +27,8 @@ TEST_CASE("backend name parsing round-trips and is case-insensitive", "[runtime]
 }
 
 TEST_CASE("ART backend availability tracks ACL_ART_HOME", "[runtime]") {
-  // Snapshot + restore the env so the test is order-independent (other suites may
-  // rely on ACL_ART_HOME being set).
+  // Snapshot + restore the env so the test is order-independent (other suites
+  // may rely on ACL_ART_HOME being set).
   const char* saved = std::getenv("ACL_ART_HOME");
   const std::string saved_str = saved != nullptr ? saved : std::string();
 
@@ -44,8 +45,8 @@ TEST_CASE("ART backend availability tracks ACL_ART_HOME", "[runtime]") {
 
 #if ACL_HAVE_JNI
   // With ACL_ART_HOME set (M2: host-ART embedding compiled in), create_vm
-  // constructs the backend. Starting it would dlopen libart — out of scope for a
-  // unit test — so a bogus path still constructs; only start() would fail.
+  // constructs the backend. Starting it would dlopen libart — out of scope for
+  // a unit test — so a bogus path still constructs; only start() would fail.
   ::setenv("ACL_ART_HOME", "/nonexistent/acl-art-home", 1);
   {
     Error err;
@@ -77,7 +78,8 @@ TEST_CASE("JVM backend availability tracks the build", "[runtime]") {
 #endif
 }
 
-TEST_CASE("Null backend drives the start/invoke/shutdown lifecycle", "[runtime]") {
+TEST_CASE("Null backend drives the start/invoke/shutdown lifecycle",
+          "[runtime]") {
   VmConfig cfg;
   cfg.boot_classpath = {"framework.jar"};
   cfg.classpath = {"/tmp/app/classes.dex"};

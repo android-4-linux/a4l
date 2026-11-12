@@ -14,9 +14,10 @@ namespace acl::runtime {
 // this is a no-op when no framework is vendored.
 void register_framework_natives(JNIEnv* env);
 
-// Register only the acl-supplied natives that the host libandroid_runtime does NOT provide (e.g.
-// android.hardware.HardwareBuffer, backed by a gbm dma-buf). register_framework_natives calls this;
-// the ART-native path (which uses libandroid_runtime for the rest) must call it too, as a supplement.
+// Register only the acl-supplied natives that the host libandroid_runtime does
+// NOT provide (e.g. android.hardware.HardwareBuffer, backed by a gbm dma-buf).
+// register_framework_natives calls this; the ART-native path (which uses
+// libandroid_runtime for the rest) must call it too, as a supplement.
 void register_acl_supplemental_natives(JNIEnv* env);
 
 }  // namespace acl::runtime

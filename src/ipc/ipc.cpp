@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: original acl design (docs/split-process-art.md). SOCK_SEQPACKET + SCM_RIGHTS fd
-// passing. Standard POSIX only (works under both glibc and bionic). No GPL-3.0 sources.
+// Provenance: original acl design (docs/split-process-art.md). SOCK_SEQPACKET +
+// SCM_RIGHTS fd passing. Standard POSIX only (works under both glibc and
+// bionic). No GPL-3.0 sources.
 #include "ipc/ipc.h"
 
 #include <sys/socket.h>
@@ -22,7 +23,9 @@ Channel& Channel::operator=(Channel&& o) noexcept {
   return *this;
 }
 
-Channel::~Channel() { close(); }
+Channel::~Channel() {
+  close();
+}
 
 void Channel::close() {
   if (fd_ >= 0) {
@@ -34,8 +37,12 @@ void Channel::close() {
 // Room for two fds of ancillary data.
 static constexpr int kMaxFds = 2;
 
-bool Channel::send(const Message& m, std::span<const std::byte> extra, int fd0, int fd1) {
-  if (fd_ < 0) return false;
+bool Channel::send(const Message& m,
+                   std::span<const std::byte> extra,
+                   int fd0,
+                   int fd1) {
+  if (fd_ < 0)
+    return false;
   assert(extra.size() == m.extra_len && "extra.size() must equal m.extra_len");
 
   // The header and the trailer go in one datagram via two iovecs.
@@ -51,8 +58,10 @@ bool Channel::send(const Message& m, std::span<const std::byte> extra, int fd0, 
 
   int fds[kMaxFds];
   int nfds = 0;
-  if (fd0 >= 0) fds[nfds++] = fd0;
-  if (fd1 >= 0) fds[nfds++] = fd1;
+  if (fd0 >= 0)
+    fds[nfds++] = fd0;
+  if (fd1 >= 0)
+    fds[nfds++] = fd1;
 
   alignas(cmsghdr) char cbuf[CMSG_SPACE(sizeof(int) * kMaxFds)];
   msghdr mh{};
@@ -78,12 +87,14 @@ bool Channel::send(const Message& m, std::span<const std::byte> extra, int fd0, 
 }
 
 bool Channel::recv(Received& out) {
-  if (fd_ < 0) return false;
+  if (fd_ < 0)
+    return false;
   out.extra.clear();
   out.fd0 = -1;
   out.fd1 = -1;
 
-  // SEQPACKET preserves message boundaries; size the buffer to header + a generous trailer.
+  // SEQPACKET preserves message boundaries; size the buffer to header + a
+  // generous trailer.
   static constexpr size_t kMaxExtra = 64 * 1024;
   std::vector<std::byte> buf(sizeof(Message) + kMaxExtra);
 
@@ -106,7 +117,8 @@ bool Channel::recv(Received& out) {
     errno = 0;
     return false;
   }
-  if (n < 0) return false;
+  if (n < 0)
+    return false;
   if (static_cast<size_t>(n) < sizeof(Message)) {  // truncated / bogus
     errno = EPROTO;
     return false;
@@ -115,14 +127,17 @@ bool Channel::recv(Received& out) {
   std::memcpy(&out.msg, buf.data(), sizeof(Message));
   size_t extra_have = static_cast<size_t>(n) - sizeof(Message);
   // Trust the smaller of what arrived vs what the header claims.
-  size_t extra_len = out.msg.extra_len < extra_have ? out.msg.extra_len : extra_have;
+  size_t extra_len =
+      out.msg.extra_len < extra_have ? out.msg.extra_len : extra_have;
   if (extra_len > 0)
-    out.extra.assign(buf.begin() + sizeof(Message), buf.begin() + sizeof(Message) + extra_len);
+    out.extra.assign(buf.begin() + sizeof(Message),
+                     buf.begin() + sizeof(Message) + extra_len);
 
   // Harvest any passed fds (up to kMaxFds).
   int recvd[kMaxFds];
   int nfds = 0;
-  for (cmsghdr* cm = CMSG_FIRSTHDR(&mh); cm != nullptr; cm = CMSG_NXTHDR(&mh, cm)) {
+  for (cmsghdr* cm = CMSG_FIRSTHDR(&mh); cm != nullptr;
+       cm = CMSG_NXTHDR(&mh, cm)) {
     if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS) {
       int count = (cm->cmsg_len - CMSG_LEN(0)) / sizeof(int);
       for (int i = 0; i < count && nfds < kMaxFds; ++i) {
@@ -132,8 +147,10 @@ bool Channel::recv(Received& out) {
       }
     }
   }
-  if (nfds > 0) out.fd0 = recvd[0];
-  if (nfds > 1) out.fd1 = recvd[1];
+  if (nfds > 0)
+    out.fd0 = recvd[0];
+  if (nfds > 1)
+    out.fd1 = recvd[1];
   return true;
 }
 

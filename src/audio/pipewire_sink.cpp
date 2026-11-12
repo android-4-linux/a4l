@@ -3,10 +3,10 @@
 // pw_stream_new_simple, spa_format_audio_raw_build; SPA audio format headers.
 // No GPL-3.0 sources.
 //
-// The PipeWire AudioTrack backend: an OUTPUT pw_stream fed from a FIFO. The app's
-// AudioTrack.write() pushes S16 PCM into the FIFO (write()); PipeWire pulls it in
-// the realtime on_process callback. Built only when libpipewire is present
-// (ACL_HAVE_PIPEWIRE); make_sink() selects it via ACL_AUDIO=pipewire.
+// The PipeWire AudioTrack backend: an OUTPUT pw_stream fed from a FIFO. The
+// app's AudioTrack.write() pushes S16 PCM into the FIFO (write()); PipeWire
+// pulls it in the realtime on_process callback. Built only when libpipewire is
+// present (ACL_HAVE_PIPEWIRE); make_sink() selects it via ACL_AUDIO=pipewire.
 
 #include <algorithm>
 #include <cstdint>
@@ -38,7 +38,8 @@ class PipeWireSink final : public Sink {
     inited_ = true;
 
     loop_ = pw_thread_loop_new("acl-audio", nullptr);
-    if (loop_ == nullptr) return false;
+    if (loop_ == nullptr)
+      return false;
 
     static const pw_stream_events events = [] {
       pw_stream_events e{};
@@ -64,7 +65,8 @@ class PipeWireSink final : public Sink {
     info.format = SPA_AUDIO_FORMAT_S16;
     info.rate = static_cast<std::uint32_t>(fmt.sample_rate);
     info.channels = static_cast<std::uint32_t>(fmt.channels);
-    const spa_pod* params[1] = {spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &info)};
+    const spa_pod* params[1] = {
+        spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &info)};
 
     const int rc = pw_stream_connect(
         stream_, PW_DIRECTION_OUTPUT, PW_ID_ANY,
@@ -73,14 +75,16 @@ class PipeWireSink final : public Sink {
                                      PW_STREAM_FLAG_RT_PROCESS),
         params, 1);
     pw_thread_loop_unlock(loop_);
-    if (rc < 0) return false;
+    if (rc < 0)
+      return false;
 
     pw_thread_loop_start(loop_);
 
-    // Wait — bounded — for the stream to actually reach the daemon. Without this a
-    // missing/unreachable daemon would leave the stream stuck CONNECTING while we
-    // stream PCM into a void (and drain() would then block). If it can't connect
-    // within the budget, report failure so the caller falls back to the null sink.
+    // Wait — bounded — for the stream to actually reach the daemon. Without
+    // this a missing/unreachable daemon would leave the stream stuck CONNECTING
+    // while we stream PCM into a void (and drain() would then block). If it
+    // can't connect within the budget, report failure so the caller falls back
+    // to the null sink.
     bool connected = false;
     for (int i = 0; i < 50; ++i) {  // ~500ms budget (10ms steps)
       pw_thread_loop_lock(loop_);
@@ -90,7 +94,8 @@ class PipeWireSink final : public Sink {
         connected = true;
         break;
       }
-      if (st == PW_STREAM_STATE_ERROR || st == PW_STREAM_STATE_UNCONNECTED) break;
+      if (st == PW_STREAM_STATE_ERROR || st == PW_STREAM_STATE_UNCONNECTED)
+        break;
       const timespec ts{0, 10 * 1000 * 1000};  // 10ms
       nanosleep(&ts, nullptr);
     }
@@ -104,25 +109,29 @@ class PipeWireSink final : public Sink {
   }
 
   int write(const std::int16_t* pcm, int n_samples) override {
-    if (n_samples <= 0 || stream_ == nullptr) return 0;
+    if (n_samples <= 0 || stream_ == nullptr)
+      return 0;
     {
       std::lock_guard<std::mutex> lk(mu_);
       fifo_.insert(fifo_.end(), pcm, pcm + n_samples);
     }
-    frames_ += static_cast<std::uint64_t>(n_samples) /
-               static_cast<std::uint64_t>(fmt_.channels > 0 ? fmt_.channels : 1);
+    frames_ +=
+        static_cast<std::uint64_t>(n_samples) /
+        static_cast<std::uint64_t>(fmt_.channels > 0 ? fmt_.channels : 1);
     return n_samples;
   }
 
   void drain() override {
-    // Best-effort: let the RT callback consume the FIFO before we tear down. Bounded
-    // so a stalled/underrunning stream can never hang the app — the FIFO holds ~1s
-    // of audio, so a few seconds is a generous cap.
-    if (stream_ == nullptr) return;
+    // Best-effort: let the RT callback consume the FIFO before we tear down.
+    // Bounded so a stalled/underrunning stream can never hang the app — the
+    // FIFO holds ~1s of audio, so a few seconds is a generous cap.
+    if (stream_ == nullptr)
+      return;
     for (int i = 0; i < 3; ++i) {  // <= 3s total (1s per wait)
       {
         std::lock_guard<std::mutex> lk(mu_);
-        if (fifo_.empty()) break;
+        if (fifo_.empty())
+          break;
       }
       pw_thread_loop_lock(loop_);
       pw_thread_loop_timed_wait(loop_, 1);  // woken by process; 1s cap per wait
@@ -131,29 +140,47 @@ class PipeWireSink final : public Sink {
   }
 
   void close() override {
-    if (closed_) return;  // idempotent: nativeRelease closes, then ~PipeWireSink
+    if (closed_)
+      return;  // idempotent: nativeRelease closes, then ~PipeWireSink
     closed_ = true;
-    if (loop_ != nullptr) pw_thread_loop_stop(loop_);
-    if (stream_ != nullptr) { pw_stream_destroy(stream_); stream_ = nullptr; }
-    if (loop_ != nullptr) { pw_thread_loop_destroy(loop_); loop_ = nullptr; }
-    if (inited_) { pw_deinit(); inited_ = false; }
+    if (loop_ != nullptr)
+      pw_thread_loop_stop(loop_);
+    if (stream_ != nullptr) {
+      pw_stream_destroy(stream_);
+      stream_ = nullptr;
+    }
+    if (loop_ != nullptr) {
+      pw_thread_loop_destroy(loop_);
+      loop_ = nullptr;
+    }
+    if (inited_) {
+      pw_deinit();
+      inited_ = false;
+    }
     log::i(kTag, "sink=pipewire close: {} frames written", frames_);
   }
 
   std::uint64_t frames_written() const override { return frames_; }
 
  private:
-  static void on_process(void* data) { static_cast<PipeWireSink*>(data)->process(); }
+  static void on_process(void* data) {
+    static_cast<PipeWireSink*>(data)->process();
+  }
 
   void process() {
     pw_buffer* b = pw_stream_dequeue_buffer(stream_);
-    if (b == nullptr) return;
+    if (b == nullptr)
+      return;
     spa_buffer* buf = b->buffer;
     auto* dst = static_cast<std::int16_t*>(buf->datas[0].data);
-    if (dst == nullptr) { pw_stream_queue_buffer(stream_, b); return; }
+    if (dst == nullptr) {
+      pw_stream_queue_buffer(stream_, b);
+      return;
+    }
 
     const int ch = fmt_.channels > 0 ? fmt_.channels : 1;
-    int max_samples = static_cast<int>(buf->datas[0].maxsize / sizeof(std::int16_t));
+    int max_samples =
+        static_cast<int>(buf->datas[0].maxsize / sizeof(std::int16_t));
     if (b->requested != 0) {
       max_samples = std::min(max_samples, static_cast<int>(b->requested) * ch);
     }
@@ -162,13 +189,16 @@ class PipeWireSink final : public Sink {
     {
       std::lock_guard<std::mutex> lk(mu_);
       n = std::min(max_samples, static_cast<int>(fifo_.size()));
-      for (int i = 0; i < n; ++i) dst[i] = fifo_.front(), fifo_.pop_front();
+      for (int i = 0; i < n; ++i)
+        dst[i] = fifo_.front(), fifo_.pop_front();
     }
-    for (int i = n; i < max_samples; ++i) dst[i] = 0;  // pad underrun with silence
+    for (int i = n; i < max_samples; ++i)
+      dst[i] = 0;  // pad underrun with silence
     const int filled = b->requested != 0 ? max_samples : n;
 
     buf->datas[0].chunk->offset = 0;
-    buf->datas[0].chunk->stride = static_cast<std::int32_t>(ch * sizeof(std::int16_t));
+    buf->datas[0].chunk->stride =
+        static_cast<std::int32_t>(ch * sizeof(std::int16_t));
     buf->datas[0].chunk->size =
         static_cast<std::uint32_t>(filled) * sizeof(std::int16_t);
     pw_stream_queue_buffer(stream_, b);

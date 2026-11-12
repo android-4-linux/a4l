@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: specs/dex.md (pending), JVM Specification ch.4 (class file). No GPL-3.0 sources.
+// Provenance: specs/dex.md (pending), JVM Specification ch.4 (class file). No
+// GPL-3.0 sources.
 
 #include "dex/classwriter.h"
 
@@ -36,7 +37,8 @@ void be32(std::vector<std::uint8_t>& v, std::uint32_t x) {
 
 std::uint16_t ClassWriter::add_entry(std::vector<std::uint8_t> cp_info,
                                      const std::string& key) {
-  if (auto it = interned_.find(key); it != interned_.end()) return it->second;
+  if (auto it = interned_.find(key); it != interned_.end())
+    return it->second;
   pool_.push_back(std::move(cp_info));
   const auto index = static_cast<std::uint16_t>(pool_.size());  // 1-based
   interned_.emplace(key, index);
@@ -83,28 +85,32 @@ std::uint16_t ClassWriter::float_const(std::uint32_t raw_bits) {
 
 std::uint16_t ClassWriter::double_const(std::uint64_t raw_bits) {
   const std::string key = "d:" + std::to_string(raw_bits);
-  if (auto it = interned_.find(key); it != interned_.end()) return it->second;
+  if (auto it = interned_.find(key); it != interned_.end())
+    return it->second;
   std::vector<std::uint8_t> e;
   e.push_back(kDouble);
   be32(e, static_cast<std::uint32_t>(raw_bits >> 32));
   be32(e, static_cast<std::uint32_t>(raw_bits & 0xffffffff));
   const auto index = static_cast<std::uint16_t>(pool_.size() + 1);
   pool_.push_back(std::move(e));
-  pool_.push_back({});  // CONSTANT_Double occupies two cp slots; second unusable
+  pool_.push_back(
+      {});  // CONSTANT_Double occupies two cp slots; second unusable
   interned_.emplace(key, index);
   return index;
 }
 
 std::uint16_t ClassWriter::long_const(std::int64_t v) {
   const std::string key = "L:" + std::to_string(v);
-  if (auto it = interned_.find(key); it != interned_.end()) return it->second;
+  if (auto it = interned_.find(key); it != interned_.end())
+    return it->second;
   std::vector<std::uint8_t> e;
   e.push_back(kLong);
   be32(e, static_cast<std::uint32_t>(static_cast<std::uint64_t>(v) >> 32));
   be32(e, static_cast<std::uint32_t>(v & 0xffffffff));
   const auto index = static_cast<std::uint16_t>(pool_.size() + 1);
   pool_.push_back(std::move(e));
-  pool_.push_back({});  // CONSTANT_Long occupies two cp slots; second is unusable
+  pool_.push_back(
+      {});  // CONSTANT_Long occupies two cp slots; second is unusable
   interned_.emplace(key, index);
   return index;
 }
@@ -121,7 +127,8 @@ std::uint16_t ClassWriter::name_and_type(std::string_view name,
                    "N:" + std::string(name) + ":" + std::string(desc));
 }
 
-std::uint16_t ClassWriter::methodref(std::string_view cls, std::string_view name,
+std::uint16_t ClassWriter::methodref(std::string_view cls,
+                                     std::string_view name,
                                      std::string_view desc) {
   const std::uint16_t c = class_ref(cls);
   const std::uint16_t nt = name_and_type(name, desc);
@@ -130,7 +137,8 @@ std::uint16_t ClassWriter::methodref(std::string_view cls, std::string_view name
   be16(e, c);
   be16(e, nt);
   return add_entry(std::move(e), "M:" + std::string(cls) + ":" +
-                                     std::string(name) + ":" + std::string(desc));
+                                     std::string(name) + ":" +
+                                     std::string(desc));
 }
 
 std::uint16_t ClassWriter::interface_methodref(std::string_view cls,
@@ -143,10 +151,12 @@ std::uint16_t ClassWriter::interface_methodref(std::string_view cls,
   be16(e, c);
   be16(e, nt);
   return add_entry(std::move(e), "I:" + std::string(cls) + ":" +
-                                     std::string(name) + ":" + std::string(desc));
+                                     std::string(name) + ":" +
+                                     std::string(desc));
 }
 
-std::uint16_t ClassWriter::fieldref(std::string_view cls, std::string_view name,
+std::uint16_t ClassWriter::fieldref(std::string_view cls,
+                                    std::string_view name,
                                     std::string_view desc) {
   const std::uint16_t c = class_ref(cls);
   const std::uint16_t nt = name_and_type(name, desc);
@@ -155,10 +165,12 @@ std::uint16_t ClassWriter::fieldref(std::string_view cls, std::string_view name,
   be16(e, c);
   be16(e, nt);
   return add_entry(std::move(e), "F:" + std::string(cls) + ":" +
-                                     std::string(name) + ":" + std::string(desc));
+                                     std::string(name) + ":" +
+                                     std::string(desc));
 }
 
-ClassWriter::ClassWriter(std::string this_internal, std::string super_internal) {
+ClassWriter::ClassWriter(std::string this_internal,
+                         std::string super_internal) {
   this_class_ = class_ref(this_internal);
   super_class_ = class_ref(super_internal);
   code_attr_name_ = utf8("Code");
@@ -168,13 +180,16 @@ void ClassWriter::add_interface(std::string_view internal_name) {
   interfaces_.push_back(class_ref(internal_name));
 }
 
-void ClassWriter::add_field(std::uint16_t access_flags, std::string_view name,
+void ClassWriter::add_field(std::uint16_t access_flags,
+                            std::string_view name,
                             std::string_view descriptor) {
   fields_.push_back({access_flags, utf8(name), utf8(descriptor)});
 }
 
-void ClassWriter::add_method(std::uint16_t access_flags, std::string_view name,
-                             std::string_view descriptor, std::uint16_t max_stack,
+void ClassWriter::add_method(std::uint16_t access_flags,
+                             std::string_view name,
+                             std::string_view descriptor,
+                             std::uint16_t max_stack,
                              std::uint16_t max_locals,
                              std::vector<std::uint8_t> code,
                              std::vector<ExceptionEntry> exceptions,
@@ -190,26 +205,32 @@ void ClassWriter::add_method(std::uint16_t access_flags, std::string_view name,
 void ClassWriter::add_abstract_method(std::uint16_t access_flags,
                                       std::string_view name,
                                       std::string_view descriptor) {
-  // No Code attribute: empty code + the ACC_ABSTRACT/ACC_NATIVE flag tells build().
-  methods_.push_back({access_flags, utf8(name), utf8(descriptor), 0, 0, {}, {}, {}});
+  // No Code attribute: empty code + the ACC_ABSTRACT/ACC_NATIVE flag tells
+  // build().
+  methods_.push_back(
+      {access_flags, utf8(name), utf8(descriptor), 0, 0, {}, {}, {}});
 }
 
 std::vector<std::uint8_t> ClassWriter::build() const {
   std::vector<std::uint8_t> out;
   be32(out, 0xCAFEBABE);
-  be16(out, 0);   // minor
+  be16(out, 0);  // minor
   // Major 51 (Java 7): the type-checking verifier is used, so branch/exception
   // methods carry a StackMapTable (computed by the translator).
   be16(out, 51);
 
   be16(out, static_cast<std::uint16_t>(pool_.size() + 1));  // cp count
-  for (const auto& e : pool_) out.insert(out.end(), e.begin(), e.end());
+  for (const auto& e : pool_)
+    out.insert(out.end(), e.begin(), e.end());
 
-  be16(out, access_flags_);  // ACC_PUBLIC|ACC_SUPER, or interface/annotation flags
+  be16(out,
+       access_flags_);  // ACC_PUBLIC|ACC_SUPER, or interface/annotation flags
   be16(out, this_class_);
   be16(out, super_class_);
-  be16(out, static_cast<std::uint16_t>(interfaces_.size()));  // interfaces_count
-  for (std::uint16_t iface : interfaces_) be16(out, iface);
+  be16(out,
+       static_cast<std::uint16_t>(interfaces_.size()));  // interfaces_count
+  for (std::uint16_t iface : interfaces_)
+    be16(out, iface);
 
   be16(out, static_cast<std::uint16_t>(fields_.size()));
   for (const Field& f : fields_) {
@@ -235,8 +256,10 @@ std::vector<std::uint8_t> ClassWriter::build() const {
     const bool has_smt = !m.stackmaptable.empty();
     const std::uint32_t smt_attr_size =
         has_smt ? static_cast<std::uint32_t>(6 + m.stackmaptable.size()) : 0;
-    const std::uint32_t code_attr_len = static_cast<std::uint32_t>(
-        12 + m.code.size() + m.exceptions.size() * 8) + smt_attr_size;
+    const std::uint32_t code_attr_len =
+        static_cast<std::uint32_t>(12 + m.code.size() +
+                                   m.exceptions.size() * 8) +
+        smt_attr_size;
     be32(out, code_attr_len);
     be16(out, m.max_stack);
     be16(out, m.max_locals);

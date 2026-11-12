@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: plan.md §A01.3 (Gate G1.5a), §5 (Tier A unit); Android SDK
-// PlaybackState/MediaSession docs; MPRIS2 spec (freedesktop, public). No GPL-3.0 sources.
+// PlaybackState/MediaSession docs; MPRIS2 spec (freedesktop, public). No
+// GPL-3.0 sources.
 //
-// Tier-A unit tests for the headless media bridge (hosts/media). Automotive-profile
-// only — the module is compiled out under the phone profile.
+// Tier-A unit tests for the headless media bridge (hosts/media).
+// Automotive-profile only — the module is compiled out under the phone profile.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -11,16 +12,18 @@
 
 using namespace acl::hosts::media;
 
-TEST_CASE("playback state mapping mirrors PlaybackState.STATE_*", "[media][automotive]") {
+TEST_CASE("playback state mapping mirrors PlaybackState.STATE_*",
+          "[media][automotive]") {
   CHECK(playback_from_state(0) == Playback::None);
   CHECK(playback_from_state(1) == Playback::Stopped);
   CHECK(playback_from_state(2) == Playback::Paused);
   CHECK(playback_from_state(3) == Playback::Playing);
-  CHECK(playback_from_state(-1) == Playback::None);   // absent state
-  CHECK(playback_from_state(99) == Playback::None);   // unknown value
+  CHECK(playback_from_state(-1) == Playback::None);  // absent state
+  CHECK(playback_from_state(99) == Playback::None);  // unknown value
 }
 
-TEST_CASE("publish bumps generation and snapshot reads it back", "[media][automotive]") {
+TEST_CASE("publish bumps generation and snapshot reads it back",
+          "[media][automotive]") {
   MediaBridge b;
   CHECK(b.generation() == 0);
 
@@ -42,11 +45,15 @@ TEST_CASE("publish bumps generation and snapshot reads it back", "[media][automo
   CHECK(b.snapshot().generation == 2);
 }
 
-TEST_CASE("mpris projection maps playback state to MPRIS PlaybackStatus", "[media][automotive]") {
+TEST_CASE("mpris projection maps playback state to MPRIS PlaybackStatus",
+          "[media][automotive]") {
   MediaBridge b;
 
   auto status_for = [&](Playback p) {
-    NowPlaying np; np.title = "T"; np.artist = "A"; np.state = p;
+    NowPlaying np;
+    np.title = "T";
+    np.artist = "A";
+    np.state = p;
     b.publish(np);
     return b.mpris();
   };
@@ -54,14 +61,16 @@ TEST_CASE("mpris projection maps playback state to MPRIS PlaybackStatus", "[medi
   CHECK(status_for(Playback::Playing).playback_status == "Playing");
   CHECK(status_for(Playback::Paused).playback_status == "Paused");
   CHECK(status_for(Playback::Stopped).playback_status == "Stopped");
-  CHECK(status_for(Playback::None).playback_status == "Stopped");  // None -> Stopped
+  CHECK(status_for(Playback::None).playback_status ==
+        "Stopped");  // None -> Stopped
 
   const MprisMetadata m = status_for(Playback::Playing);
-  CHECK(m.title == "T");    // xesam:title
-  CHECK(m.artist == "A");   // xesam:artist
+  CHECK(m.title == "T");   // xesam:title
+  CHECK(m.artist == "A");  // xesam:artist
 }
 
-TEST_CASE("transport command channel is an ordered FIFO", "[media][automotive]") {
+TEST_CASE("transport command channel is an ordered FIFO",
+          "[media][automotive]") {
   MediaBridge b;
   Command out;
   CHECK_FALSE(b.next_command(out));  // empty
@@ -72,14 +81,18 @@ TEST_CASE("transport command channel is an ordered FIFO", "[media][automotive]")
   b.post_command(Command::Pause);
   CHECK(b.pending_commands() == 3);
 
-  REQUIRE(b.next_command(out)); CHECK(out == Command::Play);
-  REQUIRE(b.next_command(out)); CHECK(out == Command::Next);
-  REQUIRE(b.next_command(out)); CHECK(out == Command::Pause);
+  REQUIRE(b.next_command(out));
+  CHECK(out == Command::Play);
+  REQUIRE(b.next_command(out));
+  CHECK(out == Command::Next);
+  REQUIRE(b.next_command(out));
+  CHECK(out == Command::Pause);
   CHECK_FALSE(b.next_command(out));  // drained
   CHECK(b.pending_commands() == 0);
 }
 
-TEST_CASE("commands map to names and MediaSession.Callback methods", "[media][automotive]") {
+TEST_CASE("commands map to names and MediaSession.Callback methods",
+          "[media][automotive]") {
   CHECK(std::string(command_name(Command::Play)) == "Play");
   CHECK(std::string(command_name(Command::Previous)) == "Previous");
 
@@ -104,7 +117,8 @@ class FakeRoute : public AudioRoute {
 };
 }  // namespace
 
-TEST_CASE("audio route is driven with the current now-playing", "[media][automotive]") {
+TEST_CASE("audio route is driven with the current now-playing",
+          "[media][automotive]") {
   MediaBridge b;
   CHECK(b.route_now_playing() == 0);  // no route installed -> nothing played
 

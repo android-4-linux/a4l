@@ -21,7 +21,8 @@ struct Record {
 class CaptureSink final : public acl::log::Sink {
  public:
   std::vector<Record> records;
-  void write(acl::log::Level level, std::string_view tag,
+  void write(acl::log::Level level,
+             std::string_view tag,
              std::string_view message) noexcept override {
     records.push_back({level, std::string(tag), std::string(message)});
   }
@@ -63,7 +64,8 @@ TEST_CASE("log dispatches formatted records to the active sink", "[log]") {
   CHECK(cap->records[1].message == "boom");
 }
 
-TEST_CASE("log drops records below the minimum level before formatting", "[log]") {
+TEST_CASE("log drops records below the minimum level before formatting",
+          "[log]") {
   auto cap = std::make_shared<CaptureSink>();
   SinkGuard guard(cap);
   acl::log::set_min_level(Level::Warn);

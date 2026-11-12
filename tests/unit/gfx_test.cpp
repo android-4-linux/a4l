@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: original test; plan.md §5 (Tier A), ADR-4 (pinned Skia backend). No GPL-3.0 sources.
+// Provenance: original test; plan.md §5 (Tier A), ADR-4 (pinned Skia backend).
+// No GPL-3.0 sources.
 //
-// gfx/ rasterizer tests. The software rasterizer is always exercised; when the build
-// has the pinned Skia backend (ACL_HAVE_SKIA), the Skia raster path is asserted to be
-// bit-identical to the software path for the ops both support — the guarantee that
-// lets android.graphics Canvas/Bitmap natives swap onto host Skia without changing
-// what wm/ presents.
+// gfx/ rasterizer tests. The software rasterizer is always exercised; when the
+// build has the pinned Skia backend (ACL_HAVE_SKIA), the Skia raster path is
+// asserted to be bit-identical to the software path for the ops both support —
+// the guarantee that lets android.graphics Canvas/Bitmap natives swap onto host
+// Skia without changing what wm/ presents.
 
 #include "gfx/gfx.h"
 #include "gfx/gfx_vk.h"
@@ -62,11 +63,13 @@ TEST_CASE("Skia raster output matches the software rasterizer", "[gfx][skia]") {
 #endif  // ACL_HAVE_SKIA
 
 #if ACL_HAVE_VULKAN
-// P2.4 / V1: the Ganesh Vulkan render target draws through a real SkCanvas on the GPU
-// and reads the pixels back. AA-off solid fills must match the software rasterizer
-// exactly. SKIPs cleanly (SUCCEED with a note) where no Vulkan device is present — the
-// same contract the host-ART tests use, so CI without a GPU still passes.
-TEST_CASE("Ganesh Vulkan render target matches the software rasterizer", "[gfx][vulkan]") {
+// P2.4 / V1: the Ganesh Vulkan render target draws through a real SkCanvas on
+// the GPU and reads the pixels back. AA-off solid fills must match the software
+// rasterizer exactly. SKIPs cleanly (SUCCEED with a note) where no Vulkan
+// device is present — the same contract the host-ART tests use, so CI without a
+// GPU still passes.
+TEST_CASE("Ganesh Vulkan render target matches the software rasterizer",
+          "[gfx][vulkan]") {
   const int w = 16, h = 10;
   const std::uint32_t bg = 0xFF204060;
   const std::uint32_t fg = 0xFFCC8844;
@@ -97,12 +100,13 @@ TEST_CASE("Ganesh Vulkan render target matches the software rasterizer", "[gfx][
   }
 }
 
-// P2.4 / V2: the render target hands a rendered frame over as a Linux dma-buf — the
-// handle a Wayland compositor imports via zwp_linux_dmabuf_v1. Headless verification:
-// the exported plane layout is sane, and (where the export memory is host-visible) the
-// mmap'd dma-buf holds exactly the software-rasterizer pixels. SKIPs cleanly when no
-// device / no dma-buf export.
-TEST_CASE("Ganesh Vulkan frame exports as a valid linear dma-buf", "[gfx][vulkan][dmabuf]") {
+// P2.4 / V2: the render target hands a rendered frame over as a Linux dma-buf —
+// the handle a Wayland compositor imports via zwp_linux_dmabuf_v1. Headless
+// verification: the exported plane layout is sane, and (where the export memory
+// is host-visible) the mmap'd dma-buf holds exactly the software-rasterizer
+// pixels. SKIPs cleanly when no device / no dma-buf export.
+TEST_CASE("Ganesh Vulkan frame exports as a valid linear dma-buf",
+          "[gfx][vulkan][dmabuf]") {
   const int w = 16, h = 10;
   const std::uint32_t bg = 0xFF204060;
   const std::uint32_t fg = 0xFFCC8844;
@@ -117,7 +121,8 @@ TEST_CASE("Ganesh Vulkan frame exports as a valid linear dma-buf", "[gfx][vulkan
     return;
   }
   if (!vk->dmabuf_export_available()) {
-    WARN("device lacks dma-buf export extensions (skipping): " << vk->device_name());
+    WARN("device lacks dma-buf export extensions (skipping): "
+         << vk->device_name());
     SUCCEED();
     return;
   }
@@ -136,11 +141,13 @@ TEST_CASE("Ganesh Vulkan frame exports as a valid linear dma-buf", "[gfx][vulkan
   CHECK(frame.height == static_cast<std::uint32_t>(h));
   CHECK(frame.plane_count == 1u);
   CHECK(frame.stride() >= static_cast<std::uint32_t>(w) * 4u);
-  CHECK(frame.modifier == 0u);  // DRM_FORMAT_MOD_LINEAR == 0 (no libdrm header in tests)
+  CHECK(frame.modifier ==
+        0u);  // DRM_FORMAT_MOD_LINEAR == 0 (no libdrm header in tests)
   CHECK_FALSE(frame.modifier_tiled);
   CHECK(frame.mem_size >= static_cast<std::uint64_t>(frame.stride()) * h);
 
-  // Where the export memory is host-visible, the dma-buf must hold the rendered scene.
+  // Where the export memory is host-visible, the dma-buf must hold the rendered
+  // scene.
   if (frame.host_mapped) {
     Surface ref(w, h);
     ref.draw_color(bg);
@@ -155,19 +162,27 @@ TEST_CASE("Ganesh Vulkan frame exports as a valid linear dma-buf", "[gfx][vulkan
       }
     }
   } else {
-    WARN("dma-buf memory not host-visible; layout checked, pixels not mmap-verified");
+    WARN(
+        "dma-buf memory not host-visible; layout checked, pixels not "
+        "mmap-verified");
   }
 }
 
-// P2.4 / S3b: import CPU pixels (a real android.graphics Bitmap, here stood in for by the
-// software rasterizer) into the linear dma-buf, ready to present. Verifies the imported
-// dma-buf holds exactly the source pixels. SKIPs without a device / dma-buf export.
-TEST_CASE("CPU pixels import into the linear dma-buf (S3b)", "[gfx][vulkan][dmabuf][import]") {
+// P2.4 / S3b: import CPU pixels (a real android.graphics Bitmap, here stood in
+// for by the software rasterizer) into the linear dma-buf, ready to present.
+// Verifies the imported dma-buf holds exactly the source pixels. SKIPs without
+// a device / dma-buf export.
+TEST_CASE("CPU pixels import into the linear dma-buf (S3b)",
+          "[gfx][vulkan][dmabuf][import]") {
   const int w = 16, h = 10;
   std::string err;
   std::unique_ptr<acl::gfx::VkRenderTarget> vk =
       acl::gfx::VkRenderTarget::Create(w, h, &err);
-  if (!vk) { WARN("no Vulkan render target: " + err); SUCCEED(); return; }
+  if (!vk) {
+    WARN("no Vulkan render target: " + err);
+    SUCCEED();
+    return;
+  }
   if (!vk->dmabuf_export_available()) {
     WARN("no dma-buf export (skipping import): " << vk->device_name());
     SUCCEED();
@@ -198,12 +213,14 @@ TEST_CASE("CPU pixels import into the linear dma-buf (S3b)", "[gfx][vulkan][dmab
     }
 }
 
-// P2.4 / V2b: the modifier-tiled DIRECT path (zero-copy) — Skia renders straight into
-// a modifier-tiled, dma-buf-exported VkImage. Headless, we stand in for the compositor
-// by offering the GPU's own render+sampleable modifiers as the "advertised" set (a real
-// compositor's set is intersected the same way). Verifies a non-linear modifier is
-// chosen, the export is valid, and the Skia-detiled pixels match the software raster.
-TEST_CASE("Ganesh Vulkan modifier-tiled direct dma-buf path", "[gfx][vulkan][dmabuf][modifier]") {
+// P2.4 / V2b: the modifier-tiled DIRECT path (zero-copy) — Skia renders
+// straight into a modifier-tiled, dma-buf-exported VkImage. Headless, we stand
+// in for the compositor by offering the GPU's own render+sampleable modifiers
+// as the "advertised" set (a real compositor's set is intersected the same
+// way). Verifies a non-linear modifier is chosen, the export is valid, and the
+// Skia-detiled pixels match the software raster.
+TEST_CASE("Ganesh Vulkan modifier-tiled direct dma-buf path",
+          "[gfx][vulkan][dmabuf][modifier]") {
   const int w = 16, h = 10;
   const std::uint32_t bg = 0xFF204060;
   const std::uint32_t fg = 0xFFCC8844;
@@ -212,15 +229,21 @@ TEST_CASE("Ganesh Vulkan modifier-tiled direct dma-buf path", "[gfx][vulkan][dma
   std::string err;
   std::unique_ptr<acl::gfx::VkRenderTarget> vk =
       acl::gfx::VkRenderTarget::Create(w, h, &err);
-  if (!vk) { WARN("no Vulkan render target: " + err); SUCCEED(); return; }
+  if (!vk) {
+    WARN("no Vulkan render target: " + err);
+    SUCCEED();
+    return;
+  }
   if (!vk->modifier_tiled_available()) {
-    WARN("device lacks VK_EXT_image_drm_format_modifier (skipping): " << vk->device_name());
+    WARN("device lacks VK_EXT_image_drm_format_modifier (skipping): "
+         << vk->device_name());
     SUCCEED();
     return;
   }
 
-  // Stand-in for compositor feedback: every modifier the GPU can render+sample (tiled
-  // preferred over LINEAR). A real presenter passes the compositor's advertised set.
+  // Stand-in for compositor feedback: every modifier the GPU can render+sample
+  // (tiled preferred over LINEAR). A real presenter passes the compositor's
+  // advertised set.
   std::vector<std::uint64_t> advertised = vk->all_renderable_modifiers();
   if (advertised.empty()) {
     WARN("GPU advertises no render+sampleable modifiers (skipping)");
@@ -229,7 +252,8 @@ TEST_CASE("Ganesh Vulkan modifier-tiled direct dma-buf path", "[gfx][vulkan][dma
   }
 
   acl::gfx::DmabufFrame frame;
-  if (!vk->render_to_modifier_dmabuf(advertised, bg, l, t, r, b, fg, &frame, &err)) {
+  if (!vk->render_to_modifier_dmabuf(advertised, bg, l, t, r, b, fg, &frame,
+                                     &err)) {
     WARN("no usable modifier / direct path unavailable (skipping): " + err);
     SUCCEED();
     return;
@@ -242,8 +266,9 @@ TEST_CASE("Ganesh Vulkan modifier-tiled direct dma-buf path", "[gfx][vulkan][dma
   CHECK(frame.width == static_cast<std::uint32_t>(w));
   CHECK(frame.stride() >= static_cast<std::uint32_t>(w) * 4u);
 
-  // The pixels: Skia detiles the wrapped tiled surface on readback, so this verifies
-  // the direct render landed correctly even though the memory isn't CPU-linear.
+  // The pixels: Skia detiles the wrapped tiled surface on readback, so this
+  // verifies the direct render landed correctly even though the memory isn't
+  // CPU-linear.
   Surface ref(w, h);
   ref.draw_color(bg);
   ref.fill_rect(l, t, r, b, fg);

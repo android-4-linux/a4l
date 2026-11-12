@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: specs/dex.md (pending), public Dalvik .dex format spec. No GPL-3.0 sources.
+// Provenance: specs/dex.md (pending), public Dalvik .dex format spec. No
+// GPL-3.0 sources.
 
 #include "dex/dexfile.h"
 
@@ -12,7 +13,8 @@ namespace {
 constexpr std::uint32_t kNoIndex = 0xffffffffu;
 
 std::uint16_t rd16(const std::uint8_t* p) noexcept {
-  return static_cast<std::uint16_t>(p[0]) | static_cast<std::uint16_t>(p[1]) << 8;
+  return static_cast<std::uint16_t>(p[0]) | static_cast<std::uint16_t>(p[1])
+                                                << 8;
 }
 std::uint32_t rd32(const std::uint8_t* p) noexcept {
   return static_cast<std::uint32_t>(p[0]) |
@@ -24,7 +26,8 @@ std::uint32_t rd32(const std::uint8_t* p) noexcept {
 // Cursor over the dex buffer with bounds-checked reads.
 class Reader {
  public:
-  Reader(const std::uint8_t* base, std::size_t size) : base_(base), size_(size) {}
+  Reader(const std::uint8_t* base, std::size_t size)
+      : base_(base), size_(size) {}
 
   bool ok() const noexcept { return ok_; }
   const std::string& error() const noexcept { return error_; }
@@ -34,11 +37,13 @@ class Reader {
   }
 
   std::uint32_t u32(std::uint64_t off) {
-    if (!require(off, 4)) return 0;
+    if (!require(off, 4))
+      return 0;
     return rd32(base_ + off);
   }
   std::uint16_t u16(std::uint64_t off) {
-    if (!require(off, 2)) return 0;
+    if (!require(off, 2))
+      return 0;
     return rd16(base_ + off);
   }
 
@@ -47,10 +52,12 @@ class Reader {
     std::uint32_t result = 0;
     int shift = 0;
     for (int i = 0; i < 5; ++i) {
-      if (!require(off, 1)) return 0;
+      if (!require(off, 1))
+        return 0;
       const std::uint8_t b = base_[off++];
       result |= static_cast<std::uint32_t>(b & 0x7f) << shift;
-      if ((b & 0x80) == 0) return result;
+      if ((b & 0x80) == 0)
+        return result;
       shift += 7;
     }
     fail("uleb128 too long");
@@ -62,13 +69,16 @@ class Reader {
     int shift = 0;
     std::uint8_t b = 0;
     for (int i = 0; i < 5; ++i) {
-      if (!require(off, 1)) return 0;
+      if (!require(off, 1))
+        return 0;
       b = base_[off++];
       result |= static_cast<std::int32_t>(b & 0x7f) << shift;
       shift += 7;
-      if ((b & 0x80) == 0) break;
+      if ((b & 0x80) == 0)
+        break;
     }
-    if (shift < 32 && (b & 0x40)) result |= -(1 << shift);  // sign-extend
+    if (shift < 32 && (b & 0x40))
+      result |= -(1 << shift);  // sign-extend
     return result;
   }
 
@@ -78,7 +88,8 @@ class Reader {
     std::string out;
     while (require(off, 1)) {
       const std::uint8_t b = base_[off++];
-      if (b == 0) break;
+      if (b == 0)
+        break;
       out.push_back(static_cast<char>(b));  // ASCII/MUTF-8 passthrough
     }
     return out;
@@ -113,10 +124,14 @@ class Reader {
 
 const char* dex_status_name(DexStatus status) noexcept {
   switch (status) {
-    case DexStatus::Ok:          return "ok";
-    case DexStatus::BadFormat:   return "bad-format";
-    case DexStatus::Truncated:   return "truncated";
-    case DexStatus::Unsupported: return "unsupported";
+    case DexStatus::Ok:
+      return "ok";
+    case DexStatus::BadFormat:
+      return "bad-format";
+    case DexStatus::Truncated:
+      return "truncated";
+    case DexStatus::Unsupported:
+      return "unsupported";
   }
   return "?";
 }
@@ -129,27 +144,50 @@ std::string descriptor_to_java(std::string_view d) {
   }
   std::string base;
   if (!d.empty() && d.front() == 'L') {
-    base = std::string(d.substr(1, d.size() >= 2 ? d.size() - 2 : 0));  // strip L..;
+    base = std::string(
+        d.substr(1, d.size() >= 2 ? d.size() - 2 : 0));  // strip L..;
     for (char& c : base) {
-      if (c == '/') c = '.';
+      if (c == '/')
+        c = '.';
     }
   } else if (d.size() == 1) {
     switch (d.front()) {
-      case 'V': base = "void"; break;
-      case 'Z': base = "boolean"; break;
-      case 'B': base = "byte"; break;
-      case 'S': base = "short"; break;
-      case 'C': base = "char"; break;
-      case 'I': base = "int"; break;
-      case 'J': base = "long"; break;
-      case 'F': base = "float"; break;
-      case 'D': base = "double"; break;
-      default:  base = std::string(d); break;
+      case 'V':
+        base = "void";
+        break;
+      case 'Z':
+        base = "boolean";
+        break;
+      case 'B':
+        base = "byte";
+        break;
+      case 'S':
+        base = "short";
+        break;
+      case 'C':
+        base = "char";
+        break;
+      case 'I':
+        base = "int";
+        break;
+      case 'J':
+        base = "long";
+        break;
+      case 'F':
+        base = "float";
+        break;
+      case 'D':
+        base = "double";
+        break;
+      default:
+        base = std::string(d);
+        break;
     }
   } else {
     base = std::string(d);
   }
-  for (int i = 0; i < dims; ++i) base += "[]";
+  for (int i = 0; i < dims; ++i)
+    base += "[]";
   return base;
 }
 
@@ -164,21 +202,33 @@ struct Tables {
       field_ids_size;
 
   std::string str(std::uint32_t idx) {
-    if (idx >= string_ids_size) { r.fail("string index out of range"); return {}; }
+    if (idx >= string_ids_size) {
+      r.fail("string index out of range");
+      return {};
+    }
     return r.string_data(r.u32(string_ids_off + idx * 4));
   }
   std::string type_desc(std::uint32_t idx) {
-    if (idx >= type_ids_size) { r.fail("type index out of range"); return {}; }
+    if (idx >= type_ids_size) {
+      r.fail("type index out of range");
+      return {};
+    }
     return str(r.u32(type_ids_off + idx * 4));
   }
   // Fill a method's name/return/params from a method_id index.
   void method(std::uint32_t idx, DexMethod& out) {
-    if (idx >= method_ids_size) { r.fail("method index out of range"); return; }
+    if (idx >= method_ids_size) {
+      r.fail("method index out of range");
+      return;
+    }
     const std::uint64_t base = method_ids_off + idx * 8;
     const std::uint16_t proto_idx = r.u16(base + 2);
     const std::uint32_t name_idx = r.u32(base + 4);
     out.name = str(name_idx);
-    if (proto_idx >= proto_ids_size) { r.fail("proto index out of range"); return; }
+    if (proto_idx >= proto_ids_size) {
+      r.fail("proto index out of range");
+      return;
+    }
     const std::uint64_t p = proto_ids_off + proto_idx * 12;
     out.return_descriptor = type_desc(r.u32(p + 4));
     out.return_type = descriptor_to_java(out.return_descriptor);
@@ -193,9 +243,13 @@ struct Tables {
     }
   }
 
-  // Fill a field's name/type from a field_id index (access comes from class_data).
+  // Fill a field's name/type from a field_id index (access comes from
+  // class_data).
   void field(std::uint32_t idx, DexField& out) {
-    if (idx >= field_ids_size) { r.fail("field index out of range"); return; }
+    if (idx >= field_ids_size) {
+      r.fail("field index out of range");
+      return;
+    }
     const std::uint64_t base = field_ids_off + idx * 8;
     out.type_descriptor = type_desc(r.u16(base + 2));
     out.name = str(r.u32(base + 4));
@@ -219,12 +273,17 @@ void parse_code_item(Reader& r, std::uint64_t off, DexCode& out) {
     out.insns.push_back(r.u16(insns_off + k * 2));
   }
 
-  if (tries_size == 0) return;
+  if (tries_size == 0)
+    return;
 
-  // try_item[] follows the insns, 4-byte aligned (a 2-byte pad if insns_size odd).
-  std::uint64_t tries_off = insns_off + static_cast<std::uint64_t>(insns_size) * 2;
-  if (insns_size & 1) tries_off += 2;
-  const std::uint64_t handlers_off = tries_off + static_cast<std::uint64_t>(tries_size) * 8;
+  // try_item[] follows the insns, 4-byte aligned (a 2-byte pad if insns_size
+  // odd).
+  std::uint64_t tries_off =
+      insns_off + static_cast<std::uint64_t>(insns_size) * 2;
+  if (insns_size & 1)
+    tries_off += 2;
+  const std::uint64_t handlers_off =
+      tries_off + static_cast<std::uint64_t>(tries_size) * 8;
 
   for (std::uint16_t i = 0; i < tries_size; ++i) {
     const std::uint64_t ti = tries_off + i * 8;
@@ -281,7 +340,7 @@ void parse_class_data(Reader& r, Tables& t, std::uint64_t off, DexClass& cls) {
   auto read_methods = [&](std::uint32_t n, std::vector<DexMethod>& into) {
     std::uint32_t method_idx = 0;
     for (std::uint32_t i = 0; i < n && r.ok(); ++i) {
-      method_idx += r.uleb(off);            // cumulative diff
+      method_idx += r.uleb(off);  // cumulative diff
       const std::uint32_t access = r.uleb(off);
       const std::uint32_t code_off = r.uleb(off);
       DexMethod m;
@@ -303,13 +362,15 @@ void parse_class_data(Reader& r, Tables& t, std::uint64_t off, DexClass& cls) {
 
 std::string DexMethod::jvm_descriptor() const {
   std::string d = "(";
-  for (const std::string& p : param_descriptors) d += p;
+  for (const std::string& p : param_descriptors)
+    d += p;
   d += ")";
   d += return_descriptor;
   return d;
 }
 
-std::optional<DexFile> DexFile::parse(const std::uint8_t* data, std::size_t size,
+std::optional<DexFile> DexFile::parse(const std::uint8_t* data,
+                                      std::size_t size,
                                       DexError& out_error) {
   if (size < 112 || std::memcmp(data, "dex\n", 4) != 0 || data[7] != 0) {
     out_error = {DexStatus::BadFormat, "not a dex file (bad magic)"};
@@ -321,16 +382,21 @@ std::optional<DexFile> DexFile::parse(const std::uint8_t* data, std::size_t size
   Reader r(dex.data_.data(), dex.data_.size());
 
   if (r.u32(0x28) != 0x12345678u) {
-    out_error = {DexStatus::Unsupported, "unexpected endian tag (big-endian dex?)"};
+    out_error = {DexStatus::Unsupported,
+                 "unexpected endian tag (big-endian dex?)"};
     return std::nullopt;
   }
 
   Tables t{r,
-           /*string_ids_off*/ r.u32(0x3c), /*type_ids_off*/ r.u32(0x44),
-           /*proto_ids_off*/ r.u32(0x4c),  /*method_ids_off*/ r.u32(0x5c),
+           /*string_ids_off*/ r.u32(0x3c),
+           /*type_ids_off*/ r.u32(0x44),
+           /*proto_ids_off*/ r.u32(0x4c),
+           /*method_ids_off*/ r.u32(0x5c),
            /*field_ids_off*/ r.u32(0x54),
-           /*string_ids_size*/ r.u32(0x38), /*type_ids_size*/ r.u32(0x40),
-           /*proto_ids_size*/ r.u32(0x48),  /*method_ids_size*/ r.u32(0x58),
+           /*string_ids_size*/ r.u32(0x38),
+           /*type_ids_size*/ r.u32(0x40),
+           /*proto_ids_size*/ r.u32(0x48),
+           /*method_ids_size*/ r.u32(0x58),
            /*field_ids_size*/ r.u32(0x50)};
 
   // Resolve the string and type tables for const-string / new-instance.

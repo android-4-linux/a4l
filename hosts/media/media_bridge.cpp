@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: plan.md §A01.2 (media-app bridge), §A01.3 (Gate G1.5a); Android SDK
-// MediaSession/PlaybackState docs; MPRIS2 org.mpris.MediaPlayer2.Player spec
-// (freedesktop, public). No GPL-3.0 sources.
+// Provenance: plan.md §A01.2 (media-app bridge), §A01.3 (Gate G1.5a); Android
+// SDK MediaSession/PlaybackState docs; MPRIS2 org.mpris.MediaPlayer2.Player
+// spec (freedesktop, public). No GPL-3.0 sources.
 //
-// The headless media-app bridge: publish/snapshot of the now-playing state (with a
-// generation counter standing in for the ihs_shared seqlock) and a FIFO transport
-// command channel (standing in for the SPSC ring). All state is mutex-guarded —
-// single-process is the current model; the lock-free shared-memory form is a later
-// swap behind the same interface.
+// The headless media-app bridge: publish/snapshot of the now-playing state
+// (with a generation counter standing in for the ihs_shared seqlock) and a FIFO
+// transport command channel (standing in for the SPSC ring). All state is
+// mutex-guarded — single-process is the current model; the lock-free
+// shared-memory form is a later swap behind the same interface.
 
 #include "hosts/media/media_bridge.h"
 
@@ -15,42 +15,61 @@ namespace acl::hosts::media {
 
 Playback playback_from_state(int state) noexcept {
   switch (state) {
-    case 1: return Playback::Stopped;
-    case 2: return Playback::Paused;
-    case 3: return Playback::Playing;
-    default: return Playback::None;  // STATE_NONE and any unknown value
+    case 1:
+      return Playback::Stopped;
+    case 2:
+      return Playback::Paused;
+    case 3:
+      return Playback::Playing;
+    default:
+      return Playback::None;  // STATE_NONE and any unknown value
   }
 }
 
 const char* playback_name(Playback p) noexcept {
   switch (p) {
-    case Playback::Playing: return "Playing";
-    case Playback::Paused: return "Paused";
-    case Playback::Stopped: return "Stopped";
-    case Playback::None: return "None";
+    case Playback::Playing:
+      return "Playing";
+    case Playback::Paused:
+      return "Paused";
+    case Playback::Stopped:
+      return "Stopped";
+    case Playback::None:
+      return "None";
   }
   return "None";
 }
 
 const char* command_name(Command c) noexcept {
   switch (c) {
-    case Command::Play: return "Play";
-    case Command::Pause: return "Pause";
-    case Command::Stop: return "Stop";
-    case Command::Next: return "Next";
-    case Command::Previous: return "Previous";
+    case Command::Play:
+      return "Play";
+    case Command::Pause:
+      return "Pause";
+    case Command::Stop:
+      return "Stop";
+    case Command::Next:
+      return "Next";
+    case Command::Previous:
+      return "Previous";
   }
   return "?";
 }
 
-// The android.media.session.MediaSession.Callback method each command dispatches to.
+// The android.media.session.MediaSession.Callback method each command
+// dispatches to.
 const char* command_callback(Command c) noexcept {
   switch (c) {
-    case Command::Play: return "onPlay";
-    case Command::Pause: return "onPause";
-    case Command::Stop: return "onStop";
-    case Command::Next: return "onSkipToNext";
-    case Command::Previous: return "onSkipToPrevious";
+    case Command::Play:
+      return "onPlay";
+    case Command::Pause:
+      return "onPause";
+    case Command::Stop:
+      return "onStop";
+    case Command::Next:
+      return "onSkipToNext";
+    case Command::Previous:
+      return "onSkipToPrevious";
   }
   return "onStop";
 }
@@ -74,7 +93,8 @@ std::uint64_t MediaBridge::generation() const {
 MprisMetadata MediaBridge::mpris() const {
   std::lock_guard<std::mutex> lk(mu_);
   MprisMetadata m;
-  // MPRIS PlaybackStatus is one of Playing/Paused/Stopped; None maps to Stopped.
+  // MPRIS PlaybackStatus is one of Playing/Paused/Stopped; None maps to
+  // Stopped.
   m.playback_status = now_.state == Playback::Playing  ? "Playing"
                       : now_.state == Playback::Paused ? "Paused"
                                                        : "Stopped";
@@ -96,11 +116,13 @@ std::uint64_t MediaBridge::route_now_playing() {
     route = audio_;
     now = now_;
   }
-  // Call the route outside the lock — play() may block for the playback duration.
+  // Call the route outside the lock — play() may block for the playback
+  // duration.
   return route != nullptr ? route->play(now) : 0;
 }
 
-void MediaBridge::publish_browse(std::string root_id, std::vector<std::string> items) {
+void MediaBridge::publish_browse(std::string root_id,
+                                 std::vector<std::string> items) {
   std::lock_guard<std::mutex> lk(mu_);
   browse_root_ = std::move(root_id);
   browse_items_ = std::move(items);
@@ -123,7 +145,8 @@ void MediaBridge::post_command(Command c) {
 
 bool MediaBridge::next_command(Command& out) {
   std::lock_guard<std::mutex> lk(mu_);
-  if (commands_.empty()) return false;
+  if (commands_.empty())
+    return false;
   out = commands_.front();
   commands_.pop_front();
   return true;
@@ -139,6 +162,8 @@ MediaBridge& MediaBridge::instance() {
   return bridge;
 }
 
-const char* module_name() noexcept { return "hosts/media"; }
+const char* module_name() noexcept {
+  return "hosts/media";
+}
 
 }  // namespace acl::hosts::media

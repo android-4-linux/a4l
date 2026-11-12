@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: Android android.net.ConnectivityManager/NetworkCapabilities public
-// surface (AOSP android.jar stubs, Apache-2.0); host mapping from freedesktop
-// systemd-networkd (org.freedesktop.network1), NetworkManager, and net.connman
-// D-Bus API docs; sdbus-cpp usage pattern after jwinarske/sdbus-cpp-examples
-// (Apache-2.0). No GPL-3.0 sources.
+// Provenance: Android android.net.ConnectivityManager/NetworkCapabilities
+// public surface (AOSP android.jar stubs, Apache-2.0); host mapping from
+// freedesktop systemd-networkd (org.freedesktop.network1), NetworkManager, and
+// net.connman D-Bus API docs; sdbus-cpp usage pattern after
+// jwinarske/sdbus-cpp-examples (Apache-2.0). No GPL-3.0 sources.
 #include "svc/net/net_backend.h"
 
 #include "acl_config.h"
@@ -16,9 +16,9 @@
 #include <string_view>
 
 #if ACL_HAVE_SDBUS
+#include <sdbus-c++/sdbus-c++.h>
 #include <map>
 #include <vector>
-#include <sdbus-c++/sdbus-c++.h>
 #endif
 
 namespace acl::net {
@@ -27,7 +27,8 @@ namespace {
 using Transport = AndroidNetState::Transport;
 constexpr std::string_view kTag = "svc.net";
 
-// ---- Null backend: no daemon on the bus → permanently offline (the prior stub) ----
+// ---- Null backend: no daemon on the bus → permanently offline (the prior
+// stub) ----
 class NullBackend final : public INetBackend {
  public:
   const char* name() const noexcept override { return "null"; }
@@ -57,11 +58,13 @@ class DbusBackend : public INetBackend {
     std::function<void(const AndroidNetState&)> cb;
     {
       std::lock_guard<std::mutex> lk(m_);
-      if (s == state_) return;
+      if (s == state_)
+        return;
       state_ = s;
       cb = sink_;
     }
-    if (cb) cb(s);
+    if (cb)
+      cb(s);
   }
   // Subscribe to org.freedesktop.DBus.Properties.PropertiesChanged → refresh().
   void watch_properties(const std::function<void()>& refresh) {
@@ -83,81 +86,102 @@ class DbusBackend : public INetBackend {
 #endif  // ACL_HAVE_SDBUS
 
 #if ACL_NET_NETWORKMANAGER
-// org.freedesktop.NetworkManager — richest source: State/Connectivity/Metered are
-// first-class, PrimaryConnectionType names the transport directly.
+// org.freedesktop.NetworkManager — richest source: State/Connectivity/Metered
+// are first-class, PrimaryConnectionType names the transport directly.
 class NetworkManagerBackend final : public DbusBackend {
  public:
   explicit NetworkManagerBackend(std::unique_ptr<sdbus::IConnection> conn)
       : DbusBackend(std::move(conn)) {
-    proxy_ = sdbus::createProxy(*conn_, sdbus::ServiceName{"org.freedesktop.NetworkManager"},
-                                sdbus::ObjectPath{"/org/freedesktop/NetworkManager"});
+    proxy_ = sdbus::createProxy(
+        *conn_, sdbus::ServiceName{"org.freedesktop.NetworkManager"},
+        sdbus::ObjectPath{"/org/freedesktop/NetworkManager"});
     watch_properties([this] { refresh(); });
     refresh();
     conn_->enterEventLoopAsync();
   }
   const char* name() const noexcept override { return "networkmanager"; }
 
-  // WifiManager/WifiInfo: the radio switch is NetworkManager's WirelessEnabled; the
-  // association details come from the first NM_DEVICE_TYPE_WIFI device's
+  // WifiManager/WifiInfo: the radio switch is NetworkManager's WirelessEnabled;
+  // the association details come from the first NM_DEVICE_TYPE_WIFI device's
   // ActiveAccessPoint (SSID/BSSID/strength/frequency/bitrate).
   AndroidWifiState wifi_snapshot() const override {
     AndroidWifiState w;
     const sdbus::InterfaceName nm{"org.freedesktop.NetworkManager"};
     try {
-      w.enabled = proxy_->getProperty("WirelessEnabled").onInterface(nm).get<bool>();
+      w.enabled =
+          proxy_->getProperty("WirelessEnabled").onInterface(nm).get<bool>();
     } catch (const sdbus::Error&) {
       return w;  // no wireless support on this daemon build
     }
-    if (!w.enabled) return w;  // radio off: nothing else is meaningful
+    if (!w.enabled)
+      return w;  // radio off: nothing else is meaningful
 
     try {
       std::vector<sdbus::ObjectPath> devices;
       proxy_->callMethod("GetDevices").onInterface(nm).storeResultsTo(devices);
       for (const auto& dpath : devices) {
-        auto dev = sdbus::createProxy(*conn_, sdbus::ServiceName{"org.freedesktop.NetworkManager"},
-                                      dpath);
+        auto dev = sdbus::createProxy(
+            *conn_, sdbus::ServiceName{"org.freedesktop.NetworkManager"},
+            dpath);
         std::uint32_t dtype = 0;
         try {
           dtype = dev->getProperty("DeviceType")
-                      .onInterface(sdbus::InterfaceName{"org.freedesktop.NetworkManager.Device"})
+                      .onInterface(sdbus::InterfaceName{
+                          "org.freedesktop.NetworkManager.Device"})
                       .get<std::uint32_t>();
-        } catch (const sdbus::Error&) { continue; }
-        if (dtype != 2) continue;  // NM_DEVICE_TYPE_WIFI
+        } catch (const sdbus::Error&) {
+          continue;
+        }
+        if (dtype != 2)
+          continue;  // NM_DEVICE_TYPE_WIFI
 
         sdbus::ObjectPath ap;
         try {
           ap = dev->getProperty("ActiveAccessPoint")
-                   .onInterface(
-                       sdbus::InterfaceName{"org.freedesktop.NetworkManager.Device.Wireless"})
+                   .onInterface(sdbus::InterfaceName{
+                       "org.freedesktop.NetworkManager.Device.Wireless"})
                    .get<sdbus::ObjectPath>();
-        } catch (const sdbus::Error&) { continue; }
-        if (ap.empty() || ap == "/") return w;  // radio on but not associated
+        } catch (const sdbus::Error&) {
+          continue;
+        }
+        if (ap.empty() || ap == "/")
+          return w;  // radio on but not associated
 
-        auto apx = sdbus::createProxy(*conn_, sdbus::ServiceName{"org.freedesktop.NetworkManager"},
-                                      ap);
-        const sdbus::InterfaceName api{"org.freedesktop.NetworkManager.AccessPoint"};
+        auto apx = sdbus::createProxy(
+            *conn_, sdbus::ServiceName{"org.freedesktop.NetworkManager"}, ap);
+        const sdbus::InterfaceName api{
+            "org.freedesktop.NetworkManager.AccessPoint"};
         try {
           const std::vector<std::uint8_t> ssid =
-              apx->getProperty("Ssid").onInterface(api).get<std::vector<std::uint8_t>>();
+              apx->getProperty("Ssid")
+                  .onInterface(api)
+                  .get<std::vector<std::uint8_t>>();
           w.ssid.assign(ssid.begin(), ssid.end());
-          w.bssid = apx->getProperty("HwAddress").onInterface(api).get<std::string>();
-          const std::uint8_t strength = apx->getProperty("Strength").onInterface(api).get<std::uint8_t>();
-          w.frequency_mhz =
-              static_cast<int>(apx->getProperty("Frequency").onInterface(api).get<std::uint32_t>());
-          const std::uint32_t maxbr =
-              apx->getProperty("MaxBitrate").onInterface(api).get<std::uint32_t>();
-          // NM reports signal quality as 0..100%; Android wants dBm. The conventional
-          // linear fit maps 0% -> -100 dBm and 100% -> -50 dBm.
+          w.bssid =
+              apx->getProperty("HwAddress").onInterface(api).get<std::string>();
+          const std::uint8_t strength =
+              apx->getProperty("Strength").onInterface(api).get<std::uint8_t>();
+          w.frequency_mhz = static_cast<int>(apx->getProperty("Frequency")
+                                                 .onInterface(api)
+                                                 .get<std::uint32_t>());
+          const std::uint32_t maxbr = apx->getProperty("MaxBitrate")
+                                          .onInterface(api)
+                                          .get<std::uint32_t>();
+          // NM reports signal quality as 0..100%; Android wants dBm. The
+          // conventional linear fit maps 0% -> -100 dBm and 100% -> -50 dBm.
           w.rssi_dbm = static_cast<int>(strength) / 2 - 100;
-          w.link_speed_mbps = maxbr > 0 ? static_cast<int>(maxbr / 1000) : -1;  // kbit/s -> Mbps
+          w.link_speed_mbps = maxbr > 0 ? static_cast<int>(maxbr / 1000)
+                                        : -1;  // kbit/s -> Mbps
           w.connected = true;
         } catch (const sdbus::Error& e) {
-          acl::log::w(kTag, "NetworkManager access-point read failed: {}", e.getMessage());
+          acl::log::w(kTag, "NetworkManager access-point read failed: {}",
+                      e.getMessage());
         }
         return w;
       }
     } catch (const sdbus::Error& e) {
-      acl::log::w(kTag, "NetworkManager wifi device enumeration failed: {}", e.getMessage());
+      acl::log::w(kTag, "NetworkManager wifi device enumeration failed: {}",
+                  e.getMessage());
     }
     return w;
   }
@@ -167,17 +191,24 @@ class NetworkManagerBackend final : public DbusBackend {
     const sdbus::InterfaceName i{"org.freedesktop.NetworkManager"};
     AndroidNetState s;
     try {
-      uint32_t state = proxy_->getProperty("State").onInterface(i).get<uint32_t>();
-      uint32_t conny = proxy_->getProperty("Connectivity").onInterface(i).get<uint32_t>();
-      uint32_t metered = proxy_->getProperty("Metered").onInterface(i).get<uint32_t>();
-      std::string ptype =
-          proxy_->getProperty("PrimaryConnectionType").onInterface(i).get<std::string>();
+      uint32_t state =
+          proxy_->getProperty("State").onInterface(i).get<uint32_t>();
+      uint32_t conny =
+          proxy_->getProperty("Connectivity").onInterface(i).get<uint32_t>();
+      uint32_t metered =
+          proxy_->getProperty("Metered").onInterface(i).get<uint32_t>();
+      std::string ptype = proxy_->getProperty("PrimaryConnectionType")
+                              .onInterface(i)
+                              .get<std::string>();
       s.connected = (state == 70);                 // NM_STATE_CONNECTED_GLOBAL
       s.validated = (conny == 4);                  // NM_CONNECTIVITY_FULL
       s.metered = (metered == 1 || metered == 3);  // YES / GUESS_YES
-      if (ptype == "802-11-wireless") s.transport = Transport::kWifi;
-      else if (ptype == "802-3-ethernet") s.transport = Transport::kEthernet;
-      else if (ptype == "gsm" || ptype == "cdma") s.transport = Transport::kCellular;
+      if (ptype == "802-11-wireless")
+        s.transport = Transport::kWifi;
+      else if (ptype == "802-3-ethernet")
+        s.transport = Transport::kEthernet;
+      else if (ptype == "gsm" || ptype == "cdma")
+        s.transport = Transport::kCellular;
     } catch (const sdbus::Error& e) {
       acl::log::w(kTag, "NetworkManager refresh failed: {}", e.getMessage());
     }
@@ -187,14 +218,16 @@ class NetworkManagerBackend final : public DbusBackend {
 #endif  // ACL_NET_NETWORKMANAGER
 
 #if ACL_NET_NETWORKD
-// org.freedesktop.network1 (systemd-networkd). Thinner API: OperationalState gives
-// reachability; there is no portal check (validated≈routable) and no metered notion
-// (both documented fidelity gaps). Transport is classified from the link name.
+// org.freedesktop.network1 (systemd-networkd). Thinner API: OperationalState
+// gives reachability; there is no portal check (validated≈routable) and no
+// metered notion (both documented fidelity gaps). Transport is classified from
+// the link name.
 class NetworkdBackend final : public DbusBackend {
  public:
   explicit NetworkdBackend(std::unique_ptr<sdbus::IConnection> conn)
       : DbusBackend(std::move(conn)) {
-    proxy_ = sdbus::createProxy(*conn_, sdbus::ServiceName{"org.freedesktop.network1"},
+    proxy_ = sdbus::createProxy(*conn_,
+                                sdbus::ServiceName{"org.freedesktop.network1"},
                                 sdbus::ObjectPath{"/org/freedesktop/network1"});
     watch_properties([this] { refresh(); });
     refresh();
@@ -207,33 +240,42 @@ class NetworkdBackend final : public DbusBackend {
     const sdbus::InterfaceName i{"org.freedesktop.network1.Manager"};
     AndroidNetState s;
     try {
-      std::string op = proxy_->getProperty("OperationalState").onInterface(i).get<std::string>();
+      std::string op = proxy_->getProperty("OperationalState")
+                           .onInterface(i)
+                           .get<std::string>();
       std::string online;
       try {  // OnlineState is systemd v249+; tolerate its absence.
-        online = proxy_->getProperty("OnlineState").onInterface(i).get<std::string>();
-      } catch (...) {}
+        online = proxy_->getProperty("OnlineState")
+                     .onInterface(i)
+                     .get<std::string>();
+      } catch (...) {
+      }
       s.connected = (online == "online") || (op == "routable");
-      s.validated = s.connected;  // no reachability check in networkd (fidelity gap)
-      s.metered = false;          // networkd has no metered concept (fidelity gap)
+      s.validated =
+          s.connected;    // no reachability check in networkd (fidelity gap)
+      s.metered = false;  // networkd has no metered concept (fidelity gap)
       s.transport = active_transport(i);
     } catch (const sdbus::Error& e) {
       acl::log::w(kTag, "networkd refresh failed: {}", e.getMessage());
     }
     publish(s);
   }
-  // ListLinks() → a(iso); classify the first non-loopback link by its (predictable)
-  // interface name. Heuristic — a documented non-optimal bucket; a Link.Describe()
-  // JSON read would be exact.
+  // ListLinks() → a(iso); classify the first non-loopback link by its
+  // (predictable) interface name. Heuristic — a documented non-optimal bucket;
+  // a Link.Describe() JSON read would be exact.
   Transport active_transport(const sdbus::InterfaceName& i) {
     try {
       std::vector<sdbus::Struct<int32_t, std::string, sdbus::ObjectPath>> links;
       proxy_->callMethod("ListLinks").onInterface(i).storeResultsTo(links);
       for (const auto& l : links) {
         const std::string& n = std::get<1>(l);
-        if (n == "lo") continue;
-        if (n.rfind("wl", 0) == 0) return Transport::kWifi;      // wlan0, wlp*
-        if (n.rfind("ww", 0) == 0) return Transport::kCellular;  // wwan0 (modem)
-        return Transport::kEthernet;                             // en*, eth*, ...
+        if (n == "lo")
+          continue;
+        if (n.rfind("wl", 0) == 0)
+          return Transport::kWifi;  // wlan0, wlp*
+        if (n.rfind("ww", 0) == 0)
+          return Transport::kCellular;  // wwan0 (modem)
+        return Transport::kEthernet;    // en*, eth*, ...
       }
     } catch (const sdbus::Error& e) {
       acl::log::w(kTag, "networkd ListLinks failed: {}", e.getMessage());
@@ -258,9 +300,11 @@ class ConnmanBackend final : public DbusBackend {
         .call([this](const std::string&, const sdbus::Variant&) { refresh(); });
     proxy_->uponSignal("ServicesChanged")
         .onInterface(sdbus::InterfaceName{"net.connman.Manager"})
-        .call([this](const std::vector<sdbus::Struct<sdbus::ObjectPath,
-                         std::map<std::string, sdbus::Variant>>>&,
-                     const std::vector<sdbus::ObjectPath>&) { refresh(); });
+        .call(
+            [this](
+                const std::vector<sdbus::Struct<
+                    sdbus::ObjectPath, std::map<std::string, sdbus::Variant>>>&,
+                const std::vector<sdbus::ObjectPath>&) { refresh(); });
     refresh();
     conn_->enterEventLoopAsync();
   }
@@ -273,19 +317,29 @@ class ConnmanBackend final : public DbusBackend {
     try {
       std::map<std::string, sdbus::Variant> props;
       proxy_->callMethod("GetProperties").onInterface(mi).storeResultsTo(props);
-      std::string state = props.count("State") ? props["State"].get<std::string>() : "";
+      std::string state =
+          props.count("State") ? props["State"].get<std::string>() : "";
       s.connected = (state == "ready" || state == "online");
       s.validated = (state == "online");
 
-      // GetServices() → a(oa{sv}); the first entry is the default/active service.
-      std::vector<sdbus::Struct<sdbus::ObjectPath, std::map<std::string, sdbus::Variant>>> svcs;
+      // GetServices() → a(oa{sv}); the first entry is the default/active
+      // service.
+      std::vector<sdbus::Struct<sdbus::ObjectPath,
+                                std::map<std::string, sdbus::Variant>>>
+          svcs;
       proxy_->callMethod("GetServices").onInterface(mi).storeResultsTo(svcs);
       if (!svcs.empty()) {
         auto& sp = std::get<1>(svcs.front());
-        std::string type = sp.count("Type") ? sp["Type"].get<std::string>() : "";
-        if (type == "wifi") s.transport = Transport::kWifi;
-        else if (type == "ethernet" || type == "gadget") s.transport = Transport::kEthernet;
-        else if (type == "cellular") { s.transport = Transport::kCellular; s.metered = true; }
+        std::string type =
+            sp.count("Type") ? sp["Type"].get<std::string>() : "";
+        if (type == "wifi")
+          s.transport = Transport::kWifi;
+        else if (type == "ethernet" || type == "gadget")
+          s.transport = Transport::kEthernet;
+        else if (type == "cellular") {
+          s.transport = Transport::kCellular;
+          s.metered = true;
+        }
       }
     } catch (const sdbus::Error& e) {
       acl::log::w(kTag, "connman refresh failed: {}", e.getMessage());
@@ -299,8 +353,9 @@ class ConnmanBackend final : public DbusBackend {
 // True iff `bus_name` currently has an owner (a running daemon) on the bus.
 bool name_has_owner(sdbus::IConnection& conn, const char* bus_name) {
   try {
-    auto dbus = sdbus::createProxy(conn, sdbus::ServiceName{"org.freedesktop.DBus"},
-                                   sdbus::ObjectPath{"/org/freedesktop/DBus"});
+    auto dbus =
+        sdbus::createProxy(conn, sdbus::ServiceName{"org.freedesktop.DBus"},
+                           sdbus::ObjectPath{"/org/freedesktop/DBus"});
     bool owned = false;
     dbus->callMethod("NameHasOwner")
         .onInterface(sdbus::InterfaceName{"org.freedesktop.DBus"})
@@ -321,7 +376,8 @@ std::unique_ptr<INetBackend> make_net_backend() {
   try {
     conn = sdbus::createSystemBusConnection();
   } catch (const sdbus::Error& e) {
-    acl::log::w(kTag, "no system bus ({}); connectivity offline", e.getMessage());
+    acl::log::w(kTag, "no system bus ({}); connectivity offline",
+                e.getMessage());
     return std::make_unique<NullBackend>();
   }
 
@@ -330,9 +386,11 @@ std::unique_ptr<INetBackend> make_net_backend() {
 
   // Probe with sync calls (no event loop needed); the chosen backend takes the
   // connection and starts its own async loop. Order: automotive/device ConnMan,
-  // then NetworkManager, then systemd-networkd — an explicit override still wins.
+  // then NetworkManager, then systemd-networkd — an explicit override still
+  // wins.
 #if ACL_NET_CONNMAN
-  if ((pref.empty() || pref == "connman") && name_has_owner(*conn, "net.connman")) {
+  if ((pref.empty() || pref == "connman") &&
+      name_has_owner(*conn, "net.connman")) {
     acl::log::i(kTag, "connectivity backend: connman");
     return std::make_unique<ConnmanBackend>(std::move(conn));
   }
@@ -351,7 +409,9 @@ std::unique_ptr<INetBackend> make_net_backend() {
     return std::make_unique<NetworkdBackend>(std::move(conn));
   }
 #endif
-  acl::log::i(kTag, "no supported connectivity daemon on the bus; offline (null backend)");
+  acl::log::i(
+      kTag,
+      "no supported connectivity daemon on the bus; offline (null backend)");
 #endif  // ACL_HAVE_SDBUS
   return std::make_unique<NullBackend>();
 }

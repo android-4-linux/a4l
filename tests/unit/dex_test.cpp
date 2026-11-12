@@ -18,7 +18,8 @@ namespace {
 
 std::vector<std::uint8_t> load_fixture_dex() {
   const char* p = std::getenv("ACL_FIXTURE_DEX");
-  if (!p) return {};
+  if (!p)
+    return {};
   std::ifstream in(p, std::ios::binary);
   return std::vector<std::uint8_t>((std::istreambuf_iterator<char>(in)),
                                    std::istreambuf_iterator<char>());
@@ -26,7 +27,8 @@ std::vector<std::uint8_t> load_fixture_dex() {
 
 const DexMethod* find(const std::vector<DexMethod>& v, std::string_view name) {
   for (const DexMethod& m : v) {
-    if (m.name == name) return &m;
+    if (m.name == name)
+      return &m;
   }
   return nullptr;
 }
@@ -44,7 +46,8 @@ TEST_CASE("descriptor_to_java maps primitives, objects, and arrays", "[dex]") {
 
 TEST_CASE("DexFile parses classes and method signatures", "[dex]") {
   const auto bytes = load_fixture_dex();
-  if (bytes.empty()) SKIP("ACL_FIXTURE_DEX not set");
+  if (bytes.empty())
+    SKIP("ACL_FIXTURE_DEX not set");
 
   DexError err;
   auto dex = DexFile::parse(bytes, err);
@@ -82,10 +85,10 @@ TEST_CASE("DexFile parses classes and method signatures", "[dex]") {
   CHECK(counter.instance_fields[0].type_descriptor == "I");
   CHECK(counter.instance_fields[1].name == "label");
   CHECK(counter.instance_fields[1].type_descriptor == "Ljava/lang/String;");
-  CHECK(find(counter.direct_methods, "<init>") != nullptr);      // constructor
+  CHECK(find(counter.direct_methods, "<init>") != nullptr);  // constructor
   const DexMethod* get = find(counter.virtual_methods, "get");
   REQUIRE(get != nullptr);
-  CHECK_FALSE(get->is_static());                                  // instance method
+  CHECK_FALSE(get->is_static());  // instance method
   CHECK(get->return_type == "int");
 }
 
@@ -97,16 +100,18 @@ TEST_CASE("DexFile rejects non-dex input", "[dex]") {
   CHECK(err.status == DexStatus::BadFormat);
 }
 
-TEST_CASE("convert emits a real .class and translates the int subset", "[dex]") {
+TEST_CASE("convert emits a real .class and translates the int subset",
+          "[dex]") {
   const auto bytes = load_fixture_dex();
-  if (bytes.empty()) SKIP("ACL_FIXTURE_DEX not set");
+  if (bytes.empty())
+    SKIP("ACL_FIXTURE_DEX not set");
   DexError err;
   auto dex = DexFile::parse(bytes, err);
   REQUIRE(dex.has_value());
 
   ConvertOptions opts;
-  opts.work_dir = (std::filesystem::temp_directory_path() / "acl-dex-utest")
-                      .string();
+  opts.work_dir =
+      (std::filesystem::temp_directory_path() / "acl-dex-utest").string();
   std::filesystem::remove_all(opts.work_dir);
   ConvertResult res;
   DexError cerr = convert(*dex, opts, res);

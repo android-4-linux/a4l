@@ -4,9 +4,9 @@
 //
 // Prints which host session/power daemons acl selects and the derived
 // android.os.PowerManager state, so the logind + power-profiles + thermal-sysfs
-// mapping can be eyeballed on desktop/device. With --hold it takes a real wake lock
-// (a logind inhibitor) and holds it until Enter, so `systemd-inhibit --list` can
-// confirm the inhibitor is actually registered.
+// mapping can be eyeballed on desktop/device. With --hold it takes a real wake
+// lock (a logind inhibitor) and holds it until Enter, so `systemd-inhibit
+// --list` can confirm the inhibitor is actually registered.
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -18,14 +18,22 @@
 namespace {
 const char* thermal_name(int s) {
   switch (s) {
-    case acl::power::kThermalNone: return "none";
-    case acl::power::kThermalLight: return "light";
-    case acl::power::kThermalModerate: return "moderate";
-    case acl::power::kThermalSevere: return "severe";
-    case acl::power::kThermalCritical: return "critical";
-    case acl::power::kThermalEmergency: return "emergency";
-    case acl::power::kThermalShutdown: return "shutdown";
-    default: return "?";
+    case acl::power::kThermalNone:
+      return "none";
+    case acl::power::kThermalLight:
+      return "light";
+    case acl::power::kThermalModerate:
+      return "moderate";
+    case acl::power::kThermalSevere:
+      return "severe";
+    case acl::power::kThermalCritical:
+      return "critical";
+    case acl::power::kThermalEmergency:
+      return "emergency";
+    case acl::power::kThermalShutdown:
+      return "shutdown";
+    default:
+      return "?";
   }
 }
 }  // namespace
@@ -37,19 +45,27 @@ int main(int argc, char** argv) {
   std::printf("  isInteractive    = %s\n", s.interactive ? "true" : "false");
   std::printf("  isPowerSaveMode  = %s\n", s.power_save ? "true" : "false");
   std::printf("  isDeviceIdleMode = %s\n", s.device_idle ? "true" : "false");
-  std::printf("  thermalStatus    = %d (%s)\n", s.thermal_status, thermal_name(s.thermal_status));
+  std::printf("  thermalStatus    = %d (%s)\n", s.thermal_status,
+              thermal_name(s.thermal_status));
 
-  // --hold [seconds]: take a real wake lock. With a seconds argument the hold is timed
-  // (scriptable — `systemd-inhibit --list` can be checked meanwhile); without one it
-  // waits for Enter.
+  // --hold [seconds]: take a real wake lock. With a seconds argument the hold
+  // is timed (scriptable — `systemd-inhibit --list` can be checked meanwhile);
+  // without one it waits for Enter.
   const bool hold = argc > 1 && std::strcmp(argv[1], "--hold") == 0;
   if (hold) {
     int seconds = 0;
-    if (argc > 2) { try { seconds = std::stoi(argv[2]); } catch (...) { seconds = 0; } }
-    const long cookie =
-        backend->acquire_wake_lock(acl::power::kPartialWakeLock, "acl-power-probe");
+    if (argc > 2) {
+      try {
+        seconds = std::stoi(argv[2]);
+      } catch (...) {
+        seconds = 0;
+      }
+    }
+    const long cookie = backend->acquire_wake_lock(acl::power::kPartialWakeLock,
+                                                   "acl-power-probe");
     std::printf("\nwake lock acquired (cookie=%ld)%s\n", cookie,
-                cookie != 0 ? " — check: systemd-inhibit --list" : " — NOT backed by an inhibitor");
+                cookie != 0 ? " — check: systemd-inhibit --list"
+                            : " — NOT backed by an inhibitor");
     if (seconds > 0) {
       std::printf("holding %d s...\n", seconds);
       std::fflush(stdout);

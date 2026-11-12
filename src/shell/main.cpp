@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: specs/shell.md (pending), Android SDK launch semantics, xdg-desktop specs. No GPL-3.0 sources.
+// Provenance: specs/shell.md (pending), Android SDK launch semantics,
+// xdg-desktop specs. No GPL-3.0 sources.
 //
 // acl CLI. `acl run <app.apk>` drives the Phase 1 runtime-spine vertical:
 // open the APK (pkg), inspect its DEX/ABIs, configure a VM, and invoke a static
-// main() through the runtime seam. The ART/JVM backends report Unavailable until
-// they land (R-1 / ADR-0001); `--vm=null` exercises the full plumbing today.
+// main() through the runtime seam. The ART/JVM backends report Unavailable
+// until they land (R-1 / ADR-0001); `--vm=null` exercises the full plumbing
+// today.
 
 #include <csignal>
 #include <cstdint>
@@ -36,14 +38,16 @@ constexpr std::string_view kTag = "acl";
 // Exit codes.
 enum : int { kOk = 0, kUsage = 1, kBackendUnavailable = 2, kRuntimeError = 3 };
 
-void print_version() { std::printf("acl %s\n", ACL_VERSION); }
+void print_version() {
+  std::printf("acl %s\n", ACL_VERSION);
+}
 
 void print_roster() {
   // Phase 0 smoke: prove the native-core module link graph resolves.
   namespace r = acl::runtime;
-  std::printf("profile: %s\n",
-              ACL_PROFILE_AUTOMOTIVE ? "automotive" : "phone");
-  std::printf("runtime backends: art (target), jvm (fallback), null (plumbing)\n");
+  std::printf("profile: %s\n", ACL_PROFILE_AUTOMOTIVE ? "automotive" : "phone");
+  std::printf(
+      "runtime backends: art (target), jvm (fallback), null (plumbing)\n");
   (void)r::backend_name(r::Backend::Art);
 }
 
@@ -54,27 +58,39 @@ void print_usage() {
       "commands:\n"
       "  run <app.apk>        inspect and launch an APK\n"
       "  dex <file>           dump classes/methods of a .dex or .apk\n"
-      "  tone [options]       play a test tone through the audio backend (manual\n"
-      "                       audio check); streams to PipeWire, else silent null sink\n"
+      "  tone [options]       play a test tone through the audio backend "
+      "(manual\n"
+      "                       audio check); streams to PipeWire, else silent "
+      "null sink\n"
       "  (no command)         print version and build profile\n"
       "\n"
       "run options:\n"
       "  --vm=<art|jvm|null>  runtime backend (default: $ACL_VM or art)\n"
       "  --main=<class>       static main() class to invoke\n"
-      "  --service=<class>    host a MediaBrowserService (automotive media path)\n"
-      "  --cal=<class>        host a CarAppService (automotive Car App Library path)\n"
-      "  --classpath=<paths>  extra classpath entries (colon-separated); the JVM\n"
-      "                       backend runs .class/.jar from here (DEX is not loaded\n"
+      "  --service=<class>    host a MediaBrowserService (automotive media "
+      "path)\n"
+      "  --cal=<class>        host a CarAppService (automotive Car App Library "
+      "path)\n"
+      "  --classpath=<paths>  extra classpath entries (colon-separated); the "
+      "JVM\n"
+      "                       backend runs .class/.jar from here (DEX is not "
+      "loaded\n"
       "                       by a stock JVM)\n"
-      "  --convert-dex        convert the APK's DEX to JVM classes and add them to\n"
+      "  --convert-dex        convert the APK's DEX to JVM classes and add "
+      "them to\n"
       "                       the classpath (implied by --vm=jvm)\n"
-      "  --framework=<paths>  vendored android.* framework boot classpath (colon-\n"
+      "  --framework=<paths>  vendored android.* framework boot classpath "
+      "(colon-\n"
       "                       separated); also read from $ACL_FRAMEWORK\n"
       "  --cache=<dir>        DEX->OAT / dalvik-cache directory\n"
-      "  --present            show the rendered content view in a Wayland window\n"
-      "                       (wcs); no-op if no compositor / built without wcs\n"
-      "  --present-frames=<n> present continuously for n frames via a Choreographer\n"
-      "                       loop (implies --present; 0 = until the window closes)\n"
+      "  --present            show the rendered content view in a Wayland "
+      "window\n"
+      "                       (wcs); no-op if no compositor / built without "
+      "wcs\n"
+      "  --present-frames=<n> present continuously for n frames via a "
+      "Choreographer\n"
+      "                       loop (implies --present; 0 = until the window "
+      "closes)\n"
       "\n"
       "tone options:\n"
       "  --freq=<hz>          tone frequency (default 440)\n"
@@ -97,17 +113,22 @@ bool match_opt(std::string_view arg, std::string_view key, std::string& value) {
   return false;
 }
 
-// Android ends an app by killing its process (Runtime.halt / SIGKILL), never by tearing down the ART
-// VM. A graceful DestroyJavaVM (vm->shutdown()) — or a normal exit() running atexit / static dtors —
-// races the still-live in-process native threads (Chromium's ThreadPool): as the VM/process winds
-// down they call AttachCurrentThread, which returns JNI_ERR, and Chromium's CHECK_EQ(JNI_OK) aborts
-// (base/android/jni_android.cc) -> SIGTRAP, which ART's fault handler then reenters ("HandleUnexpected
-// Signal reentered") and HANGS. So end a run the Android way: skip the VM teardown and hard-exit the
-// process (the OS reclaims everything), both on normal completion (end_run) and on a termination
-// signal (acl_on_kill_signal, installed once the app is running).
-void acl_on_kill_signal(int /*sig*/) { std::_Exit(0); }  // async-signal-safe: just the exit syscall
+// Android ends an app by killing its process (Runtime.halt / SIGKILL), never by
+// tearing down the ART VM. A graceful DestroyJavaVM (vm->shutdown()) — or a
+// normal exit() running atexit / static dtors — races the still-live in-process
+// native threads (Chromium's ThreadPool): as the VM/process winds down they
+// call AttachCurrentThread, which returns JNI_ERR, and Chromium's
+// CHECK_EQ(JNI_OK) aborts (base/android/jni_android.cc) -> SIGTRAP, which ART's
+// fault handler then reenters ("HandleUnexpected Signal reentered") and HANGS.
+// So end a run the Android way: skip the VM teardown and hard-exit the process
+// (the OS reclaims everything), both on normal completion (end_run) and on a
+// termination signal (acl_on_kill_signal, installed once the app is running).
+void acl_on_kill_signal(int /*sig*/) {
+  std::_Exit(0);
+}  // async-signal-safe: just the exit syscall
 [[noreturn]] void end_run(int code) {
-  std::fflush(nullptr);  // flush app stdout/stderr (safe here — not a signal context)
+  std::fflush(
+      nullptr);  // flush app stdout/stderr (safe here — not a signal context)
   std::_Exit(code);
 }
 
@@ -127,12 +148,15 @@ int cmd_run(const std::vector<std::string>& args) {
   std::string present_frames;
 
   // Split a colon-separated path list into `out`, skipping empties.
-  const auto split_paths = [](const std::string& v, std::vector<std::string>& out) {
+  const auto split_paths = [](const std::string& v,
+                              std::vector<std::string>& out) {
     for (std::size_t start = 0; start <= v.size();) {
       const std::size_t colon = v.find(':', start);
       const std::size_t end = colon == std::string::npos ? v.size() : colon;
-      if (end > start) out.push_back(v.substr(start, end - start));
-      if (colon == std::string::npos) break;
+      if (end > start)
+        out.push_back(v.substr(start, end - start));
+      if (colon == std::string::npos)
+        break;
       start = colon + 1;
     }
   };
@@ -178,7 +202,8 @@ int cmd_run(const std::vector<std::string>& args) {
   // Select the backend.
   r::Backend backend = r::default_backend();
   if (!vm_name.empty() && !r::parse_backend(vm_name, backend)) {
-    std::fprintf(stderr, "run: unknown --vm '%s' (art|jvm|null)\n", vm_name.c_str());
+    std::fprintf(stderr, "run: unknown --vm '%s' (art|jvm|null)\n",
+                 vm_name.c_str());
     return kUsage;
   }
 
@@ -187,7 +212,7 @@ int cmd_run(const std::vector<std::string>& args) {
   auto apk = acl::pkg::Apk::open(apk_path, zerr);
   if (!apk.has_value()) {
     acl::log::e(kTag, "cannot open {}: [{}] {}", apk_path,
-                   acl::pkg::zip_status_name(zerr.status), zerr.message);
+                acl::pkg::zip_status_name(zerr.status), zerr.message);
     return kUsage;
   }
 
@@ -202,15 +227,15 @@ int cmd_run(const std::vector<std::string>& args) {
   const std::vector<std::string> abis = apk->native_abis();
 
   acl::log::i(kTag, "opened {} ({} entries, {} dex, abis=[{}])", apk_path,
-                 apk->entries().size(), dex_files.size(),
-                 [&] {
-                   std::string s;
-                   for (std::size_t i = 0; i < abis.size(); ++i) {
-                     if (i) s += ',';
-                     s += abis[i];
-                   }
-                   return s;
-                 }());
+              apk->entries().size(), dex_files.size(), [&] {
+                std::string s;
+                for (std::size_t i = 0; i < abis.size(); ++i) {
+                  if (i)
+                    s += ',';
+                  s += abis[i];
+                }
+                return s;
+              }());
   if (dex_files.empty()) {
     acl::log::w(kTag, "no classes*.dex found — nothing to execute");
   }
@@ -221,24 +246,25 @@ int cmd_run(const std::vector<std::string>& args) {
   if (auto mbytes = apk->read("AndroidManifest.xml", merr)) {
     if (acl::pkg::AxmlError ae = acl::pkg::parse_manifest(*mbytes, manifest)) {
       acl::log::w(kTag, "manifest parse failed: [{}] {}",
-                     acl::pkg::axml_status_name(ae.status), ae.message);
+                  acl::pkg::axml_status_name(ae.status), ae.message);
     } else {
       acl::log::i(kTag, "package={} versionCode={} minSdk={} targetSdk={}",
-                     manifest.package.empty() ? "?" : manifest.package,
-                     manifest.version_code ? *manifest.version_code : 0,
-                     manifest.min_sdk ? *manifest.min_sdk : -1,
-                     manifest.target_sdk ? *manifest.target_sdk : -1);
+                  manifest.package.empty() ? "?" : manifest.package,
+                  manifest.version_code ? *manifest.version_code : 0,
+                  manifest.min_sdk ? *manifest.min_sdk : -1,
+                  manifest.target_sdk ? *manifest.target_sdk : -1);
     }
   } else {
     acl::log::w(kTag, "no AndroidManifest.xml: [{}] {}",
-                   acl::pkg::zip_status_name(merr.status), merr.message);
+                acl::pkg::zip_status_name(merr.status), merr.message);
   }
 
   // Resolve the launch class: explicit --main wins, else the manifest launcher.
   if (main_class.empty()) {
     if (const acl::pkg::Activity* launch = manifest.launcher()) {
-      // launch_class() follows an <activity-alias> to its real targetActivity (the alias name
-      // is not an instantiable class — e.g. Spotify's com.spotify.music.MainActivity alias).
+      // launch_class() follows an <activity-alias> to its real targetActivity
+      // (the alias name is not an instantiable class — e.g. Spotify's
+      // com.spotify.music.MainActivity alias).
       main_class = launch->launch_class();
       acl::log::i(kTag, "launch activity: {}", main_class);
     }
@@ -251,49 +277,70 @@ int cmd_run(const std::vector<std::string>& args) {
   cfg.classpath.insert(cfg.classpath.end(), extra_classpath.begin(),
                        extra_classpath.end());
   cfg.cache_dir = cache_dir;
-  cfg.package_name = manifest.package;  // injected into the entry point's Context
-  cfg.application_name = manifest.application_name;  // app Application, created before the Activity
-  cfg.application_theme = manifest.application_theme;  // applied to the app Context's theme
-  // A per-activity android:theme overrides the application theme for the launched activity — many
-  // apps declare a NoActionBar activity theme so they can setSupportActionBar their own Toolbar
-  // (the application theme keeps the DarkActionBar). Prefer the launcher activity's theme when set.
+  cfg.package_name =
+      manifest.package;  // injected into the entry point's Context
+  cfg.application_name =
+      manifest
+          .application_name;  // app Application, created before the Activity
+  cfg.application_theme =
+      manifest.application_theme;  // applied to the app Context's theme
+  // A per-activity android:theme overrides the application theme for the
+  // launched activity — many apps declare a NoActionBar activity theme so they
+  // can setSupportActionBar their own Toolbar (the application theme keeps the
+  // DarkActionBar). Prefer the launcher activity's theme when set.
   if (const acl::pkg::Activity* launch = manifest.launcher();
       launch != nullptr && launch->theme != 0) {
     cfg.application_theme = launch->theme;
-    acl::log::i(kTag, "using launcher activity theme resId=0x{:x}", launch->theme);
+    acl::log::i(kTag, "using launcher activity theme resId=0x{:x}",
+                launch->theme);
   }
-  cfg.present = present;                 // show the rendered content view via wm/ (wcs)
-  if (!present_frames.empty()) cfg.present_frames = std::strtoull(present_frames.c_str(), nullptr, 10);
+  cfg.present = present;  // show the rendered content view via wm/ (wcs)
+  if (!present_frames.empty())
+    cfg.present_frames = std::strtoull(present_frames.c_str(), nullptr, 10);
 
-  // Native libraries (NDK): extract the app's lib/<abi>/*.so for this host's ABI to a per-app
-  // dir and point java.library.path at it, so System.loadLibrary(name) resolves lib<name>.so.
-  // An ABI mismatch (e.g. an arm-only app on an x86_64 host) is reported, not extracted. Real
-  // apps ship bionic-linked .so, which load only when host-arch-compatible AND through the
-  // bionic bridge (Phase 4 / ADR-5, R-6); this wires the front of that path. See docs/ndk-scope.md.
+  // Native libraries (NDK): extract the app's lib/<abi>/*.so for this host's
+  // ABI to a per-app dir and point java.library.path at it, so
+  // System.loadLibrary(name) resolves lib<name>.so. An ABI mismatch (e.g. an
+  // arm-only app on an x86_64 host) is reported, not extracted. Real apps ship
+  // bionic-linked .so, which load only when host-arch-compatible AND through
+  // the bionic bridge (Phase 4 / ADR-5, R-6); this wires the front of that
+  // path. See docs/ndk-scope.md.
   if (!abis.empty()) {
     const std::string abi = acl::pkg::Apk::select_abi(abis);
     if (abi.empty()) {
-      acl::log::w(kTag, "native libs present but no host-compatible ABI (see abis above); "
-                        "System.loadLibrary will fail (needs arch match + bionic bridge)");
+      acl::log::w(
+          kTag,
+          "native libs present but no host-compatible ABI (see abis above); "
+          "System.loadLibrary will fail (needs arch match + bionic bridge)");
     } else {
       std::string base;
-      if (const char* x = std::getenv("XDG_CACHE_HOME"); x != nullptr && *x != '\0') base = x;
+      if (const char* x = std::getenv("XDG_CACHE_HOME");
+          x != nullptr && *x != '\0')
+        base = x;
       else if (const char* h = std::getenv("HOME"); h != nullptr && *h != '\0')
         base = std::string(h) + "/.cache";
-      else base = "/tmp";
+      else
+        base = "/tmp";
       const std::string libdir =
-          base + "/acl/" + (manifest.package.empty() ? "app" : manifest.package) + "/lib";
+          base + "/acl/" +
+          (manifest.package.empty() ? "app" : manifest.package) + "/lib";
       std::error_code ec;
       std::filesystem::create_directories(libdir, ec);
       const std::string want = "lib/" + abi + "/";
       int nlibs = 0;
       for (const acl::pkg::Apk::Entry& e : apk->entries()) {
-        if (e.name.size() <= want.size() || e.name.compare(0, want.size(), want) != 0) continue;
-        if (e.name.size() < 3 || e.name.compare(e.name.size() - 3, 3, ".so") != 0) continue;
-        if (e.name.find('/', want.size()) != std::string::npos) continue;  // flat, no nested dirs
+        if (e.name.size() <= want.size() ||
+            e.name.compare(0, want.size(), want) != 0)
+          continue;
+        if (e.name.size() < 3 ||
+            e.name.compare(e.name.size() - 3, 3, ".so") != 0)
+          continue;
+        if (e.name.find('/', want.size()) != std::string::npos)
+          continue;  // flat, no nested dirs
         acl::pkg::ZipError lerr;
         std::vector<std::uint8_t> bytes;
-        if (!apk->read(e, bytes, lerr)) continue;
+        if (!apk->read(e, bytes, lerr))
+          continue;
         std::ofstream f(libdir + "/" + e.name.substr(want.size()),
                         std::ios::binary | std::ios::trunc);
         if (f) {
@@ -303,19 +350,23 @@ int cmd_run(const std::vector<std::string>& args) {
         }
       }
       cfg.options.push_back("-Djava.library.path=" + libdir);
-      acl::log::i(kTag, "native libs: extracted {} lib(s) for abi '{}' -> {}", nlibs, abi, libdir);
-      // Hand the extracted dir to the bionic loader as an extra search path, so an app lib's
-      // NEEDED on a *sibling* app lib resolves (the staged sysroot only carries bionic itself).
-      // The loader is gated on ACL_BIONIC_LINKER; setting this when it is unset is inert. An
-      // explicit ACL_BIONIC_APP_LIBS from the environment wins (overwrite=0) so a caller can
-      // point the search elsewhere. See jvm_vm register_ndk_loadlibrary_override + docs/ndk-scope.md.
+      acl::log::i(kTag, "native libs: extracted {} lib(s) for abi '{}' -> {}",
+                  nlibs, abi, libdir);
+      // Hand the extracted dir to the bionic loader as an extra search path, so
+      // an app lib's NEEDED on a *sibling* app lib resolves (the staged sysroot
+      // only carries bionic itself). The loader is gated on ACL_BIONIC_LINKER;
+      // setting this when it is unset is inert. An explicit ACL_BIONIC_APP_LIBS
+      // from the environment wins (overwrite=0) so a caller can point the
+      // search elsewhere. See jvm_vm register_ndk_loadlibrary_override +
+      // docs/ndk-scope.md.
       ::setenv("ACL_BIONIC_APP_LIBS", libdir.c_str(), 0);
     }
   }
 
-  // Boot classpath = the android.* framework (ADR-0002). Precedence: --framework,
-  // then $ACL_FRAMEWORK, then the staged default (framework/ -> build/framework/classes,
-  // baked in at build time) so `acl run <apk>` resolves android.* out of the box.
+  // Boot classpath = the android.* framework (ADR-0002). Precedence:
+  // --framework, then $ACL_FRAMEWORK, then the staged default (framework/ ->
+  // build/framework/classes, baked in at build time) so `acl run <apk>`
+  // resolves android.* out of the box.
   cfg.boot_classpath = framework_dirs;
   if (const char* env = std::getenv("ACL_FRAMEWORK")) {
     split_paths(env, cfg.boot_classpath);
@@ -323,14 +374,17 @@ int cmd_run(const std::vector<std::string>& args) {
 #ifdef ACL_DEFAULT_FRAMEWORK
   if (cfg.boot_classpath.empty() &&
       std::filesystem::exists(ACL_DEFAULT_FRAMEWORK)) {
-    cfg.boot_classpath.push_back(ACL_DEFAULT_FRAMEWORK);  // staged framework/ classes
-    // The api-33 android.jar stub layer resolves AFTER our shims (so our classes with
-    // real behavior win) and fills the rest of android.* (ADR-0002). $ACL_ANDROID_JAR
-    // overrides the baked-in default.
+    cfg.boot_classpath.push_back(
+        ACL_DEFAULT_FRAMEWORK);  // staged framework/ classes
+    // The api-33 android.jar stub layer resolves AFTER our shims (so our
+    // classes with real behavior win) and fills the rest of android.*
+    // (ADR-0002). $ACL_ANDROID_JAR overrides the baked-in default.
     std::string android_jar;
-    if (const char* j = std::getenv("ACL_ANDROID_JAR")) android_jar = j;
+    if (const char* j = std::getenv("ACL_ANDROID_JAR"))
+      android_jar = j;
 #ifdef ACL_DEFAULT_ANDROID_JAR
-    if (android_jar.empty()) android_jar = ACL_DEFAULT_ANDROID_JAR;
+    if (android_jar.empty())
+      android_jar = ACL_DEFAULT_ANDROID_JAR;
 #endif
     if (!android_jar.empty() && std::filesystem::exists(android_jar)) {
       cfg.boot_classpath.push_back(android_jar);
@@ -339,8 +393,8 @@ int cmd_run(const std::vector<std::string>& args) {
 #endif
   if (!cfg.boot_classpath.empty()) {
     acl::log::i(kTag, "framework boot classpath: {} entr{}",
-                   cfg.boot_classpath.size(),
-                   cfg.boot_classpath.size() == 1 ? "y" : "ies");
+                cfg.boot_classpath.size(),
+                cfg.boot_classpath.size() == 1 ? "y" : "ies");
   }
 
   // DEX->JVM: convert each classes*.dex to JVM classes and add them to the
@@ -359,23 +413,25 @@ int cmd_run(const std::vector<std::string>& args) {
       acl::dex::DexError de;
       auto dx = acl::dex::DexFile::parse(*db, de);
       if (!dx) {
-        acl::log::w(kTag, "convert-dex: parse {} failed: {}", dex_name, de.message);
+        acl::log::w(kTag, "convert-dex: parse {} failed: {}", dex_name,
+                    de.message);
         continue;
       }
       // A work dir unique per process AND per DEX, so concurrent `acl run`
-      // invocations (and multi-dex within one) never clobber each other's classes.
+      // invocations (and multi-dex within one) never clobber each other's
+      // classes.
       acl::dex::ConvertOptions opts;
-      opts.work_dir =
-          (std::filesystem::temp_directory_path() /
-           ("acl-" + std::to_string(::getpid()) + "-dex-" + std::to_string(idx)))
-              .string();
+      opts.work_dir = (std::filesystem::temp_directory_path() /
+                       ("acl-" + std::to_string(::getpid()) + "-dex-" +
+                        std::to_string(idx)))
+                          .string();
       acl::dex::ConvertResult cr;
       if (acl::dex::DexError ce = acl::dex::convert(*dx, opts, cr)) {
         acl::log::w(kTag, "convert-dex: {} failed: {}", dex_name, ce.message);
         continue;
       }
       acl::log::i(kTag, "convert-dex: {} -> {} ({} classes)", dex_name,
-                     cr.classpath_dir, cr.classes.size());
+                  cr.classpath_dir, cr.classes.size());
       cfg.classpath.push_back(cr.classpath_dir);
     }
   }
@@ -384,66 +440,75 @@ int cmd_run(const std::vector<std::string>& args) {
   auto vm = r::create_vm(backend, cfg, err);
   if (vm == nullptr) {
     acl::log::e(kTag, "runtime backend '{}' unavailable: {}",
-                   r::backend_name(backend), err.message);
+                r::backend_name(backend), err.message);
     return kBackendUnavailable;
   }
 
   if (r::Error e = vm->start()) {
     acl::log::e(kTag, "vm start failed: [{}] {}", r::status_name(e.status),
-                   e.message);
+                e.message);
     return kRuntimeError;
   }
 
-  // The VM (and possibly in-process native runtimes like Chromium's WebView) is now live. Terminate
-  // the process directly on a kill signal rather than letting the default action / any handler race
-  // those native threads into a JNI-on-a-dying-VM crash (see end_run). ART leaves SIGTERM/SIGINT at
-  // their defaults, so this only overrides "terminate" with "terminate now, cleanly".
+  // The VM (and possibly in-process native runtimes like Chromium's WebView) is
+  // now live. Terminate the process directly on a kill signal rather than
+  // letting the default action / any handler race those native threads into a
+  // JNI-on-a-dying-VM crash (see end_run). ART leaves SIGTERM/SIGINT at their
+  // defaults, so this only overrides "terminate" with "terminate now, cleanly".
   std::signal(SIGTERM, acl_on_kill_signal);
   std::signal(SIGINT, acl_on_kill_signal);
 
   if (!service_class.empty()) {
-    // Automotive media path: host a MediaBrowserService (no Views, no launcher).
+    // Automotive media path: host a MediaBrowserService (no Views, no
+    // launcher).
     if (r::Error e = vm->call_media_browser(service_class)) {
       acl::log::e(kTag, "host service {} failed: [{}] {}", service_class,
-                     r::status_name(e.status), e.message);
+                  r::status_name(e.status), e.message);
       vm->shutdown();
       return kRuntimeError;
     }
   } else if (!cal_class.empty()) {
-    // Automotive Car App Library path: host a CarAppService (template tree, no Views).
+    // Automotive Car App Library path: host a CarAppService (template tree, no
+    // Views).
     if (r::Error e = vm->call_car_app(cal_class)) {
       acl::log::e(kTag, "host CarAppService {} failed: [{}] {}", cal_class,
-                     r::status_name(e.status), e.message);
+                  r::status_name(e.status), e.message);
       vm->shutdown();
       return kRuntimeError;
     }
   } else if (main_class.empty()) {
     acl::log::w(kTag,
-                   "no launcher activity in the manifest and no --main given; "
-                   "VM started, nothing invoked");
+                "no launcher activity in the manifest and no --main given; "
+                "VM started, nothing invoked");
   } else {
     // Prefer the Android Activity lifecycle; fall back to a static main() for
-    // self-contained apps (or when no framework Activity is on the boot classpath).
+    // self-contained apps (or when no framework Activity is on the boot
+    // classpath).
     r::Error e = vm->call_activity_lifecycle(main_class);
     if (e.status == r::Status::NotApplicable) {
-      acl::log::i(kTag, "{} is not an Activity; invoking static main()", main_class);
+      acl::log::i(kTag, "{} is not an Activity; invoking static main()",
+                  main_class);
       e = vm->call_static_main(main_class, {});
     }
     if (e) {
       acl::log::e(kTag, "launch {} failed: [{}] {}", main_class,
-                     r::status_name(e.status), e.message);
-      end_run(kRuntimeError);  // app may have spun up WebView/native threads — no DestroyJavaVM
+                  r::status_name(e.status), e.message);
+      end_run(kRuntimeError);  // app may have spun up WebView/native threads —
+                               // no DestroyJavaVM
     }
   }
 
-  end_run(kOk);  // Android-style process exit (no DestroyJavaVM race with native threads)
+  end_run(kOk);  // Android-style process exit (no DestroyJavaVM race with
+                 // native threads)
 }
 
-void dump_methods(const char* kind, const std::vector<acl::dex::DexMethod>& ms) {
+void dump_methods(const char* kind,
+                  const std::vector<acl::dex::DexMethod>& ms) {
   for (const acl::dex::DexMethod& m : ms) {
     std::string params;
     for (std::size_t i = 0; i < m.param_types.size(); ++i) {
-      if (i) params += ", ";
+      if (i)
+        params += ", ";
       params += m.param_types[i];
     }
     std::printf("    %s%s %s(%s) [%s%s]\n", m.is_static() ? "static " : "",
@@ -466,8 +531,10 @@ int cmd_dex(const std::vector<std::string>& args) {
     std::fprintf(stderr, "dex: cannot open %s\n", path.c_str());
     return kUsage;
   }
-  bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-  const bool is_dex = bytes.size() >= 4 && std::memcmp(bytes.data(), "dex\n", 4) == 0;
+  bytes.assign(std::istreambuf_iterator<char>(in),
+               std::istreambuf_iterator<char>());
+  const bool is_dex =
+      bytes.size() >= 4 && std::memcmp(bytes.data(), "dex\n", 4) == 0;
   if (!is_dex) {
     acl::pkg::ZipError zerr;
     auto apk = acl::pkg::Apk::open(path, zerr);
@@ -509,11 +576,16 @@ int cmd_tone(const std::vector<std::string>& args) {
   acl::audio::ToneSpec spec;
   std::string v;
   for (const std::string& a : args) {
-    if (match_opt(a, "--freq", v)) spec.freq_hz = std::atoi(v.c_str());
-    else if (match_opt(a, "--seconds", v)) spec.seconds = std::atof(v.c_str());
-    else if (match_opt(a, "--rate", v)) spec.sample_rate = std::atoi(v.c_str());
-    else if (match_opt(a, "--channels", v)) spec.channels = std::atoi(v.c_str());
-    else if (match_opt(a, "--amplitude", v)) spec.amplitude = std::atof(v.c_str());
+    if (match_opt(a, "--freq", v))
+      spec.freq_hz = std::atoi(v.c_str());
+    else if (match_opt(a, "--seconds", v))
+      spec.seconds = std::atof(v.c_str());
+    else if (match_opt(a, "--rate", v))
+      spec.sample_rate = std::atoi(v.c_str());
+    else if (match_opt(a, "--channels", v))
+      spec.channels = std::atoi(v.c_str());
+    else if (match_opt(a, "--amplitude", v))
+      spec.amplitude = std::atof(v.c_str());
     else {
       std::fprintf(stderr, "acl tone: unknown option '%s'\n", a.c_str());
       return kUsage;

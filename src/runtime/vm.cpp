@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: specs/runtime.md (pending), JNI Invocation API docs, ADR-0001. No GPL-3.0 sources.
+// Provenance: specs/runtime.md (pending), JNI Invocation API docs, ADR-0001. No
+// GPL-3.0 sources.
 
 #include "runtime/vm.h"
 
@@ -21,12 +22,16 @@ constexpr std::string_view kTag = "acl.runtime";
 
 // Case-insensitive ASCII equality for short backend names.
 bool iequals(std::string_view a, std::string_view b) noexcept {
-  if (a.size() != b.size()) return false;
+  if (a.size() != b.size())
+    return false;
   for (std::size_t i = 0; i < a.size(); ++i) {
     char ca = a[i], cb = b[i];
-    if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca - 'A' + 'a');
-    if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb - 'A' + 'a');
-    if (ca != cb) return false;
+    if (ca >= 'A' && ca <= 'Z')
+      ca = static_cast<char>(ca - 'A' + 'a');
+    if (cb >= 'A' && cb <= 'Z')
+      cb = static_cast<char>(cb - 'A' + 'a');
+    if (ca != cb)
+      return false;
   }
   return true;
 }
@@ -34,7 +39,8 @@ bool iequals(std::string_view a, std::string_view b) noexcept {
 std::string join(const std::vector<std::string>& parts, char sep) {
   std::string out;
   for (std::size_t i = 0; i < parts.size(); ++i) {
-    if (i) out.push_back(sep);
+    if (i)
+      out.push_back(sep);
     out += parts[i];
   }
   return out;
@@ -45,10 +51,12 @@ std::string join(const std::vector<std::string>& parts, char sep) {
 // service hub, argument marshaling) before ART/JVM land.
 class NullVm final : public Vm {
  public:
-  explicit NullVm(VmConfig config) : Vm(Backend::Null), config_(std::move(config)) {}
+  explicit NullVm(VmConfig config)
+      : Vm(Backend::Null), config_(std::move(config)) {}
 
   Error start() override {
-    if (started_) return Error::ok();
+    if (started_)
+      return Error::ok();
     log::i(kTag, "VM(null) start: bootclasspath=[{}] classpath=[{}] cache='{}'",
            join(config_.boot_classpath, ':'), join(config_.classpath, ':'),
            config_.cache_dir);
@@ -59,8 +67,7 @@ class NullVm final : public Vm {
   Error call_static_main(std::string_view main_class,
                          const std::vector<std::string>& args) override {
     if (!started_) {
-      return Error::of(Status::NotStarted,
-                       "call_static_main before start()");
+      return Error::of(Status::NotStarted, "call_static_main before start()");
     }
     log::i(kTag, "VM(null) would invoke {}.main([{}]) — no Java executed",
            main_class, join(args, ' '));
@@ -69,10 +76,13 @@ class NullVm final : public Vm {
 
   Error call_activity_lifecycle(std::string_view activity_class) override {
     if (!started_) {
-      return Error::of(Status::NotStarted, "call_activity_lifecycle before start()");
+      return Error::of(Status::NotStarted,
+                       "call_activity_lifecycle before start()");
     }
-    // No Java runtime: report not-an-activity so the caller falls back to main().
-    log::i(kTag, "VM(null) would launch Activity {} — no Java executed", activity_class);
+    // No Java runtime: report not-an-activity so the caller falls back to
+    // main().
+    log::i(kTag, "VM(null) would launch Activity {} — no Java executed",
+           activity_class);
     return Error::of(Status::NotApplicable, "null backend executes no Java");
   }
 
@@ -80,7 +90,8 @@ class NullVm final : public Vm {
     if (!started_) {
       return Error::of(Status::NotStarted, "call_media_browser before start()");
     }
-    log::i(kTag, "VM(null) would host MediaBrowserService {} — no Java executed",
+    log::i(kTag,
+           "VM(null) would host MediaBrowserService {} — no Java executed",
            service_class);
     return Error::of(Status::NotApplicable, "null backend executes no Java");
   }
@@ -111,68 +122,97 @@ class NullVm final : public Vm {
 
 const char* backend_name(Backend backend) noexcept {
   switch (backend) {
-    case Backend::Art:      return "art";
-    case Backend::Jvm:      return "jvm";
-    case Backend::Null:     return "null";
-    case Backend::ArtSplit: return "art-split";
+    case Backend::Art:
+      return "art";
+    case Backend::Jvm:
+      return "jvm";
+    case Backend::Null:
+      return "null";
+    case Backend::ArtSplit:
+      return "art-split";
   }
   return "?";
 }
 
 bool parse_backend(std::string_view name, Backend& out) noexcept {
-  if (iequals(name, "art"))       { out = Backend::Art;      return true; }
-  if (iequals(name, "jvm"))       { out = Backend::Jvm;      return true; }
-  if (iequals(name, "null"))      { out = Backend::Null;     return true; }
-  if (iequals(name, "art-split")) { out = Backend::ArtSplit; return true; }
+  if (iequals(name, "art")) {
+    out = Backend::Art;
+    return true;
+  }
+  if (iequals(name, "jvm")) {
+    out = Backend::Jvm;
+    return true;
+  }
+  if (iequals(name, "null")) {
+    out = Backend::Null;
+    return true;
+  }
+  if (iequals(name, "art-split")) {
+    out = Backend::ArtSplit;
+    return true;
+  }
   return false;
 }
 
 Backend default_backend() noexcept {
   if (const char* env = std::getenv("ACL_VM")) {
     Backend b;
-    if (parse_backend(env, b)) return b;
+    if (parse_backend(env, b))
+      return b;
   }
   return Backend::Art;
 }
 
 const char* status_name(Status status) noexcept {
   switch (status) {
-    case Status::Ok:            return "ok";
-    case Status::Unavailable:   return "unavailable";
-    case Status::InvalidConfig: return "invalid-config";
-    case Status::NotStarted:    return "not-started";
-    case Status::NotFound:      return "not-found";
-    case Status::NotApplicable: return "not-applicable";
-    case Status::RuntimeError:  return "runtime-error";
+    case Status::Ok:
+      return "ok";
+    case Status::Unavailable:
+      return "unavailable";
+    case Status::InvalidConfig:
+      return "invalid-config";
+    case Status::NotStarted:
+      return "not-started";
+    case Status::NotFound:
+      return "not-found";
+    case Status::NotApplicable:
+      return "not-applicable";
+    case Status::RuntimeError:
+      return "runtime-error";
   }
   return "?";
 }
 
-std::unique_ptr<Vm> create_vm(Backend backend, VmConfig config, Error& out_error) {
+std::unique_ptr<Vm> create_vm(Backend backend,
+                              VmConfig config,
+                              Error& out_error) {
   switch (backend) {
     case Backend::Null:
       out_error = Error::ok();
       return std::make_unique<NullVm>(std::move(config));
 
     case Backend::ArtSplit:
-      // arm64 split-process (docs/split-process-art.md): the bionic host ART runs in
-      // the acl-art-host subprocess, driven over acl_ipc. Availability is checked at
-      // launch (art-host binary + ACL_ART_SPLIT_VMLIB/ACL_ART_HOME).
+      // arm64 split-process (docs/split-process-art.md): the bionic host ART
+      // runs in the acl-art-host subprocess, driven over acl_ipc. Availability
+      // is checked at launch (art-host binary +
+      // ACL_ART_SPLIT_VMLIB/ACL_ART_HOME).
       out_error = Error::ok();
       return make_split_vm(std::move(config));
 
     case Backend::Art:
 #if ACL_HAVE_JNI
       // ADR-0001 target: host ART via the JNI Invocation API, dlopen'd from
-      // ACL_ART_HOME. Runs the app's DEX natively (no dex_to_jvm translation). The
-      // spike (docs/art-host-spike.md) proved a host ART build boots + runs DEX and
-      // verifies/AOT-compiles a real obfuscated app; make_art_vm embeds it.
+      // ACL_ART_HOME. Runs the app's DEX natively (no dex_to_jvm translation).
+      // The spike (docs/art-host-spike.md) proved a host ART build boots + runs
+      // DEX and verifies/AOT-compiles a real obfuscated app; make_art_vm embeds
+      // it.
       if (const char* art_home = std::getenv("ACL_ART_HOME");
           art_home == nullptr || *art_home == '\0') {
         out_error = Error::of(
             Status::Unavailable,
             "host ART not available: set ACL_ART_HOME to a host ART build's "
-            "out/host/linux-x86 (see docs/art-host-spike.md), or use --vm=jvm.");
+            "out/host/linux-x86 (see docs/art-host-spike.md), or use "
+            "--vm=jvm.");
         return nullptr;
       }
       out_error = Error::ok();
@@ -180,7 +220,8 @@ std::unique_ptr<Vm> create_vm(Backend backend, VmConfig config, Error& out_error
 #else
       out_error = Error::of(
           Status::Unavailable,
-          "ART backend not built (no JNI headers at configure time); rebuild with "
+          "ART backend not built (no JNI headers at configure time); rebuild "
+          "with "
           "a JDK present, or use --vm=null. See docs/art-host-spike.md");
       return nullptr;
 #endif
@@ -192,10 +233,11 @@ std::unique_ptr<Vm> create_vm(Backend backend, VmConfig config, Error& out_error
       out_error = Error::ok();
       return make_jvm_vm(std::move(config));
 #else
-      out_error = Error::of(
-          Status::Unavailable,
-          "JVM backend not built (no JDK found at configure time); rebuild with "
-          "a JDK present, or use --vm=null. See docs/adr/ADR-0001-dex-execution-host-art.md");
+      out_error = Error::of(Status::Unavailable,
+                            "JVM backend not built (no JDK found at configure "
+                            "time); rebuild with "
+                            "a JDK present, or use --vm=null. See "
+                            "docs/adr/ADR-0001-dex-execution-host-art.md");
       return nullptr;
 #endif
   }
