@@ -54,6 +54,37 @@ Verify the phone-profile subset emits zero automotive symbols:
 meson setup build-phone -Dprofile_automotive=false && meson compile -C build-phone
 ```
 
+## Formatting (clang-format)
+
+`.clang-format` is ivi-homescreen's config kept byte-identical (Chromium style at 80
+columns), which is why its attribution is a `REUSE.toml` annotation rather than a header
+inside the file. The version the tree is formatted with lives in `.clang-format-version`,
+and CI checks the tree at exactly that version:
+
+```
+pipx install "clang-format==$(cat .clang-format-version)"
+git ls-files -z '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hh' '*.hpp' | xargs -0 clang-format -i
+```
+
+Three things to know before trusting a single pass:
+
+- **It does not converge in one pass.** Trailing-comment alignment oscillates and settles
+  on the second pass. Run the command above until `git diff` comes back empty.
+- **A `clang-format off` fence takes no trailing text.** `// clang-format off -- why` is
+  not recognized and silently does nothing. Three macro-invocation tables in
+  `src/ndk/bionic_runtime.cpp` carry the bare form because clang-format repacks them
+  differently on every pass.
+- **The version is part of the contract.** clang-format 18 -- what `apt-get install
+  clang-format` gives on an Ubuntu runner -- disagrees with the committed tree in 32
+  places across 5 files; 23.1.5 agrees with it exactly. The CI job asserts the version it
+  actually got, so a mismatched formatter fails loudly instead of re-flowing the tree.
+
+Reformat-only commits belong in `.git-blame-ignore-revs`. Point git at it once:
+
+```
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
 ## Local pre-flight (same checks CI runs)
 
 ```
@@ -61,4 +92,7 @@ reuse lint
 scripts/check-spdx.sh
 scripts/check-licenses.sh
 scripts/check-provenance.sh
+python3 tools/vendor_framework.py pin
+git ls-files -z '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hh' '*.hpp' \
+  | xargs -0 clang-format --dry-run -Werror
 ```

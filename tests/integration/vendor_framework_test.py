@@ -9,6 +9,7 @@
 #
 # Usage: vendor_framework_test.py <vendor_framework.py> <fwsrc_dir> <tmp_dest>
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -71,9 +72,19 @@ def main() -> int:
     check("COMBINED" in out, "plan should print a combined total")
     shutil.rmtree(dest, ignore_errors=True)
 
+    # (5) pin: the AOSP tag has one home (third_party/aosp/METADATA) and every in-tree
+    #     place that restates it still agrees. Checked here because the tool reads the pin
+    #     at import -- a broken METADATA parse or a half-done retag fails the suite on any
+    #     runner, instead of waiting for the one machine with an AOSP checkout on it.
+    rc, out = run([sys.executable, tool, "pin"])
+    check(rc == 0, f"pin exit {rc}: {out}")
+    check("OK: the AOSP tag has one home" in out, "pin should confirm the restatements agree")
+    copies = re.findall(r'"android-\d[\w.]*"', open(tool, encoding="utf-8").read())
+    check(not copies, f"vendor_framework.py should carry no copy of the tag: {copies}")
+
     if not ok:
         return 1
-    sys.stdout.write("OK: vendor_framework size/budget/vendor/plan + MANIFEST verified\n")
+    sys.stdout.write("OK: vendor_framework size/budget/vendor/plan/pin + MANIFEST verified\n")
     return 0
 
 

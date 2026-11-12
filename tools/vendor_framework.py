@@ -14,20 +14,83 @@
 #   vendor  copy the closure into third_party/aosp/frameworks/, verify each file is
 #           Apache-2.0, drop any shim of the same class (one class, one layer), and
 #           rewrite MANIFEST.md. --dry-run previews without writing.
+#   plan    size every package in a plan file against its own budget, plus a combined
+#           total, and fail on the first package over budget
+#   pin     print the pin read out of METADATA and check everything that restates it
+#           in-tree still agrees with it
+#
+# The pin is NOT duplicated here. The tag and the checkout path are read out of
+# third_party/aosp/METADATA at import, because a constant here with a `keep in sync`
+# comment beside it is not a pin -- nothing makes the two agree, and the copy that is
+# wrong is the one the tooling acts on. `pin` is the gate: it re-derives the tag and
+# fails if the pinned manifest's filename, that manifest's own default revision, the
+# automotive pairing or the Skia pairing has drifted away from it.
 #
 # The AOSP checkout is NOT vendored in-tree; create it once (see `check` output) at
-# $ACL_AOSP_ROOT (default /mnt/dev/aosp), pinned android-13.0.0_r84. Then classes
-# land in the boot classpath automatically (framework/meson.build compiles the layer).
+# $ACL_AOSP_ROOT, defaulting to METADATA's local_checkout. Then classes land in the
+# boot classpath automatically (framework/meson.build compiles the layer).
 import argparse
 import os
+import re
 import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # sibling fw_extract
 import fw_extract  # noqa: E402
 
-TAG = "android-13.0.0_r84"  # keep in sync with third_party/aosp/METADATA
-DEFAULT_AOSP_ROOT = "/mnt/dev/aosp"
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+METADATA = os.path.join(REPO_ROOT, "third_party", "aosp", "METADATA")
+# Keys the tooling cannot run without, as "<block>.<key>" (see read_pin).
+REQUIRED_PIN = ("platform.branch", "platform.local_checkout", "platform.pinned_manifest")
+_SCALAR = re.compile(r'^(\s*)([A-Za-z_][A-Za-z0-9_]*):(.*)$')
+_QUOTED = re.compile(r'\s*"([^"]*)"')
+
+
+def parse_metadata(path=METADATA):
+    """Quoted scalars out of third_party/aosp/METADATA, keyed "<block>.<key>" inside an
+    indented block and "<key>" at the top level.
+
+    Deliberately not a YAML parser and not a dependency: five pinned strings are read
+    out of a file this repo also writes by hand, and requiring the VALUE to be quoted
+    is what keeps a trailing `# comment` -- which most lines in that file have -- out of
+    it. An unquoted or commented-out key is therefore invisible here, which read_pin
+    turns into a loud failure rather than a silent empty string.
+    """
+    out, block = {}, ""
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            m = _SCALAR.match(line.rstrip("\n"))
+            if not m:  # comments, list items and blanks never match
+                continue
+            indent, key, rest = m.groups()
+            q = _QUOTED.match(rest)
+            if not indent:
+                block = "" if q else key  # a bare `key:` opens a block
+                if q:
+                    out[key] = q.group(1)
+            elif q and block:
+                out[block + "." + key] = q.group(1)
+    return out
+
+
+def read_pin(path=METADATA):
+    """The AOSP pin, or exit. One home for the tag: this file has no copy of it."""
+    try:
+        md = parse_metadata(path)
+    except OSError as e:
+        raise SystemExit(f"cannot read the AOSP pin from {path}: {e}")
+    missing = [k for k in REQUIRED_PIN if not md.get(k)]
+    if missing:
+        raise SystemExit(
+            f"{path} is missing the pin key(s) {', '.join(missing)}, or their values are\n"
+            f"not double-quoted. Every tag, path and sha in that file is read from here, so\n"
+            f"the tooling has no fallback to run against.")
+    return md
+
+
+PIN = read_pin()
+TAG = PIN["platform.branch"]
+DEFAULT_AOSP_ROOT = PIN["platform.local_checkout"]
 # AOSP frameworks/base Java source roots, relative to the checkout root.
 DEFAULT_SRC_REL = [
     "frameworks/base/core/java",
@@ -35,7 +98,6 @@ DEFAULT_SRC_REL = [
     "frameworks/base/media/java",
 ]
 DEFAULT_SEED = ["android.util"]  # a small starter; grow package-by-package (R-2 budget)
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DEST = os.path.join(REPO_ROOT, "third_party", "aosp", "frameworks")
 DEFAULT_PLAN = os.path.join(DEFAULT_DEST, "vendor-plan.txt")
 SHIM_ROOT = os.path.join(REPO_ROOT, "framework", "shim")
@@ -48,7 +110,7 @@ SHIM_ROOT = os.path.join(REPO_ROOT, "framework", "shim")
 # substring search cannot tell a real identifier from a provenance comment stating that a
 # file has no GPL-3.0 sources in it, and the second is the opposite claim.
 FORBIDDEN_SPDX = ("GPL-3.0", "LGPL-3.0", "AGPL")
-# Full licence notices are prose, not tags, so they count wherever they appear.
+# Full license notices are prose, not tags, so they count wherever they appear.
 FORBIDDEN_NOTICES = (
     "GNU General Public License", "GNU Affero General Public License",
     "GNU Lesser General Public License, Version 3",
@@ -274,9 +336,57 @@ def cmd_vendor(args):
     return 0
 
 
+def cmd_pin(args):
+    """Re-derive the tag from METADATA and fail on anything in-tree that disagrees.
+
+    Four places legitimately restate the tag -- a filename, that file's own default
+    revision, and two pairing fields -- because each has to be readable on its own. This
+    is what makes them agree: it runs on a bare checkout (no AOSP tree needed), so it can
+    gate every push rather than only a machine that has the 1145 projects synced.
+    """
+    rel = PIN["platform.pinned_manifest"]
+    manifest = os.path.join(REPO_ROOT, rel)
+    print(f"pin        {TAG}   (third_party/aosp/METADATA platform.branch)")
+    print(f"checkout   {DEFAULT_AOSP_ROOT}   ($ACL_AOSP_ROOT overrides)")
+    print(f"manifest   {rel}")
+    bad = []
+
+    def want(cond, detail):
+        print(("  ok    " if cond else "  FAIL  ") + detail)
+        if not cond:
+            bad.append(detail)
+
+    want(os.path.isfile(manifest), f"the pinned manifest exists at {rel}")
+    want(os.path.basename(rel).startswith(TAG + "-"),
+         f"the pinned manifest's filename names the tag ({TAG}-*)")
+    revision = f'revision="refs/tags/{TAG}"'
+    head = ""
+    if os.path.isfile(manifest):
+        with open(manifest, encoding="utf-8") as fh:
+            head = fh.read(4096)  # the <remote>/<default> elements lead the file
+    want(revision in head, f"the pinned manifest defaults to {revision}")
+    want(PIN.get("automotive.platform_pairing") == TAG,
+         f"automotive.platform_pairing is the pinned tag "
+         f"(got {PIN.get('automotive.platform_pairing', '<unset>')!r})")
+    skia = PIN.get("skia_pin", "")
+    want(skia.endswith("@ " + TAG),
+         f"skia_pin pairs external/skia with the pinned tag (got {skia or '<unset>'!r})")
+
+    if bad:
+        sys.stderr.write(
+            f"\n{len(bad)} of the checks above failed. Each one covers a place that has to\n"
+            f"restate the AOSP tag to be readable on its own, and they no longer agree with\n"
+            f"third_party/aosp/METADATA platform.branch ({TAG}). Re-point them, or, if the\n"
+            f"pin itself moved, regenerate the manifest (tools/aosp/manifests/README.md)\n"
+            f"rather than editing the tag in place.\n")
+        return 1
+    print("OK: the AOSP tag has one home and every in-tree restatement of it agrees.")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="ADR-0002 framework vendoring orchestrator")
-    ap.add_argument("command", choices=["check", "size", "vendor", "plan"])
+    ap.add_argument("command", choices=["check", "size", "vendor", "plan", "pin"])
     ap.add_argument("--aosp-root", default=os.environ.get("ACL_AOSP_ROOT", DEFAULT_AOSP_ROOT))
     ap.add_argument("--src-rel", default=":".join(DEFAULT_SRC_REL),
                     help="colon-separated java roots relative to the AOSP checkout")
@@ -293,7 +403,7 @@ def main():
     args.seed = [s for s in args.seed.split(",") if s]
     args.denylist = [d for d in args.denylist.split(",") if d]
     return {"check": cmd_check, "size": cmd_size, "vendor": cmd_vendor,
-            "plan": cmd_plan}[args.command](args)
+            "plan": cmd_plan, "pin": cmd_pin}[args.command](args)
 
 
 if __name__ == "__main__":

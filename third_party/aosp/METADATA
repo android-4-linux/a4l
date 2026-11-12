@@ -18,6 +18,14 @@ license: "Apache-2.0"   # bionic subtree is BSD; record per-component below when
 #
 # The tag is ANNOTATED, so it has two shas and both are recorded: comparing one against
 # the other reads as a mismatch when nothing is wrong. See the README beside the manifest.
+#
+# `branch` below is the ONE home of the tag. tools/vendor_framework.py READS it at import
+# rather than defining a constant beside a `keep in sync` comment, and
+# `tools/vendor_framework.py pin` fails if any of the four places that have to restate it
+# -- the pinned manifest's filename, that manifest's own default revision,
+# automotive.platform_pairing, and skia_pin -- has drifted. CI runs that check on every
+# push, so a half-done retag cannot merge. Values here must stay double-quoted: that is
+# how the reader tells a value from the trailing comments most of these lines carry.
 platform:
   api_level: 33
   manifest_url: "https://android.googlesource.com/platform/manifest"
@@ -31,7 +39,8 @@ platform:
   # tools/aosp/patches/external-skia-host-vulkan.patch after syncing. Both verified to
   # 'git apply --check -R' clean against the checkout on 2026-11-11.
   # Local checkout the extraction/vendoring tooling runs against. Configurable via
-  # $ACL_AOSP_ROOT; tools/vendor_framework.py defaults to this path.
+  # $ACL_AOSP_ROOT; tools/vendor_framework.py reads this value as its default rather
+  # than carrying a second copy of the path.
   local_checkout: "/mnt/dev/aosp"
   # Create it from the pinned manifest rather than from the tag, so the result is the
   # same tree rather than the same release. Full recipe in tools/aosp/manifests/README.md:
