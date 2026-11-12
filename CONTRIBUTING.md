@@ -27,6 +27,12 @@ license rules are hard constraints enforced in CI, not guidelines.
    ```
    which appends `Signed-off-by: Your Name <you@example.com>`.
 
+   The one exemption is Dependabot, which cannot put a trailer in its own commits. The
+   gate skips a commit only when the pull request was opened by `dependabot[bot]` *and*
+   that commit is authored by it; a commit of yours in a Dependabot branch is still
+   checked, and claiming its author identity on a pull request of your own does not
+   exempt you.
+
 ## License rules (see PROVENANCE.md for the full matrix)
 
 - Permitted: Apache-2.0 / BSD / MIT / ISC / Zlib / BSL-1.0 statically; LGPL-2.1 and MPL-2.0
@@ -97,3 +103,18 @@ python3 tools/vendor_framework.py pin
 git ls-files -z '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hh' '*.hpp' \
   | xargs -0 clang-format --dry-run -Werror
 ```
+
+## Updating an action
+
+Actions are pinned by commit sha with the release in a trailing comment, and
+`scripts/check-action-pins.sh` requires both. Do not change a pin by hand unless you have
+to: Dependabot proposes the move weekly as a single grouped pull request, rewriting the
+sha and the comment together, which is the only way the two cannot disagree. If you do it
+by hand, resolve the sha from the tag rather than trusting the tag itself:
+
+```
+gh api repos/actions/checkout/commits/v7 --jq .sha
+```
+
+Meson wrap dependencies are not covered — Dependabot has no Meson ecosystem, so `catch2`,
+`pugixml`, `drm-cxx` and `wayland-cxx-scanner` move only when someone moves them.

@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Version updates for the one ecosystem in this tree Dependabot understands: the actions
+# used by .github/workflows. Those are pinned by commit sha and held there by Gate G0.d,
+# which makes them immune to a moved tag and equally immune to a security release, because
+# a sha never updates itself. This file is the other half of that pin. Dependabot proposes
+# the move with the sha and its `# vX.Y.Z` comment rewritten together, and CI and a human
+# decide whether to take it.
+#
+# Not covered, deliberately: subprojects/*.wrap. Dependabot has no Meson ecosystem, so
+# catch2, pugixml, drm-cxx and wayland-cxx-scanner stay manual. wayland-cxx-scanner in
+# particular is pinned by revision and cross-checked against the cache key in the present
+# job, so moving it is a build change rather than a dependency bump.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    # One pull request for the whole set rather than one per action. The set is three
+    # references to two repositories; reviewing them together is reviewing them once.
+    groups:
+      actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "ci"

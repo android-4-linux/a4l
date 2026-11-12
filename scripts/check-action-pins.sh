@@ -11,11 +11,16 @@
 # after. A sha names one tree and cannot be re-pointed, so it is the only form in which
 # "pinned" is a fact rather than a request. The `# vX.Y.Z` comment is required as well,
 # because a bare sha records nothing about which release was actually reviewed.
+#
+# The comment has to name a release: `v7.0.1`, or `v7.0` where upstream tags that way.
+# A bare major (`# v7`) is rejected, since that is the thing being replaced. Dependabot
+# rewrites the sha and this comment together, so the two stay consistent across a bump
+# without anyone editing either by hand -- see .github/dependabot.yml.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 sha_re='^[0-9a-f]{40}$'
-ver_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
+ver_re='^v[0-9]+\.[0-9]+(\.[0-9]+)?$'
 fail=0
 pinned=0
 local_refs=0
@@ -56,7 +61,7 @@ while IFS= read -r hit; do
     continue
   fi
   if [[ ! "$comment" =~ $ver_re ]]; then
-    echo "FAIL: $file:$lineno: $name@${ref:0:12} has no trailing '# vX.Y.Z' comment" \
+    echo "FAIL: $file:$lineno: $name@${ref:0:12} has no trailing '# vX.Y[.Z]' comment" \
          "naming the release the sha was taken from." >&2
     fail=1
     continue
