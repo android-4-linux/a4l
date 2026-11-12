@@ -92,6 +92,7 @@ reuse lint
 scripts/check-spdx.sh
 scripts/check-licenses.sh
 scripts/check-provenance.sh
+scripts/check-action-pins.sh
 python3 tools/vendor_framework.py pin
 git ls-files -z '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hh' '*.hpp' \
   | xargs -0 clang-format --dry-run -Werror

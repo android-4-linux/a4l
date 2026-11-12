@@ -31,7 +31,7 @@ jobs:
     name: Clean-room & license gates (Gate G0)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install REUSE
         run: pipx install reuse
       - name: SPDX headers
@@ -50,6 +50,13 @@ jobs:
         # checkout and no build, which is the point: a half-done retag fails here in
         # seconds rather than on the one machine that has the 1145 projects synced.
         run: python3 tools/vendor_framework.py pin
+      - name: Actions are pinned by sha (Gate G0.d)
+        # Every `uses:` in this file names a commit, not a tag. A major tag is a moving
+        # pointer by design -- actions/checkout@v7 meant v7.0.0 when we adopted it and
+        # v7.0.1 a day later, with nothing in the ref to say so -- and a moved tag runs
+        # new code inside a job that has a token and a cache. The trailing `# vX.Y.Z`
+        # comment is what makes the sha reviewable; this step requires both.
+        run: ./scripts/check-action-pins.sh
 
   # The tree is a fixed point of ONE clang-format version, so the check is only meaningful
   # at that version -- which is why .clang-format-version exists and why this job asserts
@@ -58,7 +65,7 @@ jobs:
     name: Format (clang-format at the pinned version)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install clang-format at .clang-format-version
         # Pinned because the runner's own clang-format is not the one this tree is
         # formatted with: the version apt serves on ubuntu-latest is 18, and it disagrees
@@ -110,7 +117,7 @@ jobs:
     runs-on: ubuntu-24.04
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Every commit is Signed-off-by
@@ -138,7 +145,7 @@ jobs:
     # turn a hang into a retry.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install toolchain
         # The runner's mirror list periodically serves an index whose pool has already moved on.
         # Two failure modes, both infrastructure rather than build: every fetch 404s ("Unable to
@@ -206,7 +213,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve the wcs and Skia pins
         # Neither pin is repeated here. The wcs commit has one home, the wrap; the Skia
@@ -255,7 +262,7 @@ jobs:
 
       - name: Restore the Skia prefix
         id: skia-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/skia-prefix
           key: skia-${{ steps.pins.outputs.os_id }}-x86_64-${{ steps.pins.outputs.skia_key }}-${{ steps.pins.outputs.wcs_rev }}
@@ -318,7 +325,7 @@ jobs:
         # banks the expensive artifact the moment it exists, so a failure after this point costs
         # one run instead of one run plus the next rebuild.
         if: steps.skia-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/skia-prefix
           key: ${{ steps.skia-cache.outputs.cache-primary-key }}
