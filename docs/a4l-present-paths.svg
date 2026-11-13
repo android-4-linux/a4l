@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Contributors to a4l -->
+<!-- Provenance: original a4l diagram, drawn from this repository's own tree and docs
+     (plan.md, docs/ndk-scope.md, docs/split-process-art.md, src/ layout). No GPL-3.0
+     sources. Colors are literal presentation attributes, because renderers without CSS
+     custom-property support (librsvg <= 2.62) draw var() as black; the dark theme is a
+     progressive CSS override. -->
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 960 720' width='960' height='720'
+     role='img' aria-label='four a4l present paths drawn as block chains with extent dimensions'>
+  <title>a4l present paths</title>
+  <desc>Engineering-drawing view of the four present paths. Three carry pixels with no CPU copy; the fourth, the default wl_shm path, presents only a4l&#x27;s own Bitmap shim and is drawn dashed.</desc>
+  <style>
+    @media (prefers-color-scheme: dark) {
+      .f-accent { fill: #5fb0e4; }
+      .f-ink { fill: #e9ecee; }
+      .f-muted { fill: #8c9398; }
+      .f-paper { fill: #0d0f11; }
+      .f-thin { fill: #e9ecee; }
+      .s-accent { stroke: #5fb0e4; }
+      .s-grid { stroke: #262b2f; }
+      .s-thin { stroke: #e9ecee; }
+    }
+  </style>
+  <rect x='0' y='0' width='960' height='720' fill='#ffffff' class='f-paper'/>
+  <circle cx='144' cy='108' r='8' fill='none' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <text x='144' y='111.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#0d5c91' class='f-accent'>01</text>
+  <text x='164' y='112' font-size='13' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="1.2" fill='#16181a' class='f-ink'>GPU PRESENT</text>
+  <text x='164' y='127' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>ACL_PRESENT_GPU=1 · Views, Compose, custom View · the path a real app needs</text>
+  <rect x='136' y='142' width='140.099' height='44' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='146' y='161' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#16181a' class='f-ink'>CANVAS / RENDERNODE</text>
+  <text x='146' y='176' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>android.graphics JNI</text>
+  <line x1='283.099' y1='164' x2='303.099' y2='164' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <path d='M303.099 164 L297.099 166.6 L297.099 161.4 z' fill='#0d5c91' class='f-accent'/>
+  <rect x='310.099' y='142' width='136.547' height='44' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='320.099' y='161' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#16181a' class='f-ink'>SKIA GANESH VULKAN</text>
+  <text x='320.099' y='176' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>renders into a VkImage</text>
+  <line x1='453.646' y1='164' x2='473.646' y2='164' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <path d='M473.646 164 L467.646 166.6 L467.646 161.4 z' fill='#0d5c91' class='f-accent'/>
+  <rect x='480.646' y='142' width='133.778' height='44' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='490.646' y='161' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#16181a' class='f-ink'>DMA-BUF + MODIFIER</text>
+  <text x='490.646' y='176' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>zwp_linux_dmabuf_v1</text>
+  <line x1='621.424' y1='164' x2='641.424' y2='164' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <path d='M641.424 164 L635.424 166.6 L635.424 161.4 z' fill='#0d5c91' class='f-accent'/>
+  <rect x='648.424' y='142' width='136.547' height='44' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='658.424' y='161' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#16181a' class='f-ink'>COMPOSITOR</text>
+  <text x='658.424' y='176' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>may promote to a plane</text>
+  <line x1='136' y1='201' x2='414.087' y2='201' stroke='#d8dcdf' stroke-width='0.6' class='s-grid'/>
+  <line x1='506.885' y1='201' x2='784.971' y2='201' stroke='#d8dcdf' stroke-width='0.6' class='s-grid'/>
+  <line x1='136' y1='197' x2='136' y2='205' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <line x1='784.971' y1='197' x2='784.971' y2='205' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='460.486' y='204.2' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" letter-spacing="1.2" fill='#0d5c91' class='f-accent'>NO CPU COPY</text>
+  <circle cx='144' cy='241' r='8' fill='none' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <text x='144' y='244.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#0d5c91' class='f-accent'>02</text>
+  <text x='164' y='245' font-size='13' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="1.2" fill='#16181a' class='f-ink'>NATIVE GL</text>
+  <text x='164' y='260' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>Flutter and Impeller, and any app that brings its own EGL</text>
+  <rect x='136' y='275' width='146.42' height='44' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='146' y='294' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#16181a' class='f-ink'>APP LIBEGL / LIBGLES</text>
+  <text x='146' y='309' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>bionic ABI, in-process</text>
+  <line x1='289.42' y1='297' x2='309.42' y2='297' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <path d='M309.42 297 L303.42 299.6 L303.42 294.4 z' fill='#0d5c91' class='f-accent'/>
+  <rect x='316.42' y='275' width='141.845' height='44' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='326.42' y='294' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#16181a' class='f-ink'>A4L FORWARDER</text>
+  <text x='326.42' y='309' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>across the %fs boundary</text>
+  <line x1='465.265' y1='297' x2='485.265' y2='297' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <path d='M485.265 297 L479.265 299.6 L479.265 294.4 z' fill='#0d5c91' class='f-accent'/>
+  <rect x='492.265' y='275' width='120.654' height='44' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='502.265' y='294' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#16181a' class='f-ink'>MESA</text>
+  <text x='502.265' y='309' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>renders and commits</text>
+  <line x1='619.919' y1='297' x2='639.919' y2='297' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <path d='M639.919 297 L633.919 299.6 L633.919 294.4 z' fill='#0d5c91' class='f-accent'/>
+  <rect x='646.919' y='275' width='131.25' height='44' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='656.919' y='294' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#16181a' class='f-ink'>A4L WL_SURFACE</text>
+  <text x='656.919' y='309' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>inside eglSwapBuffers</text>
+  <line x1='136' y1='334' x2='370.977' y2='334' stroke='#d8dcdf' stroke-width='0.6' class='s-grid'/>
+  <line x1='543.191' y1='334' x2='778.169' y2='334' stroke='#d8dcdf' stroke-width='0.6' class='s-grid'/>
+  <line x1='136' y1='330' x2='136' y2='338' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <line x1='778.169' y1='330' x2='778.169' y2='338' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='457.084' y='337.2' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" letter-spacing="1.2" fill='#0d5c91' class='f-accent'>A4L ALLOCATES NO BUFFER</text>
+  <circle cx='144' cy='374' r='8' fill='none' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <text x='144' y='377.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#0d5c91' class='f-accent'>03</text>
+  <text x='164' y='378' font-size='13' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="1.2" fill='#16181a' class='f-ink'>VIDEO</text>
+  <text x='164' y='393' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>ExoPlayer / media3 · SurfaceView hole-punch onto a subsurface</text>
+  <rect x='136' y='408' width='136.547' height='44' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='146' y='427' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#16181a' class='f-ink'>MEDIACODEC</text>
+  <text x='146' y='442' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>app feeds access units</text>
+  <line x1='279.547' y1='430' x2='299.547' y2='430' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <path d='M299.547 430 L293.547 432.6 L293.547 427.4 z' fill='#0d5c91' class='f-accent'/>
+  <rect x='306.547' y='408' width='115.357' height='44' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='316.547' y='427' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#16181a' class='f-ink'>VA-API DECODE</text>
+  <text x='316.547' y='442' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>hardware, host GPU</text>
+  <line x1='428.904' y1='430' x2='448.904' y2='430' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <path d='M448.904 430 L442.904 432.6 L442.904 427.4 z' fill='#0d5c91' class='f-accent'/>
+  <rect x='455.904' y='408' width='141.845' height='44' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='465.904' y='427' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#16181a' class='f-ink'>DRM_PRIME DMA-BUF</text>
+  <text x='465.904' y='442' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>imported as an EGLImage</text>
+  <line x1='604.749' y1='430' x2='624.749' y2='430' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <path d='M624.749 430 L618.749 432.6 L618.749 427.4 z' fill='#0d5c91' class='f-accent'/>
+  <rect x='631.749' y='408' width='115.357' height='44' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='641.749' y='427' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#16181a' class='f-ink'>WL_SUBSURFACE</text>
+  <text x='641.749' y='442' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>below the toplevel</text>
+  <line x1='136' y1='467' x2='368.682' y2='467' stroke='#d8dcdf' stroke-width='0.6' class='s-grid'/>
+  <line x1='514.424' y1='467' x2='747.106' y2='467' stroke='#d8dcdf' stroke-width='0.6' class='s-grid'/>
+  <line x1='136' y1='463' x2='136' y2='471' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <line x1='747.106' y1='463' x2='747.106' y2='471' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='441.553' y='470.2' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" letter-spacing="1.2" fill='#0d5c91' class='f-accent'>ANDROID&#x27;S OWN MODEL</text>
+  <circle cx='144' cy='507' r='8' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='144' y='510.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#16181a' class='f-ink'>04</text>
+  <text x='164' y='511' font-size='13' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="1.2" fill='#16181a' class='f-ink'>DEFAULT WL_SHM</text>
+  <text x='164' y='526' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>the fallback, and the usual reason a first run looks empty</text>
+  <rect x='136' y='541' width='136.547' height='44' fill='none' stroke='#16181a' stroke-width='0.9' stroke-dasharray="5 3" class='s-thin'/>
+  <text x='146' y='560' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>A4L BITMAP SHIM</text>
+  <text x='146' y='575' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>not a real app surface</text>
+  <line x1='279.547' y1='563' x2='299.547' y2='563' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <path d='M299.547 563 L293.547 565.6 L293.547 560.4 z' fill='#16181a' class='f-thin'/>
+  <rect x='306.547' y='541' width='70.568' height='44' fill='none' stroke='#16181a' stroke-width='0.9' stroke-dasharray="5 3" class='s-thin'/>
+  <text x='316.547' y='560' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>CPU BLIT</text>
+  <text x='316.547' y='575' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>per frame</text>
+  <line x1='384.115' y1='563' x2='404.115' y2='563' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <path d='M404.115 563 L398.115 565.6 L398.115 560.4 z' fill='#16181a' class='f-thin'/>
+  <rect x='411.115' y='541' width='131.25' height='44' fill='none' stroke='#16181a' stroke-width='0.9' stroke-dasharray="5 3" class='s-thin'/>
+  <text x='421.115' y='560' font-size='10.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>WL_SHM POOL</text>
+  <text x='421.115' y='575' font-size='8.8' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>no modifier, no plane</text>
+  <line x1='136' y1='600' x2='246.457' y2='600' stroke='#d8dcdf' stroke-width='0.6' class='s-grid'/>
+  <line x1='431.907' y1='600' x2='542.365' y2='600' stroke='#d8dcdf' stroke-width='0.6' class='s-grid'/>
+  <line x1='136' y1='596' x2='136' y2='604' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <line x1='542.365' y1='596' x2='542.365' y2='604' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='339.182' y='603.2' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" letter-spacing="1.2" fill='#6b7075' class='f-muted'>CANNOT PRESENT A REAL APP</text>
+  <rect x='14' y='14' width='932' height='692' fill='none' stroke='#16181a' stroke-width='1.2' class='s-thin'/>
+  <rect x='19' y='19' width='922' height='682' fill='none' stroke='#d8dcdf' stroke-width='0.6' class='s-grid'/>
+  <text x='36' y='54' font-size='21' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="-0.5" fill='#16181a' class='f-ink'>a4l</text>
+  <text x='100' y='54' font-size='11' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="2.4" fill='#16181a' class='f-ink'>PRESENT PATHS</text>
+  <text x='924' y='54' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' text-anchor="end" letter-spacing="1.4" fill='#6b7075' class='f-muted'>REV 2026-11-13</text>
+  <line x1='36' y1='66' x2='924' y2='66' stroke='#16181a' stroke-width='1.2' class='s-thin'/>
+  <rect x='624' y='640' width='300' height='44' fill='none' stroke='#16181a' stroke-width='1' class='s-thin'/>
+  <line x1='624' y1='662' x2='924' y2='662' stroke='#16181a' stroke-width='0.7' class='s-thin'/>
+  <line x1='774' y1='640' x2='774' y2='684' stroke='#16181a' stroke-width='0.7' class='s-thin'/>
+  <text x='633' y='654.5' font-size='8.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' letter-spacing="0.8" fill='#6b7075' class='f-muted'>ANDROID-4-LINUX / A4L</text>
+  <text x='783' y='654.5' font-size='8.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' letter-spacing="0.8" fill='#6b7075' class='f-muted'>FIG. 2 OF 2</text>
+  <text x='633' y='676.5' font-size='8.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' letter-spacing="0.8" fill='#6b7075' class='f-muted'>APACHE-2.0</text>
+  <text x='783' y='676.5' font-size='8.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' letter-spacing="0.8" fill='#6b7075' class='f-muted'>SHEET 2 / 2</text>
+</svg>
