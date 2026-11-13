@@ -17,7 +17,7 @@ if framework_android_jar != ''
 endif
 
 acl_exe = executable(
-  'acl',
+  'a4l',
   files('main.cpp'),
   include_directories : [config_inc, core_inc],
   link_with : module_libs,

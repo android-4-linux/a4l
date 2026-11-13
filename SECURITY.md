@@ -4,7 +4,7 @@
 ## Reporting a vulnerability
 
 Report privately through GitHub, not in a public issue:
-**[Security → Report a vulnerability](https://github.com/android-4-linux/acl-cxx/security/advisories/new)**.
+**[Security → Report a vulnerability](https://github.com/android-4-linux/a4l/security/advisories/new)**.
 That opens a private advisory visible only to the maintainers, and it is the only reporting
 channel this project offers — there is no security mailing list.
 

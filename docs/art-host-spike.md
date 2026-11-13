@@ -3,6 +3,8 @@
      Phase 1 exit gate; AOSP art host-build docs (public, Apache-2.0). No GPL-3.0 sources. -->
 
 # Host-ART spike — scope & go/no-go plan (the ADR-1 decision)
+> **Binary name.** The executable was `acl` until 2026-11-13 and is **`a4l`** now. Command
+> transcripts below are kept exactly as they were run; read `acl run ...` as `a4l run ...`.
 
 ## The question this spike answers
 

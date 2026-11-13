@@ -5,6 +5,8 @@
      system (Soong, host targets), Mesa V3DV/Panfrost docs (public). No GPL-3.0 sources. -->
 
 # Running acl on a Raspberry Pi (and RK3588) — bring-up plan
+> **Binary name.** The executable was `acl` until 2026-11-13 and is **`a4l`** now. Command
+> transcripts below are kept exactly as they were run; read `acl run ...` as `a4l run ...`.
 
 Target boards: **Raspberry Pi 4** (BCM2711, Cortex-A72 ×4, VideoCore VI) and **Pi 5**
 (BCM2712, Cortex-A76 ×4, VideoCore VII). Both are aarch64/Linux — the same architecture family

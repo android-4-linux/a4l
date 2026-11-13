@@ -471,7 +471,7 @@ index 000000000..dfdae55d1
 --- /dev/null
 +++ b/cc/config/arm64_musl_host.go
 @@ -0,0 +1,105 @@
-+// Copyright 2026 Contributors to acl-cxx
++// Copyright 2026 Contributors to a4l
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
 +// you may not use this file except in compliance with the License.

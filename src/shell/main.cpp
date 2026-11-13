@@ -39,7 +39,7 @@ constexpr std::string_view kTag = "acl";
 enum : int { kOk = 0, kUsage = 1, kBackendUnavailable = 2, kRuntimeError = 3 };
 
 void print_version() {
-  std::printf("acl %s\n", ACL_VERSION);
+  std::printf("a4l %s\n", ACL_VERSION);
 }
 
 void print_roster() {
@@ -53,7 +53,7 @@ void print_roster() {
 
 void print_usage() {
   std::printf(
-      "usage: acl <command> [options]\n"
+      "usage: a4l <command> [options]\n"
       "\n"
       "commands:\n"
       "  run <app.apk>        inspect and launch an APK\n"
@@ -587,7 +587,7 @@ int cmd_tone(const std::vector<std::string>& args) {
     else if (match_opt(a, "--amplitude", v))
       spec.amplitude = std::atof(v.c_str());
     else {
-      std::fprintf(stderr, "acl tone: unknown option '%s'\n", a.c_str());
+      std::fprintf(stderr, "a4l tone: unknown option '%s'\n", a.c_str());
       return kUsage;
     }
   }
@@ -624,7 +624,7 @@ int main(int argc, char** argv) {
     return cmd_tone({args.begin() + 1, args.end()});
   }
 
-  std::fprintf(stderr, "acl: unknown command '%s'\n\n", cmd.c_str());
+  std::fprintf(stderr, "a4l: unknown command '%s'\n\n", cmd.c_str());
   print_usage();
   return kUsage;
 }

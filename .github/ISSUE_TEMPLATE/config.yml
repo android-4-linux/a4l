@@ -3,13 +3,13 @@
 blank_issues_enabled: true
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/android-4-linux/acl-cxx/security/advisories/new
+    url: https://github.com/android-4-linux/a4l/security/advisories/new
     about: >-
       Report privately through a GitHub security advisory, never as a public issue.
       See SECURITY.md for what is in scope — APK signatures are not verified and
       app native code is not confined, both by design today.
   - name: Design, scope and roadmap
-    url: https://github.com/android-4-linux/acl-cxx/blob/main/plan.md
+    url: https://github.com/android-4-linux/a4l/blob/main/plan.md
     about: >-
       plan.md is the source of truth for architecture, ADRs and phases;
       docs/app-corpus-status.md records what runs today, dated.

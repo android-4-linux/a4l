@@ -32,14 +32,14 @@ path = [
   "**.md",
 ]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "Copyright 2026 Contributors to acl-cxx"
+SPDX-FileCopyrightText = "Copyright 2026 Contributors to a4l"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
 path = [".gitignore", "**/.gitignore", "**/.gitkeep", "**.wrap", "**.ini",
         ".git-blame-ignore-revs", ".clang-format-version"]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "Copyright 2026 Contributors to acl-cxx"
+SPDX-FileCopyrightText = "Copyright 2026 Contributors to a4l"
 SPDX-License-Identifier = "Apache-2.0"
 
 # .clang-format is taken verbatim from toyota-connected/ivi-homescreen (Apache-2.0), which
@@ -56,7 +56,7 @@ SPDX-License-Identifier = "Apache-2.0"
 [[annotations]]
 path = ["third_party/README.md", "third_party/**/METADATA"]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "Copyright 2026 Contributors to acl-cxx"
+SPDX-FileCopyrightText = "Copyright 2026 Contributors to a4l"
 SPDX-License-Identifier = "Apache-2.0"
 
 # The pinned AOSP manifest is 'repo manifest -r' output: AOSP's own project list with a

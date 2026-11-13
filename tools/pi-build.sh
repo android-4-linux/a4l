@@ -5,7 +5,7 @@
 #
 # M1 — build acl natively on a Raspberry Pi (arm64) running Debian/RPi-OS trixie (g++ 14, meson >=1.3).
 # Run from the acl repo root on the Pi:  tools/pi-build.sh
-# Then run an app:  ACL_AUDIO=pipewire build/src/shell/acl run app.apk --vm=jvm --present
+# Then run an app:  ACL_AUDIO=pipewire build/src/shell/a4l run app.apk --vm=jvm --present
 #
 # Bookworm (Debian 12) note: its meson is 1.0.1 < the required 1.3 — first
 #   sudo apt-get install -y python3-pip && pip3 install --break-system-packages 'meson>=1.3'
@@ -28,9 +28,9 @@ meson setup build 2>&1 | grep -iE 'C\+\+ compiler|Host machine cpu|Run-time dep 
 meson compile -C build
 
 echo ""
-echo "acl built: $(readlink -f build/src/shell/acl)"
-file build/src/shell/acl 2>/dev/null | sed 's/^/  /'
-./build/src/shell/acl 2>&1 | head -4
+echo "a4l built: $(readlink -f build/src/shell/a4l)"
+file build/src/shell/a4l 2>/dev/null | sed 's/^/  /'
+./build/src/shell/a4l 2>&1 | head -4
 echo ""
 echo "Next: acl run <app.apk> --vm=jvm --present   (M1)"
 echo "      then M2/M3 per docs/pi-plan.md (arm64 host ART via tools/assemble-arm64-art.sh)"
