@@ -23,12 +23,12 @@ the system `Typeface` map. On a Linux host there is no `/system`, so it throws �
 `getSystemFontConfigInternal("/system/etc/fonts.xml", "/system/fonts/", …)`. There is **no
 `ANDROID_ROOT` indirection** — it always looks at literal `/system`. So the only ways to satisfy
 the *framework* path are (a) put real files at `/system` (a user mount-namespace `mount --bind`,
-or shipping them on the embedded/automotive image where acl owns the rootfs), or (b) reflectively
+or shipping them on the embedded/automotive image where a4l owns the rootfs), or (b) reflectively
 override the constants (fragile — `String` constants inline at the use-site).
 
-## What acl does instead — own it in Skia
+## What a4l does instead — own it in Skia
 
-acl does not use `SystemFonts`. `graphics_jni` is backed by Skia; `HostBootstrap.seedTypefaces()`
+a4l does not use `SystemFonts`. `graphics_jni` is backed by Skia; `HostBootstrap.seedTypefaces()`
 (run once after the graphics natives register) builds `Typeface.DEFAULT` from a real font file
 (`ACL_GRAPHICS_FONT` → Android's `Roboto-Regular.ttf`, else a probed host font) and installs it as
 the default + the `sSystemFontMap` family aliases. That is why text already renders. Fonts are

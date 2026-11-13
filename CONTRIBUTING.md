@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-# Contributing to acl
+# Contributing to a4l
 
 Before anything else, read `PROVENANCE.md` and `docs/clean-room.md`. The clean-room and
 license rules are hard constraints enforced in CI, not guidelines. How people are expected to
@@ -110,7 +110,7 @@ git ls-files -z '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hh' '*.hpp' \
 
 The tree builds at `warning_level=2` with **`werror=false`**, and that is deliberate: a
 subproject's warning must not fail a consumer build, and a compiler newer than the pinned CI
-image must not make acl unbuildable for you. So nothing in the build fails on a warning —
+image must not make a4l unbuildable for you. So nothing in the build fails on a warning —
 instead CI counts them, where the compiler is pinned, and **the count must be zero**:
 
 ```
@@ -120,12 +120,12 @@ scripts/check-warnings.sh compile.log
 ```
 
 Two things the gate does on purpose. Warnings under `subprojects/` and `third_party/` are not
-counted — they are upstream's, and acl pins those by sha, so the only honest fix here would be a
+counted — they are upstream's, and a4l pins those by sha, so the only honest fix here would be a
 different pin. And a log in which **nothing compiled** fails rather than passes: an incremental
 `meson compile` with no work to do emits no warnings, and a green gate that proves nothing is
 worse than no gate. Configure a fresh build directory if you see that failure.
 
-If a warning is genuinely upstream's and reaches acl's own translation units, suppress it at the
+If a warning is genuinely upstream's and reaches a4l's own translation units, suppress it at the
 narrowest scope — a `#pragma` around the include, not a project-wide `-Wno-`— with a comment
 saying why.
 

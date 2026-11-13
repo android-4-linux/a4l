@@ -9,7 +9,7 @@
 
 ## Context
 ADR-0002 vendored the real AOSP Java framework but committed to **replacing the native
-underside** (`android_view_*`, `android_os_*`, … JNI registrations) with clean-room acl C++ —
+underside** (`android_view_*`, `android_os_*`, … JNI registrations) with clean-room a4l C++ —
 a very large surface. Spike A (post host-ART bring-up) tested whether that reimplementation is
 actually necessary once the app's DEX runs on host ART:
 
@@ -26,11 +26,11 @@ actually necessary once the app's DEX runs on host ART:
 ## Decision
 Reuse the **real** AOSP framework (loaded natively on host ART) **and** the host-buildable AOSP
 native libraries (`libandroid_runtime`, `libandroidfw`, …) as the framework's JNI floor, rather
-than clean-room reimplementing the native underside. acl provides a **host `AndroidRuntime`
+than clean-room reimplementing the native underside. a4l provides a **host `AndroidRuntime`
 bootstrap** (adapted from `frameworks/base/cmds/app_process/app_main.cpp` + `AndroidRuntime::
 start`/`startReg`) to register the `gRegJNI` table, and substitutes **only at the device
 boundary**: Binder/SystemServer → the in-process `svc` hub (ADR-0003); SurfaceFlinger → Wayland
-+ Skia (ADR-0004). Clean-room acl C++ is written only where a host lib is hopelessly device-tied
++ Skia (ADR-0004). Clean-room a4l C++ is written only where a host lib is hopelessly device-tied
 or absent. This **refines** — does not revoke — ADR-0002: the framework is still vendored AOSP;
 only its "replace the native underside" clause is changed to "reuse where host-buildable".
 
@@ -58,7 +58,7 @@ exported `register_android_*`). The framework-heavy JNI — `AndroidRuntime`/`st
 `target: { android: {...} }` block and is **not compiled for host** (device-tied deps:
 SurfaceFlinger, Binder, HALs). So a real Activity's native floor (Resources/AssetManager/View)
 is not reachable by simply dlopening the stock host lib. Getting it means enabling those `.cpp`
-for host one subsystem at a time and **stubbing each device dep against acl's substitutes**
+for host one subsystem at a time and **stubbing each device dep against a4l's substitutes**
 (SurfaceFlinger→Wayland/Skia per ADR-0004, Binder→svc hub per ADR-0003) — the same substitution
 work as P2.4/P2.5, entered from the native side; `libandroidfw` (resources) is already
 `host_supported`, so resources is the first candidate. This is what AOSP's own host framework
@@ -70,7 +70,7 @@ The host `libandroid_runtime` (via its LayoutlibLoader host srcs block) DOES com
 ApkAssets, XmlBlock, StringBlock), Looper (`MessageQueue`), the input stack, Parcel, SQLite,
 animation. A(2)'s "AssetManager is target-only" was a wrong-name search
 (`register_android_content_res_AssetManager` does not exist; the symbol is
-`register_android_content_AssetManager`). So acl reuses these directly (R1: ArtVm registers 28).
+`register_android_content_AssetManager`). So a4l reuses these directly (R1: ArtVm registers 28).
 Only the **render** natives (View, Bitmap/Canvas, Configuration) are genuinely target-only and
 still need the P2.4 SurfaceFlinger→Wayland/Skia substitution. Resources beyond the native is now
 a **data** problem (framework-res.apk), not a native one.

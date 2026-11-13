@@ -15,7 +15,7 @@ the point of the project. Contempt for the person holding the position is not, a
 thing that reliably ends a technical discussion early.
 
 **Bring evidence.** A claim about what the code does should come with a way to check it — a log, a
-command, a commit. This matters more here than in most projects: acl is a compatibility layer whose
+command, a commit. This matters more here than in most projects: a4l is a compatibility layer whose
 documents have already been wrong about its own capabilities, in both directions. Assertion is not
 status.
 
@@ -24,7 +24,7 @@ this tree is a decision made against a constraint that was never written down. A
 constraint was.
 
 **Accept that scope is bounded.** A maintainer declining a feature, a platform or a dependency is
-not a judgment about the person who asked. acl deliberately does not accept some contributions at
+not a judgment about the person who asked. a4l deliberately does not accept some contributions at
 all — anything derived from the GPL-3.0 project that preceded it, for the reasons in
 `PROVENANCE.md`.
 

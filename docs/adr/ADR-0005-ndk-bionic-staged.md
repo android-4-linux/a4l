@@ -12,7 +12,7 @@ linker namespaces bridged to host libraries — the class of problem libhybris s
 ## Decision
 **Stage it.** Phase ≤3: Java/Kotlin-only apps (reject APKs whose `lib/` matters). Phase 4:
 build AOSP `bionic` + `linker` for the host, load app `.so` in a bionic namespace bridged to
-acl's libandroid / EGL / Vulkan trampolines into host Mesa; `AHardwareBuffer` on dmabuf.
+a4l's libandroid / EGL / Vulkan trampolines into host Mesa; `AHardwareBuffer` on dmabuf.
 
 ## Consequences
 Java-only remains fully shippable without any of this, so NDK risk (R-6: TLS, ifuncs, pthread

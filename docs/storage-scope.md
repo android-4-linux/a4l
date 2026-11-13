@@ -8,7 +8,7 @@
 
 `svc/storage` maps the slice of Android's storage API that unmodified apps read onto the host
 UDisks2 daemon (`org.freedesktop.UDisks2`), via sdbus-c++, mirroring `svc/battery` (UPower),
-`svc/bluetooth` (BlueZ), and `svc/net`. It is **read-only enumeration** — acl never mounts,
+`svc/bluetooth` (BlueZ), and `svc/net`. It is **read-only enumeration** — a4l never mounts,
 unmounts, formats, or ejects host storage.
 
 ## What pulls it in
@@ -23,7 +23,7 @@ Environment.getExternalStorageState()
     → IStorageManager.getVolumeList(int userId, String callingPackage, int flags)
 ```
 
-`IStorageManager` resolves through `ServiceManager.getService("mount")`. acl has no Binder
+`IStorageManager` resolves through `ServiceManager.getService("mount")`. a4l has no Binder
 (ADR-3), so without a seeded `"mount"` service that lookup returns `null` and `getVolumeList`
 NPEs — the wall a2dp.Vol hit after its `AudioManager` gap cleared.
 
@@ -35,7 +35,7 @@ NPEs — the wall a2dp.Vol hit after its `AudioManager` gap cleared.
 
 | StorageVolume            | Source                                                              |
 |--------------------------|---------------------------------------------------------------------|
-| `[0]` primary, emulated  | **synthesized in Java** from the app Context — rooted at the app's XDG external storage (`getExternalFilesDir(null)/..`), `removable=false`, `emulated=true`, `state="mounted"`. So `getExternalStorageState`/`getPrimaryStorageVolume` resolve and reads/writes land where acl already roots external files. |
+| `[0]` primary, emulated  | **synthesized in Java** from the app Context — rooted at the app's XDG external storage (`getExternalFilesDir(null)/..`), `removable=false`, `emulated=true`, `state="mounted"`. So `getExternalStorageState`/`getPrimaryStorageVolume` resolve and reads/writes land where a4l already roots external files. |
 | `[1..]` removable        | **UDisks2** — each mounted `org.freedesktop.UDisks2.Filesystem` whose `Block` is not `HintSystem`/`HintIgnore` and whose `Drive` is `Removable`/`MediaRemovable`/`Ejectable` (USB sticks, SD cards): `path`=`MountPoints[0]`, `description`=`IdLabel` (else Drive `Model`), `fsUuid`=`IdUUID`, `removable=true`, `emulated=false`, `state="mounted"`. |
 
 The backend snapshots the UDisks2 object tree once (`ObjectManager.GetManagedObjects`) and keeps

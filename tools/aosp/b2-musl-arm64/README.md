@@ -1,11 +1,11 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- Provenance: original acl build tooling. Consumes/patches AOSP Soong (Apache-2.0). No GPL-3.0 sources. -->
+<!-- Provenance: original a4l build tooling. Consumes/patches AOSP Soong (Apache-2.0). No GPL-3.0 sources. -->
 
 # B2: a musl-arm64 host ART toolchain for Soong
 
 ## Why
 
-acl runs the app's DEX on a real AOSP **host** ART, loaded in-process (`dlopen`) alongside the
+a4l runs the app's DEX on a real AOSP **host** ART, loaded in-process (`dlopen`) alongside the
 platform's glibc Wayland / Vulkan / PipeWire libraries. On x86 that host ART is `linux_glibc` — same
 libc as the rest of the process, no conflict. On **arm64 the only stock AOSP host is `linux_bionic`**,
 and a glibc `acl` process **cannot `dlopen` a bionic `libart.so`**: bionic `libc` cannot cold-load

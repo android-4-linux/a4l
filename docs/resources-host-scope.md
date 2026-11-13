@@ -33,7 +33,7 @@ framework-res.apk, sets `ACL_ART_FRAMEWORK_RES`; SKIPs if not built). **The reso
 Built a resource APK with `aapt2` (compile + link -I framework-res), loaded
 `[framework-res, app.apk]` via `ApkAssets.loadFromPath` into an `AssetManager.Builder`, wrapped
 in a `Resources`, and **resolved the app's own `com.acl.restest:string/app_greeting` +
-`integer/app_answer=42` on host ART**. No new acl code — it works through the standard framework
+`integer/app_answer=42` on host ART**. No new a4l code — it works through the standard framework
 `AssetManager.Builder`/`Resources` API a real `Context` uses, over the R1 native floor. So the
 resources subsystem is **complete** (framework + app). Proven by scratch/r4probe; a dedicated
 regression test (aapt2-built fixture) is an optional follow-on — the R3 test already covers the
@@ -64,15 +64,15 @@ build.prop fix (`ResourcesImpl.<clinit>` → `AssetManager.nativeGetThemeFreeFun
     host-exported already.
   - `android_content_res_ApkAssets` → already host-buildable (its `register_*` is exported).
 
-## Architecture — an acl-owned host JNI lib, NOT a libandroid_runtime patch
+## Architecture — an a4l-owned host JNI lib, NOT a libandroid_runtime patch
 The A(2) bridge spike showed patching `libandroid_runtime`'s `Android.bp` per-file is the
-wrong seam (it forces the whole device-only block + broke rtti/typeinfo). Instead, acl's ART
+wrong seam (it forces the whole device-only block + broke rtti/typeinfo). Instead, a4l's ART
 build tooling adds its **own** Soong module — `libacl_framework_jni` — that compiles the
 *reusable AOSP JNI sources* for host, links the host-buildable engine (`libandroidfw`), and
-provides thin **acl stubs for the few device deps**. acl dlopens it and registers those
+provides thin **a4l stubs for the few device deps**. a4l dlopens it and registers those
 natives (extending the P2.2 curated set). This is additive (no AOSP module edited), and it is
 the **generalizable pattern**: each later subsystem adds its `.cpp` + its device-dep stubs to
-this lib. Substitutions reuse acl's existing seams: Binder → svc hub (ADR-0003), later
+this lib. Substitutions reuse a4l's existing seams: Binder → svc hub (ADR-0003), later
 SurfaceFlinger → Wayland/Skia (ADR-0004).
 
 ## Two sides: code and data
@@ -85,13 +85,13 @@ against).
 ### R1 — host-build the AssetManager JNI (code)
 Add `libacl_framework_jni` (host `cc_library_shared`) compiling
 `android_util_AssetManager.cpp` (+ `android_content_res_ApkAssets.cpp` if not already
-reachable) for host, linking `libandroidfw` + `libnativehelper`. Provide acl stubs for the
+reachable) for host, linking `libandroidfw` + `libnativehelper`. Provide a4l stubs for the
 narrow device surface: a host `ReturnParcelFileDescriptor` (return the fd via a plain host
 `ParcelFileDescriptor`/`FileDescriptor`, or leave the two `*OpenAssetFd` methods unregistered
 initially — resource *resolution* doesn't use them).
 **Gate:** `nm` shows `register_android_content_res_AssetManager` exported from the host lib.
 
-### R2 — register it in acl + Resources constructs
+### R2 — register it in a4l + Resources constructs
 ArtVm dlopens `libacl_framework_jni` and calls `register_android_content_res_AssetManager`
 (and ApkAssets) alongside the P2.2 floor. 
 **Gate:** on host ART with the real framework, `Resources.getSystem()` constructs (no
@@ -99,7 +99,7 @@ ArtVm dlopens `libacl_framework_jni` and calls `register_android_content_res_Ass
 
 ### R3 — framework resource data
 Build `framework-res` (the `android` package `resources.arsc` + assets) and stage it; point
-the AssetManager at it (the boot resources path). acl's `pkg/` already parses `resources.arsc`
+the AssetManager at it (the boot resources path). a4l's `pkg/` already parses `resources.arsc`
 for APKs — reuse that understanding for staging/verification.
 **Gate:** a real object resolves a framework resource on host ART — e.g. `Resources.getSystem()
 .getString(android.R.string.ok)` returns the real string.
@@ -119,7 +119,7 @@ An app `AssetManager` opens the APK's `resources.arsc` + assets (ApkAssets), so
   coupling is 2 methods. Days, not weeks, for R1–R3.
 - **Watch:** `android_util_AssetManager.cpp` may pull a couple of transitive headers
   (`android_util_Binder.h`, resource-overlay/idmap paths) that assume device; stub or `#if`
-  them in the acl lib. The idmap/overlay code may need trimming for host.
+  them in the a4l lib. The idmap/overlay code may need trimming for host.
 - **Data pinning:** `framework-res` must be the android-13.0.0_r84 build (matches the framework
   DEX + runtime). Re-pin only via ADR.
 - This validates the hybrid pattern (ADR-0008): if R1–R3 land cleanly, the same recipe scales

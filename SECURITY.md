@@ -26,17 +26,17 @@ where the project is, stated so that nobody spends a report on them:
 - **APK signatures are not verified.** `pkg/apk.cpp` parses ZIP structure only. Single-shot
   APK v2/v3 verification at open time is designed and intended, mirroring Android's install-time
   check, and is not implemented.
-- **There is no sandbox.** An app's native code runs as arbitrary code in acl's single glibc
+- **There is no sandbox.** An app's native code runs as arbitrary code in a4l's single glibc
   process, with no per-app UID, SELinux domain or seccomp filter of the kind on-device Android
   provides, so it can reach ART, Mesa and the Wayland connection. Containment is an architectural
   question tracked separately.
 
-The consequence is the thing to take away: **treat an APK you run under acl as native code running
+The consequence is the thing to take away: **treat an APK you run under a4l as native code running
 with your own privileges, because that is what it is.** Running an untrusted APK is not yet a
 supported use. `docs/ndk-scope.md` has the full reasoning for both points.
 
-A report that acl executes untrusted code it was asked to execute is therefore expected behavior.
-A report that acl can be made to execute code it was *not* asked to execute — a path traversal out
+A report that a4l executes untrusted code it was asked to execute is therefore expected behavior.
+A report that a4l can be made to execute code it was *not* asked to execute — a path traversal out
 of an APK, a parser bug reachable from a crafted APK, a loader that resolves a library from outside
 the app's own directories — is a vulnerability, and is wanted.
 
@@ -57,7 +57,7 @@ actually be fixed:
 | `wayland-protocols` XML | [Wayland](https://gitlab.freedesktop.org/wayland/wayland-protocols) |
 | `catch2`, `pugixml`, `drm-cxx`, `wayland-cxx-scanner` | their own repositories |
 
-A vulnerability in one of those that acl's own use makes *worse* — a bad default, a check we skip,
+A vulnerability in one of those that a4l's own use makes *worse* — a bad default, a check we skip,
 a privilege we hold that we should not — is in scope here, and worth saying so in the report.
 
 ## Supply chain

@@ -1,7 +1,7 @@
 # Clean-Room Android Compatibility Layer — C++ Reimplementation Plan
 
 **Status:** Draft v1 — 2026-07-09
-**Codename (working):** `acl` (rename at will)
+**Name:** `a4l` (renamed from the `acl` codename on 2026-11-13)
 **Goal:** A GPLv3-free, C++23-first runtime that executes unmodified Android APKs on desktop/embedded Linux (Wayland-native), functionally comparable to the GPL-3.0 predecessor, without incorporating or deriving from the predecessor's GPL-3.0-or-later source.
 **License target for output:** Apache-2.0 (maximizes AOSP code reuse; MIT dual-license optional).
 
@@ -91,7 +91,7 @@ Recommendation: **B now, upgrade to A** the moment a second contributor exists. 
 ├──────────────── JNI boundary ──────────────────────────────┤
 │  ART host runtime (AOSP, Apache-2.0)                       │
 ├────────────────────────────────────────────────────────────┤
-│  acl native core (C++23, new code, Apache-2.0)          │
+│  a4l native core (C++23, new code, Apache-2.0)          │
 │  ├─ runtime/     ART embedding, class-loader plumbing,     │
 │  │               DEX/OAT cache, JNI registration tables    │
 │  ├─ pkg/         APK parse, resources.arsc, manifest,      │
@@ -131,7 +131,7 @@ Threading model follows the ivi-homescreen reactor discipline: one shared contro
 Apps ship DEX; ART preserves invoke-custom, hidden-API semantics, `dalvik.system.*`, and JNI behavior exactly. OpenJDK + d8-reversal loses fidelity and drags in `dalvik.*` shims. Cost: ART host build outside the Android build system is the hardest single infrastructure item (see R-1). Decision gate at end of Phase 1: if host ART cannot be stood up in budget, fall back to OpenJDK+CE with a `dalvik.system` compatibility layer and accept the fidelity loss.
 
 **ADR-2 — Java framework: vendored AOSP subset, not hand-written stubs.**
-Vendor curated packages from `frameworks/base` (view, graphics, content, os, app, util, text, widget) at a pinned API level (target: 33/Tiramisu — post-scoped-storage, pre-heaviest-Binder-coupling; revisit). Replace the native underside (`android_view_*`, `android_os_*` JNI regs) with `acl` implementations. Where a class is hopelessly entangled with SystemServer/Binder, substitute a minimal source-compatible shim — written from SDK docs, never from the predecessor.
+Vendor curated packages from `frameworks/base` (view, graphics, content, os, app, util, text, widget) at a pinned API level (target: 33/Tiramisu — post-scoped-storage, pre-heaviest-Binder-coupling; revisit). Replace the native underside (`android_view_*`, `android_os_*` JNI regs) with `a4l` implementations. Where a class is hopelessly entangled with SystemServer/Binder, substitute a minimal source-compatible shim — written from SDK docs, never from the predecessor.
 
 **ADR-3 — IPC: in-process service hub; binderfs deferred.**
 Single-process model (app + framework services in one address space) eliminates Binder for v1. `svc/` exposes the same Java-visible Manager APIs backed by direct C++ calls. binderfs + libbinder is a Phase 5 option if multi-app isolation or real `ServiceManager` semantics become necessary; note binderfs is mainline but frequently not enabled in distro kernels.
@@ -140,7 +140,7 @@ Single-process model (app + framework services in one address space) eliminates 
 wcs already has skia-shm, skia-egl, and skia-vulkan-dmabuf canvases landed. Start with Skia-backed `Canvas`/`Surface` JNI. hwui (AOSP's own Skia-based renderer, incl. RenderThread, damage, HW layers) is the higher-fidelity endgame but has deep `gui/` (BufferQueue/SurfaceFlinger) coupling; Phase 2 spike decides vendored-hwui vs. continued direct-Skia. SurfaceView maps to `wl_subsurface` (decision already made in prior predecessor-replacement work — reusable here as *our* design, independent of the predecessor).
 
 **ADR-5 — NDK native code: staged.**
-Phase ≤3: Java/Kotlin-only apps (reject APKs with `lib/` unless `extractNativeLibs`-irrelevant). Phase 4: bionic linker namespaces on glibc host — build AOSP `bionic` + `linker` for host, load app `.so` in a bionic namespace bridged to `acl`'s libandroid/EGL/vulkan trampolines. This is the same class of problem libhybris solves in reverse; do **not** consult libhybris code without a license check (it's Apache-2.0 — fine).
+Phase ≤3: Java/Kotlin-only apps (reject APKs with `lib/` unless `extractNativeLibs`-irrelevant). Phase 4: bionic linker namespaces on glibc host — build AOSP `bionic` + `linker` for host, load app `.so` in a bionic namespace bridged to `a4l`'s libandroid/EGL/vulkan trampolines. This is the same class of problem libhybris solves in reverse; do **not** consult libhybris code without a license check (it's Apache-2.0 — fine).
 
 **ADR-6 — Windowing/scaling.** `wp_fractional_scale_v1` + `wp_viewport` primary, integer `wl_output.scale` fallback — identical policy to the ivi-homescreen physical-pixel patch; implement as shared code if practical.
 
@@ -157,7 +157,7 @@ Phase ≤3: Java/Kotlin-only apps (reject APKs with `lib/` unless `extractNative
 - ART host build standing alone: boot classpath from vendored framework, `JNI_CreateJavaVM`-equivalent embedding, DEX→OAT cache dir.
 - `pkg/`: APK open (libziparchive), manifest binary-XML parse, resources.arsc via libandroidfw, ABI/split selection.
 - Headless milestone: execute an activity-less DEX `main()`, log via framework `Log` → spdlog/DLT facade (reuse ihs_shared three-layer facade design).
-- **Gate G1:** `adb`-free `acl run app.apk` executes Java code, passes a 50-test CTS-derived smoke set (libcore + util). ADR-1 fallback decision here.
+- **Gate G1:** `adb`-free `a4l run app.apk` executes Java code, passes a 50-test CTS-derived smoke set (libcore + util). ADR-1 fallback decision here.
 
 ### Phase 2 — Window + draw (8–12 wks)
 - Activity lifecycle driver (create/start/resume; state machine spec'd from SDK docs + CTS `ActivityLifecycleTests`).
@@ -201,7 +201,7 @@ Phase ≤3: Java/Kotlin-only apps (reject APKs with `lib/` unless `extractNative
 | R-7 | GMS-dependent apps dominate user expectations | H | M | Scope statement; microG later; publish compat list early |
 | R-8 | GPLv3 creep via transitive deps (e.g., readline, some codecs) | L | H | CI license scanner gate; dynamic-link-only LGPL policy |
 | R-9 | Wayland IME/clipboard/activation gaps on some compositors | M | M | Same portability matrix + fallbacks as the flatpak-activation plugin spec |
-| R-10 | Untrusted app native code runs unrestricted in acl's single glibc process (no per-app UID/SELinux/seccomp; a malicious/buggy `.so` reaches ART, Mesa, the Wayland conn) | M | H | Integrity = one-time **APK v2/v3 signature verification** in `pkg/` (the `.so` are covered by the whole-APK sig; not a per-load or loader concern). Containment = separate ADR (seccomp filter around the bionic-namespace threads; process/UID isolation later). Dev corpus is user-vetted; gate before untrusted APKs |
+| R-10 | Untrusted app native code runs unrestricted in a4l's single glibc process (no per-app UID/SELinux/seccomp; a malicious/buggy `.so` reaches ART, Mesa, the Wayland conn) | M | H | Integrity = one-time **APK v2/v3 signature verification** in `pkg/` (the `.so` are covered by the whole-APK sig; not a per-load or loader concern). Containment = separate ADR (seccomp filter around the bionic-namespace threads; process/UID isolation later). Dev corpus is user-vetted; gate before untrusted APKs |
 
 ## 7. Effort estimate
 
@@ -220,7 +220,7 @@ Assumes one senior engineer full-time with existing wcs/drm-cxx/PipeWire assets;
 ## 8. Repo layout and provenance
 
 ```
-acl/
+a4l/
 ├── LICENSE            Apache-2.0
 ├── PROVENANCE.md      global source policy (§1.3)
 ├── third_party/
@@ -275,7 +275,7 @@ AOSP pinning delta: `packages/services/Car` and automotive CTS pin to an **autom
 ### `hosts/cal/` — Car App Library template host
 `androidx.car.app` apps never draw; they serialize a template tree (`Bundleable` graph) to a platform-provided host, which renders and enforces distraction rules. We implement the host:
 - In the ADR-3 single-process model the app↔host AIDL boundary collapses to direct calls behind the same interfaces (CarAppBinder-equivalent), so no Binder is needed; keep the serialization layer intact anyway for version skew tolerance across CAL releases.
-- **Rendering decision (ADR-7):** render templates in **Flutter via ivi-homescreen** (host UI is ours, not Android Views — no hwui/ViewRoot dependency), with a native-Skia fallback renderer for acl-standalone use. This makes the CAL host shippable **before Phase 2 completes**: templates + media constitute a usable IVI app story with zero Android View stack.
+- **Rendering decision (ADR-7):** render templates in **Flutter via ivi-homescreen** (host UI is ours, not Android Views — no hwui/ViewRoot dependency), with a native-Skia fallback renderer for a4l-standalone use. This makes the CAL host shippable **before Phase 2 completes**: templates + media constitute a usable IVI app story with zero Android View stack.
 - Template set staged: Tier 1 (List, Grid, Pane, Message, LongMessage), Tier 2 (Tab, SearchTemplate, SignIn), Tier 3 (NavigationTemplate + surface embedding — needs SurfaceView/wl_subsurface path from Phase 2/4).
 
 ### `svc/car/` — vehicle services
@@ -304,7 +304,7 @@ Net effect: **first useful automotive milestone moves from ~G3 (6–9 mo) to G1.
 | RA-2 | Legacy support-lib vs media3 session duality doubles media bridge surface | M | M | media3 first (compat layer covers legacy for most apps); corpus-driven |
 | RA-3 | UxRestrictions stub in a moving vehicle is a safety/regulatory exposure (driver distraction) | L | H | Explicit config + loud default; document as integrator responsibility; wire to real signals before any vehicle deployment |
 | RA-4 | Property hub semantics drift from VHAL spec (rate limiting, staleness, zoned props) | M | M | Treat AIDL VHAL docs + VTS tests (Apache-2.0) as the spec; mock-adapter replay tests in CI |
-| RA-5 | Flutter-host dependency couples acl releases to ivi-homescreen ABI | M | L | CAL host talks only via ihs_shared stable ABI; native-Skia fallback keeps standalone builds honest |
+| RA-5 | Flutter-host dependency couples a4l releases to ivi-homescreen ABI | M | L | CAL host talks only via ihs_shared stable ABI; native-Skia fallback keeps standalone builds honest |
 
 ## A01.5 Effort delta
 
@@ -328,7 +328,7 @@ Permitted: `packages/services/Car`, `androidx.car.app` (Jetpack repo), AOSP `car
 
 ## A02.1 Constraint
 
-All native windowing in acl goes through **wayland-cxx-scanner (wcs)** bindings; all rasterization goes through **Skia**. No GTK, no Qt, and no hard Flutter dependency in the acl core. Concretely:
+All native windowing in a4l goes through **wayland-cxx-scanner (wcs)** bindings; all rasterization goes through **Skia**. No GTK, no Qt, and no hard Flutter dependency in the a4l core. Concretely:
 
 - Surfaces: xdg-shell toplevels/popups, `wl_subsurface` (SurfaceView), `wp_viewport` + `wp_fractional_scale_v1`, `xdg-activation-v1`, `wp_presentation` — all via wcs CRTP bindings. Seat/cursor/data-device via the landed `SeatManager`, `wl::CursorManager`, `wl::DataDevice`.
 - Pixels: wcs Skia canvases as the only render backends — `skia-shm-canvas` (guaranteed path), `skia-egl-canvas`, `skia-vulkan-dmabuf` (preferred on RK3588/SA8155P/RADV). Backend selection at runtime, same probe order discipline as ivi-homescreen.
@@ -344,12 +344,12 @@ What we re-own natively (spec sources: SDK docs + CTS + Flutter-engine damage le
 - **Text:** Skia + HarfBuzz/ICU directly; `android.text`/`Typeface` JNI mapped to SkTypeface/SkFont with fontconfig-backed font resolution.
 - Hardware `View` layers → SkSurface-backed layer cache; `RenderEffect`/shaders → SkRuntimeEffect (AGSL and SkSL are near-identical — flag divergences per CTS).
 
-**New pinning rule:** Skia has no stable API; pin the Skia milestone to the branch used by the vendored `frameworks/base` tag (api-33 ⇒ Skia m-branch of that release) *or* carry a small `gfx/skia_compat.h` shim if wcs canvases want a newer milestone. Record the pairing in `third_party/*/METADATA`. wcs and acl must agree on one Skia build (single copy, no ODR games).
+**New pinning rule:** Skia has no stable API; pin the Skia milestone to the branch used by the vendored `frameworks/base` tag (api-33 ⇒ Skia m-branch of that release) *or* carry a small `gfx/skia_compat.h` shim if wcs canvases want a newer milestone. Record the pairing in `third_party/*/METADATA`. wcs and a4l must agree on one Skia build (single copy, no ODR games).
 
 ## A02.3 ADR-7 (revised) — CAL host renders native Skia; Flutter optional
 
 Inverts A01's ordering: the **native Skia template renderer is primary**; the ivi-homescreen/Flutter renderer becomes an optional integration behind the ihs_shared ABI (unchanged interface, so nothing in A01's data-plane design moves). Consequences:
-- acl-standalone is fully functional on any wlroots/Mutter/agl compositor with zero Flutter runtime.
+- a4l-standalone is fully functional on any wlroots/Mutter/agl compositor with zero Flutter runtime.
 - RA-5 (Flutter ABI coupling) downgraded to L/L.
 - Template renderer becomes the first consumer of the Skia UI substrate (Tier-1 templates are lists/panes/text — a good forcing function for the text stack before Android View work needs it). G1.5b now requires the Skia text path, so HarfBuzz/ICU/fontconfig bring-up moves ahead of G1.5b instead of Phase 2.
 

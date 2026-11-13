@@ -142,7 +142,7 @@ Path A concretely:
    ```
    If host `dalvikvm` can't run a hello DEX, embedding can't either — so this is the
    cheapest possible validation of the *whole* ART approach, and it comes before any
-   acl work.
+   a4l work.
 
 **GO/NO-GO:** a host `libart.so` + core `boot.art` exists and `dalvikvm` runs a hello
 DEX. **This gate decides ADR-1.** Risk is concentrated entirely here (Soong host build
@@ -163,15 +163,15 @@ work is getting ART's options + apex/env layout right.
 ### M3 — framework on ART · IN PROGRESS
 Get the vendored android.* framework (ADR-0002) onto ART so real `Activity`s load.
 
-**Step 1 DONE (2026-07-12): real Activity lifecycle on host ART.** `acl run
+**Step 1 DONE (2026-07-12): real Activity lifecycle on host ART.** `a4l run
 activity_art.apk --vm=art` (ACL_ART_HOME + ACL_ART_FRAMEWORK=shim.dex:stubs.dex) →
 launcher resolved → recognized as `android.app.Activity` subclass → `onCreate→onStart→
 onResume` runs; "MainActivity.onCreate ran on host ART"; ActivityManager/WindowManager/
 MediaSessionManager answer; exit 0. Matches the JVM `run_activity` test on REAL ART.
 The lifecycle + `register_framework_natives` are shared `JniVm` code (backend-agnostic),
 so ART needed only the framework as DEX (one small `ArtVm` change: `ACL_ART_FRAMEWORK`
-prepended to the app classpath). Framework dex = `d8` of acl's 41 shim classes
-(recompiled `--release 8` — acl's Java-25/class-v69 output is rejected by android-13 d8)
+prepended to the app classpath). Framework dex = `d8` of a4l's 41 shim classes
+(recompiled `--release 8` — a4l's Java-25/class-v69 output is rejected by android-13 d8)
 + `d8` of android.jar. App apk must be d8+zipaligned.
 
 Remaining M3 / Phase 2: (a) meson d8 custom_target for the framework dex + a `--vm=art`

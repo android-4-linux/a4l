@@ -21,7 +21,7 @@ Repository tooling. Phase 0 placeholder for the items called out in `plan.md` §
 - **`run-apk.sh` — run an unmodified APK on the host-ART backend (dev harness).** The interactive
   counterpart to the `tests/integration/run_*_art_test.py` tests: it assembles the framework boot
   classpath, compiles `framework/acl_host` and performs the **boot-vs-app classpath split** that
-  the framework shims require (see `docs/framework-bootstrap.md` A1.1), then `acl run <apk>
+  the framework shims require (see `docs/framework-bootstrap.md` A1.1), then `a4l run <apk>
   --vm=art`. Needs a host ART build (`$ACL_ART_HOME`) and the AOSP host toolchain; exits 77 (skip)
   when absent. Example: `ACL_ART_HOME=… tools/run-apk.sh app.apk --present`.
 

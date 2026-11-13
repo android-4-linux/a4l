@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # PROVENANCE — global source policy
 
-This file is the authoritative, enforced source-provenance policy for the acl tree.
+This file is the authoritative, enforced source-provenance policy for the a4l tree.
 It derives from `plan.md` §1 and Appendix A and is checked in CI
 (`scripts/check-licenses.sh`, `scripts/check-provenance.sh`, `reuse lint`). When this file
 and `plan.md` disagree, fix one to match — they must not drift.

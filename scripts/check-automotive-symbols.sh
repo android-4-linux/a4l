@@ -6,7 +6,7 @@
 # actually gates svc/car + hosts/. The same symbol pattern must:
 #   * be PRESENT in the automotive-profile build (the car/hosts modules link), and
 #   * be ABSENT from the phone-profile build (they are compiled out), and
-#   * be ABSENT from the shipped phone product binary (acl).
+#   * be ABSENT from the shipped phone product binary (a4l).
 # A one-sided "phone build has zero automotive symbols" check passes vacuously if the
 # pattern is stale (renamed symbols); requiring a match on the ON side keeps it honest.
 #

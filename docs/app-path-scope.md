@@ -1,10 +1,10 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- Provenance: acl app-path exploration (host ART, real android.view.View). Android SDK
+<!-- Provenance: a4l app-path exploration (host ART, real android.view.View). Android SDK
      behavioral (public + observed @hide). No GPL-3.0 sources. -->
 
 # App path — running a real `android.view.View` on host ART
 
-The graphics subsystem (P2.4) is done: the acl-owned `android.graphics` natives
+The graphics subsystem (P2.4) is done: the a4l-owned `android.graphics` natives
 (`libacl_graphics_jni`) render color / geometry / **text** / **bitmap** / **path** /
 **matrix** / **gradients** on Android's host Skia, verified pixel-by-pixel
 (`graphics_ops_check`, `ACL_ART_GRAPHICS_OPS=1`). Those natives work with any Canvas.
@@ -24,8 +24,8 @@ coupling. Observed, with the fix for each:
    null Context. *Fix:* a minimal Context — `ContextWrapper(null)` overriding `getResources()`
    → `Resources.getSystem()`, plus `getDisplayId()`=0 (`@hide`, so no `@Override`).
 2. **`ViewConfiguration` → `WindowManagerGlobal.getWindowManagerService()` →
-   `BinderInternal.getContextObject()`** — `UnsatisfiedLinkError` (acl has no Binder, ADR-3).
-   *Fix (in acl):* `register_no_binder()` stubs `getContextObject()` → null.
+   `BinderInternal.getContextObject()`** — `UnsatisfiedLinkError` (a4l has no Binder, ADR-3).
+   *Fix (in a4l):* `register_no_binder()` stubs `getContextObject()` → null.
 3. **`ServiceManager.getIServiceManager()` returns null → `getService()` NPEs** — a null
    context object leaves `ServiceManager` with no `IServiceManager`. *Fix:* seed a no-op
    `IServiceManager` (fixture, via reflection today).
@@ -38,12 +38,12 @@ coupling. Observed, with the fix for each:
 5. **`View.<init>` → `RenderNode.create()` → `RenderNode.nCreate()`** — `UnsatisfiedLinkError`.
    **This is where the probe currently stops.** RenderNode is hwui's display-list node; the
    `View` constructor always creates one (`mRenderNode`). hwui is device-only / dropped
-   (ADR-4). *Fix (next milestone):* an acl-provided **RenderNode shim**.
+   (ADR-4). *Fix (next milestone):* an a4l-provided **RenderNode shim**.
 
 ## The next milestone: a RenderNode shim
 
 `android.graphics.RenderNode` has **93 native methods** (80 `@CriticalNative` handle-only,
-`nCreate`/`nGetNativeFinalizer` + ~11 normal). For acl's software/Skia draw path the RenderNode
+`nCreate`/`nGetNativeFinalizer` + ~11 normal). For a4l's software/Skia draw path the RenderNode
 is **not used to draw** (a Bitmap-backed Canvas is not hardware-accelerated; `View.draw(canvas)`
 calls `onDraw` directly), so the shim is mostly mechanical:
 
@@ -69,7 +69,7 @@ the smallest next step that unblocks a real `View.onDraw`.
 
 ## Architectural note
 
-acl's *own* view traversal (the `present_content_loop` path) can keep using a minimal shim View
+a4l's *own* view traversal (the `present_content_loop` path) can keep using a minimal shim View
 that avoids this coupling. The service/hwui walls here are specifically about hosting
 *unmodified third-party* Views — the real target, and genuinely a framework-bootstrap effort,
 not a graphics one.
@@ -81,12 +81,12 @@ constructs, measures, lays out, and draws on host ART, presented GPU-native (Gan
 tiled dma-buf → Wayland). What made it work:
 - **RenderNode shim** (93 natives) + **no-Binder stubs** (`getContextObject`, `getCallingUid`,
   `getNativeBBinderHolder`/`getNativeFinalizer`) — see commits.
-- **`org.acl.internal.HostBootstrap`** — an acl runtime bootstrap DEX injected onto the
+- **`org.acl.internal.HostBootstrap`** — an a4l runtime bootstrap DEX injected onto the
   classpath (`ACL_ART_HOST_BOOTSTRAP`): `init()` (main Looper + no-Binder ServiceManager with
   local interface-proxy stubs) and a minimal `Context` (`getResources`=system, `getTheme`=empty
   system theme, `getMainLooper`, `getApplicationInfo`, `getSystemService(layout_inflater)`).
 - **`Canvas.nQuickReject`** for `ViewGroup.drawChild` culling.
-- The app provides **only a View subclass**; acl constructs it with the runtime Context and
+- The app provides **only a View subclass**; a4l constructs it with the runtime Context and
   drives `present_content_loop_gpu` (`ArtVm::graphics_view_demo`, `ACL_ART_VIEW_HOST`).
 
 ## Next frontier: the Activity / Window layer (mapped, not yet cleared)

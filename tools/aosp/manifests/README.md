@@ -1,6 +1,6 @@
 <!--
 SPDX-License-Identifier: Apache-2.0
-Provenance: acl-authored bookkeeping. No GPL-3.0 sources.
+Provenance: a4l-authored bookkeeping. No GPL-3.0 sources.
 -->
 
 # The AOSP pin, as a manifest
@@ -13,7 +13,7 @@ depending on when it runs, because a release tag pins project revisions only for
 as long as nobody re-points it.
 
 `android-13.0.0_r84-pinned.xml` closes that. It is `repo manifest -r` output
-from the checkout acl is developed against, recording all **1145** projects at
+from the checkout a4l is developed against, recording all **1145** projects at
 an explicit 40-character commit sha rather than at a branch or tag name.
 
 ## Recreating the tree
@@ -28,7 +28,7 @@ repo init -m pinned.xml
 repo sync -c -j8          # ~64 GB; -c limits to the current branch
 ```
 
-A partial sync is enough for most acl work; `METADATA` lists the components that
+A partial sync is enough for most a4l work; `METADATA` lists the components that
 are actually consumed.
 
 The `repo init -u` step is not optional, and dropping the file in afterwards is
@@ -37,7 +37,7 @@ the manifest repository itself was cloned from. The file cannot be used
 standalone or from another location, because nothing in it says what it is
 relative *to*.
 
-## The manifest alone does not reproduce acl's build tree
+## The manifest alone does not reproduce a4l's build tree
 
 Two projects are **modified in the working tree**, deliberately, and those edits
 are not commits, so no manifest can carry them. Apply them after syncing:

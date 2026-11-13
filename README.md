@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-# acl
+# a4l
 
 A clean-room, **C++23-first** Android compatibility layer: it runs unmodified Android APKs as
 native Wayland clients on desktop and embedded Linux, comparable in function to
@@ -14,12 +14,12 @@ first-class target and reaches a useful milestone ahead of the phone/View path.
 > Views/Material (`opendrummer`, `a2dp.Vol`, `batterytemperature`) and a custom-View clock
 > (`octalsuntime`). A real app needs `ACL_PRESENT_GPU=1`, the zero-copy path that draws through Skia
 > (Ganesh Vulkan) into a dma-buf with a tiled format modifier; the default shm path can only present
-> acl's own Bitmap shim. CI enforces the clean-room and license discipline.
+> a4l's own Bitmap shim. CI enforces the clean-room and license discipline.
 >
 > **Flutter APKs built with the Flutter tooling render on screen too**, on an unmodified engine:
-> `libflutter.so` loads against acl's own bionic-side `libandroid.so`, its EGL/GLES forward to host
-> Mesa, and for a native-GL app Mesa renders and commits acl's toplevel `wl_surface` itself. Text,
-> network images, `Texture`-widget external textures (an acl dma-buf imported as an `EGLImage`
+> `libflutter.so` loads against a4l's own bionic-side `libandroid.so`, its EGL/GLES forward to host
+> Mesa, and for a native-GL app Mesa renders and commits a4l's toplevel `wl_surface` itself. Text,
+> network images, `Texture`-widget external textures (an a4l dma-buf imported as an `EGLImage`
 > through `ImageReader`) and a `video_player` clip that decodes, plays and loops have each been seen
 > on screen.
 >
@@ -29,7 +29,7 @@ first-class target and reaches a useful milestone ahead of the phone/View path.
 > the legacy **`gles_jni`** EGL10/GLES JNI is registered, so `GLSurfaceView` apps (libGDX) run and
 > take input. What is still open is narrower than those: apps whose own GL draws to an FBO can
 > present nothing, a GLES3-heavy app can link its whole native stack and then trip a robustness bug
-> in acl's JNI bridge, and acl does not verify APK signatures or confine an app's native code (see
+> in a4l's JNI bridge, and a4l does not verify APK signatures or confine an app's native code (see
 > [`SECURITY.md`](SECURITY.md)). `docs/app-corpus-status.md` tracks the corpus app by app and dates
 > every claim. The authoritative design is [`plan.md`](plan.md); contributor guidance is in
 > [`CONTRIBUTING.md`](CONTRIBUTING.md).

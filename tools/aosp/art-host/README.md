@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- Provenance: original acl build tooling for the split-process ART design (docs/split-process-art.md).
+<!-- Provenance: original a4l build tooling for the split-process ART design (docs/split-process-art.md).
      Consumes AOSP prebuilts + the stock linux_bionic host toolchain. No GPL-3.0 sources. -->
 
 # Building `acl-art-host` for the Pi (linux_bionic-arm64)
@@ -47,4 +47,4 @@ acl run app.apk --vm=art-split --main=<Class>
 
 `acl` (glibc) `posix_spawn`s `acl-art-host` (bionic) with an inherited SEQPACKET fd; art-host boots the
 bionic ART and streams output back. `LD_LIBRARY_PATH` carries the tree's bionic libs (for art-host) and
-the JDK's `libjvm.so` (acl's hard NEEDED) — no soname collision (bionic `libc.so` vs glibc `libc.so.6`).
+the JDK's `libjvm.so` (a4l's hard NEEDED) — no soname collision (bionic `libc.so` vs glibc `libc.so.6`).
