@@ -301,7 +301,10 @@ struct AttachedThread {
   std::uintptr_t bionic_fs = 0;
 };
 
-void release_attached_thread(void* p) {
+// maybe_unused: armed by pthread_key_create only in the x86_64 path that also
+// has the bionic struct offsets (`#elif !ACL_BIONIC_OFFSETS_AVAILABLE` selects
+// a different attach), so a build without those offsets never references it.
+[[maybe_unused]] void release_attached_thread(void* p) {
   auto* a = static_cast<AttachedThread*>(p);
   // Order matters: drop the pairing first, so no up-call can be routed to a TCB
   // that is about to be unmapped — and so a later mmap reusing the address
@@ -316,8 +319,9 @@ void release_attached_thread(void* p) {
   delete a;
 }
 
-pthread_key_t g_attached_key;
-std::once_flag g_attached_key_once;
+// maybe_unused: paired with release_attached_thread above, same guard.
+[[maybe_unused]] pthread_key_t g_attached_key;
+[[maybe_unused]] std::once_flag g_attached_key_once;
 
 // The DTV every attached thread starts with: all-zero, so its generation is
 // kTlsGenerationNone. That makes the first dynamic-TLS access build the

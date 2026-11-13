@@ -920,7 +920,10 @@ thread_local jint g_strict_mode_policy = 0;
 // Map a Linux evdev scancode to an Android KeyEvent keycode (a small practical
 // subset; unmapped keys become KEYCODE_UNKNOWN=0). Mirrors Android's
 // Generic.kl.
-jint acl_evdev_to_android_keycode(std::uint32_t evdev) {
+// maybe_unused: every caller is inside `#if ACL_HAVE_VULKAN && ACL_HAVE_WCS` or
+// `#if ACL_GL_PRESENT`, so a build without a presenter has no key source to map
+// from and this is legitimately dead there.
+[[maybe_unused]] jint acl_evdev_to_android_keycode(std::uint32_t evdev) {
   switch (evdev) {
     case 30:
       return 29;
@@ -1039,7 +1042,9 @@ jint acl_evdev_to_android_keycode(std::uint32_t evdev) {
 // scancode then keysym (0 if the key is not a modifier). Tracking these lets
 // dispatched KeyEvents carry metaState, without which Shift+Arrow selects
 // nothing and Ctrl+shortcuts are inert.
-jint acl_modifier_meta_bits(std::uint32_t evdev, std::uint32_t keysym) {
+// maybe_unused: as above, called only from the presenter-gated input paths.
+[[maybe_unused]] jint acl_modifier_meta_bits(std::uint32_t evdev,
+                                             std::uint32_t keysym) {
   switch (evdev) {
     case 42:
       return 0x1 | 0x40;  // LeftShift  -> META_SHIFT_ON | META_SHIFT_LEFT_ON
@@ -1080,7 +1085,8 @@ jint acl_modifier_meta_bits(std::uint32_t evdev, std::uint32_t keysym) {
 // A fallback for the evdev map above: a synthetic key (ACL_TEST_KEYS) or a
 // keymap-less compositor may deliver a keysym with no evdev scancode (keycode
 // 0), yet these keys still need an Android keycode to act.
-jint acl_keysym_to_android_keycode(std::uint32_t keysym) {
+// maybe_unused: as above, called only from the presenter-gated input paths.
+[[maybe_unused]] jint acl_keysym_to_android_keycode(std::uint32_t keysym) {
   switch (keysym) {
     case 0xff08:
       return 67;  // BackSpace -> KEYCODE_DEL

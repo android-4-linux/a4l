@@ -205,7 +205,10 @@ jobs:
       - name: Configure (automotive profile, default ON)
         run: meson setup build
       - name: Compile
-        run: meson compile -C build
+        shell: bash          # pipefail, so a failed compile still fails the step through tee
+        run: meson compile -C build 2>&1 | tee compile-automotive.log
+      - name: Zero warnings in acl's own code (Gate G0.e)
+        run: ./scripts/check-warnings.sh compile-automotive.log
       - name: Run the stub
         run: ./build/src/shell/acl
       - name: Test
@@ -214,7 +217,10 @@ jobs:
       - name: Configure phone profile
         run: meson setup build-phone -Dprofile_automotive=false
       - name: Compile phone profile
-        run: meson compile -C build-phone
+        shell: bash
+        run: meson compile -C build-phone 2>&1 | tee compile-phone.log
+      - name: Zero warnings in the phone profile (Gate G0.e)
+        run: ./scripts/check-warnings.sh compile-phone.log
       - name: Automotive nm-diff gate (symbols present when ON, absent when OFF)
         run: scripts/check-automotive-symbols.sh build build-phone
 
@@ -377,7 +383,10 @@ jobs:
           exit $missing
 
       - name: Compile
-        run: meson compile -C build-present
+        shell: bash
+        run: meson compile -C build-present 2>&1 | tee compile-present.log
+      - name: Zero warnings on the present path (Gate G0.e)
+        run: ./scripts/check-warnings.sh compile-present.log
 
       - name: Run the stub
         run: ./build-present/src/shell/acl
