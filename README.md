@@ -1,11 +1,27 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # a4l
 
-A clean-room, **C++23-first** Android compatibility layer: it runs unmodified Android APKs as
-native Wayland clients on desktop and embedded Linux, comparable in function to
-the GPL-3.0 project that preceded it while sharing **none** of its source. Output license
-is **Apache-2.0**. The automotive profile (media apps + Car App Library templates) is a
-first-class target and reaches a useful milestone ahead of the phone/View path.
+Android apps on Linux, without an emulator and without an Android device image.
+
+If a Linux product needs an Android app on it -- an IVI head unit, a kiosk, a panel, a
+workstation -- there have been two ways to get one. Run a whole Android OS beside your own,
+as an emulator or as a container carrying Android's userspace, its binder, its compositor
+and its graphics stack. Or get the app ported, which is usually not on offer, because you do
+not own the app. The first duplicates the stack the product already ships and taxes every
+frame that crosses between the two.
+
+a4l takes a third position: run the app, not the OS. The APK's DEX executes on real ART, in one
+glibc process on x86-64, alongside a4l's native core and the app's own bionic-ABI `.so` files. The
+Java framework is a vendored Apache-2.0 AOSP subset. There is no second compositor, no binder, no
+device image and no VM boundary -- the app is an `xdg-toplevel` on the compositor the product
+already runs. On arm64 the only stock host ART is bionic, which a glibc process cannot `dlopen`, so
+that path runs ART in its own all-bionic process and keeps the platform in the first
+([`docs/split-process-art.md`](docs/split-process-art.md)).
+
+a4l is clean-room and **C++23-first**, comparable in function to the GPL-3.0 project that
+preceded it while sharing **none** of its source. Output license is **Apache-2.0**. The
+automotive profile (media apps + Car App Library templates) is a first-class target and
+reaches a useful milestone ahead of the phone/View path.
 
 > **Status: unmodified APKs render — Android UI toolkits, Flutter, WebView and video.** Of 18
 > F-Droid apps run headless on `a4l run --vm=art`, 15 reach layout and 3 fail; reaching layout means
