@@ -19,7 +19,7 @@ That splits into two independent problems.
 
 ## Two problems
 
-**(A) The loading mechanism** — acl-owned, no AOSP needed. Boot-classpath plumbing, the
+**(A) The loading mechanism** — a4l-owned, no AOSP needed. Boot-classpath plumbing, the
 JNI native underside (`android.*` `native` methods → C++), and a lifecycle driver that replaces
 the static-`main` entry with instantiate-Activity + `onCreate`. This is ordinary engineering and
 is where we start; it de-risks (B) by giving it a target to load into.
@@ -44,7 +44,7 @@ On the real host-ART backend the framework is not source-staged — it is the AO
 classpath (`-Xbootclasspath`, `$ACL_ART_BOOTCLASSPATH`). That framework is *minus apex*: it
 references apex/mainline-module classes (`android.net.ConnectivityManager`,
 `android.bluetooth.*`, `android.provider.MediaStore`, the `*FrameworkInitializer`s, …) that live
-in modules acl does not ship. acl instead vendors clean-room shims for them under
+in modules a4l does not ship. a4l instead vendors clean-room shims for them under
 `framework/acl_host/android/**`.
 
 **A boot-classpath class can only resolve other boot-classpath classes.** So those shims *must*
@@ -76,13 +76,13 @@ build/framework/classes/      # javac output -> boot_classpath
 
 ### A3. Native underside (JNI seam)
 `android.*` classes carry `native` methods (`Canvas.nDrawRect`, `Log.println_native`, …). On VM
-start (or lazily on first class init) acl `RegisterNatives` C++ implementations that forward to
+start (or lazily on first class init) a4l `RegisterNatives` C++ implementations that forward to
 the existing native core (`svc/`, `gfx/`, `wm/`, `log/`). New module `runtime/framework/` owns
 these registrations, one translation unit per `android.*` package. The registry is data-driven
 (class → {name, sig, fnptr}) so coverage is measurable and gaps fail loudly ("no native for X").
 
 ### A4. Lifecycle driver (replaces static `main`)
-A minimal, acl-owned `ActivityThread`-equivalent (a source-compatible shim, from SDK docs):
+A minimal, a4l-owned `ActivityThread`-equivalent (a source-compatible shim, from SDK docs):
 1. load the launcher class from the app classpath;
 2. if it is an `android.app.Activity` subclass, instantiate it, `attach()` a shimmed `Context`,
    call `onCreate(null)` → `onStart()` → `onResume()`; else fall back to `call_static_main`.
@@ -125,10 +125,10 @@ mapping (plan.md §2 threading) lands with windowing (G2 proper).
 | Step | Deliverable | Exit criterion |
 |------|-------------|----------------|
 | **G2.a** ✅ | Boot-classpath seam (A1) + `--framework` + native-seam scaffold (A3) | an app resolves a class it does NOT bundle, from `--framework` (`run-apk-framework`) |
-| **G2.b** ✅ | `android.util.Log` on the boot cp (docs-derived shim, `framework/shim/`) + its native `write0` bound by acl (`runtime/framework_natives`) forwarding to `acl::log` | app calls `android.util.Log.i(...)` → line via `acl::log` (`run-apk-log`) |
+| **G2.b** ✅ | `android.util.Log` on the boot cp (docs-derived shim, `framework/shim/`) + its native `write0` bound by a4l (`runtime/framework_natives`) forwarding to `acl::log` | app calls `android.util.Log.i(...)` → line via `acl::log` (`run-apk-log`) |
 | **G2.c** ✅ | Extraction tool (`tools/fw_extract.py`) + AOSP pin (`android-13.0.0_r84`) + closure/budget/denylist report | tool reports class count + denylist edges (`fw-extract` test); METADATA pinned |
 | **G2.d** ✅ | Lifecycle driver (`JvmVm::call_activity_lifecycle`) + `Activity`/`Bundle` shims | `activity.apk`'s `MainActivity` subclass is instantiated and `onCreate`→`onStart`→`onResume` driven — no static `main` (`run-apk-activity`) |
-| **G2.e** 🚧 | Automotive media path (no Views): `MediaBrowserService` + `MediaSession` + **audio** | media control plane (`run-apk-media`): browse tree + now-playing metadata + transport `onPlay`/`onPause`. **Audio (`run-apk-audio`)**: `audio.apk` writes PCM via `android.media.AudioTrack` → the acl native underside → `acl::audio` — the **first native integration** (`src/audio/`, real PipeWire playback via `ACL_AUDIO=pipewire`; counting sink for the deterministic test). Next: `PlaybackState`; Context/Service hierarchy for real apps |
+| **G2.e** 🚧 | Automotive media path (no Views): `MediaBrowserService` + `MediaSession` + **audio** | media control plane (`run-apk-media`): browse tree + now-playing metadata + transport `onPlay`/`onPause`. **Audio (`run-apk-audio`)**: `audio.apk` writes PCM via `android.media.AudioTrack` → the a4l native underside → `acl::audio` — the **first native integration** (`src/audio/`, real PipeWire playback via `ACL_AUDIO=pipewire`; counting sink for the deterministic test). Next: `PlaybackState`; Context/Service hierarchy for real apps |
 
 Windowing/`Canvas`/`Looper`-fidelity (real G2 "renders and is interactive", plan.md §4 Phase 2)
 builds on G2.d; the automotive media/template path (G1.5) is preferred first because it needs no
@@ -145,7 +145,7 @@ android.os.Bundle, android.content.Context`:
 
 This is the R-2 evidence: you cannot vendor `Activity`'s closure — it drags in SystemServer. So
 `Activity`/`Bundle`/`Context` are **shimmed** at the Manager boundary (ADR-0002), source-compatible
-from SDK docs (`framework/shim/android/app/Activity.java`, `.../os/Bundle.java`), and the acl
+from SDK docs (`framework/shim/android/app/Activity.java`, `.../os/Bundle.java`), and the a4l
 lifecycle driver instantiates the app's `Activity` subclass and calls `onCreate`/`onStart`/
 `onResume` directly — no Binder. `setContentView`/`Context` services stay stubbed until the View
 stack (Phase 2).
@@ -158,7 +158,7 @@ in-process `svc/` hub **directly — no Binder, no SystemServer** (ADR-3). The f
 state). `MainActivity.onCreate` does `((AudioManager) getSystemService("audio")).setStreamVolume(
 STREAM_MUSIC, 7, 0)` and the C++ service logs `set stream 3 volume -> 7` (`run-apk-activity`
 asserts it). This is the shim-at-Manager-boundary (ADR-2) working end-to-end: app →
-`getSystemService` → Manager shim → JNI native → acl C++ service. `svc::audio` is a general
+`getSystemService` → Manager shim → JNI native → a4l C++ service. `svc::audio` is a general
 service (present in the phone build; `svc/car` stays automotive-gated). More Managers
 (ActivityManager, WindowManager, MediaSessionManager, ...) join as the app corpus needs them.
 

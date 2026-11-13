@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- Provenance: original acl spike. Grounds docs/ndk-scope.md Stage 0b. Reads AOSP bionic linker
+<!-- Provenance: original a4l spike. Grounds docs/ndk-scope.md Stage 0b. Reads AOSP bionic linker
      source (Apache-2.0) for the bootstrap contract; libhybris (Apache-2.0) referenced for the
      two-libc TLS-swap technique, not vendored. No GPL-3.0 sources. -->
 
@@ -63,5 +63,5 @@ must be reachable via `LD_LIBRARY_PATH` (no `ld.config.txt` on host → default 
 
 NEXT (Rung 3+, docs/ndk-scope.md): promote to `src/ndk/` as a real loader; thread the TLS-swap
 seam through JNI up/down calls (app native thread ↔ glibc ART); resolve the NDK trampoline `.so`
-(`liblog`→acl `log`, `libandroid`/`ANativeWindow`→`wm`) on the app's search path; then the arm64
+(`liblog`→a4l `log`, `libandroid`/`ANativeWindow`→`wm`) on the app's search path; then the arm64
 port (same code, swap `%fs`→`TPIDR_EL0` / auxv / reloc details).

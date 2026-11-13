@@ -10,7 +10,7 @@ pin recorded here. What *is* tracked per subtree:
 - upstream `LICENSE` — carried verbatim.
 - local patches, if any, under `<dep>/patches/`.
 
-Each dependency's build system is its own (Skia = GN, AOSP = Soong); acl consumes the
+Each dependency's build system is its own (Skia = GN, AOSP = Soong); a4l consumes the
 resulting prebuilt artifacts. Nothing here may carry a forbidden license
 (GPL-3.0 / LGPL-3.0 / AGPL — CI rejects those SPDX ids).
 

@@ -18,7 +18,7 @@ app↔host AIDL boundary collapses to direct calls, but the serialization layer 
 version-skew tolerance (RA-1).
 
 ## Consequences
-acl-standalone is fully functional on any wlroots/Mutter/agl compositor with zero Flutter
+a4l-standalone is fully functional on any wlroots/Mutter/agl compositor with zero Flutter
 runtime (RA-5 downgraded to L/L). The template renderer becomes the first consumer of the Skia
 text substrate, so HarfBuzz/ICU/fontconfig bring-up moves ahead of Gate G1.5b. Templates staged:
 Tier 1 (List, Grid, Pane, Message, LongMessage) → Tier 2 (Tab, Search, SignIn) → Tier 3

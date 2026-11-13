@@ -28,7 +28,7 @@ sectionless stub fails configuration. The single-pinned-Skia rule (A02.2) is rec
   own checkout and everyone else gets the pin. `subproject()` is `required : false`: an
   offline setup disables the real presenter rather than failing. Bump the `revision`
   deliberately — it is never a branch.
-- **pugixml** (`pugixml.wrap`, BSD-2-Clause) — wcs's XML parser, not acl's. Meson resolves a
+- **pugixml** (`pugixml.wrap`, BSD-2-Clause) — wcs's XML parser, not a4l's. Meson resolves a
   nested subproject's wrap from the **top-level** project, so the wrap has to live here for
   the wcs subproject to build on a machine without a system pugixml. Pinned WrapDB wrap
   (v1.15); refresh with `meson wrap update pugixml`.

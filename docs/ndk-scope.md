@@ -27,7 +27,7 @@ these on a glibc/Wayland host breaks into: (1) find/extract the right ABI, (2) C
   reported, not extracted.
 
 **Verified end-to-end** with a host-built x86_64 JNI fixture (`libacldemo.so` with a `JNI_OnLoad`
-registering `answer()`; a `NativeMain` that `System.loadLibrary("acldemo")` then calls it): acl
+registering `answer()`; a `NativeMain` that `System.loadLibrary("acldemo")` then calls it): a4l
 selects `x86_64`, extracts the lib, and the app logs `loaded libacldemo; answer()=42` — so
 `loadLibrary → dlopen → JNI_OnLoad → RegisterNatives → native call` all work on host ART.
 
@@ -70,15 +70,15 @@ drags the app's driver state through a foreign libc. The correct decoupling is a
   fences, never address space** — zero-copy, explicit sync, in-process (two Vulkan instances).
 
 This is Android's own contract, not a new interop: **`AHardwareBuffer`/gralloc + `ANativeWindow`
-ARE dma-buf + external-memory interop**. So acl implements the contract it already owns:
+ARE dma-buf + external-memory interop**. So a4l implements the contract it already owns:
 1. **`AHardwareBuffer_allocate` → the HOST allocator** (`gbm`/minigbm on the glibc side) → dma-buf
    fd + stride + offset + modifier in the AHB handle. Single allocator ⇒ every buffer is
    host-Mesa- and display-consumable; the app only ever *imports*, never allocates.
-2. **`ANativeWindow` = acl BufferQueue over host AHBs** (`src/ndk/`): `dequeueBuffer` → a free host
+2. **`ANativeWindow` = a4l BufferQueue over host AHBs** (`src/ndk/`): `dequeueBuffer` → a free host
    AHB + acquire fence; `queueBuffer` → return + completion fence.
 3. **Two producers import the same host AHB:** the framework (glibc ART, HWUI-equiv on host
    Skia/Vulkan — trivial, no bionic) and NDK GPU code (bionic ICD, via
-   `VK_ANDROID_external_memory_android_hardware_buffer`, or — since acl owns the AHB — the raw
+   `VK_ANDROID_external_memory_android_hardware_buffer`, or — since a4l owns the AHB — the raw
    dma-buf fd + `VK_KHR_external_memory_fd`).
 4. **Consumer = host glibc Mesa / drm-cxx** imports the same dma-buf for composition/scanout.
 5. **Sync** via `sync_file`/`drm_syncobj` fds on both handoffs — libc-agnostic.
@@ -86,7 +86,7 @@ ARE dma-buf + external-memory interop**. So acl implements the contract it alrea
 The only things crossing the bionic↔glibc line are the AHB handle (dma-buf fd + format/stride/
 modifier ints) and sync fds — no shared libc, no Vulkan-API thunk, no copy. So `libEGL`/`libGLESv2`
 still thunk (small, legacy), but the **Vulkan/Impeller path decouples at AHardwareBuffer**. This
-extends acl's "re-own `android.graphics` on host Skia+Vulkan-dmabuf" decision to the NDK GPU-app
+extends a4l's "re-own `android.graphics` on host Skia+Vulkan-dmabuf" decision to the NDK GPU-app
 case. Open questions: modifier agreement between the two V3DV builds (same silicon ⇒ should match);
 V3DV `sync_file`/`drm_syncobj` export; whether the bionic ICD loads in the libhybris namespace
 in-process or needs a bionic sidecar — and if a sidecar, *that* (the app's native GPU context,
@@ -97,7 +97,7 @@ decoupled by external memory) is the only justified process split, never the fra
 **MEASURED against a real Flutter APK (2026-07-16).** F-Droid's Feeel (`com.enjoyingfoss.feeel`,
 versionCode 4241) ships `lib/x86_64/{libflutter.so, libapp.so, libsqlite3.so}`. The prediction below
 (read from Flutter's source) matches its `libflutter.so` DT_NEEDED exactly: libc/libdl/libm +
-**libandroid, libEGL, libGLESv2, liblog, libjnigraphics**. Status on acl **as measured that
+**libandroid, libEGL, libGLESv2, liblog, libjnigraphics**. Status on a4l **as measured that
 day** — superseded four days later, see *Flutter runs* below:
 
 - **`libapp.so` — the app's Dart AOT snapshot (7.3 MB) — LOADS in-process** (no DT_NEEDED at all).
@@ -118,15 +118,15 @@ day** — superseded four days later, see *Flutter runs* below:
 **MEASURED on screen.** Everything the bullets above call missing was built, and APKs produced by
 the Flutter tooling render. The sequence, each step a commit in this tree:
 
-- `6a49143` — acl's own bionic-side `libandroid.so` (`src/ndk/bionic/acl_libandroid.c`), so
+- `6a49143` — a4l's own bionic-side `libandroid.so` (`src/ndk/bionic/acl_libandroid.c`), so
   `libflutter.so` resolves its direct NEEDED set and loads. `755eb3a` added the NDK
   `AChoreographer` frame clock on top of the real `ALooper`.
 - `f0b8f6d` / `b238e0e` — the app's bionic EGL/GLES forward across the `%fs` boundary to host Mesa
-  and bind to acl's GL device. For a native-GL app acl allocates no dma-buf of its own: Mesa
-  renders and commits acl's toplevel `wl_surface` inside `eglSwapBuffers` (`src/wm/present.h`, GL
+  and bind to a4l's GL device. For a native-GL app a4l allocates no dma-buf of its own: Mesa
+  renders and commits a4l's toplevel `wl_surface` inside `eglSwapBuffers` (`src/wm/present.h`, GL
   mode), which is why Flutter never needed a `SurfaceView`.
 - `f177773` — the engine builds its GL environment synchronously on its raster thread *during*
-  `Activity.onCreate`, while the main thread is blocked in the engine constructor; acl published
+  `Activity.onCreate`, while the main thread is blocked in the engine constructor; a4l published
   its GL session only after `onCreate` returned, so `get_display` waited 10s, timed out to
   `EGL_NO_DISPLAY` and the engine aborted. The native-EGL `get_display` hook now creates the
   session in place and `nGlOpen` adopts it. This broke **every** app on a recent engine build;
@@ -137,14 +137,14 @@ the Flutter tooling render. The sequence, each step a commit in this tree:
 - `ae2b49f` — Dart's BoringSSL reads trusted roots from `/system/etc/security/cacerts`, which the
   AOSP target does not ship, so every `NetworkImage` HTTPS fetch failed its certificate check.
 - `7bb42e6` — the external-texture path end to end: the engine's `ImageReaderSurfaceProducer`
-  imports acl-produced dma-buf frames as `EGLImage`s and composites them as a `Texture` widget.
+  imports a4l-produced dma-buf frames as `EGLImage`s and composites them as a `Texture` widget.
   Animated frames on screen, on a Flutter 3.44 app on host ART.
 - `a6e1931` + `f177773` — a `video_player` app (media3/ExoPlayer → `MediaCodec` → VAAPI) decodes
   H.264 zero-copy and, once the GL session was pre-created, **plays and loops** (position advances
   and wraps).
 
 So the "genuinely hard, missing piece" named in the upshot below — the bionic libc/libm/libdl
-bridge — exists (`## The bionic bridge`), and the NDK trampolines did map onto machinery acl
+bridge — exists (`## The bionic bridge`), and the NDK trampolines did map onto machinery a4l
 already had, as predicted.
 
 Read from `flutter/engine/src/flutter/shell/platform/android/`. `libflutter.so` (x86_64 build,
@@ -165,7 +165,7 @@ still bionic-linked) is a concrete, representative NDK client. What it needs:
   context, `eglSwapBuffers`. That is the minimal render path.
 - **Surface flow:** Java `Surface` → `ANativeWindow_fromSurface` → `eglCreateWindowSurface` →
   GLES2 render → `eglSwapBuffers`. So the one load-bearing shim is **`ANativeWindow` backed by an
-  acl Wayland/dma-buf surface** (`wm/`+`gfx/` already produce exactly this), with EGL/GLES routed
+  a4l Wayland/dma-buf surface** (`wm/`+`gfx/` already produce exactly this), with EGL/GLES routed
   to host **Mesa**. **Vsync can be driven entirely from Java** (`FlutterJNI.nativeOnVsync`), so
   `AChoreographer` is optional.
 - **Bring-up an embedder drives:** `FlutterLoader.startInitialization` → `loadLibrary` →
@@ -179,7 +179,7 @@ still bionic-linked) is a concrete, representative NDK client. What it needs:
 Mesa, `liblog` → `log/`. The genuinely hard, missing piece is the **bionic libc/libm/libdl bridge**
 so the `.so` links at all; the trampolines are then a well-scoped surface, not a guess.
 
-### Vsync — reuse acl's wp_presentation source (per ivi-homescreen)
+### Vsync — reuse a4l's wp_presentation source (per ivi-homescreen)
 
 Reference: ivi-homescreen `shell/vsync/wayland_vsync_provider.cc` + `ivsync_provider.cc` (the
 canonical Flutter-on-Wayland embedder, Apache-2.0). Its model, and the mapping to acl:
@@ -201,12 +201,12 @@ canonical Flutter-on-Wayland embedder, Apache-2.0). Its model, and the mapping t
 - **Clock gate**: only usable when `wp_presentation.clock_id == CLOCK_MONOTONIC` (matches
   `FlutterEngineGetCurrentTime`); otherwise leave vsync unset and let Flutter self-schedule.
 
-**acl already has this exact source.** The Looper-driven present (`PresentDriver` +
+**a4l already has this exact source.** The Looper-driven present (`PresentDriver` +
 `acl_deliver_vsync`, clocked by `wp_presentation` `OnPresented → present_ns + refresh`) is the same
 mechanism ivi-homescreen's provider implements. On the **Android** engine path, vsync rides Java
-`android.view.Choreographer` → `DisplayEventReceiver` — which acl **already drives** from that same
+`android.view.Choreographer` → `DisplayEventReceiver` — which a4l **already drives** from that same
 wp_presentation source. So if the NDK trampoline **omits `AChoreographer_*`** (the research shows
-the engine then falls back to the Java `nativeOnVsync` path), Flutter's vsync flows through acl's
+the engine then falls back to the Java `nativeOnVsync` path), Flutter's vsync flows through a4l's
 existing Choreographer/`acl_deliver_vsync` machinery for free — matching ivi-homescreen's
 `frame_start = present_ns`, `frame_target = present_ns + refresh` timing. Vsync is **reuse, not new
 work**; only the timestamps/thread-affinity above must be honored.
@@ -244,13 +244,13 @@ The mechanism (map PIE → synthetic KAB → `__linker_init` → `__loader_*`) i
 the arm64 port swaps only the TLS register (`TPIDR_EL0`), auxv, and reloc details (the target
 `linker64` carries the relocs). The remaining work is integration, not feasibility.
 
-**Rung 3 — promoted into `src/ndk/` (2026-07-16).** The spike is now a real acl API:
+**Rung 3 — promoted into `src/ndk/` (2026-07-16).** The spike is now a real a4l API:
 `src/ndk/bionic_runtime.{h,cpp}` — `BionicRuntime` (process-singleton; the linker bootstraps once),
 `BionicConfig` (paths from `ACL_BIONIC_LINKER`/`_SYSROOT`/`_STUB`, validated up front because linker
 input errors are fatal), `load()`/`symbol()`, and an RAII `RunScope` that brackets bionic calls with
 the `%fs` swap (the swap confined to the `-fno-stack-protector` TU). Arch-guarded: non-x86_64 returns
 a clean "arm64 TLS port pending" error so cross builds stay green. Verified via `acl-ndk-probe`
-(`nativeAnswer()=42 (PASS)`, logging through acl's `log/`).
+(`nativeAnswer()=42 (PASS)`, logging through a4l's `log/`).
 
 **Rung 4a — the bidirectional %fs boundary, PROVEN (2026-07-16).** `acl-ndk-probe --boundary` →
 `boundary selftest = 1010 (PASS)`. A bionic `.so` under bionic `%fs` writes a bionic thread-local,
@@ -307,7 +307,7 @@ works against a genuine VM, which is exactly what `jvm_vm.cpp` provides. The Jav
 `java.lang.Runtime.nativeLoad(String,ClassLoader,Class)`: it configures `BionicRuntime` from
 `ACL_BIONIC_*` (+ `ACL_BIONIC_APP_LIBS` for inter-lib deps), and `ndk_native_load` routes each load
 by `acl::ndk::is_bionic_elf(path)` — bionic app libs → `BionicRuntime::load_library(path, artVM,
-artEnv)`, acl's own glibc supplemental libs (e.g. soundpool) → `dlopen`+`JNI_OnLoad`. Unset ⇒ no-op,
+artEnv)`, a4l's own glibc supplemental libs (e.g. soundpool) → `dlopen`+`JNI_OnLoad`. Unset ⇒ no-op,
 ART's own `nativeLoad` untouched (zero regression: full build + 33 tests green). `is_bionic_elf`
 (DT_NEEDED `libc.so` vs glibc `libc.so.6`) validated: bionic `.so`/stub → BIONIC, `libz.so.1`/`ls` →
 glibc. The mechanism it calls is the `--realvm`-proven stack.
@@ -332,12 +332,12 @@ bootstrap identical bits.
 process/thread state for bionic: the crash handlers (`linker_debuggerd_init` →
 `debuggerd_register_handlers`: SIGABRT/BUS/FPE/ILL/SEGV/STKFLT/SYS/TRAP + `BIONIC_SIGNAL_DEBUGGER`)
 and **this thread's `sigaltstack`** (`__libc_init_main_thread_late` → `__init_alternate_signal_stack`
-mmaps a guarded region and installs it). Both must stay acl's: ART installs its own SIGSEGV handler
+mmaps a guarded region and installs it). Both must stay a4l's: ART installs its own SIGSEGV handler
 (implicit null checks are SEGVs it fixes up), and on host `art::Thread::TearDownAlternateSignalStack`
 reads back whatever `sigaltstack` is installed and `delete[]`s it — with bionic's mmap there, **ART
 shutdown `free()`d a bionic guard-page address and SIGSEGV'd** (the app had already run correctly;
 the crash was in teardown). `bootstrap_x86_64` now snapshots the host's `sigaltstack` + those
-sigactions across `__linker_init` and restores them, so acl stays the crash handler and owns its own
+sigactions across `__linker_init` and restores them, so a4l stays the crash handler and owns its own
 alt stack; bionic's stay mapped but unreferenced. A bionic crash is then reported by the host —
 what we want from a translation layer anyway.
 
@@ -348,7 +348,7 @@ by the bionic linker, so ART holds no handle and that lookup can **never** succe
 (`UnsatisfiedLinkError: No implementation found for … (tried Java_com_acl_ndktest_Main_nativeAnswer
 …)`). The lazy path can't be hooked either: `ClassLinker::RegisterNative` CHECKs a non-null address,
 so JVMTI's `NativeMethodBind` only fires for an address ART **already** found — it can redirect a
-binding, not create one. So acl binds **eagerly** at load time (`src/ndk/native_bind.{h,cpp}`):
+binding, not create one. So a4l binds **eagerly** at load time (`src/ndk/native_bind.{h,cpp}`):
 enumerate the loading class's declared natives by reflection, mangle each per the JNI spec (short
 name, then the overload long name), `__loader_dlsym` it in the bionic lib, wrap it in a down-call
 trampoline (`BionicRuntime::downcall_symbol`) and `RegisterNatives` it. `load_library` now wraps the
@@ -451,7 +451,7 @@ not exported. `pthread_create` is no use either, with or without a caller-suppli
 (`pthread_attr_setstack` does make bionic map TLS-only): it always `clone()`s a *new* OS thread, and
 the native must run on ART's own thread — the one holding `Thread::Current()` and the JNIEnv. A
 donor thread's TCB can't be re-pointed at another thread either: `pthread_internal_t::tid` backs
-recursive/errorcheck mutex ownership, so two threads sharing a tid break mutual exclusion. So acl
+recursive/errorcheck mutex ownership, so two threads sharing a tid break mutual exclusion. So a4l
 must synthesize the TCB. Read for it: `bionic/libc/bionic/pthread_create.cpp` (`__allocate_thread`),
 `__libc_init_main_thread.cpp`, `bionic_elf_tls.cpp`, `private/bionic_elf_tls.h`.
 
@@ -491,7 +491,7 @@ drift. Thread exit also needs `__libc_register_thread_exit_callback` (or an expl
 `__free_dynamic_tls` and unmap, or every attached thread leaks its block.
 
 NEXT (to real NDK apps): (1) thread-exit cleanup for attached threads (above); (2) NDK trampoline
-`.so` (`liblog`→acl `log`, `libandroid`→`wm`) for NativeActivity/GPU apps; then **arm64** (the
+`.so` (`liblog`→a4l `log`, `libandroid`→`wm`) for NativeActivity/GPU apps; then **arm64** (the
 mechanism is arch-neutral: swap `%fs`→`TPIDR_EL0`, redo auxv/reloc details, and note
 `MIN_TLS_SLOT` is negative there, so the thread pointer is NOT the TCB address —
 `StaticTlsLayout::offset_thread_pointer()` must be used).
@@ -510,10 +510,10 @@ The mechanism, pinned:
   `.so` on its search path.
 - This is exactly what **libhybris** (Apache-2.0) implements (for the reverse direction — glibc apps
   using bionic GL drivers). Options: **(a)** vendor/patch libhybris's linker-loading core, or **(b)** a
-  purpose-built bootstrap in `src/ndk/` (a controlled subset — acl loads a known `.so` set, not the
+  purpose-built bootstrap in `src/ndk/` (a controlled subset — a4l loads a known `.so` set, not the
   general case). Both are bionic-version-specific (target the vendored android-13 bionic) and are a
   focused multi-step build, not a small shim. The two-libc coexistence (bionic libc for app `.so` +
-  glibc for acl, bridged at the NDK/JNI boundary) is the R-6 risk to manage here.
+  glibc for a4l, bridged at the NDK/JNI boundary) is the R-6 risk to manage here.
 
 ### Stage 0b — libhybris core vs a purpose-built bootstrap (the two paths, contrasted)
 
@@ -584,12 +584,12 @@ comes from the **whole-APK signature**: v1 (JAR) digests every entry in `MANIFES
 as the APK is** — nothing separate to vet at the `.so` level.
 
 - **Integrity is a `pkg/`-layer, one-time concern, not a per-load one.** The right design is a single
-  APK v2/v3 signature verification when acl *opens* the APK (mirroring Android install-time), after
-  which every extracted `.so` is trusted by construction. acl does **not** do this yet (`pkg/apk.cpp`
+  APK v2/v3 signature verification when a4l *opens* the APK (mirroring Android install-time), after
+  which every extracted `.so` is trusted by construction. a4l does **not** do this yet (`pkg/apk.cpp`
   only parses ZIP structure) — a bounded, standard task to add before running untrusted APKs. The NDK
   loader itself stays signature-free.
 - **The real runtime worry is containment, not signing.** Signing says *who authored* the code, not
-  that it's *safe*. Once an app `.so` runs it is arbitrary native code in acl's **single glibc
+  that it's *safe*. Once an app `.so` runs it is arbitrary native code in a4l's **single glibc
   process** — no per-app UID / SELinux / seccomp cage like on-device Android — so it can reach ART,
   Mesa, and the Wayland connection. That's an architectural sandboxing question (seccomp around the
   bionic-namespace threads; process/UID isolation later), orthogonal to both signing and the loader,

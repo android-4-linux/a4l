@@ -7,7 +7,7 @@
 
 Phase 1 gave us: host ART runs DEX natively, verifies/AOT-compiles real obfuscated apps
 (Spotify 9,817/9,820, 0 VerifyError), and runs a trivial real `Activity` lifecycle against
-acl's 41-shim framework (`--vm=art`, `run-apk-activity-art`). Phase 2 is the hard core:
+a4l's 41-shim framework (`--vm=art`, `run-apk-activity-art`). Phase 2 is the hard core:
 **a real Android app launches, draws its UI to a Wayland window, and takes input.**
 
 ## North star & realistic first target
@@ -73,13 +73,13 @@ exactly which classes are SystemServer/Binder-entangled → the substitution bou
 them), so app_process-style bootstrapping isn't linkable from the stock host `.so`. BUT all 33
 `register_android_*(JNIEnv*)` functions ARE exported. Proven: boot host ART → `dlopen`
 libandroid_runtime → call `register_android_os_SystemProperties(env)` (returns JNI_OK) →
-`SystemProperties.get(...)` **executes on ART** (no UnsatisfiedLinkError). So acl registers the
+`SystemProperties.get(...)` **executes on ART** (no UnsatisfiedLinkError). So a4l registers the
 framework natives it needs by calling the exported `register_android_*(env)` set directly — no
 `AndroidRuntime` instance for simple components. Caveats to handle during integration: (a) the
 real framework (`framework-minus-apex.jar`, not the shim/stub set) must be on the classpath so
 each `register_*`'s `FindClass` resolves; (b) natives that call `AndroidRuntime::getJavaVM`/
 thread-attach may still need `gCurRuntime` set — expect a subset needing an in-tree bridge or a
-minimal AndroidRuntime shim; (c) prefer libandroid_runtime's natives over acl's hand-bound shim
+minimal AndroidRuntime shim; (c) prefer libandroid_runtime's natives over a4l's hand-bound shim
 natives where they overlap (ADR-0008). **Integration next:** ArtVm dlopens libandroid_runtime +
 calls a curated `register_android_*` set when pointed at the real framework.
 
@@ -104,9 +104,9 @@ ActivityInfo)` → `Instrumentation.callActivityOnCreate`). Two concrete require
    `Resources.getSystem()`). The full floor is **153 `REG_JNI` entries** registered by the
    stripped `startReg`; only **33 are individually exported** (leaf natives). Resources/
    AssetManager/View/graphics are NOT exported. **So the exported-function approach is a
-   partial floor for simple code; a real Activity needs the full floor → build an in-tree acl
+   partial floor for simple code; a real Activity needs the full floor → build an in-tree a4l
    native bridge** (a Soong `cc_library` alongside `libandroid_runtime` that creates a minimal
-   `AndroidRuntime` and calls `startReg`/the gRegJNI table with the symbols visible), which acl
+   `AndroidRuntime` and calls `startReg`/the gRegJNI table with the symbols visible), which a4l
    dlopens from `ACL_ART_HOME`. This is ADR-0008's "minimal AndroidRuntime shim", now concretely
    specified. It replaces the 33-function subset.
 
@@ -135,10 +135,10 @@ natives reuse cleanly (P2.2), but the framework-heavy natives a real Activity ne
 Resources/View/graphics) are NOT host-buildable as-is. Getting them requires, per component,
 either (a) making it host-buildable by stubbing its device deps (SurfaceFlinger→Wayland/Skia,
 Binder→svc hub) — which is the same substitution work as P2.4/P2.5, just entered from the native
-side — or (b) reimplementing it in acl C++ (the clean-room path). AOSP's own host framework
+side — or (b) reimplementing it in a4l C++ (the clean-room path). AOSP's own host framework
 (ravenwood/layoutlib) does exactly this stubbing. **A(2) revised plan:** enable the target-only
 framework native `.cpp` files for host one subsystem at a time, stubbing each device dep against
-acl's substitutes — starting with resources (`android_util_AssetManager` + libandroidfw, which is
+a4l's substitutes — starting with resources (`android_util_AssetManager` + libandroidfw, which is
 already host_supported) since a real Activity needs `Resources` first. The AndroidRuntime bridge
 still applies once AndroidRuntime.cpp is host-enabled. AOSP-tree bridge changes were reverted
 (unworkable as-is); bridge source kept at scratch/acl_art_bridge.cpp.
@@ -181,7 +181,7 @@ the pinned tree (~8 min) and probed on host ART:
 - **Bootstrap gap pinned down (the first P2.2 task):** a bare `System.load` of
   libandroid_runtime returns `JNI_ERR` — its `JNI_OnLoad` requires an `AndroidRuntime`
   instance (`getRuntime() != NULL`), i.e. the `app_process`/zygote bootstrap. `app_process`
-  is **target-only** (no host variant), so acl provides a **mini host AndroidRuntime**
+  is **target-only** (no host variant), so a4l provides a **mini host AndroidRuntime**
   (reuse `frameworks/base/cmds/app_process/app_main.cpp` + `AndroidRuntime::start`/`startReg`
   to register the `gRegJNI` table with the JavaVM set). Bounded, well-trodden — not a wall.
 

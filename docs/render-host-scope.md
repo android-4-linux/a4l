@@ -8,31 +8,31 @@
 
 The last genuinely target-only native frontier before apps draw (per
 `docs/resources-host-scope.md`): the **render** path. The resources subsystem proved the
-ADR-0008 hybrid pattern (reuse host-exported AOSP framework natives + acl-owned seams for
+ADR-0008 hybrid pattern (reuse host-exported AOSP framework natives + a4l-owned seams for
 device deps); render is the same pattern applied to graphics — but with a real presentation
 backend behind it instead of a headless buffer.
 
 ## Presentation direction — GPU, patterned after wcs
 
-Decided: the acl present path follows wcs's **`skia-vulkan-dmabuf`** example (preferred) with
+Decided: the a4l present path follows wcs's **`skia-vulkan-dmabuf`** example (preferred) with
 **`skia-egl-canvas`** (Ganesh GL) as the alternative — NOT the wl_shm software-raster path.
 Rationale:
 
-- The **single pinned Skia** acl links (`~/.local/skia-m150`, ADR-4/A02.2) is built
+- The **single pinned Skia** a4l links (`~/.local/skia-m150`, ADR-4/A02.2) is built
   `skia_use_vulkan=true skia_use_gl=true skia_use_egl=true is_official_build=true` — the exact
-  config those examples require. Ganesh Vulkan is already in the archives acl links
+  config those examples require. Ganesh Vulkan is already in the archives a4l links
   (`GrVkDirectContext`, `VulkanBackendContext`).
 - **Zero-copy present:** Skia's Ganesh Vulkan backend renders into modifier-tiled `VkImage`s
   exported as **dma-buf** via `zwp_linux_dmabuf_v1`, so pixels reach the compositor without
   touching `wl_shm` — and a scanout modifier lets the compositor promote the surface onto a
   hardware plane. This is the production path for an Android app's continuously-animating
   surface (Choreographer-driven), where a CPU shm blit per frame is the wrong cost.
-- It's the **same wcs CRTP bindings** acl's `wm/` already uses (`ACL_HAVE_WCS`): the example
+- It's the **same wcs CRTP bindings** a4l's `wm/` already uses (`ACL_HAVE_WCS`): the example
   drives `wl::DmabufFeedback`, `wl::LinuxDmabuf`, `wl::Presentation`, `wl::XdgShell` — all
-  present in the vendored wcs `include/wl/`. acl reuses the framework, not the example binary.
+  present in the vendored wcs `include/wl/`. a4l reuses the framework, not the example binary.
 - The scene draws through a **plain `SkCanvas*`** (`demo::DemoScene::Render`), agnostic to the
-  buffer path — exactly the seam acl needs: the `android.graphics` Canvas/Bitmap natives (host
-  Skia) draw into that canvas; the backend underneath is acl's concern, not the app's.
+  buffer path — exactly the seam a4l needs: the `android.graphics` Canvas/Bitmap natives (host
+  Skia) draw into that canvas; the backend underneath is a4l's concern, not the app's.
 
 The host has it all: Vulkan 1.4 + a real GPU (RADV) + llvmpipe fallback, libdrm, vulkan-hpp,
 DRM render node, wcs framework headers. So the whole path builds and is CI-testable here.
@@ -42,7 +42,7 @@ DRM render node, wcs framework headers. So the whole path builds and is CI-testa
 1. **gfx/ — the GPU render target (Ganesh Vulkan).** Owns the `VkInstance`/`VkDevice`/queue +
    `skgpu::VulkanMemoryAllocator` + `GrDirectContext` (Vulkan), and a render target that
    exposes an `SkCanvas` and, on the present path, is a dma-buf-exported `VkImage` wrapped as a
-   Ganesh `SkSurface`. This is the acl-owned replacement for hwui's RenderThread/`SkiaVulkan`
+   Ganesh `SkSurface`. This is the a4l-owned replacement for hwui's RenderThread/`SkiaVulkan`
    pipeline (hwui dropped, ADR-4) — the surface the `android.graphics` natives compose onto.
 2. **wm/ — the Wayland present.** dma-buf feedback → modifier selection → per-slot
    `zwp_linux_buffer_params` → `wl_surface.attach`/`damage`/`commit`, with a slot ring and
@@ -80,7 +80,7 @@ modifiers. Then build `wl_buffer`s from the `DmabufFrame` (one `add()` per plane
 path engage) and asserts the received plane params — deterministic, no GPU-import dependency.
 
 ### V3 — real android.graphics onto the gfx surface (RE-SCOPED 2026-07-12)
-**Decided (user): acl is a host translation layer (host-translation-layer style), not a device container. Render via
+**Decided (user): a4l is a host translation layer (host-translation-layer style), not a device container. Render via
 Android's own Skia, backed by our Vulkan-dmabuf present.** See memory `render-architecture-decision`.
 
 **Dead end found — DON'T reuse the host libandroid_runtime graphics natives directly.** ArtVm CAN
@@ -97,23 +97,23 @@ are device-only (bionic) binaries; the host lib has NO Vulkan hwui pipeline. Rej
 `@CriticalNative` (user concern), porting libhwui to host (heavy + still fights it), and the
 device-container model (contradicts ADR-1/host-ART, single-process, no-Binder).
 
-**CHOSEN — the clean split (S1–S4):** Android's Skia renders; acl's Vulkan-dmabuf is the backend.
+**CHOSEN — the clean split (S1–S4):** Android's Skia renders; a4l's Vulkan-dmabuf is the backend.
 - **S1 ✅** — build Android's android-13 host `libskia.a` (`m out/soong/.intermediates/external/skia/
   libskia/linux_glibc_x86_64_static/libskia.a` after `lunch aosp_x86_64-eng`; 97MB). android-13 Skia
   is an OLDER API than m150 (`GrDirectContext::MakeVulkan`, `SkSurface::MakeRenderTarget`,
   `GrVkBackendContext`).
-- **S2** — acl's gfx present backend is **pure Vulkan (no Skia in meson — avoids Android Skia's
+- **S2** — a4l's gfx present backend is **pure Vulkan (no Skia in meson — avoids Android Skia's
   jpeg/ft2/icu/… dep tree)**: allocate the dma-buf-exported `VkImage`, export fd, present. Expose the
   `VkDevice`/queue + `VkImage` (`GrVkImageInfo`-shaped) handles.
-- **S3** — `libacl_graphics_jni`: a Soong module with acl's **own minimal graphics natives**
+- **S3** — `libacl_graphics_jni`: a Soong module with a4l's **own minimal graphics natives**
   (Bitmap/Canvas/Paint calling core Skia directly — the full AOSP `android_graphics_jni` set is
   `libhwui`-coupled, so we write a thin subset rather than extract it), compiled with the **device**
   `@CriticalNative` convention (correct signatures to *match* the annotation — not clearing it, no
   AOSP patch, no libhwui rebuild, no runtime flag — verified there's no ART option to disable
-  `@CriticalNative`). acl shares one `VkDevice` with it (via `GrVkBackendContext`); the natives wrap
-  acl's dma-buf `VkImage` as the `Canvas`'s `SkSurface` (`GrBackendTexture` /
+  `@CriticalNative`). a4l shares one `VkDevice` with it (via `GrVkBackendContext`); the natives wrap
+  a4l's dma-buf `VkImage` as the `Canvas`'s `SkSurface` (`GrBackendTexture` /
   `SkSurface::MakeFromBackendTexture`) and render straight in. ONE Skia in the render path (hidden in
-  the Soong lib → no ODR). **Gate:** a real `android.graphics.Canvas` draws on host ART into acl's
+  the Soong lib → no ODR). **Gate:** a real `android.graphics.Canvas` draws on host ART into a4l's
   dma-buf VkImage.
   **S3 linchpin DE-RISKED (2026-07-12):** a probe Soong module (`vendor/acl/skia_probe/`,
   cc_binary_host) renders a bg+rect into an `SkBitmap` and reads pixels back — **builds + runs on host,
@@ -123,10 +123,10 @@ device-container model (contradicts ADR-1/host-ART, single-process, no-Binder).
   libpiex, liblog, libbase, libcutils — `static_libs:["libskia"]` does NOT auto-pull them). So the
   Skia-on-host linking is solved; the remaining S3 work is the natives themselves.
   **S3 DONE (2026-07-12):** `libacl_graphics_jni` (Soong `cc_library_shared` host,
-  `tools/aosp/graphics_jni/` → `$AOSP/vendor/acl/graphics_jni/`) implements acl's minimal
+  `tools/aosp/graphics_jni/` → `$AOSP/vendor/acl/graphics_jni/`) implements a4l's minimal
   `android.graphics` natives (Bitmap/Canvas/BaseCanvas/Paint/ColorSpace$Rgb) over core Skia, the
   `@CriticalNative` methods in the **device convention** (handle-only) to match the annotation host
-  ART honors. acl (`ArtVm::load_acl_graphics`, gated `ACL_ART_GRAPHICS_LIB`) `dlopen`s it and calls
+  ART honors. a4l (`ArtVm::load_acl_graphics`, gated `ACL_ART_GRAPHICS_LIB`) `dlopen`s it and calls
   `register_acl_graphics`. **Verified: real `Bitmap.createBitmap(16,10,ARGB_8888)` → `new Canvas` →
   `drawColor` → `new Paint().setColor` → `drawRect` → `getPixel` all execute on host ART, rendered by
   Android's host Skia, pixels correct (`bg=0xff204060 fg=0xffcc8844`)** — no `@CriticalNative`
@@ -139,7 +139,7 @@ device-container model (contradicts ADR-1/host-ART, single-process, no-Binder).
   setColor`→`drawRect`), reads the pixels via `acl_read_bitmap`, imports to the dma-buf, and presents
   via `present_dmabuf`. **Verified LIVE against GNOME Shell/Mutter: `app → android.graphics → Android's
   Skia → dma-buf → Wayland`, 3 clean frames.** Unit `[import]` covers the CPU→dma-buf write (163
-  assertions); acl suite green (demo opt-in).
+  assertions); a4l suite green (demo opt-in).
 ### S4 — two tracks (FINDING 2026-07-12)
 **Android's host `libskia` is CPU-only** — zero GPU backend (`nm` on the host `libskia.a`: no `GrGL*`,
 no `GrVk*`, no `MakeVulkan`/`MakeGL`; Vulkan/`GrVk*`/`libvulkan` are gated to `target: { android }`
@@ -157,7 +157,7 @@ is correct + working.** GPU-native therefore forks:
   Vulkan device, `GrDirectContext::MakeVulkan` (Android Skia), an offscreen GPU `SkSurface`
   (`MakeRenderTarget`), renders + reads back — **verified on the real GPU (RADV):
   bg=0xff204060 fg=0xffcc8844.** All vk entrypoints come via `dlopen`(libvulkan)+`GrVkGetProc` (Soong
-  can't `-lvulkan` on host; the real lib gets them from acl instead). So Android's Skia does Ganesh
+  can't `-lvulkan` on host; the real lib gets them from a4l instead). So Android's Skia does Ganesh
   Vulkan on host+GPU. **Step 2 remaining (wiring):** make a modifier-tiled dma-buf-exportable `VkImage`,
   wrap it as an Android-Skia Ganesh `SkSurface` (`GrBackendTexture`+`GrVkImageInfo`), route the
   `Canvas`'s `nInitRaster` to it, render + export fd + present via `present_dmabuf` — no CPU upload.
@@ -184,11 +184,11 @@ is correct + working.** GPU-native therefore forks:
   Work` "VkDevice dispatch handle not found" artifact), so Skia's `GrVkCaps` is silently rejecting the
   render target under ART. Loader-handle (`RTLD_DEFAULT` vs `dlopen`) didn't change it. **NEXT:** a Skia
   debug build (for the reject reason) or VMA/ART-memory tracing; suspects = ART's low-4GB region-space
-  reservation vs Skia/VMA allocation, or a Skia-GPU global-state clash with acl's separately-linked m150
+  reservation vs Skia/VMA allocation, or a Skia-GPU global-state clash with a4l's separately-linked m150
   Skia. Until then, the **live CPU-native loop (S3b) is the working render path.**
 - **S4b — breadth (runs real apps, into Gate G2).** No Skia rebuild: grow graphics ops
   (paths/text/drawBitmap/clip/transform) + Paint setters as real apps hit them, and drive the loop
-  from a real `View.draw`/`onDraw` traversal (acl already has the View-traversal driver from Phase 2).
+  from a real `View.draw`/`onDraw` traversal (a4l already has the View-traversal driver from Phase 2).
   Then hwui's DisplayList/RenderThread/damage design for device-class behavior.
 
 The reusable probe `tests/fixtures/art_graphics/Main.java` (real `Bitmap`/`Canvas`/`Paint` via
@@ -280,13 +280,13 @@ compositor isn't in CI). **NEXT = V2b-ci**: a libwayland-server test compositor 
 deterministic CI coverage. Then V3 (android.graphics natives compose onto the gfx surface).
 
 ## V3 / S3 RESULT (2026-07-12) — done; real android.graphics on Android host Skia, CPU loop live
-The architecture settled (user, 2026-07-12): acl is a **host translation layer**, so we **re-own
+The architecture settled (user, 2026-07-12): a4l is a **host translation layer**, so we **re-own
 android.graphics** rather than register host `libandroid_runtime`'s graphics natives (its layoutlib
 build compiles the framework's `@CriticalNative` methods with the wrong ABI → crash). `libacl_graphics_jni`
 (Soong `cc_library_shared`, host; source in `tools/aosp/graphics_jni/`, built in `$AOSP/vendor/acl/`)
-provides ~22 acl-owned Bitmap/Canvas/Paint/ColorSpace natives over **Android's optimized host Skia**,
+provides ~22 a4l-owned Bitmap/Canvas/Paint/ColorSpace natives over **Android's optimized host Skia**,
 with the `@CriticalNative` methods written **handle-only (device convention)** to match the annotation
-host ART honors — no `@CriticalNative` surgery, no AOSP patch. acl `dlopen`s it and calls
+host ART honors — no `@CriticalNative` surgery, no AOSP patch. a4l `dlopen`s it and calls
 `register_acl_graphics`. **CPU loop closed live (S3b, commit c7f0d98):** a real
 `Bitmap.createBitmap → Canvas → drawColor → Paint → drawRect` on host ART → `acl_read_bitmap` →
 `gfx::Surface` → `import_pixels_to_dmabuf` → `present_dmabuf`; 3 clean frames on GNOME Shell.

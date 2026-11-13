@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- Provenance: acl P2.4 display-pipeline design; Android ViewRootImpl/Choreographer/
+<!-- Provenance: a4l P2.4 display-pipeline design; Android ViewRootImpl/Choreographer/
      DisplayEventReceiver behavior (AOSP docs) + wp_presentation/zwp_linux_dmabuf (Wayland).
      No GPL-3.0 sources. -->
 
@@ -7,7 +7,7 @@
 
 ## Problem
 
-acl's GPU present (`present_dmabuf_loop`) is a **hand-rolled `poll()` loop** on the JVM main
+a4l's GPU present (`present_dmabuf_loop`) is a **hand-rolled `poll()` loop** on the JVM main
 thread. It polls only the Wayland fd; it never runs the Android main `Looper`. But Android's
 async framework — most sharply **Jetpack Compose's recomposer** — posts its continuations to the
 main `Handler` queue. With that queue never drained, Compose's first composition never completes,

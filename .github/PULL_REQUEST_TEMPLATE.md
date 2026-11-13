@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- Provenance: original acl pull-request template. No GPL-3.0 sources. -->
+<!-- Provenance: original a4l pull-request template. No GPL-3.0 sources. -->
 
 ## What this changes, and what it fixes
 
@@ -17,7 +17,7 @@
       a commit made through the GitHub web editor now gets the trailer automatically.
 - [ ] New source files carry an `SPDX-License-Identifier` and a `Provenance:` line
       (`scripts/check-spdx.sh`, `scripts/check-provenance.sh`).
-- [ ] Nothing here was taken from, or written while reading, the GPL-3.0 project that preceded acl.
+- [ ] Nothing here was taken from, or written while reading, the GPL-3.0 project that preceded a4l.
       The Android API surface comes from Apache-2.0 AOSP — see `PROVENANCE.md`.
 - [ ] `clang-format` is a fixed point at the pinned version (`.clang-format-version`).
 - [ ] Any third-party GitHub action is pinned to a full 40-character sha with a `# vX.Y.Z` comment

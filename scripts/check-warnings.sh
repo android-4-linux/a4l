@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Provenance: original acl CI gate. No GPL-3.0 sources.
+# Provenance: original a4l CI gate. No GPL-3.0 sources.
 #
-# Gate G0.e: a compile of acl's own code emits ZERO warnings.
+# Gate G0.e: a compile of a4l's own code emits ZERO warnings.
 #
 # The tree builds at warning_level=2 with werror=false, deliberately: a subproject's warning
 # must not fail a consumer build, and a newer compiler than the pinned image must not make the
@@ -16,7 +16,7 @@
 # `shell: bash` in a workflow step, so a compile failure still fails the step).
 #
 # Warnings from subprojects/ and third_party/ are NOT counted: they are upstream's to fix and
-# acl pins them by sha, so the only honest response here would be to pin a different sha.
+# a4l pins them by sha, so the only honest response here would be to pin a different sha.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -45,7 +45,7 @@ for log in "$@"; do
   ours="$(grep -E '(^|[ /])[^ ]*:[0-9]+:[0-9]+: warning:' "$log" | grep -vE "$foreign_re" || true)"
   if [[ -n "$ours" ]]; then
     count="$(printf '%s\n' "$ours" | wc -l)"
-    echo "FAIL: $count warning(s) in acl's own code, from $log:" >&2
+    echo "FAIL: $count warning(s) in a4l's own code, from $log:" >&2
     printf '  %s\n' "$ours" >&2
     fail=1
   fi
@@ -64,4 +64,4 @@ if (( fail )); then
   exit 1
 fi
 
-echo "OK: zero warnings in acl's own code across $total_compiled compiled target(s)."
+echo "OK: zero warnings in a4l's own code across $total_compiled compiled target(s)."

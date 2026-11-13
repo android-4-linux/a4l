@@ -4,22 +4,22 @@
      dma-buf), ADR-0006 (windowing/scaling), cross/rk3588.ini + cross/sa8155p.ini; AOSP build
      system (Soong, host targets), Mesa V3DV/Panfrost docs (public). No GPL-3.0 sources. -->
 
-# Running acl on a Raspberry Pi (and RK3588) — bring-up plan
+# Running a4l on a Raspberry Pi (and RK3588) — bring-up plan
 > **Binary name.** The executable was `acl` until 2026-11-13 and is **`a4l`** now. Command
 > transcripts below are kept exactly as they were run; read `acl run ...` as `a4l run ...`.
 
 Target boards: **Raspberry Pi 4** (BCM2711, Cortex-A72 ×4, VideoCore VI) and **Pi 5**
 (BCM2712, Cortex-A76 ×4, VideoCore VII). Both are aarch64/Linux — the same architecture family
-acl's automotive board targets already assume (`cross/rk3588.ini`, `cross/sa8155p.ini`). This doc
-is the ordered, honest task list to stand acl up on a Pi, plus the **RK3588 gaps** (§7).
+a4l's automotive board targets already assume (`cross/rk3588.ini`, `cross/sa8155p.ini`). This doc
+is the ordered, honest task list to stand a4l up on a Pi, plus the **RK3588 gaps** (§7).
 
 ## 0. TL;DR
 
 The C++23 core cross-compiles to arm64 today — that is not the work. The work is dominated by one
-thing: **there is no stock arm64-Linux "host" ART build.** acl's model (ADR-0001) runs the app's
+thing: **there is no stock arm64-Linux "host" ART build.** a4l's model (ADR-0001) runs the app's
 DEX on a real AOSP ART built for the *build host* — currently `out/host/linux-x86` (x86_64/glibc).
 A Pi needs that entire runtime — `libart.so`, `dex2oat64`, the boot image, `libandroid_runtime.so`,
-plus acl's `libacl_graphics_jni.so` / `libsoundpool.so` and the framework jars — rebuilt for an
+plus a4l's `libacl_graphics_jni.so` / `libsoundpool.so` and the framework jars — rebuilt for an
 **arm64 Linux host** target. Everything else (Skia, Vulkan/dma-buf, Wayland, PipeWire, the OAT
 cache) is available or tractable on a Pi; the ART lift is the critical path.
 
@@ -28,10 +28,10 @@ cache) is available or tractable on a Pi; the ART lift is the critical path.
 cannot `dlopen` a bionic `libart.so`** in-process (SIGTRAP at load; two libcs can't coexist). Two ways
 out: **B2** (a single-libc musl arm64 host ART — toolchain + full LLVM-runtime port done, but consuming
 it is a multi-week host-graph port; `tools/aosp/b2-musl-arm64/`), and **B1-split** (run the stock
-bionic ART in its own process, IPC to glibc acl).
+bionic ART in its own process, IPC to glibc a4l).
 
 **✅ B1-SPLIT WORKS ON THE PI (2026-07-16): `--vm=art` runs.** `acl run hello.apk --vm=art-split` →
-glibc acl spawns the bionic `acl-art-host` (stock `linux_bionic-arm64` Soong `cc_binary`), which
+glibc a4l spawns the bionic `acl-art-host` (stock `linux_bionic-arm64` Soong `cc_binary`), which
 `dlopen`s the bionic `libart.so`, boots ART, runs the app's DEX, and streams output back over `acl_ipc`
 — **no SIGTRAP** (art-host is bionic). This is the pragmatic path to a running host ART on the Pi, with
 no B2 host-graph port. Design + milestones in **docs/split-process-art.md**; `--vm=jvm` (M1) remains
@@ -50,10 +50,10 @@ build, at reduced fidelity — useful for early bring-up, not the end state (§4
 | Wayland | labwc/Wayfire (Bookworm) | labwc/Wayfire | vendor/Wayland stack |
 | Audio | PipeWire (Bookworm) | PipeWire | PipeWire |
 | RAM | 1–8 GB (use ≥4) | 4–16 GB | 4–32 GB |
-| Relative perf for acl | tight but usable for media/CAL | comfortable | best of the three |
+| Relative perf for a4l | tight but usable for media/CAL | comfortable | best of the three |
 | Cross file | **new `cross/pi4.ini`** | reuse pi4 w/ `cpu=cortex-a76` | `cross/rk3588.ini` (exists) |
 
-acl's sweet spot on any of these is the **automotive critical path** (media apps, Car App Library
+a4l's sweet spot on any of these is the **automotive critical path** (media apps, Car App Library
 template apps) which draw no Android Views — far more realistic on a Pi 4 than a heavy View/Compose
 app. General View/Compose apps will run but be slow on Pi 4.
 
@@ -78,19 +78,19 @@ absent in the fresh container (fails identically on x86 without that step), not 
 arm64 build is verified correct, not merely compilable.
 
 **Pi-4 target compiler — characterized (Bookworm, arm64 container):** a full arm64 `acl` also
-**builds and runs with stock Bookworm's g++ 12.2 and fmt 9.1** (rc=0) — so acl's C++23 usage does
+**builds and runs with stock Bookworm's g++ 12.2 and fmt 9.1** (rc=0) — so a4l's C++23 usage does
 NOT need g++13+. The ONE stock-Bookworm blocker is **meson 1.0.1 < the required 1.3.0**: install a
 newer meson (`pip3 install --break-system-packages 'meson>=1.3'`, or bookworm-backports) and the
-stock g++12 toolchain compiles acl cleanly. Net: **Pi 4 (Bookworm) can build acl from stock apt
+stock g++12 toolchain compiles a4l cleanly. Net: **Pi 4 (Bookworm) can build a4l from stock apt
 packages + a pip meson** — no compiler upgrade required.
 
-Original task (now satisfied by the above): confirm the acl C++ core compiles clean for arm64.
+Original task (now satisfied by the above): confirm the a4l C++ core compiles clean for arm64.
 - Add `cross/pi4.ini` (copy `rk3588.ini`; `cpu = 'cortex-a72'`, point `sysroot` at a Pi OS
   Bookworm sysroot). A Pi 5 build reuses it with `cpu = 'cortex-a76'`.
 - `meson setup build-pi4 --cross-file cross/pi4.ini` then `meson compile -C build-pi4`. The host-ART
   bits are runtime-loaded (`dlopen($ACL_ART_HOME/...)`), so the core links without an arm64 ART
   present; `--vm=null`/`--vm=jvm` codepaths and pkg (APK/zip/manifest), wm, gfx, svc all build.
-- Sysroot needs the arm64 dev packages acl links: `wayland-client`, `libpipewire-0.3`, Vulkan
+- Sysroot needs the arm64 dev packages a4l links: `wayland-client`, `libpipewire-0.3`, Vulkan
   loader/headers, `fmt`, `sdbus-c++` (optional), `libavcodec/format/util/swresample` (SoundPool is
   dlopen'd, but headers are needed to compile). **Exit criterion:** an arm64 `acl` binary that runs
   `acl` (version + module roster) on the Pi.
@@ -109,18 +109,18 @@ AOSP registers host toolchains for these OS/arch pairs only
 
 | host libc | x86 / x86_64 | arm64 |
 |---|---|---|
-| glibc (`android.Linux`) | yes (acl uses this today) | **NO** |
+| glibc (`android.Linux`) | yes (a4l uses this today) | **NO** |
 | musl (`android.LinuxMusl`) | yes | **NO** |
 | bionic (`android.LinuxBionic`) | yes | **yes — the only arm64 host** (`arm64_linux_host.go`) |
 
 So the earlier `linux_musl_arm64` premise was wrong (musl host is x86-only), and there is **no stock
 glibc arm64 host** either. The single arm64 Linux host is **`linux_bionic-arm64`** — Android's bionic
-libc with a host-bionic linker. That collides with acl's core model: acl runs ART **in-process** with
+libc with a host-bionic linker. That collides with a4l's core model: a4l runs ART **in-process** with
 the Pi's **glibc** Wayland / Vulkan / PipeWire libraries, and you cannot cleanly host two libcs
 (bionic + glibc) in one process (loader, TLS, malloc, symbol namespaces). So P-B forks:
 
 - **Path B1 — `linux_bionic-arm64` (stock, but fights the model).** Build ART bionic-arm64; then
-  either (a) make the graphics/audio underside *also* bionic (build acl + Skia + Wayland/Vulkan/
+  either (a) make the graphics/audio underside *also* bionic (build a4l + Skia + Wayland/Vulkan/
   PipeWire clients against bionic — large, and the Pi's system libs are glibc), or (b) split ART into
   its own process and IPC to a glibc render/audio process (a big architectural change to the
   single-process design). Host Bionic is also a niche/fragile AOSP path.
@@ -184,7 +184,7 @@ LLVM-runtime port. Recorded for a human call — not yet decided.
 Once a target exists, the module set is the same either way: `libart`, `libartbase`, `libdexfile`,
 `libprofile`, `dex2oat`, `libandroid_runtime`, `libnativehelper`; core boot jars (`core-oj`,
 `core-libart`, `okhttp`, `bouncycastle`, `apache-xml`, `core-icu4j`, `conscrypt`);
-`framework-minus-apex`/`framework-graphics`/`ext`/`telephony-common`; and acl's own
+`framework-minus-apex`/`framework-graphics`/`ext`/`telephony-common`; and a4l's own
 `libacl_graphics_jni.so` + `libsoundpool.so` rebuilt for it (the SoundPool FFmpeg-vs-OpenSSL dlopen
 isolation matters *more* against a distro OpenSSL). `tools/run-apk.sh` already derives everything from
 `ACL_ART_HOME`, so no harness change — only which tree you point it at.
@@ -211,10 +211,10 @@ in-process coexistence (integration/architecture), plus scaling the build up to 
 **Full native stack spike done (2026-07-15) — the whole ART host runtime builds for arm64.**
 Building the `linux_bionic_arm64_shared` outputs of `libandroid_runtime` (+ `libart`,
 `libnativehelper`, `libprofile`) links successfully: **`libart.so` (AArch64, ~104M unstripped) and
-`libandroid_runtime.so` (AArch64, ~112M)** — exactly the two `.so`s acl `dlopen`s from
+`libandroid_runtime.so` (AArch64, ~112M)** — exactly the two `.so`s a4l `dlopen`s from
 `$ACL_ART_HOME/lib64/` — plus everything `libandroid_runtime` transitively pulls (libart-compiler,
 libsigchain, libbase, libc++, libsqlite, …), all as `linux_bionic` AArch64, **no source patches**.
-So P-B is **build-complete at the native level**: the entire embedding surface acl depends on
+So P-B is **build-complete at the native level**: the entire embedding surface a4l depends on
 compiles+links for an arm64 host. (Unstripped because the `linux_bionic` bp block disables strip for
 crash symbols; stripped is far smaller.)
 - **Sole remaining P-B risk = integration, not build:** bionic ART in-process with the Pi's glibc
@@ -234,7 +234,7 @@ crash symbols; stripped is far smaller.)
 - **P-D boot image — finding:** AOSP does NOT auto-generate an arm64 *host* boot image (no
   `linux_bionic-arm64 boot.art` target in the Soong graph; host boot images are built only for the
   build host's x86_64). Options: run the arm64 `dex2oats` (under emulation) or the x86 `dex2oat`
-  (cross-targeting arm64) over the boot classpath jars to emit `boot.art` manually — OR skip it: acl
+  (cross-targeting arm64) over the boot classpath jars to emit `boot.art` manually — OR skip it: a4l
   already defaults to imageless `-Xint` when `ACL_ART_BOOT_IMAGE` is unset, so a *first* arm64 boot
   needs no boot image (just slower). The boot jars are DEX/Java = arch-independent (reuse the x86 ones).
 - **NATIVE-on-Pi spike done (2026-07-15) — arm64 ART runs on real silicon.** The assembled
@@ -262,10 +262,10 @@ crash symbols; stripped is far smaller.)
   - **`--vm=jvm` (OpenJDK arm64) remains the working fallback today** (ADR-1) — validated below.
 
 ### P-C. GPU / Vulkan dma-buf bring-up
-acl re-owns `android.graphics` on Skia + a Vulkan dma-buf present loop (ADR-0004). On a Pi that is
+a4l re-owns `android.graphics` on Skia + a Vulkan dma-buf present loop (ADR-0004). On a Pi that is
 **Mesa V3DV**.
 - Verify V3DV exposes what `graphics_jni`/`gpu_dmabuf.cpp` negotiates: `VK_EXT_external_memory_dma_buf`,
-  `VK_EXT_image_drm_format_modifier`, `VK_KHR_external_memory_fd`, and the modifiers acl advertises
+  `VK_EXT_image_drm_format_modifier`, `VK_KHR_external_memory_fd`, and the modifiers a4l advertises
   for `XRGB8888` (the logs show it querying compositor modifiers). V3DV supports external dma-buf
   import/export but its **modifier set is narrower** than desktop RADV — expect a format/modifier
   negotiation fallback path to be needed.
@@ -274,7 +274,7 @@ acl re-owns `android.graphics` on Skia + a Vulkan dma-buf present loop (ADR-0004
 - **Gaps:**
   - Modifier mismatch → blank/garbled frames: add a linear-modifier / `wl_shm` fallback for boards
     whose Vulkan modifiers don't intersect the compositor's.
-  - `wp_linux_dmabuf` feedback on labwc/Wayfire vs the desktop compositors acl was developed against
+  - `wp_linux_dmabuf` feedback on labwc/Wayfire vs the desktop compositors a4l was developed against
     (Mutter/Sway) — Tier C matrix should add a Pi compositor.
   - Vulkan 1.2 feature floor: confirm nothing in graphics_jni assumes 1.3-only features.
 
@@ -301,7 +301,7 @@ container on the x86 host (emulated) — trixie-in-container == trixie-on-Pi, so
 against the same glibc lib versions the Pi carries; scp it over and run. The three milestones below
 are all **DONE (2026-07-15)** on a real Pi 4 (trixie), executed exactly this way.
 
-**M1 — acl on the Pi via OpenJDK (`--vm=jvm`) — ✅ DONE.** Host-built arm64 `acl` (11 MB, trixie
+**M1 — a4l on the Pi via OpenJDK (`--vm=jvm`) — ✅ DONE.** Host-built arm64 `acl` (11 MB, trixie
 container) scp'd to the Pi; `acl run hello.apk --vm=jvm --main=Hello` ran end-to-end: DEX→JVM
 translation (2 methods, 0 stubbed), OpenJDK-21 arm64 booted, static `main()` executed, exit 0. The
 binary's `NEEDED` set (`libfmt.so.10`, `libjvm.so`, `libpipewire-0.3`, `libsdbus-c++`, …) all resolve
@@ -327,7 +327,7 @@ arm64 Soong `ToolchainFactory`; musl likely lighter) — or split ART into its o
 with IPC to the glibc render/audio process. `--vm=jvm` (M1) is the working interim. **This was the one
 question no off-Pi spike could answer; it is now answered on hardware.**
 
-## 3. What already works in acl's favor
+## 3. What already works in a4l's favor
 - **arm64 is first-class**: cross files exist; the automotive targets (RK3588, SA8155P) are arm64.
 - **Harness is host-agnostic**: `tools/run-apk.sh` + `ArtVm` derive everything from `ACL_ART_HOME`;
   no x86 is hardcoded in logic (only in which tree you point at).
@@ -352,7 +352,7 @@ product** — a scaffold.
 | P-E corpus/conformance | low | low | — |
 
 The program is gated on **P-B**. Recommend doing **P-A now** (de-risks the core, cheap), then a
-spike on P-B (can a `linux_musl_arm64` ART even be built + booted with acl's embedding seam?) before
+spike on P-B (can a `linux_musl_arm64` ART even be built + booted with a4l's embedding seam?) before
 committing to the full board bring-up.
 
 ## 6. Pi 4 vs Pi 5
@@ -379,7 +379,7 @@ identically):
    risk; (c) if using the vendor blob, license/namespace isolation (it is not in-tree, must be
    dlopen'd like the graphics lib).  Note "RADV" in the cross-file comment is a misnomer for Mali —
    RADV is AMD; the Mali Vulkan driver is PanVk. **Fix the comment.**
-3. **Kernel/DRM + Wayland compositor.** RK3588 boards vary (Rockchip BSP kernel vs mainline). acl
+3. **Kernel/DRM + Wayland compositor.** RK3588 boards vary (Rockchip BSP kernel vs mainline). a4l
    needs `wp_linux_dmabuf`, `wp_presentation`, `wp_fractional_scale_v1`, `wp_viewport` (ADR-0006).
    **Gap:** confirm the board's compositor advertises these; the Rockchip vendor stack may lag
    mainline protocol support.
@@ -404,4 +404,4 @@ identically):
 ## 8. First concrete step
 `cross/pi4.ini` + a P-A cross-compile smoke build. It is cheap, needs no ART, and proves the core is
 arm64-clean — de-risking every later phase. Then spike P-B (build + boot a `linux_musl_arm64` ART
-under acl's embedding seam) before committing to full board bring-up.
+under a4l's embedding seam) before committing to full board bring-up.
