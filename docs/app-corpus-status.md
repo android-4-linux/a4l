@@ -47,6 +47,48 @@ The default `--present` path instead blits from a `gfx::Surface` it gets via `Bi
 which exists only on acl's Bitmap **shim** — so it cannot show a real app's frame and says so.
 (That default should probably change; see the note at the end.)
 
+## What cleared after that corpus run — 2026-07-19 to 2026-08-04
+
+**Read this before the sections below.** The corpus table and the per-app notes that follow were
+written on 2026-07-18 and are kept as the record of that day. Four of the walls they name have since
+fallen, so a row saying "out of scope" or "a large component" is history, not status. Each item
+below cites the commit that closed it; `git show <sha>` carries the measurement.
+
+- **Flutter renders.** APKs built with the Flutter tooling run on an unmodified engine:
+  `libflutter.so` loads against acl's own bionic-side `libandroid.so` (`6a49143`), its EGL/GLES
+  forward to host Mesa (`f0b8f6d`, `b238e0e`), and Mesa commits acl's toplevel `wl_surface` itself,
+  so no `SurfaceView` is involved. The load-bearing fix was `f177773`: a recent engine builds its GL
+  environment synchronously inside `Activity.onCreate`, so acl now creates the GL session in the
+  native-EGL `get_display` hook and adopts it in `nGlOpen`. Text needed the AOSP faces bound at
+  `/fonts` (`c961326`), network images needed a CA store where Dart looks for it (`ae2b49f`),
+  `Texture`-widget external textures import an acl dma-buf as an `EGLImage` through `ImageReader`
+  (`7bb42e6`, animated frames on screen with Flutter 3.44), and a `video_player` clip decodes via
+  VAAPI, plays and loops (`a6e1931` + `f177773`). Details in `docs/ndk-scope.md`.
+- **WebView composites.** The provider is auto-wired (`c8de6a6`) and real Chromium content draws
+  through its `AwDrawFn` Vulkan functor onto the present surface — a full OSM map, an EPUB reader —
+  once acl drove the functor's `on_sync` on a split RenderThread (`c94d0c0`). Startup needed the
+  signal handlers reclaimed from crashpad (`f48adb2`), navigation needed the NDK `ALooper` bridged
+  on the Skia present path (`fd81ccf`), z-order needed the present-root walk, now the default
+  (`703366a`), and overlay flicker took a snapshot freeze plus a vsync cap (`6010b1a`).
+- **A video `SurfaceView` hole-punches.** acl backs it with a real hardware-plane Surface
+  (`abad8d0`), presents it on a `wl_subsurface` below the toplevel and clears a transparent hole in
+  the UI above it (`3cc990d`, which also had to make the toplevel buffer ARGB8888 — Mutter ignores
+  an XRGB toplevel's alpha, so the hole rendered black), scaled to the View's bounds with
+  `wp_viewport` (`110762c`). This is the video case, not a general GL or camera `SurfaceView`.
+- **`gles_jni` / `GLSurfaceView` is registered.** `com.google.android.gles_jni.EGLImpl` plus
+  `android.opengl.GLES20`/`GLES30` natives exist (`4e96f6d`, `4e1661f`, `75fe3a7`), Surface
+  injection and GL present make libGDX GL apps run (`eef2785`), they receive input (`ae15c49`), and
+  a mixed Java-EGL/native-GL app's Java `gl*` calls route onto the native-GL donor `%fs` so its
+  texture setup has a current context (`5f03d36`, `585c746`). `EGL14` is registered too (`62b214b`).
+- **Obfuscated Compose UIs resume.** An R8-renamed `ComponentActivity` never reached RESUMED, so
+  Compose drew one frame and never recomposed; the `LifecycleRegistry` is now found by the shape of
+  `handleLifecycleEvent` and driven by ordinal (`187d1f8`).
+
+What is still open is narrower than those four: an app whose own GL renders to an FBO or gates its
+draws still presents nothing (an app-side GL issue, with the context bridging proven correct), a
+GLES3-heavy app can link its entire native stack and then trip a null `real`-env deref in acl's JNI
+bridge (`6391708`), and the black-frame question below is unchanged.
+
 ## Corpus re-run — 2026-07-18
 
 18 F-Droid apps re-fetched (latest F-Droid version) and run headless (`run-apk.sh … --present-frames=0`),
@@ -74,7 +116,7 @@ that can leave content incomplete; those are flagged). Verified-on-screen this s
 | `app.halma` (libGDX GL) | reached layout (decor); GL content via the `gles_jni` path |
 | `ardash.doodledudette` (libGDX GL) | reached layout (decor); GL content via the `gles_jni` path |
 | `app.smarzaro.foss4g2024.schedule` | resource gap **fixed** (see below) — now inflates its layout; advances to a separate app-side NPE in `MainActivity.onCreate` |
-| `app.fedilab.openmaps` | **FAIL** — `InflateException` on `android.webkit.WebView` (no browser engine; out of scope) |
+| `app.fedilab.openmaps` | **FAIL** — `InflateException` on `android.webkit.WebView` (no browser engine; out of scope) — **superseded**: WebView composites, see the top of this file |
 | `app.crossword.yourealwaysbe.forkyzscanner` | **FAIL** — `NoClassDefFoundError w0.e` (app-side R8/protobuf `dynamicColors_`; fails on stock ART too) |
 
 **`foss4g.schedule` — now fixed.** The layout id `0x7f0c004b` (`main_layout`) exists only as
@@ -99,7 +141,7 @@ eliminating the `onCreate` crashes (ContentProviders, Hilt `getApplicationContex
 | `barilyuk.batterytemperature` | Views (XML layout) | **renders** — full UI (adaptive icon, CheckBox, RadioButtons) |
 | `app.fedilab.castlab` | React Native | RN native libs load via the bionic bridge; stops in Expo (below) |
 | `S.N.A.K.E` | custom View game | presents, but **black** — draws 5-7 ops/frame yet nothing shows (below) |
-| `app.fedilab.openmaps` | WebView | can't inflate `android.webkit.WebView` — no browser engine (below) |
+| `app.fedilab.openmaps` | WebView | **renders** its full OSM map through the `AwDrawFn` functor (superseded this row; see the top of this file) |
 
 Also tried, outside the F-Droid corpus (not redistributable, run locally only):
 
@@ -213,7 +255,9 @@ classified by whether the presented frame has non-black content). Roughly half r
     bindings, whose `_nativeClassInit()` native acl does not provide —
     `UnsatisfiedLinkError` in `AndroidGraphics.createGLSurfaceView` → `onCreate` fails. That is the
     **SurfaceView + GLES** path (below), not a single missing native: it needs a GL-backed
-    `SurfaceView` and the `gles_jni` EGL/GLES JNI, a large component.
+    `SurfaceView` and the `gles_jni` EGL/GLES JNI, a large component. **Superseded (2026-07-17):**
+    that component was built — `EGLImpl` + `GLES20`/`GLES30` natives, Surface injection, GL present
+    and input — and libGDX GL apps run. See the top of this file.
   - `at.manuelbichler.octalsuntime` — **now renders its full octal clock UI** (dial digits 0–7, tick
     marks, the yellow daylight arc, hand, octal time, "Greenwich"). Two fixes: (1) `ClockActivity.
     onCreate` called `getComponentName().getClassName()` and acl never set `Activity.mComponent` →
@@ -242,8 +286,9 @@ classified by whether the presented frame has non-black content). Roughly half r
 Recurring, actionable gaps this surfaced: **`libstdc++.so`** (two apps — now staged, see above) and
 single missing natives like **`Bitmap.nativeHasMipMap`** (fixed) — the latter is the cheap kind, one
 function unblocks an app. With `libstdc++.so` staged, the two libGDX apps fold into the larger
-**GLSurfaceView / `gles_jni.EGLImpl`** gap (the SurfaceView + GLES path). The black-frame apps share
-the S.N.A.K.E question (custom-View content not reaching the screen).
+**GLSurfaceView / `gles_jni.EGLImpl`** gap (the SurfaceView + GLES path) — **since closed**, see the
+top of this file. The black-frame apps share the S.N.A.K.E question (custom-View content not
+reaching the screen), which is still open.
 
 ### ContentProviders (built)
 
