@@ -2,7 +2,9 @@
 # Contributing to acl
 
 Before anything else, read `PROVENANCE.md` and `docs/clean-room.md`. The clean-room and
-license rules are hard constraints enforced in CI, not guidelines.
+license rules are hard constraints enforced in CI, not guidelines. How people are expected to
+treat each other here is in [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md); reporting an app that
+does or does not run goes through the app-report issue form.
 
 ## The three per-contribution requirements
 
