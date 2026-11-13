@@ -95,7 +95,8 @@ decoupled by external memory) is the only justified process split, never the fra
 **MEASURED against a real Flutter APK (2026-07-16).** F-Droid's Feeel (`com.enjoyingfoss.feeel`,
 versionCode 4241) ships `lib/x86_64/{libflutter.so, libapp.so, libsqlite3.so}`. The prediction below
 (read from Flutter's source) matches its `libflutter.so` DT_NEEDED exactly: libc/libdl/libm +
-**libandroid, libEGL, libGLESv2, liblog, libjnigraphics**. Status on acl today:
+**libandroid, libEGL, libGLESv2, liblog, libjnigraphics**. Status on acl **as measured that
+day** — superseded four days later, see *Flutter runs* below:
 
 - **`libapp.so` — the app's Dart AOT snapshot (7.3 MB) — LOADS in-process** (no DT_NEEDED at all).
 - **`libsqlite3.so` LOADS** (needs only libm/libdl/libc, which the staged sysroot has).
@@ -109,6 +110,40 @@ versionCode 4241) ships `lib/x86_64/{libflutter.so, libapp.so, libsqlite3.so}`. 
 - Note `ANativeWindow_lock`/`unlockAndPost` are linked directly: this build can drive the **software**
   surface path, not only EGL/GLES. `AChoreographer_*`/`AHardwareBuffer_*`/`ASurfaceControl_*` are
   absent from the direct imports, confirming they are `dlsym`'d lazily and tolerated missing.
+
+### Flutter runs — the `libandroid.so` wall fell on 2026-07-20
+
+**MEASURED on screen.** Everything the bullets above call missing was built, and APKs produced by
+the Flutter tooling render. The sequence, each step a commit in this tree:
+
+- `6a49143` — acl's own bionic-side `libandroid.so` (`src/ndk/bionic/acl_libandroid.c`), so
+  `libflutter.so` resolves its direct NEEDED set and loads. `755eb3a` added the NDK
+  `AChoreographer` frame clock on top of the real `ALooper`.
+- `f0b8f6d` / `b238e0e` — the app's bionic EGL/GLES forward across the `%fs` boundary to host Mesa
+  and bind to acl's GL device. For a native-GL app acl allocates no dma-buf of its own: Mesa
+  renders and commits acl's toplevel `wl_surface` inside `eglSwapBuffers` (`src/wm/present.h`, GL
+  mode), which is why Flutter never needed a `SurfaceView`.
+- `f177773` — the engine builds its GL environment synchronously on its raster thread *during*
+  `Activity.onCreate`, while the main thread is blocked in the engine constructor; acl published
+  its GL session only after `onCreate` returned, so `get_display` waited 10s, timed out to
+  `EGL_NO_DISPLAY` and the engine aborted. The native-EGL `get_display` hook now creates the
+  session in place and `nGlOpen` adopts it. This broke **every** app on a recent engine build;
+  older engines deferred GL init and dodged it.
+- `c961326` — the engine's Skia resolves font files against a compiled-in `/fonts/` prefix, not
+  `/system/fonts`, so every default face came out empty and all Roboto text drew blank while apps
+  with bundled fonts looked fine. Binding the AOSP faces at `/fonts` fixed text across the corpus.
+- `ae2b49f` — Dart's BoringSSL reads trusted roots from `/system/etc/security/cacerts`, which the
+  AOSP target does not ship, so every `NetworkImage` HTTPS fetch failed its certificate check.
+- `7bb42e6` — the external-texture path end to end: the engine's `ImageReaderSurfaceProducer`
+  imports acl-produced dma-buf frames as `EGLImage`s and composites them as a `Texture` widget.
+  Animated frames on screen, on a Flutter 3.44 app on host ART.
+- `a6e1931` + `f177773` — a `video_player` app (media3/ExoPlayer → `MediaCodec` → VAAPI) decodes
+  H.264 zero-copy and, once the GL session was pre-created, **plays and loops** (position advances
+  and wraps).
+
+So the "genuinely hard, missing piece" named in the upshot below — the bionic libc/libm/libdl
+bridge — exists (`## The bionic bridge`), and the NDK trampolines did map onto machinery acl
+already had, as predicted.
 
 Read from `flutter/engine/src/flutter/shell/platform/android/`. `libflutter.so` (x86_64 build,
 still bionic-linked) is a concrete, representative NDK client. What it needs:
