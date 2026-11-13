@@ -24,7 +24,7 @@
 #
 # Usage:   tools/run-apk.sh <app.apk> [extra acl args, e.g. --present --main=...]
 # Env:     ACL_ART_HOME   (required) host ART build out/host/linux-x86 (libart.so + apex/com.android.art)
-#          ACL_BIN        acl binary            (default: <repo>/build/src/shell/acl)
+#          ACL_BIN        a4l binary            (default: <repo>/build/src/shell/a4l)
 #          ACL_RUN_TIMEOUT seconds              (default: 60; 0 disables the timeout)
 #          ACL_APK        APK path if $1 omitted
 # Exits 77 (meson "skip" convention) when the host-ART build or toolchain is absent.
@@ -43,8 +43,8 @@ HOME_DIR="${ACL_ART_HOME:-}"
 ROOT=$(cd "$HOME_DIR/../../.." && pwd)
 # The repo root is two levels above this script (tools/run-apk.sh).
 ACLROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-ACL_BIN="${ACL_BIN:-$ACLROOT/build/src/shell/acl}"
-[ -x "$ACL_BIN" ] || die_skip "acl binary not built at $ACL_BIN (meson compile -C build acl)"
+ACL_BIN="${ACL_BIN:-$ACLROOT/build/src/shell/a4l}"
+[ -x "$ACL_BIN" ] || die_skip "a4l binary not built at $ACL_BIN (meson compile -C build a4l)"
 
 APK="${1:-${ACL_APK:-}}"
 [ -n "$APK" ] && [ -f "$APK" ] || { printf 'usage: %s <app.apk> [acl args...]\n' "$0" >&2; exit 2; }

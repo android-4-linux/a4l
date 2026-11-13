@@ -25,7 +25,7 @@ pattern='acl::(svc::car|hosts::)'
 
 auto_probe="$auto_dir/tests/unit/acl_unit_tests"
 phone_probe="$phone_dir/tests/unit/acl_unit_tests"
-phone_product="$phone_dir/src/shell/acl"
+phone_product="$phone_dir/src/shell/a4l"
 
 for f in "$auto_probe" "$phone_probe" "$phone_product"; do
   if [[ ! -f "$f" ]]; then

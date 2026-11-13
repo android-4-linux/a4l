@@ -6,7 +6,7 @@
 
 # App corpus — what runs today
 
-Unmodified F-Droid APKs on `acl run --vm=art`, with the real framework floor and acl's
+Unmodified F-Droid APKs on `a4l run --vm=art`, with the real framework floor and acl's
 android.graphics natives on Android's host Skia. What follows was observed on screen, on a Wayland
 compositor.
 

@@ -3,6 +3,8 @@
      (BSD) + linker docs, libhybris/Anbox (Apache-2.0, per-file license check). No GPL-3.0 sources. -->
 
 # NDK / native libraries — scope and status
+> **Binary name.** The executable was `acl` until 2026-11-13 and is **`a4l`** now. Command
+> transcripts below are kept exactly as they were run; read `acl run ...` as `a4l run ...`.
 
 `plan.md` ADR-5 stages NDK support to Phase 4. This tracks the increments.
 
@@ -19,7 +21,7 @@ these on a glibc/Wayland host breaks into: (1) find/extract the right ABI, (2) C
 - **`pkg`**: `Apk::host_abi_candidates()` gives this build's ABIs in Android's preference order
   (x86_64 → `{x86_64, x86}`, arm64 → `{arm64-v8a, armeabi-v7a, armeabi}`); `Apk::select_abi(apkAbis)`
   returns the first host-compatible ABI present, else "".
-- **`acl run`**: when the APK has native libs, extract `lib/<abi>/*.so` for the selected ABI to a
+- **`a4l run`**: when the APK has native libs, extract `lib/<abi>/*.so` for the selected ABI to a
   per-app dir (`$XDG_CACHE_HOME/acl/<pkg>/lib`) and add `-Djava.library.path=<dir>` so host ART's
   `System.loadLibrary` resolves them. An ABI mismatch (e.g. an arm-only app on an x86_64 host) is
   reported, not extracted.

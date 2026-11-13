@@ -8,7 +8,7 @@ is **Apache-2.0**. The automotive profile (media apps + Car App Library template
 first-class target and reaches a useful milestone ahead of the phone/View path.
 
 > **Status: unmodified APKs render — Android UI toolkits, Flutter, WebView and video.** Of 18
-> F-Droid apps run headless on `acl run --vm=art`, 15 reach layout and 3 fail; reaching layout means
+> F-Droid apps run headless on `a4l run --vm=art`, 15 reach layout and 3 fail; reaching layout means
 > the app booted without an `onCreate` crash and its decor measured and laid out, which is not a
 > pixel check. Rendering is verified on screen for Jetpack Compose (`SVS.pdfinspector`),
 > Views/Material (`opendrummer`, `a2dp.Vol`, `batterytemperature`) and a custom-View clock
@@ -53,7 +53,7 @@ are consumed as prebuilt imported artifacts; the Phase 0 skeleton needs none of 
 ```sh
 meson setup build
 meson compile -C build
-./build/src/shell/acl           # prints version + linked module roster
+./build/src/shell/a4l           # prints version + linked module roster
 
 meson test -C build                # Tier A unit tests (needs: meson wrap install catch2)
 ```
@@ -81,7 +81,7 @@ scripts/, .github/workflows/                                CI license/provenanc
 
 ## License
 
-Apache-2.0. Copyright 2026 Contributors to acl-cxx, stated in [`NOTICE`](NOTICE).
+Apache-2.0. Copyright 2026 Contributors to a4l, stated in [`NOTICE`](NOTICE).
 
 [`LICENSE`](LICENSE) holds the license text verbatim, because automated license
 detection matches that file by content rather than by what it claims; [`LICENSES/`](LICENSES/)

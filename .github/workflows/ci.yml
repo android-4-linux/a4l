@@ -210,7 +210,7 @@ jobs:
       - name: Zero warnings in acl's own code (Gate G0.e)
         run: ./scripts/check-warnings.sh compile-automotive.log
       - name: Run the stub
-        run: ./build/src/shell/acl
+        run: ./build/src/shell/a4l
       - name: Test
         run: meson test -C build --print-errorlogs
 
@@ -389,7 +389,7 @@ jobs:
         run: ./scripts/check-warnings.sh compile-present.log
 
       - name: Run the stub
-        run: ./build-present/src/shell/acl
+        run: ./build-present/src/shell/a4l
 
       - name: Test
         run: meson test -C build-present --print-errorlogs

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Provenance: original build configuration. No GPL-3.0 sources.
 project(
-  'acl',
+  'a4l',
   'cpp',
   'c',   # only for scanner-generated protocol glue in the wm/ test compositor
   version : '0.0.0',
@@ -404,4 +404,4 @@ summary({
   'automotive profile' : profile_automotive,
   'tests'              : build_tests,
   'cpp_std'            : get_option('cpp_std'),
-}, section : 'acl')
+}, section : 'a4l')

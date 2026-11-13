@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Provenance: original acl design (acl-cxx docs/split-process-art.md). Sources copied verbatim from
+// Provenance: original acl design (a4l docs/split-process-art.md). Sources copied verbatim from
 // the acl repo (src/runtime/art_host_main.cpp, src/ipc/*). Built as a linux_bionic-arm64 host binary
 // so it can dlopen the STOCK bionic host ART (libart.so) without the two-libc SIGTRAP a glibc acl
 // hits in-process. No GPL-3.0 sources.
