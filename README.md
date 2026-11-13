@@ -50,6 +50,24 @@ reaches a useful milestone ahead of the phone/View path.
 > every claim. The authoritative design is [`plan.md`](plan.md); contributor guidance is in
 > [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
+## One process, and three paths that never copy a frame
+
+![a4l layer stack: APK, ART, AOSP framework and a4l core in one glibc process](docs/a4l-stack.svg)
+
+Figure 1 draws the boundary the rest of the design follows. Everything inside the dashed
+enclosure is one glibc process on x86-64; everything below it is the stack the product already
+ships, unchanged. No Android compositor, no binder and no second graphics driver appear in the
+drawing because none of them is in the process. arm64 is the stated exception, noted on the
+sheet. The accent marks what sits on a zero-copy path.
+
+![a4l present paths: GPU, native GL, video, and the wl_shm fallback](docs/a4l-present-paths.svg)
+
+Figure 2 follows one frame from the app to the display controller on each of the four present
+paths. The first three reach the compositor with no CPU copy, and on the native-GL path a4l
+allocates no buffer at all -- Mesa renders and commits a4l's own `wl_surface` inside
+`eglSwapBuffers`. The fourth is the default, and it is the usual reason a first run without
+`ACL_PRESENT_GPU=1` looks empty.
+
 ## Read these first
 
 - [`plan.md`](plan.md) — full design, ADRs, phases, risk register (source of truth).

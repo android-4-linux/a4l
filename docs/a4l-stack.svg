@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Contributors to a4l -->
+<!-- Provenance: original a4l diagram, drawn from this repository's own tree and docs
+     (plan.md, docs/ndk-scope.md, docs/split-process-art.md, src/ layout). No GPL-3.0
+     sources. Colors are literal presentation attributes, because renderers without CSS
+     custom-property support (librsvg <= 2.62) draw var() as black; the dark theme is a
+     progressive CSS override. -->
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 960 920' width='960' height='920'
+     role='img' aria-label='a4l layer stack as an engineering drawing with numbered callouts and a parts list'>
+  <title>a4l layer stack</title>
+  <desc>Engineering-drawing view of the a4l stack. A dashed enclosure marks the single glibc process holding the unmodified APK, host ART, the vendored AOSP framework subset and a4l&#x27;s C++23 native core. Below it, the host stack a4l does not own: compositor, PipeWire and VA-API, Mesa, DRM/KMS. Numbered callouts are resolved by the parts list.</desc>
+  <style>
+    @media (prefers-color-scheme: dark) {
+      .f-accent { fill: #5fb0e4; }
+      .f-ink { fill: #e9ecee; }
+      .f-muted { fill: #8c9398; }
+      .f-paper { fill: #0d0f11; }
+      .f-thin { fill: #e9ecee; }
+      .s-accent { stroke: #5fb0e4; }
+      .s-grid { stroke: #262b2f; }
+      .s-thin { stroke: #e9ecee; }
+    }
+  </style>
+  <rect x='0' y='0' width='960' height='920' fill='#ffffff' class='f-paper'/>
+  <rect x='118' y='130' width='772' height='242' fill='none' stroke='#16181a' stroke-width='1' stroke-dasharray="7 4" class='s-thin'/>
+  <line x1='100' y1='130' x2='100' y2='372' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <line x1='100' y1='144' x2='100' y2='130' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <path d='M100 130 L102.6 136 L97.4 136 z' fill='#16181a' class='f-thin'/>
+  <line x1='100' y1='358' x2='100' y2='372' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <path d='M100 372 L97.4 366 L102.6 366 z' fill='#16181a' class='f-thin'/>
+  <line x1='95' y1='130' x2='105' y2='130' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <line x1='95' y1='372' x2='105' y2='372' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='93' y='251' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' text-anchor="middle" letter-spacing="1.5" transform="rotate(-90 93 251)" fill='#6b7075' class='f-muted'>ONE GLIBC PROCESS</text>
+  <rect x='136' y='146' width='736' height='40' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='148' y='170' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>UNMODIFIED APK</text>
+  <circle cx='856' cy='161' r='8' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='856' y='164.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#16181a' class='f-ink'>01</text>
+  <rect x='136' y='196' width='364' height='40' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='148' y='220' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>ART</text>
+  <circle cx='484' cy='211' r='8' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='484' y='214.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#16181a' class='f-ink'>02</text>
+  <rect x='508' y='196' width='364' height='40' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='520' y='220' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>AOSP FRAMEWORK</text>
+  <circle cx='856' cy='211' r='8' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='856' y='214.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#16181a' class='f-ink'>03</text>
+  <text x='136' y='258' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' letter-spacing="1.8" fill='#6b7075' class='f-muted'>A4L NATIVE CORE / C++23</text>
+  <rect x='136' y='266' width='178' height='40' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='148' y='290' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>GFX</text>
+  <circle cx='298' cy='281' r='8' fill='none' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <text x='298' y='284.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#0d5c91' class='f-accent'>04</text>
+  <rect x='322' y='266' width='178' height='40' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='334' y='290' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>NDK</text>
+  <circle cx='484' cy='281' r='8' fill='none' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <text x='484' y='284.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#0d5c91' class='f-accent'>05</text>
+  <rect x='508' y='266' width='178' height='40' fill='none' stroke='#0d5c91' stroke-width='1.1' class='s-accent'/>
+  <text x='520' y='290' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>WM</text>
+  <circle cx='670' cy='281' r='8' fill='none' stroke='#0d5c91' stroke-width='0.9' class='s-accent'/>
+  <text x='670' y='284.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#0d5c91' class='f-accent'>06</text>
+  <rect x='694' y='266' width='178' height='40' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='706' y='290' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>PKG · DEX</text>
+  <circle cx='856' cy='281' r='8' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='856' y='284.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#16181a' class='f-ink'>07</text>
+  <rect x='136' y='316' width='178' height='40' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='148' y='340' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>RUNTIME</text>
+  <circle cx='298' cy='331' r='8' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='298' y='334.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#16181a' class='f-ink'>08</text>
+  <rect x='322' y='316' width='178' height='40' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='334' y='340' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>MEDIA · AUDIO</text>
+  <circle cx='484' cy='331' r='8' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='484' y='334.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#16181a' class='f-ink'>09</text>
+  <rect x='508' y='316' width='178' height='40' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='520' y='340' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>SVC · IPC</text>
+  <circle cx='670' cy='331' r='8' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='670' y='334.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#16181a' class='f-ink'>10</text>
+  <rect x='694' y='316' width='178' height='40' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='706' y='340' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>HOSTS</text>
+  <circle cx='856' cy='331' r='8' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='856' y='334.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#16181a' class='f-ink'>11</text>
+  <text x='118' y='390' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>on arm64 the stock host ART is bionic, which a glibc process cannot dlopen, so ART runs in its own process</text>
+  <line x1='256' y1='400' x2='256' y2='426' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <path d='M256 426 L253.4 420 L258.6 420 z' fill='#16181a' class='f-thin'/>
+  <line x1='504' y1='400' x2='504' y2='426' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <path d='M504 426 L501.4 420 L506.6 420 z' fill='#16181a' class='f-thin'/>
+  <line x1='752' y1='400' x2='752' y2='426' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <path d='M752 426 L749.4 420 L754.6 420 z' fill='#16181a' class='f-thin'/>
+  <rect x='136' y='426' width='240' height='40' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='148' y='450' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>WAYLAND COMPOSITOR</text>
+  <circle cx='360' cy='441' r='8' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='360' y='444.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#16181a' class='f-ink'>12</text>
+  <rect x='384' y='426' width='240' height='40' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='396' y='450' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>PIPEWIRE / VA-API</text>
+  <circle cx='608' cy='441' r='8' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='608' y='444.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#16181a' class='f-ink'>13</text>
+  <rect x='632' y='426' width='240' height='40' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='644' y='450' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>MESA</text>
+  <circle cx='856' cy='441' r='8' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='856' y='444.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#16181a' class='f-ink'>14</text>
+  <line x1='236' y1='466' x2='236' y2='492' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <path d='M236 492 L233.4 486 L238.6 486 z' fill='#16181a' class='f-thin'/>
+  <rect x='136' y='492' width='736' height='40' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='148' y='516' font-size='11.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="0.6" fill='#16181a' class='f-ink'>DRM / KMS</text>
+  <circle cx='856' cy='507' r='8' fill='none' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='856' y='510.4' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" text-anchor="middle" fill='#16181a' class='f-ink'>15</text>
+  <text x='136' y='566' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' letter-spacing="2.2" fill='#6b7075' class='f-muted'>PARTS</text>
+  <text x='872' y='566' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' text-anchor="end" letter-spacing="1.2" fill='#0d5c91' class='f-accent'>ACCENT = ON A ZERO-COPY PATH</text>
+  <line x1='136' y1='573' x2='872' y2='573' stroke='#16181a' stroke-width='0.9' class='s-thin'/>
+  <text x='136' y='590' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>01</text>
+  <text x='162' y='590' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>UNMODIFIED APK</text>
+  <text x='312' y='590' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>classes.dex · lib/&lt;abi&gt;/*.so (bionic ABI) · resources.arsc</text>
+  <line x1='136' y1='595' x2='872' y2='595' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='606' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>02</text>
+  <text x='162' y='606' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>ART</text>
+  <text x='312' y='606' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>AOSP host build, loaded in-process · DEX, JIT, JNI</text>
+  <line x1='136' y1='611' x2='872' y2='611' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='622' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>03</text>
+  <text x='162' y='622' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>AOSP FRAMEWORK</text>
+  <text x='312' y='622' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>vendored Apache-2.0 subset · View, Compose, media, Car App Library</text>
+  <line x1='136' y1='627' x2='872' y2='627' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='638' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#0d5c91' class='f-accent'>04</text>
+  <text x='162' y='638' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>GFX</text>
+  <text x='312' y='638' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>Skia, Ganesh Vulkan, dma-buf with a tiled format modifier</text>
+  <line x1='136' y1='643' x2='872' y2='643' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='654' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#0d5c91' class='f-accent'>05</text>
+  <text x='162' y='654' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>NDK</text>
+  <text x='312' y='654' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>bionic bridge · EGL/GLES forwarded to host Mesa</text>
+  <line x1='136' y1='659' x2='872' y2='659' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='670' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#0d5c91' class='f-accent'>06</text>
+  <text x='162' y='670' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>WM</text>
+  <text x='312' y='670' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>wayland-cxx-scanner · xdg-toplevel, subsurface, vsync</text>
+  <line x1='136' y1='675' x2='872' y2='675' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='686' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>07</text>
+  <text x='162' y='686' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>PKG · DEX</text>
+  <text x='312' y='686' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>APK parse, ABI select, staging</text>
+  <line x1='136' y1='691' x2='872' y2='691' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='702' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>08</text>
+  <text x='162' y='702' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>RUNTIME</text>
+  <text x='312' y='702' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>JNI natives, lifecycle, Looper</text>
+  <line x1='136' y1='707' x2='872' y2='707' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='718' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>09</text>
+  <text x='162' y='718' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>MEDIA · AUDIO</text>
+  <text x='312' y='718' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>MediaCodec, VA-API, PipeWire</text>
+  <line x1='136' y1='723' x2='872' y2='723' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='734' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>10</text>
+  <text x='162' y='734' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>SVC · IPC</text>
+  <text x='312' y='734' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>in-process service hub, no binder</text>
+  <line x1='136' y1='739' x2='872' y2='739' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='750' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>11</text>
+  <text x='162' y='750' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>HOSTS</text>
+  <text x='312' y='750' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>automotive: Car App Library, media, vehicle properties</text>
+  <line x1='136' y1='755' x2='872' y2='755' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='766' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>12</text>
+  <text x='162' y='766' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>WAYLAND COMPOSITOR</text>
+  <text x='312' y='766' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>sway, Mutter, weston, agl-compositor · host-side</text>
+  <line x1='136' y1='771' x2='872' y2='771' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='782' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>13</text>
+  <text x='162' y='782' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>PIPEWIRE / VA-API</text>
+  <text x='312' y='782' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>audio out · hardware decode</text>
+  <line x1='136' y1='787' x2='872' y2='787' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='798' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>14</text>
+  <text x='162' y='798' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>MESA</text>
+  <text x='312' y='798' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>Vulkan, EGL, GLES · one driver stack, host-side</text>
+  <line x1='136' y1='803' x2='872' y2='803' stroke='#d8dcdf' stroke-width='0.5' class='s-grid'/>
+  <text x='136' y='814' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" fill='#6b7075' class='f-muted'>15</text>
+  <text x='162' y='814' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="600" fill='#16181a' class='f-ink'>DRM / KMS</text>
+  <text x='312' y='814' font-size='9' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' fill='#6b7075' class='f-muted'>hardware plane, scanout · tiled modifier survives to the controller</text>
+  <rect x='14' y='14' width='932' height='892' fill='none' stroke='#16181a' stroke-width='1.2' class='s-thin'/>
+  <rect x='19' y='19' width='922' height='882' fill='none' stroke='#d8dcdf' stroke-width='0.6' class='s-grid'/>
+  <text x='36' y='54' font-size='21' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="-0.5" fill='#16181a' class='f-ink'>a4l</text>
+  <text x='100' y='54' font-size='11' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' font-weight="700" letter-spacing="2.4" fill='#16181a' class='f-ink'>LAYER STACK</text>
+  <text x='924' y='54' font-size='9.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' text-anchor="end" letter-spacing="1.4" fill='#6b7075' class='f-muted'>REV 2026-11-13</text>
+  <line x1='36' y1='66' x2='924' y2='66' stroke='#16181a' stroke-width='1.2' class='s-thin'/>
+  <rect x='624' y='840' width='300' height='44' fill='none' stroke='#16181a' stroke-width='1' class='s-thin'/>
+  <line x1='624' y1='862' x2='924' y2='862' stroke='#16181a' stroke-width='0.7' class='s-thin'/>
+  <line x1='774' y1='840' x2='774' y2='884' stroke='#16181a' stroke-width='0.7' class='s-thin'/>
+  <text x='633' y='854.5' font-size='8.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' letter-spacing="0.8" fill='#6b7075' class='f-muted'>ANDROID-4-LINUX / A4L</text>
+  <text x='783' y='854.5' font-size='8.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' letter-spacing="0.8" fill='#6b7075' class='f-muted'>FIG. 1 OF 2</text>
+  <text x='633' y='876.5' font-size='8.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' letter-spacing="0.8" fill='#6b7075' class='f-muted'>APACHE-2.0</text>
+  <text x='783' y='876.5' font-size='8.5' font-family='ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace' letter-spacing="0.8" fill='#6b7075' class='f-muted'>SHEET 1 / 2</text>
+</svg>
