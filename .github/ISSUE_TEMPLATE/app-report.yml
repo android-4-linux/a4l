@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: Apache-2.0
+# Provenance: original acl issue form. No GPL-3.0 sources.
+name: App report — an APK does not run, or does not draw
+description: Report what a real Android app does on acl, working or not.
+title: "[app] <package name> — <one line>"
+labels: ["app-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports of apps that **work** are as useful as reports of apps that fail — the corpus in
+        `docs/app-corpus-status.md` is built from them.
+
+        Two things to leave out: a copy of the APK (link to it instead), and any source from the
+        GPL-3.0 project that preceded acl. See `PROVENANCE.md` — a clean-room tree cannot accept
+        that, however it arrives.
+  - type: input
+    id: app
+    attributes:
+      label: App and version
+      description: >-
+        Package name and version, plus where the APK came from (F-Droid, built
+        locally, a vendor).
+      placeholder: com.example.app 1.4.2 — F-Droid
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: What happened
+      options:
+        - Crashes before any window appears
+        - Reaches layout but the window stays blank or black
+        - Draws, but wrong (missing text, wrong colors, flicker, geometry)
+        - Draws correctly, but input or another interaction fails
+        - Runs correctly — a working report
+        - Something else
+    validations:
+      required: true
+  - type: dropdown
+    id: present
+    attributes:
+      label: Was ACL_PRESENT_GPU=1 set?
+      description: >-
+        The default shm path can only present acl's own Bitmap shim, so a real app
+        needs this. A report without it usually measures the wrong thing.
+      options:
+        - "Yes — ACL_PRESENT_GPU=1"
+        - "No — default path"
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: invocation
+    attributes:
+      label: How you ran it
+      description: The full command, including ACL_ART_HOME and any ACL_* variables.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: >-
+        The whole run, not the last few lines — the first failure is rarely the last
+        message. Trim anything you consider private.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: compositor
+    attributes:
+      label: Compositor
+      placeholder: sway 1.10, Mutter 47, weston 14 headless, tinywl
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and Mesa version
+      placeholder: "AMD RX 7600 / Mesa 25.2.4 (radeonsi), or Intel UHD 770 / Mesa 25.1"
+    validations:
+      required: true
+  - type: textarea
+    id: stock
+    attributes:
+      label: Does it work on stock Android?
+      description: >-
+        Optional, and worth more than it sounds — several corpus "failures" turned
+        out to be app-side bugs that reproduce on real ART.

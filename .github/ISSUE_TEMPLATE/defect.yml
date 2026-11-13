@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+# Provenance: original acl issue form. No GPL-3.0 sources.
+name: Build, CI or toolchain defect
+description: Something in acl itself — configuring, compiling, testing, or a gate.
+title: "<one line>"
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you ran, and what happened
+      description: Commands and output. If a gate failed, name the gate.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Output of `git rev-parse --short HEAD`.
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Toolchain
+      description: >-
+        OS and version, compiler and version, Meson and Ninja versions, and whether
+        Skia/Vulkan/wcs are present.
+      render: shell
+    validations:
+      required: true
