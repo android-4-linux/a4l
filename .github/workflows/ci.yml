@@ -181,7 +181,7 @@ jobs:
             # shellcheck disable=SC2086
             if timeout 240 sudo apt-get install -y $apt_opts \
                  meson ninja-build g++ pkg-config \
-                 libfmt-dev zlib1g-dev libssl-dev python3; then
+                 libfmt-dev zlib1g-dev libssl-dev python3 bubblewrap; then
               exit 0
             fi
             echo "apt attempt ${attempt} failed or timed out; retrying"
@@ -211,7 +211,14 @@ jobs:
         run: ./scripts/check-warnings.sh compile-automotive.log
       - name: Run the stub
         run: ./build/src/shell/a4l
+      - name: Allow unprivileged user namespaces (split-confine test)
+        # The split-confine test runs a4l's bubblewrap sandbox for real. Ubuntu 24.04 restricts
+        # unprivileged user namespaces through AppArmor, and the test skips where bubblewrap
+        # cannot create one, so without this the job would go green without running it.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Test
+        env:
+          ACL_TEST_REQUIRE_CONFINE: "1"   # split-confine fails, not skips, if it cannot sandbox
         run: meson test -C build --print-errorlogs
 
       - name: Configure phone profile
@@ -318,7 +325,7 @@ jobs:
                  meson ninja-build g++ pkg-config libfmt-dev zlib1g-dev libssl-dev python3 \
                  libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
                  libvulkan-dev libdrm-dev libgbm-dev libegl-dev libgles-dev \
-                 libfreetype-dev libfontconfig-dev libpugixml-dev; then
+                 libfreetype-dev libfontconfig-dev libpugixml-dev bubblewrap; then
               exit 0
             fi
             echo "apt attempt ${attempt} failed or timed out; retrying"
@@ -391,5 +398,12 @@ jobs:
       - name: Run the stub
         run: ./build-present/src/shell/a4l
 
+      - name: Allow unprivileged user namespaces (split-confine test)
+        # The split-confine test runs a4l's bubblewrap sandbox for real. Ubuntu 24.04 restricts
+        # unprivileged user namespaces through AppArmor, and the test skips where bubblewrap
+        # cannot create one, so without this the job would go green without running it.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Test
+        env:
+          ACL_TEST_REQUIRE_CONFINE: "1"   # split-confine fails, not skips, if it cannot sandbox
         run: meson test -C build-present --print-errorlogs

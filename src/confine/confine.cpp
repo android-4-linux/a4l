@@ -1,0 +1,550 @@
+// SPDX-License-Identifier: Apache-2.0
+// Provenance: original a4l design (ADR-0009 Decision 2, C4); bwrap(1),
+// user_namespaces(7), the sysfs layout of DRM devices as documented in
+// Documentation/ABI. No GPL-3.0 sources.
+
+#include "confine/confine.h"
+
+#include <algorithm>
+#include <array>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <system_error>
+
+#include <dirent.h>
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+namespace acl::confine {
+
+namespace fs = std::filesystem;
+
+namespace {
+
+bool starts_with(std::string_view s, std::string_view prefix) {
+  return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+}
+
+// Top-level directories that hold the system, not a user's files.
+constexpr std::array<std::string_view, 8> kSystemTop = {
+    "/usr", "/lib", "/lib64", "/lib32", "/bin", "/sbin", "/system", "/fonts"};
+
+// Under /etc: what the dynamic loader, the resolver, TLS, fontconfig and the
+// GPU loaders read. Nothing else from /etc is visible.
+constexpr std::array<std::string_view, 21> kEtc = {"/etc/ld.so.cache",
+                                                   "/etc/ld.so.conf",
+                                                   "/etc/ld.so.conf.d",
+                                                   "/etc/alternatives",
+                                                   "/etc/localtime",
+                                                   "/etc/nsswitch.conf",
+                                                   "/etc/resolv.conf",
+                                                   "/etc/hosts",
+                                                   "/etc/host.conf",
+                                                   "/etc/gai.conf",
+                                                   "/etc/ssl",
+                                                   "/etc/pki",
+                                                   "/etc/ca-certificates",
+                                                   "/etc/crypto-policies",
+                                                   "/etc/fonts",
+                                                   "/etc/glvnd",
+                                                   "/etc/vulkan",
+                                                   "/etc/drirc",
+                                                   "/etc/OpenGL",
+                                                   "/etc/libva.conf",
+                                                   "/etc/timezone"};
+
+std::string real(const std::string& p) {
+  std::error_code ec;
+  const fs::path r = fs::canonical(p, ec);
+  return ec ? std::string() : r.string();
+}
+
+bool exists(const std::string& p) {
+  struct stat st{};
+  return ::stat(p.c_str(), &st) == 0;
+}
+
+void split_colon(std::string_view v, std::vector<std::string>& out) {
+  while (!v.empty()) {
+    const std::size_t c = v.find(':');
+    const std::string_view part = v.substr(0, c);
+    if (!part.empty())
+      out.emplace_back(part);
+    if (c == std::string_view::npos)
+      break;
+    v.remove_prefix(c + 1);
+  }
+}
+
+// Run `argv` and wait. Its output goes nowhere; `out` receives stdout if
+// given. Returns the exit status, or -1.
+int run_quiet(const std::vector<std::string>& args, std::string* out) {
+  int pipefd[2] = {-1, -1};
+  if (out != nullptr && ::pipe2(pipefd, O_CLOEXEC) != 0)
+    return -1;
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+  if (out != nullptr)
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], 1);
+  else
+    posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
+  posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+  std::vector<std::string> copy = args;
+  std::vector<char*> argv;
+  for (std::string& a : copy)
+    argv.push_back(a.data());
+  argv.push_back(nullptr);
+  char* const envp[] = {nullptr};
+  pid_t pid = 0;
+  const int rc = ::posix_spawn(&pid, argv[0], &fa, nullptr, argv.data(), envp);
+  posix_spawn_file_actions_destroy(&fa);
+  if (out != nullptr)
+    ::close(pipefd[1]);
+  if (rc != 0) {
+    if (out != nullptr)
+      ::close(pipefd[0]);
+    return -1;
+  }
+  if (out != nullptr) {
+    char buf[256];
+    ssize_t n = 0;
+    while ((n = ::read(pipefd[0], buf, sizeof(buf))) > 0 && out->size() < 4096)
+      out->append(buf, static_cast<std::size_t>(n));
+    ::close(pipefd[0]);
+  }
+  int status = 0;
+  while (::waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR)
+      return -1;
+  }
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+std::string find_bwrap(char** environment) {
+  std::vector<std::string> candidates;
+  for (char** e = environment; e != nullptr && *e != nullptr; ++e) {
+    const std::string_view v(*e);
+    if (starts_with(v, "ACL_BWRAP=") && v.size() > 10)
+      return std::string(v.substr(10));  // explicit: used or reported, as is
+  }
+  candidates = {"/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"};
+  for (const std::string& c : candidates) {
+    if (::access(c.c_str(), X_OK) == 0)
+      return c;
+  }
+  return {};
+}
+
+// "bubblewrap 0.12.0" -> {0, 12}.
+bool bwrap_version(const std::string& bwrap, int& major, int& minor) {
+  std::string out;
+  if (run_quiet({bwrap, "--version"}, &out) != 0)
+    return false;
+  const std::size_t sp = out.rfind(' ');
+  if (sp == std::string::npos)
+    return false;
+  char* end = nullptr;
+  major = static_cast<int>(std::strtol(out.c_str() + sp + 1, &end, 10));
+  if (end == nullptr || *end != '.')
+    return false;
+  minor = static_cast<int>(std::strtol(end + 1, nullptr, 10));
+  return true;
+}
+
+bool make_dirs_private(const std::string& dir, std::string& error) {
+  std::error_code ec;
+  fs::create_directories(fs::path(dir).parent_path(), ec);
+  if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) {
+    error = "cannot create " + dir + ": " + std::strerror(errno);
+    return false;
+  }
+  struct stat st{};
+  if (::lstat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) ||
+      st.st_uid != ::geteuid()) {
+    error = dir + " is not a directory owned by this user";
+    return false;
+  }
+  return true;
+}
+
+std::string xdg_dir(char** environment,
+                    std::string_view var,
+                    std::string_view home,
+                    std::string_view fallback) {
+  const std::string prefix = std::string(var) + "=";
+  for (char** e = environment; e != nullptr && *e != nullptr; ++e) {
+    const std::string_view v(*e);
+    if (starts_with(v, prefix) && v.size() > prefix.size() &&
+        v[prefix.size()] == '/')
+      return normalize(v.substr(prefix.size()));
+  }
+  if (home.empty())
+    return {};
+  return std::string(home) + "/" + std::string(fallback);
+}
+
+std::string env_value(char** environment, std::string_view name) {
+  for (char** e = environment; e != nullptr && *e != nullptr; ++e) {
+    const std::string_view v(*e);
+    if (v.size() > name.size() && v[name.size()] == '=' && starts_with(v, name))
+      return std::string(v.substr(name.size() + 1));
+  }
+  return {};
+}
+
+// Files this process has mapped that live outside the system directories:
+// the a4l binary itself and, in a build tree, its own shared libraries.
+void own_mappings(std::vector<std::string>& out) {
+  std::ifstream maps("/proc/self/maps");
+  std::string line;
+  while (std::getline(maps, line)) {
+    const std::size_t slash = line.find('/');
+    if (slash == std::string::npos)
+      continue;
+    std::string path = line.substr(slash);
+    static constexpr std::string_view kDeleted = " (deleted)";
+    if (path.size() > kDeleted.size() &&
+        path.compare(path.size() - kDeleted.size(), kDeleted.size(),
+                     kDeleted) == 0)
+      continue;
+    if (starts_with(path, "/usr/") || starts_with(path, "/lib") ||
+        starts_with(path, "/dev/") || starts_with(path, "/memfd:"))
+      continue;
+    out.push_back(std::move(path));
+  }
+}
+
+// The GPU render nodes, and for each the sysfs device directory the driver
+// loaders read to identify it.
+void gpu_nodes(Plan& plan) {
+  DIR* d = ::opendir("/dev/dri");
+  if (d == nullptr)
+    return;
+  while (const dirent* e = ::readdir(d)) {
+    if (std::strncmp(e->d_name, "renderD", 7) != 0)
+      continue;
+    const std::string node = std::string("/dev/dri/") + e->d_name;
+    struct stat st{};
+    if (::stat(node.c_str(), &st) != 0 || !S_ISCHR(st.st_mode))
+      continue;
+    plan.devices.push_back(node);
+    const std::string link = "/sys/dev/char/" +
+                             std::to_string(major(st.st_rdev)) + ":" +
+                             std::to_string(minor(st.st_rdev));
+    char target[512];
+    const ssize_t n = ::readlink(link.c_str(), target, sizeof(target) - 1);
+    const std::string resolved = real(link);  // .../<device>/drm/renderD128
+    if (n <= 0 || resolved.empty())
+      continue;
+    target[n] = '\0';
+    const fs::path device = fs::path(resolved).parent_path().parent_path();
+    if (starts_with(device.string(), "/sys/devices/")) {
+      plan.ro.push_back(device.string());
+      plan.symlinks.emplace_back(target, link);
+    }
+  }
+  ::closedir(d);
+  std::sort(plan.devices.begin(), plan.devices.end());
+}
+
+}  // namespace
+
+std::string normalize(std::string_view p) {
+  if (p.empty() || p[0] != '/')
+    return {};
+  const std::string n = fs::path(p).lexically_normal().string();
+  if (n.size() > 1 && n.back() == '/')
+    return n.substr(0, n.size() - 1);
+  return n;
+}
+
+bool is_same_or_ancestor(std::string_view ancestor, std::string_view path) {
+  if (ancestor.empty() || path.empty())
+    return false;
+  if (ancestor == "/")
+    return true;
+  if (!starts_with(path, ancestor))
+    return false;
+  return path.size() == ancestor.size() || path[ancestor.size()] == '/';
+}
+
+std::string refuse_reason(std::string_view path,
+                          const std::vector<std::string>& protected_dirs) {
+  if (path.empty() || path[0] != '/')
+    return "it is not an absolute path";
+  if (path == "/")
+    return "it is the root directory";
+  if (path.find('/', 1) == std::string_view::npos &&
+      std::find(kSystemTop.begin(), kSystemTop.end(), path) == kSystemTop.end())
+    return "it is a top-level directory";
+  for (const std::string& dir : protected_dirs) {
+    if (is_same_or_ancestor(path, dir))
+      return "it contains " + dir;
+  }
+  return {};
+}
+
+bool env_is_passed(std::string_view name) {
+  static constexpr std::array<std::string_view, 22> kExact = {
+      "PATH",
+      "HOME",
+      "LANG",
+      "LANGUAGE",
+      "TZ",
+      "LD_LIBRARY_PATH",
+      "DRI_PRIME",
+      "ASAN_OPTIONS",
+      "UBSAN_OPTIONS",
+      "LSAN_OPTIONS",
+      "TSAN_OPTIONS",
+      "MSAN_OPTIONS",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy",
+      "NO_COLOR",
+      "TERM",
+      "MALLOC_PERTURB_",
+      "MALLOC_ARENA_MAX"};
+  static constexpr std::array<std::string_view, 14> kPrefix = {
+      "ACL_",     "ANDROID_", "LC_",  "VK_",    "MESA_", "LIBGL_", "EGL_",
+      "GALLIUM_", "RADV_",    "ANV_", "INTEL_", "AMD_",  "__GL",   "LIBVA_"};
+  // Decided by the broker for the child, never taken from the caller.
+  static constexpr std::array<std::string_view, 7> kNever = {
+      "ACL_APK_VERIFY",    "ACL_APK_SIGNER",   "ACL_SPLIT_FD",
+      "ACL_SPLIT_DISPLAY", "ACL_SPLIT_BROKER", "ACL_SPLIT_CONFINED",
+      "ACL_BWRAP"};
+  if (std::find(kNever.begin(), kNever.end(), name) != kNever.end())
+    return false;
+  if (std::find(kExact.begin(), kExact.end(), name) != kExact.end())
+    return true;
+  for (const std::string_view p : kPrefix) {
+    if (starts_with(name, p))
+      return true;
+  }
+  return false;
+}
+
+const std::vector<std::string_view>& path_variables() {
+  static const std::vector<std::string_view> kVars = {
+      "ACL_ART_HOME",        "ACL_ART_BOOTCLASSPATH", "ACL_ART_HOST_BOOTSTRAP",
+      "ACL_ART_LIBPATH",     "ACL_ART_FRAMEWORK_RES", "ACL_ART_GRAPHICS_LIB",
+      "ACL_ART_GLES_LIB",    "ACL_ART_FRAMEWORK",     "ACL_ART_HOST",
+      "ACL_ART_SPLIT_VMLIB", "ACL_FRAMEWORK",         "ACL_ANDROID_JAR",
+      "ACL_BIONIC_LINKER",   "ACL_BIONIC_SYSROOT",    "ACL_BIONIC_STUB",
+      "ACL_BIONIC_APP_LIBS", "ACL_SPLIT_APKS",        "ACL_GRAPHICS_FONT",
+      "ACL_FONT_SERIF",      "ACL_FONT_MONO",         "ACL_WEBVIEW_APK",
+      "ACL_SPLIT_RO",        "LD_LIBRARY_PATH"};
+  return kVars;
+}
+
+std::vector<std::string> minimal_cover(std::vector<std::string> paths) {
+  std::sort(paths.begin(), paths.end());
+  paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+  std::vector<std::string> out;
+  for (std::string& p : paths) {
+    bool covered = false;
+    for (const std::string& kept : out)
+      covered = covered || is_same_or_ancestor(kept, p);
+    if (!covered)
+      out.push_back(std::move(p));
+  }
+  return out;
+}
+
+std::vector<std::string> bwrap_argv(const Plan& plan) {
+  std::vector<std::string> a = {plan.bwrap,      "--unshare-user",
+                                "--unshare-pid", "--unshare-ipc",
+                                "--unshare-uts", "--unshare-cgroup-try"};
+  if (!plan.share_net)
+    a.emplace_back("--unshare-net");
+  if (plan.disable_userns)
+    a.emplace_back("--disable-userns");
+  a.insert(a.end(), {"--die-with-parent", "--new-session", "--cap-drop", "ALL",
+                     "--proc", "/proc", "--dev", "/dev", "--size",
+                     std::to_string(plan.tmp_bytes), "--tmpfs", "/tmp"});
+  for (const std::string& d : plan.devices)
+    a.insert(a.end(), {"--dev-bind", d, d});
+  for (const auto& [target, link] : plan.symlinks)
+    a.insert(a.end(), {"--symlink", target, link});
+  for (const std::string& p : minimal_cover(plan.ro))
+    a.insert(a.end(), {"--ro-bind", p, p});
+  for (const std::string& p : minimal_cover(plan.ro_optional))
+    a.insert(a.end(), {"--ro-bind-try", p, p});
+  // Writable last, so that a writable directory below a read-only one stays
+  // writable.
+  for (const std::string& p : minimal_cover(plan.rw))
+    a.insert(a.end(), {"--bind", p, p});
+  a.insert(a.end(), {"--remount-ro", "/", "--chdir", "/", "--"});
+  return a;
+}
+
+bool plan_launch(const Inputs& in,
+                 char** environment,
+                 Launch& out,
+                 std::string& error) {
+  Plan& plan = out.plan;
+  plan.bwrap = find_bwrap(environment);
+  if (plan.bwrap.empty() || ::access(plan.bwrap.c_str(), X_OK) != 0) {
+    error = plan.bwrap.empty()
+                ? "bubblewrap (bwrap) is not installed"
+                : "$ACL_BWRAP '" + plan.bwrap + "' is not executable";
+    return false;
+  }
+  int major = 0, minor = 0;
+  if (!bwrap_version(plan.bwrap, major, minor)) {
+    error = plan.bwrap + " --version did not answer";
+    return false;
+  }
+  plan.disable_userns = major > 0 || minor >= 8;
+  plan.share_net = in.share_net;
+  // A dry run of the namespaces alone. Where unprivileged user namespaces
+  // are switched off this is what fails, and it says so better than a child
+  // that never starts.
+  {
+    std::vector<std::string> probe = {plan.bwrap,      "--unshare-user",
+                                      "--unshare-pid", "--unshare-ipc",
+                                      "--unshare-uts", "--unshare-net"};
+    if (plan.disable_userns)
+      probe.emplace_back("--disable-userns");
+    // The whole host, read-only: this run executes bubblewrap itself and
+    // nothing else, and only the namespaces are in question.
+    probe.insert(probe.end(),
+                 {"--ro-bind", "/", "/", "--", plan.bwrap, "--version"});
+    if (run_quiet(probe, nullptr) != 0) {
+      error =
+          "bubblewrap cannot create a user namespace on this host "
+          "(unprivileged user namespaces are disabled or restricted)";
+      return false;
+    }
+  }
+
+  const std::string home = normalize(env_value(environment, "HOME"));
+  std::vector<std::string> protected_dirs;
+  if (!home.empty() && home != "/") {
+    protected_dirs.push_back(home);
+    if (const std::string r = real(home); !r.empty() && r != home)
+      protected_dirs.push_back(r);
+  }
+  if (const std::string rt =
+          normalize(env_value(environment, "XDG_RUNTIME_DIR"));
+      !rt.empty())
+    protected_dirs.push_back(rt);
+
+  // The system, read-only.
+  for (const std::string_view top : kSystemTop) {
+    const std::string p(top);
+    struct stat st{};
+    if (::lstat(p.c_str(), &st) != 0)
+      continue;
+    if (S_ISLNK(st.st_mode)) {
+      char target[256];
+      const ssize_t n = ::readlink(p.c_str(), target, sizeof(target) - 1);
+      if (n > 0) {
+        target[n] = '\0';
+        plan.symlinks.emplace_back(target, p);
+      }
+    } else if (S_ISDIR(st.st_mode)) {
+      plan.ro.push_back(p);
+    }
+  }
+  for (const std::string_view e : kEtc)
+    plan.ro_optional.emplace_back(e);
+  gpu_nodes(plan);
+
+  // a4l's own inputs: what the caller named, what the environment names, and
+  // the binary. Each is bound where it is and, if that is a symbolic link,
+  // where it leads as well.
+  std::vector<std::string> wanted = in.ro_paths;
+  wanted.push_back(in.apk);
+  own_mappings(wanted);
+  for (const std::string_view var : path_variables()) {
+    const std::string v = env_value(environment, var);
+    if (!v.empty())
+      split_colon(v, wanted);
+  }
+  if (const std::string image = env_value(environment, "ACL_ART_BOOT_IMAGE");
+      !image.empty())
+    wanted.push_back(fs::path(image).parent_path().string());
+  for (const std::string& w : wanted) {
+    const std::string n = normalize(w);
+    if (n.empty() || !exists(n))
+      continue;  // a relative or absent path: the child would not find it
+    for (const std::string& p : {n, real(n)}) {
+      if (p.empty())
+        continue;
+      if (const std::string why = refuse_reason(p, protected_dirs);
+          !why.empty()) {
+        error = "refusing to show " + p + " to the app process: " + why;
+        return false;
+      }
+      plan.ro.push_back(p);
+    }
+  }
+
+  // The app's own directories, the only writable ones.
+  const std::string data_home =
+      xdg_dir(environment, "XDG_DATA_HOME", home, ".local/share");
+  const std::string cache_home =
+      xdg_dir(environment, "XDG_CACHE_HOME", home, ".cache");
+  if (data_home.empty() || cache_home.empty() || in.package_dir.empty()) {
+    error = "no home directory to keep the app's data in";
+    return false;
+  }
+  out.data_dir = data_home + "/acl/" + in.package_dir;
+  out.cache_dir = cache_home + "/acl/" + in.package_dir;
+  for (const std::string& d :
+       {out.data_dir, out.cache_dir, out.cache_dir + "/android-data",
+        out.cache_dir + "/mesa"}) {
+    if (!make_dirs_private(d, error))
+      return false;
+  }
+  plan.rw = {out.data_dir, out.cache_dir};
+  for (const std::string& w : in.rw_paths) {
+    const std::string n = normalize(w);
+    if (n.empty())
+      continue;
+    if (const std::string why = refuse_reason(n, protected_dirs);
+        !why.empty()) {
+      error = "refusing to give " + n + " to the app process: " + why;
+      return false;
+    }
+    if (!make_dirs_private(n, error))
+      return false;
+    plan.rw.push_back(n);
+  }
+
+  // The child's environment: an allowlist, then what the sandbox decides.
+  static constexpr std::array<std::string_view, 6> kSet = {
+      "XDG_DATA_HOME", "XDG_CACHE_HOME",        "ANDROID_DATA",
+      "TMPDIR",        "MESA_SHADER_CACHE_DIR", "XDG_RUNTIME_DIR"};
+  for (char** e = environment; e != nullptr && *e != nullptr; ++e) {
+    const std::string_view v(*e);
+    const std::size_t eq = v.find('=');
+    if (eq == std::string_view::npos || eq == 0)
+      continue;
+    const std::string_view name = v.substr(0, eq);
+    if (!env_is_passed(name) ||
+        std::find(kSet.begin(), kSet.end(), name) != kSet.end())
+      continue;
+    out.env.emplace_back(v);
+  }
+  out.env.push_back("XDG_DATA_HOME=" + data_home);
+  out.env.push_back("XDG_CACHE_HOME=" + cache_home);
+  out.env.push_back("ANDROID_DATA=" + out.cache_dir + "/android-data");
+  out.env.push_back("MESA_SHADER_CACHE_DIR=" + out.cache_dir + "/mesa");
+  out.env.emplace_back("TMPDIR=/tmp");
+  return true;
+}
+
+}  // namespace acl::confine

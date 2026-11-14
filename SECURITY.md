@@ -36,25 +36,33 @@ where the project is, stated so that nobody spends a report on them:
   checked: v1 (JAR) signatures, fs-verity digests, and a key-rotation lineage. Two limits
   remain. A valid signature says who signed the code, not that the code is safe. And the cache
   is protected by file ownership, so a process already running as you can rewrite it.
-- **There is no sandbox.** An app's native code runs as arbitrary code in a4l's single glibc
-  process, with no per-app UID, SELinux domain or seccomp filter of the kind on-device Android
-  provides, so it can reach ART, Mesa and the Wayland connection. The boundary is decided and not
-  built: [`docs/adr/ADR-0009`](docs/adr/ADR-0009-containment-process-boundary.md) puts everything
-  an APK supplies in a confined child process that holds no display, audio or session connection,
+- **The default has no sandbox, and the sandbox that exists is not finished.** By default an
+  app's native code runs as arbitrary code in a4l's single glibc process, with no per-app UID,
+  SELinux domain or seccomp filter of the kind on-device Android provides, so it can reach ART,
+  Mesa and the Wayland connection.
+  [`docs/adr/ADR-0009`](docs/adr/ADR-0009-containment-process-boundary.md) puts everything an
+  APK supplies in a confined child process that holds no display, audio or session connection,
   and lists the five conditions (C1-C5) that gate any claim to run untrusted APKs. C1, signature
-  verification, is met with the limits above. C2, the process split, runs on x86-64 as
-  `a4l run --split` for apps that draw through Skia. **`--split` is not a sandbox**: the child is
-  not confined (C4), so it can still open the compositor socket, PipeWire and your files itself.
-  C3-C5 are not met.
+  verification, is met with the limits above. C2 and C4 are met on x86-64 for apps that draw
+  through Skia: `a4l run --split` runs the app in a child process inside a bubblewrap sandbox
+  (its own user, mount, pid, ipc and network namespaces; no home directory, no `/run`, no
+  network) under a seccomp allowlist, and the first process keeps the display. C3 and C5 are
+  not met: apps that use native GL or video (Flutter, libGDX) are refused under `--split`, and
+  the broker does not yet validate everything the child sends it. The sandbox has had no review
+  outside the project, its system call list was recorded from five apps, and the GPU render
+  node stays reachable from inside it. `--split=unconfined` and `--net=host` each remove part
+  of it and say so when used.
 
 The consequence is the thing to take away: **treat an APK you run under a4l as native code running
 with your own privileges, because that is what it is.** Running an untrusted APK is not yet a
-supported use. `docs/ndk-scope.md` has the full reasoning for both points.
+supported use, with or without `--split`. `docs/ndk-scope.md` has the full reasoning for both points.
 
 A report that a4l executes untrusted code it was asked to execute is therefore expected behavior.
 A report that a4l can be made to execute code it was *not* asked to execute — a path traversal out
 of an APK, a parser bug reachable from a crafted APK, a loader that resolves a library from outside
-the app's own directories — is a vulnerability, and is wanted.
+the app's own directories — is a vulnerability, and is wanted. So is a way out of the `--split`
+sandbox: a file, socket, process or device the app process reaches that ADR-0009's "C4 as built"
+says it cannot.
 
 ## In scope
 

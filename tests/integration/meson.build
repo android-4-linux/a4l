@@ -76,6 +76,25 @@ if py3.found()
       depends : [acl_exe, signed_apks],
       timeout : 120,
     )
+
+    # Confinement of the --split app process (ADR-0009 C4). confine_plan prints the bubblewrap
+    # plan a4l would use; the test runs a shell probe inside that sandbox and asserts on what it
+    # can reach, then runs `a4l run --split` and checks the app process reports itself confined.
+    # Skips where bubblewrap or unprivileged user namespaces are missing.
+    confine_plan = executable(
+      'confine_plan',
+      files('confine_plan.cpp'),
+      include_directories : [config_inc, core_inc],
+      dependencies : [confine_dep],
+    )
+    test(
+      'split-confine',
+      py3,
+      args : [files('run_confine_test.py'), acl_exe, confine_plan, signed_apks_dir,
+              (have_vulkan and have_wcs) ? '1' : '0'],
+      depends : [acl_exe, confine_plan, signed_apks],
+      timeout : 180,
+    )
   endif
 
   # a4l must not link OpenSSL: it would shadow the BoringSSL host ART loads into the same process

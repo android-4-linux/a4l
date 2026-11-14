@@ -1,13 +1,14 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # ADR-0009: Containment -- a process boundary at the dma-buf seam; seccomp alone rejected
 
-- **Status:** Accepted (boundary decided; the process split runs on x86-64 as `--split`, and
-  nothing confines the child yet). Refines ADR-0003.
+- **Status:** Accepted (boundary decided; the process split runs on x86-64 as `--split`, with
+  the child confined by namespaces and a seccomp allowlist; C3 and C5 are open, so untrusted
+  APKs are still not a supported use). Refines ADR-0003.
 - **Date:** 2026-11-13
 - **Provenance:** plan.md §4 Phase 5, §6 R-10; docs/ndk-scope.md (trust model);
   docs/split-process-art.md; ADR-0001, ADR-0003, ADR-0005; `src/ipc/`, `src/runtime/split_vm.cpp`
   as they stand at this date. Kernel interfaces as documented in seccomp(2), landlock(7) and
-  user_namespaces(7). No GPL-3.0 sources.
+  user_namespaces(7); bubblewrap as documented in bwrap(1). No GPL-3.0 sources.
 
 ## Context
 R-10: an app's native code is arbitrary code in a4l's single glibc process. It reaches ART, Mesa
@@ -45,7 +46,7 @@ driver loaded, and the compositor is elsewhere.
 State of that path, from `git log` rather than from the doc: S1 (ART boots in the subprocess,
 x86-64 and a Pi 4) and the S2 present-sink seam landed 2026-07-15/16; nothing since on arm64.
 On x86-64 the split runs as of 2026-11-14 (`a4l run --split`, see C2 below): frames and input
-cross; audio, native GL and video do not.
+cross; audio, native GL and video do not. The child is confined as of the same date (C4).
 
 ## Decision
 1. **The containment boundary is a process boundary at the dma-buf seam.** Everything an APK
@@ -73,9 +74,9 @@ cross; audio, native GL and video do not.
 | | Condition | Today |
 |---|---|---|
 | C1 | APK v2/v3 verification in `pkg/`, in the broker | met, 2026-11-14: `--verify=require` or `--signer` runs a private copy that is verified on every run (`pkg/apk_verify.cpp`, `pkg/apk_stage.cpp`). Under `--split` the broker does this before it starts the child, and the child is handed the copy. ART's compiled-code cache is trusted by location, not verified |
-| C2 | Split path at S5: a real APK renders and takes input | x86-64, Skia path, 2026-11-14: `a4l run --split` runs the app in a child a4l process whose presenter is a proxy (`wm/split_present.cpp`); the broker holds the only compositor connection. 3 corpus apps render on host ART; one presents 1176 frames in 20 s split against 1178 single-process. Input is forwarded and unit-tested; there is no controlled live input test. Not done: arm64 (`acl-art-host` is still S1), audio (the child opens PipeWire itself) |
+| C2 | Split path at S5: a real APK renders and takes input | x86-64, Skia path, 2026-11-14: `a4l run --split` runs the app in a child a4l process whose presenter is a proxy (`wm/split_present.cpp`); the broker holds the only compositor connection. 3 corpus apps render on host ART; one presents 1176 frames in 20 s split against 1178 single-process. Input is forwarded and unit-tested; there is no controlled live input test. Not done: arm64 (`acl-art-host` is still S1), audio (a confined child cannot reach PipeWire and is silent; unconfined it opens PipeWire itself) |
 | C3 | Native GL and video cross the boundary as dma-buf | not designed; see below |
-| C4 | Child confined per Decision 2 | none; `posix_spawn` passes `environ`, no attributes |
+| C4 | Child confined per Decision 2 | x86-64, 2026-11-14: `--split` starts the child through bubblewrap (`src/confine/`) in its own user, mount, pid, ipc, uts and network namespaces, and the child installs a seccomp allowlist on itself before it opens the APK. See "C4 as built" below for what it can reach and what is not covered. arm64: none |
 | C5 | Broker validates every message; receive path fuzzed | partial: the `--split` broker bounds-checks sizes, plane count, slot and strings and drops what fails (`wm/split_present.cpp`). Not checked: that the fd is a dma-buf, the format and modifier against what the compositor advertised. Not fuzzed |
 
 **What it costs.**
@@ -97,13 +98,74 @@ cross; audio, native GL and video do not.
   with the socket in `ACL_SPLIT_FD`; audio has not moved yet. On arm64 it is all-bionic and needs no `%fs` bridge.
 
 **What it does not fix.** A second process under the same UID is not a boundary by itself:
-without C4 the child can open the user's files and, where Yama permits, reach the broker through
-`ptrace` or `/proc/<pid>/mem`. Kernel and GPU-driver bugs, side channels and resource exhaustion
-are outside what this decides; a memory and CPU bound on the child is follow-on work.
+unconfined (`--split=unconfined`) the child can open the user's files and, where Yama permits,
+reach the broker through `ptrace` or `/proc/<pid>/mem`. Kernel and GPU-driver bugs, side channels
+and resource exhaustion are outside what this decides; a memory and CPU bound on the child is
+follow-on work.
+
+**C4 as built (x86-64, 2026-11-14).** `a4l run --split` confines the child; `--split=unconfined`
+is the earlier behavior and has to be asked for. If the host cannot confine (no bubblewrap, user
+namespaces disabled, an architecture with no system call list) the run is refused with exit 2
+and no child is started.
+
+- **Namespaces, by bubblewrap.** User, mount, pid, ipc, uts, cgroup where available, and
+  network. `no_new_privs`, no capabilities, no nested user namespace, a new session, and the
+  child dies with the broker.
+- **Filesystem.** A new root holding, read-only: `/usr`; a list of 21 files and directories
+  under `/etc` (loader, resolver, TLS roots, fontconfig, GPU loader configuration); the APK; the
+  a4l binary; and the paths a4l itself was told to read through its own options and environment
+  (the ART home, the boot classpath, the bionic runtime). Writable: the app's data and cache
+  directories (`$XDG_DATA_HOME/acl/<package>`, `$XDG_CACHE_HOME/acl/<package>`) and a private
+  256 MiB `/tmp`. Not present: the home directory, `/run` and with it the compositor, PipeWire
+  and D-Bus sockets, other apps' directories, other apps' verified copies. An input that would
+  put the home or runtime directory in view is refused, not bound.
+- **Devices.** `/dev/null` and its siblings, and the DRM render nodes with their sysfs device
+  directories. No `card*` node, so no modesetting.
+- **Environment.** An allowlist: a4l's own variables, the loader's, locale, GPU driver
+  selection. `WAYLAND_DISPLAY`, the D-Bus address, agent sockets and anything unrecognized are
+  not passed.
+- **Descriptors.** Standard output and error, `/dev/null` as input, and the IPC socket.
+- **seccomp.** An allowlist of 173 system calls installed by the child on itself, after a4l has
+  started and before it opens the APK; a call off the list answers `ENOSYS`
+  (`ACL_SPLIT_SECCOMP=kill` kills instead). 84 were recorded from the five corpus APKs
+  (`tools/record-seccomp.py`); 89 were added in review as fallbacks and siblings of recorded
+  calls. Three calls are checked by argument: `clone` may not create a namespace, `socket` is
+  limited to four address families, `ioctl` may not push terminal input. `execve`, `fork`,
+  `ptrace`, `mount`, `unshare`, `bpf`, `io_uring` and the like are absent.
+- **Self-check.** The child refuses to continue unless it is in namespaces other than the
+  broker's, has `no_new_privs` and the filter, and holds no descriptor beyond the four above.
+
+Measured on host ART under headless Weston, 20 s each: `octalsuntime` 1179 frames confined
+against 1178 unconfined, `forkyz` 1169 against 1169, `foss4g` 2 against 2. In 40 s traced runs of
+four APKs with the filter on, the only call it denied was `clone3`, once per process, after
+which the C library uses `clone`.
+
+Not covered, and what keeps C4 from being the last word:
+
+- **The GPU.** The render node's ioctls are not filtered. This is the exposure named above.
+- **The recording is narrow.** Five APKs, no injected input, no reachable network. A call an app
+  makes only on a touch or a completed connection may be off the list; it fails with `ENOSYS`.
+  Nobody outside the project has reviewed the list.
+- **No audio, no system services.** With no D-Bus, connectivity, battery, power, Bluetooth,
+  storage and service discovery fall back to their null backends, and the keystore is in memory.
+  These move to the broker with S4, not into the sandbox.
+- **Network is all or nothing.** The default is none. `--net=host` shares the host's network
+  namespace, and with it every abstract socket and loopback service, an X server among them.
+  A filtered network needs a proxy in the broker or a user-mode network stack.
+- **`/usr` and one sysfs device directory are readable.** Host software versions are visible.
+- **No resource bound.** No cgroup limit on memory, CPU or process count, and `/dev/shm` is
+  not sized.
+- **The terminal.** The child writes to the caller's standard output and error. It cannot push
+  input to a terminal (`TIOCSTI` and `TIOCLINUX` are refused, and it has its own session), but
+  it can print escape sequences and change terminal settings.
+- **Landlock is not used.** Decision 2 allows either; this is the namespace form.
+- **arm64** has no system call list and no split child that renders.
 
 **Follow-on.**
 - The seccomp allowlist is recorded from the app corpus (docs/app-corpus-status.md), not written
-  by hand, then reviewed. A hand-written list is wrong in both directions.
+  by hand, then reviewed. A hand-written list is wrong in both directions. As built, 84 of its
+  173 entries are recorded and 89 are review additions; widening the recording (input, network,
+  the full corpus) is what moves entries from the second group to the first.
 - The multi-app decision in Phase 5 is constrained by Decision 1: however apps map to processes,
   no app code holds the display connection. Per-app UIDs and binderfs (ADR-0003) remain open and
   are not needed for one confined app.

@@ -7,6 +7,7 @@
 
 subdir('log')       # logging facade (fmt backend; spdlog/DLT sinks later)
 subdir('ipc')       # art-host <-> acl transport (SEQPACKET + dma-buf fd passing; split-process ART)
+subdir('confine')   # --split app process confinement: bubblewrap plan + seccomp allowlist (ADR-0009 C4)
 subdir('dex')       # Dalvik .dex parser + DEX->JVM converter (prototype)
 subdir('runtime')   # ART embedding, class-loader, DEX/OAT cache, JNI tables
 subdir('pkg')       # APK/zip parse, resources.arsc, manifest, split/ABI select
