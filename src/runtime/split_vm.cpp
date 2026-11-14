@@ -156,6 +156,9 @@ class SplitVm final : public Vm {
       switch (r.msg.type) {
         case ipc::MsgType::Hello:
           log::i(kTag, "art-host up (proto {})", r.msg.u32);
+          if (r.msg.u32 != ipc::kProtocolVersion)
+            log::w(kTag, "art-host speaks acl_ipc {}, this a4l speaks {}",
+                   r.msg.u32, ipc::kProtocolVersion);
           break;
         case ipc::MsgType::Log:
           std::fwrite(r.extra.data(), 1, r.extra.size(), stdout);
@@ -194,6 +197,11 @@ class SplitVm final : public Vm {
         break;
     }
 
+    if (child_code < 0 && errno == EPROTO)
+      log::e(kTag,
+             "art-host sent a datagram of the wrong size; it was built from "
+             "another acl_ipc version (this a4l speaks {})",
+             ipc::kProtocolVersion);
     int wstatus = 0;
     ::waitpid(pid, &wstatus, 0);
     if (child_code > 0)

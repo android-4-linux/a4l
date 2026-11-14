@@ -28,8 +28,9 @@ TEST_CASE("acl_ipc round-trips a header-only message", "[ipc]") {
 
   Message m;
   m.type = MsgType::Input;
-  m.input = Input{/*kind=*/0,  /*action=*/1,  /*x=*/12.5f,
-                  /*y=*/34.0f, /*keycode=*/0, /*ts=*/99};
+  m.input = Input{/*kind=*/0,   /*action=*/1,  /*x=*/12.5f,
+                  /*y=*/34.0f,  /*keycode=*/0, /*ts=*/99,
+                  /*keysym=*/0, /*before=*/0,  /*after=*/0};
   REQUIRE(a.send(m));
 
   Received r;
@@ -87,7 +88,10 @@ TEST_CASE("acl_ipc passes an fd that shares the sender's kernel object",
                            0,
                            0,
                            64,
-                           48};
+                           48,
+                           /*plane_count=*/1,
+                           /*plane_stride=*/{0, 0, 0},
+                           /*plane_offset=*/{0, 0, 0}};
   REQUIRE(a.send(m, {}, /*fd0=*/write_end));
   ::close(write_end);  // sender drops its copy; the receiver now holds the only
                        // writer

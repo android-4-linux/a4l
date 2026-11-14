@@ -18,6 +18,7 @@ Channel& Channel::operator=(Channel&& o) noexcept {
   if (this != &o) {
     close();
     fd_ = o.fd_;
+    send_nonblocking_ = o.send_nonblocking_;
     o.fd_ = -1;
   }
   return *this;
@@ -81,12 +82,13 @@ bool Channel::send(const Message& m,
 
   ssize_t n;
   do {
-    n = ::sendmsg(fd_, &mh, MSG_NOSIGNAL);
+    n = ::sendmsg(fd_, &mh,
+                  MSG_NOSIGNAL | (send_nonblocking_ ? MSG_DONTWAIT : 0));
   } while (n < 0 && errno == EINTR);
   return n >= 0;
 }
 
-bool Channel::recv(Received& out) {
+bool Channel::recv(Received& out, bool nonblock) {
   if (fd_ < 0)
     return false;
   out.extra.clear();
@@ -96,7 +98,8 @@ bool Channel::recv(Received& out) {
   // SEQPACKET preserves message boundaries; size the buffer to header + a
   // generous trailer.
   static constexpr size_t kMaxExtra = 64 * 1024;
-  std::vector<std::byte> buf(sizeof(Message) + kMaxExtra);
+  // One buffer per thread, not one 64 KiB allocation per datagram.
+  thread_local std::vector<std::byte> buf(sizeof(Message) + kMaxExtra);
 
   iovec iov;
   iov.iov_base = buf.data();
@@ -111,7 +114,7 @@ bool Channel::recv(Received& out) {
 
   ssize_t n;
   do {
-    n = ::recvmsg(fd_, &mh, MSG_CMSG_CLOEXEC);
+    n = ::recvmsg(fd_, &mh, MSG_CMSG_CLOEXEC | (nonblock ? MSG_DONTWAIT : 0));
   } while (n < 0 && errno == EINTR);
   if (n == 0) {  // clean EOF
     errno = 0;

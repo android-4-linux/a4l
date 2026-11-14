@@ -21,6 +21,11 @@
 #include <string_view>
 #include <vector>
 
+#include <spawn.h>
+#include <sys/prctl.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>  // getpid, for a per-process DEX conversion work dir
 
 #include "acl_config.h"
@@ -33,6 +38,10 @@
 #include "pkg/apk_verify.h"
 #include "pkg/manifest.h"
 #include "runtime/vm.h"
+#include "wm/present.h"
+#include "wm/split_present.h"
+
+extern char** environ;
 
 namespace {
 
@@ -100,6 +109,10 @@ void print_usage() {
       "(comma-\n"
       "                       separated list; also $ACL_APK_SIGNER); implies "
       "require\n"
+      "  --split              run the app in a child process; this one keeps "
+      "the\n"
+      "                       display, input and APK verification (GPU present "
+      "only)\n"
       "  --present            show the rendered content view in a Wayland "
       "window\n"
       "                       (wcs); no-op if no compositor / built without "
@@ -328,6 +341,169 @@ int cmd_verify(const std::vector<std::string>& args) {
   return kOk;
 }
 
+// --split, the broker side (ADR-0009): run the app in a child a4l process and
+// keep the display, the input devices and the APK verification here. The
+// child is this binary with ACL_SPLIT_FD set; its presenter is a proxy over
+// that socket (wm/split_present.h). `apk_path` is the file already admitted,
+// the verified copy when the policy enforces; the child is told not to verify
+// again.
+int run_split(const std::string& apk_path,
+              const std::vector<std::string>& args) {
+#if ACL_HAVE_VULKAN && ACL_HAVE_WCS
+  char self[4096];
+  const ssize_t self_len = ::readlink("/proc/self/exe", self, sizeof(self) - 1);
+  if (self_len <= 0) {
+    acl::log::e(kTag, "split: cannot resolve /proc/self/exe");
+    return kRuntimeError;
+  }
+  self[self_len] = '\0';
+
+  int dw = 0, dh = 0, dscale = 1;
+  if (!acl::wm::query_display(dw, dh, dscale))
+    dw = dh = 0;  // no compositor: the child runs headless
+
+  auto [broker_end, child_end] = acl::ipc::Channel::make_pair();
+  if (!broker_end.valid()) {
+    acl::log::e(kTag, "split: socketpair failed: {}", std::strerror(errno));
+    return kRuntimeError;
+  }
+
+  // The child's command line: this one, minus what the broker already did.
+  std::vector<std::string> argv_s = {self, "run", apk_path};
+  bool positional_seen = false;
+  for (const std::string& a : args) {
+    if (a == "--split" || a.rfind("--verify", 0) == 0 ||
+        a.rfind("--signer", 0) == 0)
+      continue;
+    if (!a.empty() && a[0] != '-' && !positional_seen) {
+      positional_seen = true;  // the APK path, replaced above
+      continue;
+    }
+    argv_s.push_back(a);
+  }
+  argv_s.emplace_back("--verify=off");
+
+  // The child's environment: no route to the compositor except the socket.
+  static constexpr int kChildFd = 3;
+  static constexpr std::string_view kDropped[] = {
+      "WAYLAND_DISPLAY=", "WAYLAND_SOCKET=", "ACL_APK_VERIFY=",
+      "ACL_APK_SIGNER=",  "ACL_SPLIT_FD=",   "ACL_SPLIT_DISPLAY=",
+      "ACL_SPLIT_BROKER="};
+  std::vector<std::string> env_s;
+  bool gpu_set = false;
+  for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
+    const std::string_view v(*e);
+    bool drop = false;
+    for (const std::string_view d : kDropped)
+      drop = drop || v.rfind(d, 0) == 0;
+    if (drop)
+      continue;
+    gpu_set = gpu_set || v.rfind("ACL_PRESENT_GPU=", 0) == 0;
+    env_s.emplace_back(v);
+  }
+  env_s.push_back("ACL_SPLIT_FD=" + std::to_string(kChildFd));
+  env_s.push_back("ACL_SPLIT_BROKER=" + std::to_string(::getpid()));
+  env_s.push_back("ACL_SPLIT_DISPLAY=" + std::to_string(dw) + "x" +
+                  std::to_string(dh) + "@" + std::to_string(dscale));
+  if (!gpu_set)
+    env_s.emplace_back("ACL_PRESENT_GPU=1");  // the path that crosses
+
+  std::vector<char*> argv, envp;
+  for (std::string& a : argv_s)
+    argv.push_back(a.data());
+  argv.push_back(nullptr);
+  for (std::string& e : env_s)
+    envp.push_back(e.data());
+  envp.push_back(nullptr);
+
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  posix_spawn_file_actions_adddup2(&fa, child_end.native_handle(), kChildFd);
+  pid_t pid = 0;
+  const int rc =
+      ::posix_spawn(&pid, self, &fa, nullptr, argv.data(), envp.data());
+  posix_spawn_file_actions_destroy(&fa);
+  child_end.close();
+  if (rc != 0) {
+    acl::log::e(kTag, "split: posix_spawn failed: {}", std::strerror(rc));
+    return kRuntimeError;
+  }
+  acl::log::i(kTag, "split: app process {} started; this process is the broker",
+              pid);
+
+  const acl::wm::BrokerStats stats =
+      acl::wm::serve_split_child(broker_end, acl::wm::presenter_open);
+  broker_end.close();
+
+  // The child leaves on its own when the socket closes. Give it 3 s.
+  int wstatus = 0;
+  bool reaped = false;
+  for (int i = 0; i < 150 && !reaped; ++i) {
+    reaped = ::waitpid(pid, &wstatus, WNOHANG) == pid;
+    if (!reaped) {
+      const timespec ts{0, 20'000'000};
+      ::nanosleep(&ts, nullptr);
+    }
+  }
+  if (!reaped) {
+    ::kill(pid, SIGKILL);
+    ::waitpid(pid, &wstatus, 0);
+  }
+  acl::log::i(kTag,
+              "split: app process ended ({}); {} frame(s) presented, {} input "
+              "event(s) forwarded, {} message(s) rejected, {} datagram(s) from "
+              "the app and {} to it",
+              !reaped                ? "killed after the window closed"
+              : WIFEXITED(wstatus)   ? "exited"
+              : WIFSIGNALED(wstatus) ? "signaled"
+                                     : "stopped",
+              stats.frames, stats.inputs, stats.rejected, stats.from_child,
+              stats.to_child);
+  if (!reaped || stats.window_closed)
+    return kOk;
+  if (WIFEXITED(wstatus))
+    return WEXITSTATUS(wstatus);
+  return kRuntimeError;
+#else
+  (void)apk_path;
+  (void)args;
+  acl::log::e(kTag,
+              "split: this build has no GPU present path (needs Vulkan and "
+              "wcs); --split is unavailable");
+  return kBackendUnavailable;
+#endif
+}
+
+// The child side of --split: adopt the broker's socket before anything opens
+// a display. Returns false if ACL_SPLIT_FD is set but unusable.
+bool adopt_split_child() {
+  const char* e = std::getenv("ACL_SPLIT_FD");
+  if (e == nullptr || *e == '\0')
+    return true;
+  const int fd = std::atoi(e);
+  struct stat st{};
+  if (fd < 3 || ::fstat(fd, &st) != 0 || !S_ISSOCK(st.st_mode)) {
+    std::fprintf(stderr, "a4l: $ACL_SPLIT_FD '%s' is not a socket\n", e);
+    return false;
+  }
+  int w = 0, h = 0, scale = 1;
+  if (const char* d = std::getenv("ACL_SPLIT_DISPLAY"))
+    std::sscanf(d, "%dx%d@%d", &w, &h, &scale);
+  // Die with the broker. If it went away before the prctl took effect, the
+  // parent is no longer the pid it gave.
+  ::prctl(PR_SET_PDEATHSIG, SIGKILL);
+  const char* broker = std::getenv("ACL_SPLIT_BROKER");
+  if (broker != nullptr && *broker != '\0' &&
+      ::getppid() != static_cast<pid_t>(std::atol(broker))) {
+    std::fprintf(stderr, "a4l: the split broker is gone\n");
+    return false;
+  }
+  ::unsetenv("ACL_SPLIT_FD");
+  ::unsetenv("WAYLAND_DISPLAY");
+  acl::wm::split_child_install(fd, w, h, scale);
+  return true;
+}
+
 int cmd_run(const std::vector<std::string>& args) {
   namespace r = acl::runtime;
 
@@ -341,6 +517,7 @@ int cmd_run(const std::vector<std::string>& args) {
   std::vector<std::string> framework_dirs;
   bool convert_dex = false;
   bool present = false;
+  bool split = false;
   std::string present_frames;
   acl::pkg::VerifyPolicy verify_policy;
   if (const char* e = std::getenv("ACL_APK_VERIFY"); e && *e) {
@@ -381,6 +558,8 @@ int cmd_run(const std::vector<std::string>& args) {
       convert_dex = true;
     } else if (a == "--present") {
       present = true;
+    } else if (a == "--split") {
+      split = true;
     } else if (match_opt(a, "--present-frames", v)) {
       present = true;
       present_frames = v;
@@ -453,6 +632,10 @@ int cmd_run(const std::vector<std::string>& args) {
           : !admit_in_place(*apk, verify_policy)) {
     return kRuntimeError;
   }
+  // The broker stops here: the APK is admitted, and everything it supplies
+  // runs in the child.
+  if (split)
+    return run_split(apk_path, args);
 
   std::vector<std::string> dex_files;
   for (const auto& e : apk->entries()) {
@@ -839,6 +1022,8 @@ int main(int argc, char** argv) {
     return kOk;
   }
   if (cmd == "run") {
+    if (!adopt_split_child())
+      return kRuntimeError;
     return cmd_run({args.begin() + 1, args.end()});
   }
   if (cmd == "dex") {

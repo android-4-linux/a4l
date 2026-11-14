@@ -19,6 +19,7 @@
 // members of the non-movable Presenter, so their addresses never change.
 
 #include "wm/present.h"
+#include "wm/split_present.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -905,11 +906,15 @@ class Presenter : public wl::ime::TextInputListener {
 }  // namespace
 
 bool wayland_available() noexcept {
+  if (split_child_active())
+    return true;  // the broker holds the connection
   wl::DisplayHandle d;
   return d.Connect();  // disconnects on destruction
 }
 
 bool query_display(int& width, int& height, int& scale) noexcept {
+  if (split_child_active())
+    return split_child_display(width, height, scale);
   wl::DisplayHandle d;
   if (!d.Connect())
     return false;
