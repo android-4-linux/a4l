@@ -54,14 +54,21 @@ def main() -> int:
             code, out = run("run", signed, "--split", "--vm=null",
                             "--verify=require")
             check(code == OK, "split run of a signed APK: exit %d" % code, out)
-            broker = out.find("this process is the broker")
-            check(broker >= 0, "the broker did not announce the app process", out)
-            check(0 <= out.find("running the verified copy") < broker,
+            # The two processes share stderr and their lines interleave in
+            # either order, so nothing here depends on which side of the
+            # broker's announcement a line of the app process lands. The
+            # broker ran with --verify=require, so the "not checked" line can
+            # only be the app process's, and it is that process's first.
+            check("this process is the broker" in out,
+                  "the broker did not announce the app process", out)
+            staged = out.find("running the verified copy")
+            child = out.find("signature: not checked (--verify=off)")
+            check(child >= 0, "the app process verified again", out)
+            check(0 <= staged < child,
                   "the broker did not stage a verified copy first", out)
-            after = out[broker:] if broker >= 0 else ""
-            check("signature: not checked (--verify=off)" in after,
-                  "the app process verified again", out)
-            check("/acl/verified/" in after and "base.apk" in after,
+            after = out[child:] if child >= 0 else ""
+            check("opened " in after and "/acl/verified/" in after
+                  and "base.apk" in after,
                   "the app process did not open the verified copy", out)
             check("app process ended (exited)" in out,
                   "the broker did not report the exit", out)
