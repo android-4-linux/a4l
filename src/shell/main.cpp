@@ -437,6 +437,14 @@ int run_split(const acl::pkg::Apk& apk,
   }
   argv_s.emplace_back("--verify=off");
 
+  // The package name, from the APK this process admitted. It names the app's
+  // directories and its window; neither is the child's to choose.
+  acl::pkg::Manifest manifest;
+  acl::pkg::ZipError merr;
+  if (auto mbytes = apk.read("AndroidManifest.xml", merr))
+    (void)acl::pkg::parse_manifest(*mbytes, manifest);
+  const std::string package_dir = acl::pkg::safe_package_dir(manifest.package);
+
   // Confinement (ADR-0009 C4): the plan for bubblewrap, which becomes the
   // program this process starts, and the child's environment as an allowlist.
   static constexpr int kChildFd = 3;
@@ -457,13 +465,9 @@ int run_split(const acl::pkg::Apk& apk,
                   "runs it without confinement");
       return kBackendUnavailable;
     }
-    acl::pkg::Manifest manifest;
-    acl::pkg::ZipError merr;
-    if (auto mbytes = apk.read("AndroidManifest.xml", merr))
-      (void)acl::pkg::parse_manifest(*mbytes, manifest);
     acl::confine::Inputs in;
     in.apk = argv_s[2];
-    in.package_dir = acl::pkg::safe_package_dir(manifest.package);
+    in.package_dir = package_dir;
     in.ro_paths = opt.ro_paths;
     in.rw_paths = opt.rw_paths;
     in.share_net = opt.share_net;
@@ -557,8 +561,13 @@ int run_split(const acl::pkg::Apk& apk,
   acl::log::i(kTag, "split: app process {} started; this process is the broker",
               pid);
 
-  const acl::wm::BrokerStats stats =
-      acl::wm::serve_split_child(broker_end, acl::wm::presenter_open);
+  acl::wm::BrokerOptions broker_options;
+  // "app" is safe_package_dir()'s answer for an APK with no usable package
+  // name; such a window keeps the id the child gives, cleaned.
+  if (package_dir != "app")
+    broker_options.app_id = package_dir;
+  const acl::wm::BrokerStats stats = acl::wm::serve_split_child(
+      broker_end, acl::wm::presenter_open, broker_options);
   broker_end.close();
 
   // The child leaves on its own when the socket closes. Give it 3 s.

@@ -46,9 +46,10 @@ where the project is, stated so that nobody spends a report on them:
   verification, is met with the limits above. C2 and C4 are met on x86-64 for apps that draw
   through Skia: `a4l run --split` runs the app in a child process inside a bubblewrap sandbox
   (its own user, mount, pid, ipc and network namespaces; no home directory, no `/run`, no
-  network) under a seccomp allowlist, and the first process keeps the display. C3 and C5 are
-  not met: apps that use native GL or video (Flutter, libGDX) are refused under `--split`, and
-  the broker does not yet validate everything the child sends it. The sandbox has had no review
+  network) under a seccomp allowlist, and the first process keeps the display. C5 is met for
+  that path: the first process validates each frame the child sends against the kernel's own
+  account of the buffer, and its receive path is fuzzed. C3 is not met: apps that use native GL
+  or video (Flutter, libGDX) are refused under `--split`. The sandbox has had no review
   outside the project, its system call list was recorded from five apps, and the GPU render
   node stays reachable from inside it. `--split=unconfined` and `--net=host` each remove part
   of it and say so when used.
@@ -62,7 +63,8 @@ A report that a4l can be made to execute code it was *not* asked to execute — 
 of an APK, a parser bug reachable from a crafted APK, a loader that resolves a library from outside
 the app's own directories — is a vulnerability, and is wanted. So is a way out of the `--split`
 sandbox: a file, socket, process or device the app process reaches that ADR-0009's "C4 as built"
-says it cannot.
+says it cannot, or a message from the app process that makes the first process crash, leak or
+hand the compositor something ADR-0009's "C5 as built" says it refuses.
 
 ## In scope
 

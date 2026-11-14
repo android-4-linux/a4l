@@ -43,3 +43,7 @@ option(
   value : '',
   description : 'Path to a pinned Skia install prefix (lib/*.a + include/core/...), shared with wcs (ADR-4/A02.2). Empty searches $ACL_SKIA_PREFIX, then ~/.local/skia-m150, ~/.local/skia, ../skia-m150, /opt/skia-m150 and /usr/local/skia-m150. Skia is not built by Meson; produce a prefix with wcs scripts/build-skia.sh at the shared chrome/m150 pin (third_party/skia/METADATA). Enables the Skia-backed gfx Surface (ACL_HAVE_SKIA) and, with vulkan + vulkan-hpp + libdrm, the Ganesh Vulkan present path.',
 )
+
+# libFuzzer harnesses (tests/fuzz). Needs clang; see tests/fuzz/meson.build for the setup line.
+option('fuzzers', type : 'boolean', value : false,
+       description : 'Build the libFuzzer harnesses in tests/fuzz (clang only)')
