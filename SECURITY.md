@@ -28,8 +28,10 @@ where the project is, stated so that nobody spends a report on them:
   check, and is not implemented.
 - **There is no sandbox.** An app's native code runs as arbitrary code in a4l's single glibc
   process, with no per-app UID, SELinux domain or seccomp filter of the kind on-device Android
-  provides, so it can reach ART, Mesa and the Wayland connection. Containment is an architectural
-  question tracked separately.
+  provides, so it can reach ART, Mesa and the Wayland connection. The boundary is decided and not
+  built: [`docs/adr/ADR-0009`](docs/adr/ADR-0009-containment-process-boundary.md) puts everything
+  an APK supplies in a confined child process that holds no display, audio or session connection,
+  and lists the five conditions (C1-C5) that gate any claim to run untrusted APKs. None is met.
 
 The consequence is the thing to take away: **treat an APK you run under a4l as native code running
 with your own privileges, because that is what it is.** Running an untrusted APK is not yet a

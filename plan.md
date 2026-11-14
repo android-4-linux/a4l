@@ -177,7 +177,7 @@ Phase ≤3: Java/Kotlin-only apps (reject APKs with `lib/` unless `extractNative
 - **Gate G4:** an NDK game (SDL-based APK) runs; GL and Vulkan smoke CTS subsets pass.
 - 
 ### Phase 5 — Hardening + distribution (ongoing)
-- Multi-app process model decision (fork/exec per app; binderfs revisit), sandboxing (bwrap/portals), Flatpak packaging (ties into existing Flathub catalog/launcher specs), per-board bring-up (RK3588, SA8155P) via emb_cli artifact store.
+- Multi-app process model decision (fork/exec per app; binderfs revisit), sandboxing (bwrap/portals; the boundary it applies to is fixed by ADR-0009), Flatpak packaging (ties into existing Flathub catalog/launcher specs), per-board bring-up (RK3588, SA8155P) via emb_cli artifact store.
 
 ---
 
@@ -201,7 +201,7 @@ Phase ≤3: Java/Kotlin-only apps (reject APKs with `lib/` unless `extractNative
 | R-7 | GMS-dependent apps dominate user expectations | H | M | Scope statement; microG later; publish compat list early |
 | R-8 | GPLv3 creep via transitive deps (e.g., readline, some codecs) | L | H | CI license scanner gate; dynamic-link-only LGPL policy |
 | R-9 | Wayland IME/clipboard/activation gaps on some compositors | M | M | Same portability matrix + fallbacks as the flatpak-activation plugin spec |
-| R-10 | Untrusted app native code runs unrestricted in a4l's single glibc process (no per-app UID/SELinux/seccomp; a malicious/buggy `.so` reaches ART, Mesa, the Wayland conn) | M | H | Integrity = one-time **APK v2/v3 signature verification** in `pkg/` (the `.so` are covered by the whole-APK sig; not a per-load or loader concern). Containment = separate ADR (seccomp filter around the bionic-namespace threads; process/UID isolation later). Dev corpus is user-vetted; gate before untrusted APKs |
+| R-10 | Untrusted app native code runs unrestricted in a4l's single glibc process (no per-app UID/SELinux/seccomp; a malicious/buggy `.so` reaches ART, Mesa, the Wayland conn) | M | H | Integrity = one-time **APK v2/v3 signature verification** in `pkg/` (the `.so` are covered by the whole-APK sig; not a per-load or loader concern). Containment = **ADR-0009**: a process boundary at the dma-buf seam (`Backend::ArtSplit`), with seccomp, namespaces/Landlock on the child; a seccomp filter on the shared process is rejected as containment (a filter binds a thread, and app and a4l code share every thread, fd and page). Dev corpus is user-vetted; untrusted APKs are gated on ADR-0009 C1-C5, none of which is met |
 
 ## 7. Effort estimate
 

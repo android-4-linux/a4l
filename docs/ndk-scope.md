@@ -591,10 +591,10 @@ as the APK is** — nothing separate to vet at the `.so` level.
 - **The real runtime worry is containment, not signing.** Signing says *who authored* the code, not
   that it's *safe*. Once an app `.so` runs it is arbitrary native code in a4l's **single glibc
   process** — no per-app UID / SELinux / seccomp cage like on-device Android — so it can reach ART,
-  Mesa, and the Wayland connection. That's an architectural sandboxing question (seccomp around the
-  bionic-namespace threads; process/UID isolation later), orthogonal to both signing and the loader,
-  and tracked as its own ADR. For the hash-pinned dev corpus the files are user-vetted, so neither
-  blocks bring-up.
+  Mesa, and the Wayland connection. That's an architectural sandboxing question, orthogonal to both
+  signing and the loader, and decided in ADR-0009: a process boundary at the dma-buf seam, because
+  a seccomp filter binds a thread and no thread here runs only app code. Not implemented. For the
+  hash-pinned dev corpus the files are user-vetted, so neither blocks bring-up.
 
 ## Verify
 
