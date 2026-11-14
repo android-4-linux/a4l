@@ -223,6 +223,13 @@ class IPresenter {
   // pass to the GPU end_frame so the produced dma-buf lands in the buffer the
   // compositor has released.
   virtual int next_buffer() const noexcept = 0;
+  // Every free ping-pong buffer, bit i for slot i. next_buffer() is its lowest
+  // set bit. The split proxy (wm/split_present.h) mirrors this so it can pick
+  // the next slot itself between a submit and the broker's next report.
+  virtual std::uint32_t free_mask() const noexcept {
+    const int next = next_buffer();
+    return next >= 0 && next < 32 ? 1u << next : 0;
+  }
   // The vsync-aligned frame time (ns; Choreographer.frameTimeNanos) for the
   // next frame.
   virtual std::uint64_t frame_time_ns() const noexcept = 0;

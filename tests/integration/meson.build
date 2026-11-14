@@ -64,6 +64,20 @@ if py3.found()
     )
   endif
 
+  # `a4l run --split` (ADR-0009 C2): the broker admits the APK and starts the app process on the
+  # verified copy. --vm=null keeps a VM and a display out of it. Without the GPU present path
+  # (Vulkan + wcs) it asserts the refusal instead.
+  if have_signed_apks and have_libcrypto
+    test(
+      'split-run',
+      py3,
+      args : [files('run_split_test.py'), acl_exe, signed_apks_dir,
+              (have_vulkan and have_wcs) ? '1' : '0'],
+      depends : [acl_exe, signed_apks],
+      timeout : 120,
+    )
+  endif
+
   # a4l must not link OpenSSL: it would shadow the BoringSSL host ART loads into the same process
   # (see src/pkg/crypto_dl.h). The fault needs host ART, which CI lacks, so check the NEEDED list.
   readelf = find_program('readelf', required : false)

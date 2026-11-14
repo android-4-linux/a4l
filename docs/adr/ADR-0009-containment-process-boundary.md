@@ -1,7 +1,8 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # ADR-0009: Containment -- a process boundary at the dma-buf seam; seccomp alone rejected
 
-- **Status:** Accepted (boundary decided; no containment is implemented). Refines ADR-0003.
+- **Status:** Accepted (boundary decided; the process split runs on x86-64 as `--split`, and
+  nothing confines the child yet). Refines ADR-0003.
 - **Date:** 2026-11-13
 - **Provenance:** plan.md §4 Phase 5, §6 R-10; docs/ndk-scope.md (trust model);
   docs/split-process-art.md; ADR-0001, ADR-0003, ADR-0005; `src/ipc/`, `src/runtime/split_vm.cpp`
@@ -42,8 +43,9 @@ It is also where Android puts the same line: the app renders in its own process 
 driver loaded, and the compositor is elsewhere.
 
 State of that path, from `git log` rather than from the doc: S1 (ART boots in the subprocess,
-x86-64 and a Pi 4) and the S2 present-sink seam landed 2026-07-15/16; nothing since. First pixels
-across the boundary, input, audio and a real APK (S2-S5) are not done.
+x86-64 and a Pi 4) and the S2 present-sink seam landed 2026-07-15/16; nothing since on arm64.
+On x86-64 the split runs as of 2026-11-14 (`a4l run --split`, see C2 below): frames and input
+cross; audio, native GL and video do not.
 
 ## Decision
 1. **The containment boundary is a process boundary at the dma-buf seam.** Everything an APK
@@ -70,24 +72,29 @@ across the boundary, input, audio and a real APK (S2-S5) are not done.
 
 | | Condition | Today |
 |---|---|---|
-| C1 | APK v2/v3 verification in `pkg/`, in the broker | met for single-process, 2026-11-14: `--verify=require` or `--signer` runs a private copy that is verified on every run (`pkg/apk_verify.cpp`, `pkg/apk_stage.cpp`). "In the broker" waits on C2. ART's compiled-code cache is trusted by location, not verified |
-| C2 | Split path at S5: a real APK renders and takes input | S1 done; S2 seam wired, no pixels |
+| C1 | APK v2/v3 verification in `pkg/`, in the broker | met, 2026-11-14: `--verify=require` or `--signer` runs a private copy that is verified on every run (`pkg/apk_verify.cpp`, `pkg/apk_stage.cpp`). Under `--split` the broker does this before it starts the child, and the child is handed the copy. ART's compiled-code cache is trusted by location, not verified |
+| C2 | Split path at S5: a real APK renders and takes input | x86-64, Skia path, 2026-11-14: `a4l run --split` runs the app in a child a4l process whose presenter is a proxy (`wm/split_present.cpp`); the broker holds the only compositor connection. 3 corpus apps render on host ART; one presents 1176 frames in 20 s split against 1178 single-process. Input is forwarded and unit-tested; there is no controlled live input test. Not done: arm64 (`acl-art-host` is still S1), audio (the child opens PipeWire itself) |
 | C3 | Native GL and video cross the boundary as dma-buf | not designed; see below |
 | C4 | Child confined per Decision 2 | none; `posix_spawn` passes `environ`, no attributes |
-| C5 | Broker validates every message; receive path fuzzed | `PresentFrame` fields reach the sink as received |
+| C5 | Broker validates every message; receive path fuzzed | partial: the `--split` broker bounds-checks sizes, plane count, slot and strings and drops what fails (`wm/split_present.cpp`). Not checked: that the fd is a dma-buf, the format and modifier against what the compositor advertised. Not fuzzed |
 
 **What it costs.**
 - **The native-GL path changes shape.** Single-process, Mesa commits a4l's own `wl_surface`
   inside `eglSwapBuffers` and a4l allocates no buffer. A confined child has no `wl_surface`. It
   must render to an exported dma-buf and send `PresentFrame`. Still no CPU copy; the "allocates no
   buffer" property is a single-process property. This is the largest piece of C3.
-- **One datagram and one fd in each direction per frame.** Not measured. It gets a number at S2.
+- **Datagrams per frame.** Measured 2026-11-14 over 615 frames: 2.0 from the child (the frame
+  with its dma-buf fd, and the keepalive the deferred render path sends) and 1.0 to it (the
+  compositor's frame callback). No fd goes back; there is no release fence yet. Frame count and
+  time to first frame match single-process within run-to-run noise (504 ms single, 538 ms split,
+  one run each).
 - **The GPU driver stays reachable from the child.** Render-node ioctls are a large kernel
   surface, and the filter cannot remove them without removing rendering. Android accepts the same
   exposure. Video decode stays in the child for the same reason it renders there: it parses data
   the app supplies.
 - **On x86-64 the child is today's whole process minus present, input and audio**: glibc host ART
-  plus the bionic bridge of ADR-0005. On arm64 it is all-bionic and needs no `%fs` bridge.
+  plus the bionic bridge of ADR-0005. As built, it is the a4l binary itself, started by the broker
+  with the socket in `ACL_SPLIT_FD`; audio has not moved yet. On arm64 it is all-bionic and needs no `%fs` bridge.
 
 **What it does not fix.** A second process under the same UID is not a boundary by itself:
 without C4 the child can open the user's files and, where Yama permits, reach the broker through

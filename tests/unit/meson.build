@@ -14,6 +14,7 @@ unit_test_sources = files(
   'smoke_test.cpp',
   'log_test.cpp',
   'ipc_test.cpp',
+  'split_present_test.cpp',
   'runtime_test.cpp',
   'pkg_test.cpp',
   'apk_stage_test.cpp',

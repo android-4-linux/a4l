@@ -42,7 +42,10 @@ where the project is, stated so that nobody spends a report on them:
   built: [`docs/adr/ADR-0009`](docs/adr/ADR-0009-containment-process-boundary.md) puts everything
   an APK supplies in a confined child process that holds no display, audio or session connection,
   and lists the five conditions (C1-C5) that gate any claim to run untrusted APKs. C1, signature
-  verification, is met with the limits above; C2-C5 are not.
+  verification, is met with the limits above. C2, the process split, runs on x86-64 as
+  `a4l run --split` for apps that draw through Skia. **`--split` is not a sandbox**: the child is
+  not confined (C4), so it can still open the compositor socket, PipeWire and your files itself.
+  C3-C5 are not met.
 
 The consequence is the thing to take away: **treat an APK you run under a4l as native code running
 with your own privileges, because that is what it is.** Running an untrusted APK is not yet a

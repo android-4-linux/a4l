@@ -11,7 +11,7 @@
 # <wl/xdg_shell.hpp>, so NO --emit-interface-tables there) and wayland_presenter.cpp
 # uploads a gfx::Surface into a wl_shm buffer. Otherwise wm/ is a stub.
 
-wm_sources = [files('wm.cpp', 'present_sink.cpp')]  # present_sink: split-process external-dma-buf present seam (S2)
+wm_sources = [files('wm.cpp', 'present_sink.cpp', 'split_present.cpp')]  # present_sink: split-process external-dma-buf present seam (S2)
 wm_inc = [config_inc, core_inc]
 wm_deps = [fmt_dep]  # present_sink logs via log/log.h
 wm_cpp_args = []
@@ -149,7 +149,7 @@ if build_tests and have_wcs
     'wm_present_probe',
     files('present_probe_main.cpp'),
     include_directories : [config_inc, core_inc],
-    link_with : [wm_lib, gfx_lib, acl_log],
+    link_with : [wm_lib, gfx_lib, acl_log, ipc_lib],
     dependencies : wm_deps + [fmt_dep],
   )
   # P2.4/V2b: the dma-buf present probe (Ganesh Vulkan → zwp_linux_dmabuf_v1). Links
@@ -160,7 +160,7 @@ if build_tests and have_wcs
       'wm_dmabuf_probe',
       files('dmabuf_probe_main.cpp'),
       include_directories : [config_inc, core_inc],
-      link_with : [wm_lib, gfx_lib, acl_log],
+      link_with : [wm_lib, gfx_lib, acl_log, ipc_lib],
       dependencies : wm_deps + [fmt_dep],
     )
   endif
@@ -172,7 +172,7 @@ if build_tests and have_wcs
       'wm_gl_probe',
       files('gl_probe_main.cpp'),
       include_directories : [config_inc, core_inc],
-      link_with : [wm_lib, gfx_lib, acl_log],
+      link_with : [wm_lib, gfx_lib, acl_log, ipc_lib],
       dependencies : wm_deps + [fmt_dep, egl_dep, glesv2_dep, gbm_dep, wl_egl_dep, gl_libdrm_dep],
     )
   endif

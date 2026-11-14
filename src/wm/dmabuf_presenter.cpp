@@ -15,6 +15,7 @@
 // present (ACL_HAVE_WCS && ACL_HAVE_VULKAN).
 
 #include "wm/present.h"
+#include "wm/split_present.h"
 
 #if ACL_HAVE_WCS && ACL_HAVE_VULKAN
 
@@ -787,6 +788,13 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     return configured_ && !suspended_ && need_frame_ && free_slot() >= 0;
   }
   int next_buffer() const noexcept override { return free_slot(); }
+  std::uint32_t free_mask() const noexcept override {
+    std::uint32_t mask = 0;
+    for (int i = 0; i < kSlots; ++i)
+      if (!slots_[i].busy)
+        mask |= 1u << i;
+    return mask;
+  }
   const std::vector<std::uint64_t>& modifiers() const noexcept override {
     return mods_;
   }
@@ -2007,6 +2015,11 @@ std::unique_ptr<IPresenter> presenter_open(int width,
                                            std::string_view app_id,
                                            InputCallback input,
                                            bool want_ime) noexcept {
+  // A split child has no Wayland connection: its presenter is a proxy to the
+  // broker, which opens the real one.
+  if (split_child_active())
+    return split_presenter_open(width, height, title, app_id, std::move(input),
+                                want_ime);
   auto p = std::make_unique<Presenter>();
   if (!p->open(width, height, title, app_id, std::move(input), want_ime))
     return nullptr;

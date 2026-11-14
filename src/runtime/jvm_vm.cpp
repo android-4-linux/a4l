@@ -76,6 +76,7 @@
 #include "runtime/media_codec_jni.h"  // media_jni loadLibrary -> MediaCodec natives (M5)
 #include "svc/svc.h"
 #include "wm/present.h"
+#include "wm/split_present.h"
 #if ACL_PROFILE_AUTOMOTIVE
 #include "hosts/cal/cal.h"  // Gate G1.5b: Car App Library template host
 #include "hosts/media/media_bridge.h"  // Gate G1.5a: headless media bridge (automotive)
@@ -3190,6 +3191,14 @@ PresentSession* create_gl_session_core(JavaVM* vm,
                                        int h,
                                        const std::string& title,
                                        const std::string& appId) {
+  // Native GL has Mesa commit a4l's wl_surface from inside the app process.
+  // A split child has no wl_surface; the broker does (ADR-0009 C3, not built).
+  if (wm::split_child_active()) {
+    log::e(kTag,
+           "GL session: native GL does not cross the process boundary yet; "
+           "run this app without --split");
+    return nullptr;
+  }
   if (!wm::wayland_available()) {
     log::i(kTag, "GL session: no Wayland compositor reachable");
     return nullptr;

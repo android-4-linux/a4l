@@ -142,6 +142,11 @@ art-host; `present_dmabuf_loop` + input stay in a4l.
     to attach the external fd as a `wl_buffer` (works alongside a running compositor, e.g. the Pi's
     labwc). The render side may allocate via drm-cxx's GBM producer or Vulkan export (`gfx_vk`).
   Backend chosen by `ACL_PRESENT_SINK` (`null`|`wayland`|`drm-scanout`).
+  **x86-64, 2026-11-14 (ADR-0009 C2):** frames cross by a different child. `a4l run --split`
+  starts the a4l binary itself as the app process, with its `wm::IPresenter` replaced by a proxy
+  over `acl_ipc` (`wm/split_present.cpp`). The broker opens the real Wayland presenter and imports
+  each dma-buf. Same libc on both sides, so none of `acl-art-host` is involved; the arm64 child
+  above is unchanged and still at S1. Covers the Skia dma-buf path only.
 - **S3 — input roundtrip.** Wayland pointer/key in a4l → `Input` → injected into the View in art-host;
   a tappable UI responds.
 - **S4 — audio.** SoundPool/AudioTrack PCM → shm ring → PipeWire sink in a4l.

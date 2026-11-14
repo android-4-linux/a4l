@@ -159,7 +159,7 @@ int main(int argc, char** argv) {
   {
     Message hello;
     hello.type = MsgType::Hello;
-    hello.u32 = 1;
+    hello.u32 = acl::ipc::kProtocolVersion;
     ch.send(hello);
   }
   if (vm_lib.empty() || main_class.empty())
