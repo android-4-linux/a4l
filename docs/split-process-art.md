@@ -146,7 +146,9 @@ art-host; `present_dmabuf_loop` + input stay in a4l.
   starts the a4l binary itself as the app process, with its `wm::IPresenter` replaced by a proxy
   over `acl_ipc` (`wm/split_present.cpp`). The broker opens the real Wayland presenter and imports
   each dma-buf. Same libc on both sides, so none of `acl-art-host` is involved; the arm64 child
-  above is unchanged and still at S1. Covers the Skia dma-buf path only. The child is confined
+  above is unchanged and still at S1. Covers the Skia dma-buf path and native GL (a gbm surface
+  in the child, each swapped buffer sent the same way; ADR-0009 C3). Video does not cross. The
+  child is confined
   (ADR-0009 C4, `src/confine/`): bubblewrap namespaces and a seccomp allowlist, so it has no
   route to the compositor, PipeWire or D-Bus but the broker's socket.
 - **S3 — input roundtrip.** Wayland pointer/key in a4l → `Input` → injected into the View in art-host;

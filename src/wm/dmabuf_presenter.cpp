@@ -19,6 +19,7 @@
 
 #if ACL_HAVE_WCS && ACL_HAVE_VULKAN
 
+#include <sys/stat.h>
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -1027,8 +1028,18 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     const int s = (slot >= 0 && slot < kSlots) ? slot : free_slot();
     if (s < 0 || slots_[s].busy)
       return false;
+    // A slot's wl_buffer wraps the dma-buf it was built from. A producer that
+    // puts another buffer in the slot (a GL window recreated by the app, a
+    // gbm surface rotating its buffers) needs a new one, or the old picture
+    // is what gets shown. A dma-buf's inode number is its identity.
+    const std::uint64_t identity = dmabuf_identity(frame.fd);
+    if (slots_[s].built && identity != 0 && slots_[s].identity != identity) {
+      slots_[s].handler.Destroy();
+      slots_[s].built = false;
+    }
     if (!slots_[s].built && !build_slot(s, frame))
       return false;
+    slots_[s].identity = identity;
     // The toplevel is ARGB (for the video hole-punch). Mark it fully OPAQUE by
     // default so a normal app isn't accidentally alpha-blended (the compositor
     // treats it opaque, as with the old XRGB). The video path later overrides
@@ -1630,6 +1641,15 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     return true;
   }
 
+  // The inode number of a dma-buf, which the kernel gives each buffer once;
+  // two descriptors for one buffer agree on it. 0 if it cannot be read.
+  static std::uint64_t dmabuf_identity(int fd) noexcept {
+    struct stat st{};
+    return fd >= 0 && ::fstat(fd, &st) == 0
+               ? static_cast<std::uint64_t>(st.st_ino)
+               : 0;
+  }
+
   // Build the wl_buffer for ping-pong slot `s` from its (stable) dma-buf frame.
   // Each slot's wl_buffer.release clears its own busy flag.
   bool build_slot(int s, const gfx::DmabufFrame& frame) noexcept {
@@ -1926,6 +1946,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     BufferH handler;
     bool busy = false;
     bool built = false;
+    std::uint64_t identity = 0;  // inode of the dma-buf `handler` wraps
   };
   Slot slots_[kSlots];
   int last_slot_ =

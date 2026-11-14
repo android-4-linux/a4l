@@ -5,11 +5,11 @@
 // The system calls a confined --split app process may make, x86-64.
 //
 // Recorded 2026-11-14 on host ART (android-13.0.0_r84), Mesa radeonsi/RADV,
-// glibc 2.43, from the five APKs of tests/app-corpus: three present through
-// Skia for 60 s each, two (libGDX) are refused at the native GL check and
-// contribute their start. No input was injected and no network was reachable,
-// so the paths an app takes on a touch, a key or a completed connection are
-// covered only as far as the second section goes.
+// glibc 2.43, from nine APKs, 45 to 60 s each: the five of tests/app-corpus
+// (three present through Skia, two through libGDX and native GL) and four
+// Flutter example apps (Impeller on GLES). No input was injected and no
+// network was reachable, so the paths an app takes on a touch, a key or a
+// completed connection are covered only as far as the second section goes.
 //
 // Deliberately absent, whatever a trace shows: execve and execveat, fork and
 // vfork, ptrace, process_vm_*, mount and the new mount API, unshare, setns,
@@ -41,17 +41,26 @@ ACL_SYSCALL(clock_gettime)
 #ifdef SYS_clock_nanosleep
 ACL_SYSCALL(clock_nanosleep)
 #endif
+#ifdef SYS_clone
+ACL_SYSCALL(clone)
+#endif
 #ifdef SYS_close
 ACL_SYSCALL(close)
 #endif
 #ifdef SYS_connect
 ACL_SYSCALL(connect)
 #endif
+#ifdef SYS_dup
+ACL_SYSCALL(dup)
+#endif
 #ifdef SYS_epoll_create1
 ACL_SYSCALL(epoll_create1)
 #endif
 #ifdef SYS_epoll_ctl
 ACL_SYSCALL(epoll_ctl)
+#endif
+#ifdef SYS_epoll_pwait
+ACL_SYSCALL(epoll_pwait)
 #endif
 #ifdef SYS_epoll_wait
 ACL_SYSCALL(epoll_wait)
@@ -67,6 +76,12 @@ ACL_SYSCALL(exit_group)
 #endif
 #ifdef SYS_faccessat
 ACL_SYSCALL(faccessat)
+#endif
+#ifdef SYS_fallocate
+ACL_SYSCALL(fallocate)
+#endif
+#ifdef SYS_fchown
+ACL_SYSCALL(fchown)
 #endif
 #ifdef SYS_fcntl
 ACL_SYSCALL(fcntl)
@@ -116,6 +131,12 @@ ACL_SYSCALL(getresgid)
 #ifdef SYS_getresuid
 ACL_SYSCALL(getresuid)
 #endif
+#ifdef SYS_getrlimit
+ACL_SYSCALL(getrlimit)
+#endif
+#ifdef SYS_getsockname
+ACL_SYSCALL(getsockname)
+#endif
 #ifdef SYS_getsockopt
 ACL_SYSCALL(getsockopt)
 #endif
@@ -127,6 +148,9 @@ ACL_SYSCALL(getuid)
 #endif
 #ifdef SYS_ioctl
 ACL_SYSCALL(ioctl)
+#endif
+#ifdef SYS_listen
+ACL_SYSCALL(listen)
 #endif
 #ifdef SYS_lseek
 ACL_SYSCALL(lseek)
@@ -143,11 +167,17 @@ ACL_SYSCALL(memfd_create)
 #ifdef SYS_mkdir
 ACL_SYSCALL(mkdir)
 #endif
+#ifdef SYS_mkdirat
+ACL_SYSCALL(mkdirat)
+#endif
 #ifdef SYS_mmap
 ACL_SYSCALL(mmap)
 #endif
 #ifdef SYS_mprotect
 ACL_SYSCALL(mprotect)
+#endif
+#ifdef SYS_mremap
+ACL_SYSCALL(mremap)
 #endif
 #ifdef SYS_munmap
 ACL_SYSCALL(munmap)
@@ -160,6 +190,9 @@ ACL_SYSCALL(openat)
 #endif
 #ifdef SYS_pause
 ACL_SYSCALL(pause)
+#endif
+#ifdef SYS_pipe2
+ACL_SYSCALL(pipe2)
 #endif
 #ifdef SYS_ppoll
 ACL_SYSCALL(ppoll)
@@ -227,6 +260,9 @@ ACL_SYSCALL(sched_yield)
 #ifdef SYS_sendmsg
 ACL_SYSCALL(sendmsg)
 #endif
+#ifdef SYS_sendto
+ACL_SYSCALL(sendto)
+#endif
 #ifdef SYS_set_robust_list
 ACL_SYSCALL(set_robust_list)
 #endif
@@ -260,6 +296,12 @@ ACL_SYSCALL(statx)
 #ifdef SYS_sysinfo
 ACL_SYSCALL(sysinfo)
 #endif
+#ifdef SYS_timerfd_create
+ACL_SYSCALL(timerfd_create)
+#endif
+#ifdef SYS_timerfd_settime
+ACL_SYSCALL(timerfd_settime)
+#endif
 #ifdef SYS_uname
 ACL_SYSCALL(uname)
 #endif
@@ -280,9 +322,6 @@ ACL_SYSCALL(writev)
 // and its flags are checked.
 
 // threads and exit
-#ifdef SYS_clone
-ACL_SYSCALL(clone)
-#endif
 #ifdef SYS_kill
 ACL_SYSCALL(kill)
 #endif
@@ -306,9 +345,6 @@ ACL_SYSCALL(mincore)
 #ifdef SYS_mlock
 ACL_SYSCALL(mlock)
 #endif
-#ifdef SYS_mremap
-ACL_SYSCALL(mremap)
-#endif
 #ifdef SYS_msync
 ACL_SYSCALL(msync)
 #endif
@@ -325,9 +361,6 @@ ACL_SYSCALL(close_range)
 #endif
 #ifdef SYS_copy_file_range
 ACL_SYSCALL(copy_file_range)
-#endif
-#ifdef SYS_dup
-ACL_SYSCALL(dup)
 #endif
 #ifdef SYS_dup2
 ACL_SYSCALL(dup2)
@@ -353,17 +386,11 @@ ACL_SYSCALL(link)
 #ifdef SYS_linkat
 ACL_SYSCALL(linkat)
 #endif
-#ifdef SYS_mkdirat
-ACL_SYSCALL(mkdirat)
-#endif
 #ifdef SYS_open
 ACL_SYSCALL(open)
 #endif
 #ifdef SYS_pipe
 ACL_SYSCALL(pipe)
-#endif
-#ifdef SYS_pipe2
-ACL_SYSCALL(pipe2)
 #endif
 #ifdef SYS_preadv
 ACL_SYSCALL(preadv)
@@ -412,9 +439,6 @@ ACL_SYSCALL(utimensat)
 #ifdef SYS_epoll_create
 ACL_SYSCALL(epoll_create)
 #endif
-#ifdef SYS_epoll_pwait
-ACL_SYSCALL(epoll_pwait)
-#endif
 #ifdef SYS_epoll_pwait2
 ACL_SYSCALL(epoll_pwait2)
 #endif
@@ -439,14 +463,8 @@ ACL_SYSCALL(pselect6)
 #ifdef SYS_select
 ACL_SYSCALL(select)
 #endif
-#ifdef SYS_timerfd_create
-ACL_SYSCALL(timerfd_create)
-#endif
 #ifdef SYS_timerfd_gettime
 ACL_SYSCALL(timerfd_gettime)
-#endif
-#ifdef SYS_timerfd_settime
-ACL_SYSCALL(timerfd_settime)
 #endif
 
 // time
@@ -520,9 +538,6 @@ ACL_SYSCALL(getppid)
 #ifdef SYS_getpriority
 ACL_SYSCALL(getpriority)
 #endif
-#ifdef SYS_getrlimit
-ACL_SYSCALL(getrlimit)
-#endif
 #ifdef SYS_getsid
 ACL_SYSCALL(getsid)
 #endif
@@ -540,12 +555,6 @@ ACL_SYSCALL(accept4)
 #ifdef SYS_getpeername
 ACL_SYSCALL(getpeername)
 #endif
-#ifdef SYS_getsockname
-ACL_SYSCALL(getsockname)
-#endif
-#ifdef SYS_listen
-ACL_SYSCALL(listen)
-#endif
 #ifdef SYS_recvfrom
 ACL_SYSCALL(recvfrom)
 #endif
@@ -554,9 +563,6 @@ ACL_SYSCALL(recvmmsg)
 #endif
 #ifdef SYS_sendmmsg
 ACL_SYSCALL(sendmmsg)
-#endif
-#ifdef SYS_sendto
-ACL_SYSCALL(sendto)
 #endif
 #ifdef SYS_shutdown
 ACL_SYSCALL(shutdown)

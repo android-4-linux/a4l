@@ -11,7 +11,9 @@
 #include <bit>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -106,8 +108,13 @@ class SplitPresenter final : public IPresenter {
       handle(r);
       close_fds(r);
     }
-    if (!would_block())
-      closed_.store(true, std::memory_order_relaxed);  // broker went away
+    if (!would_block()) {  // broker went away
+      {
+        std::lock_guard<std::mutex> lock(state_mu_);
+        closed_.store(true, std::memory_order_relaxed);
+      }
+      state_cv_.notify_all();
+    }
     return !closed();
   }
   void dispatch_repeat() noexcept override {}
@@ -167,12 +174,21 @@ class SplitPresenter final : public IPresenter {
     }
     // The real presenter is not ready again until the compositor's next
     // frame callback; the broker reports that with a PresentState. Until
-    // then this slot is busy and the others are as last reported.
-    ready_.store(false, std::memory_order_relaxed);
-    if (slot >= 0 && slot < 32)
-      free_mask_.fetch_and(~(1u << slot), std::memory_order_relaxed);
-    else
-      free_mask_.store(0, std::memory_order_relaxed);
+    // then this slot is busy and the others are as last reported. The frame
+    // is numbered so that a state the broker wrote before it saw this frame
+    // can be told from one written after.
+    {
+      std::lock_guard<std::mutex> lock(state_mu_);
+      const std::uint32_t seq = ++sent_frames_;
+      ready_.store(false, std::memory_order_relaxed);
+      if (slot >= 0 && slot < 32) {
+        slot_seq_[slot] = seq;
+        free_mask_.fetch_and(~(1u << slot), std::memory_order_relaxed);
+      } else {
+        any_slot_seq_ = seq;
+        free_mask_.store(0, std::memory_order_relaxed);
+      }
+    }
     submitted_.store(true, std::memory_order_relaxed);
     return true;
   }
@@ -190,6 +206,15 @@ class SplitPresenter final : public IPresenter {
 
   bool closed() const noexcept override {
     return closed_.load(std::memory_order_relaxed);
+  }
+
+  // The state changes on the looper thread, in handle(); a render thread
+  // waits here for it.
+  bool wait_ready(int timeout_ms) noexcept override {
+    std::unique_lock<std::mutex> lock(state_mu_);
+    state_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                       [this] { return ready() || closed(); });
+    return ready();
   }
 
   void set_ime_visible(bool visible) noexcept override {
@@ -220,18 +245,44 @@ class SplitPresenter final : public IPresenter {
           feedback_flags_.store(st.feedback_flags, std::memory_order_relaxed);
           feedback_ok_.store(true, std::memory_order_relaxed);
         }
-        free_mask_.store(st.free_mask, std::memory_order_relaxed);
-        ready_.store(st.ready != 0, std::memory_order_relaxed);
-        if (st.closed != 0)
+        {
+          // A state the broker wrote before it saw our latest frame: the
+          // slots of frames it has not seen are not free, whatever it says,
+          // and the compositor is not waiting for a frame.
+          std::lock_guard<std::mutex> lock(state_mu_);
+          const auto unseen = [&](std::uint32_t seq) {
+            return seq != 0 &&
+                   static_cast<std::int32_t>(seq - st.frames_seen) > 0;
+          };
+          std::uint32_t mask = st.free_mask;
+          for (int i = 0; i < 32; ++i) {
+            if (unseen(slot_seq_[i]))
+              mask &= ~(1u << i);
+          }
+          if (unseen(any_slot_seq_))
+            mask = 0;
+          free_mask_.store(mask, std::memory_order_relaxed);
+          ready_.store(st.ready != 0 && !unseen(sent_frames_),
+                       std::memory_order_relaxed);
+        }
+        if (st.closed != 0) {
+          std::lock_guard<std::mutex> lock(state_mu_);
           closed_.store(true, std::memory_order_relaxed);
+        }
+        state_cv_.notify_all();
         break;
       }
       case ipc::MsgType::Input:
         deliver(r);
         break;
-      case ipc::MsgType::Bye:
-        closed_.store(true, std::memory_order_relaxed);
+      case ipc::MsgType::Bye: {
+        {
+          std::lock_guard<std::mutex> lock(state_mu_);
+          closed_.store(true, std::memory_order_relaxed);
+        }
+        state_cv_.notify_all();
         break;
+      }
       default:
         break;
     }
@@ -280,6 +331,13 @@ class SplitPresenter final : public IPresenter {
   std::atomic<std::uint64_t> present_ns_{0};
   std::atomic<std::uint32_t> refresh_ns_{0};
   std::atomic<std::uint32_t> feedback_flags_{0};
+  // Frame numbering, under state_mu_: submit() runs on the render thread and
+  // PresentState is handled on the looper thread.
+  std::mutex state_mu_;
+  std::condition_variable state_cv_;  // ready or closed changed
+  std::uint32_t sent_frames_ = 0;     // PresentFrame messages sent
+  std::uint32_t slot_seq_[32] = {};   // the last frame put in each slot
+  std::uint32_t any_slot_seq_ = 0;    // the last frame the broker placed
 };
 
 }  // namespace
@@ -547,6 +605,7 @@ class Broker {
 
   void present(const ipc::Received& r) noexcept {
     const ipc::PresentFrame& p = r.msg.present;
+    ++frames_seen_;  // accepted or not: the child numbers what it sends
     // Everything below was written by the app process. Ask the kernel what
     // the descriptor is and how large, then check the frame against that,
     // the surface, and what the compositor advertised.
@@ -651,6 +710,7 @@ class Broker {
     st.ready = ready ? 1 : 0;
     st.free_mask = presenter_->free_mask();
     st.closed = closed ? 1 : 0;
+    st.frames_seen = frames_seen_;
     st.frame_time_ns = presenter_->frame_time_ns();
     st.feedback_ok = presenter_->last_present_feedback(
                          &st.present_ns, &st.refresh_ns, &st.feedback_flags)
@@ -668,6 +728,7 @@ class Broker {
   const BrokerOptions& options_;
   FrameLimits limits_;
   int surfaces_created_ = 0;
+  std::uint32_t frames_seen_ = 0;  // PresentFrame messages handled
   std::unique_ptr<IPresenter> presenter_;
   BrokerStats stats_;
   bool child_ready_ = false;  // the child's view of ready()

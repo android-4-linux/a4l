@@ -904,6 +904,78 @@ void* acl_native_egl_create_window_surface(void*,
                                                        config)
              : nullptr;
 }
+// Offscreen surfaces where the display has no pbuffer configs (see
+// NativeGlHooks::offscreen_on_window). EGL constants spelled out: this file
+// does not include EGL headers.
+void* g_mesa_egl_choose_config = nullptr;
+void* g_mesa_egl_create_pbuffer = nullptr;
+constexpr int kEglNone = 0x3038;
+constexpr int kEglSurfaceType = 0x3033;
+constexpr int kEglPbufferBit = 0x0001;
+constexpr int kEglWindowBit = 0x0004;
+constexpr int kEglWidth = 0x3057;
+constexpr int kEglHeight = 0x3056;
+bool offscreen_on_window() {
+  return g_native_gl_hooks.offscreen_on_window != nullptr &&
+         g_native_gl_hooks.offscreen_on_window(g_native_gl_hooks.user);
+}
+// eglChooseConfig override. Args: dpy, attrib_list, configs, config_size,
+// num_config.
+unsigned int acl_native_egl_choose_config(void* dpy,
+                                          const int* attribs,
+                                          void* configs,
+                                          int config_size,
+                                          int* num_config) {
+  using Fn = unsigned int (*)(void*, const int*, void*, int, int*);
+  const auto real = reinterpret_cast<Fn>(g_mesa_egl_choose_config);
+  if (real == nullptr)
+    return 0u;
+  // A bounded copy with the surface type rewritten. A list longer than any
+  // real one is passed through untouched.
+  static constexpr int kMaxPairs = 64;
+  int copy[2 * kMaxPairs + 1];
+  int n = 0;
+  bool rewritten = false;
+  if (attribs != nullptr && offscreen_on_window()) {
+    while (n < 2 * kMaxPairs && attribs[n] != kEglNone) {
+      copy[n] = attribs[n];
+      copy[n + 1] = attribs[n + 1];
+      if (attribs[n] == kEglSurfaceType &&
+          (attribs[n + 1] & kEglPbufferBit) != 0) {
+        copy[n + 1] = (attribs[n + 1] & ~kEglPbufferBit) | kEglWindowBit;
+        rewritten = true;
+      }
+      n += 2;
+    }
+    rewritten = rewritten && attribs[n] == kEglNone;
+    copy[n] = kEglNone;
+  }
+  return real(dpy, rewritten ? copy : attribs, configs, config_size,
+              num_config);
+}
+// eglCreatePbufferSurface override. Args: dpy, config, attrib_list.
+void* acl_native_egl_create_pbuffer_surface(void* dpy,
+                                            void* config,
+                                            const int* attribs) {
+  if (offscreen_on_window() &&
+      g_native_gl_hooks.create_offscreen_surface != nullptr) {
+    int w = 1, h = 1;
+    for (int i = 0; attribs != nullptr && i < 64 && attribs[i] != kEglNone;
+         i += 2) {
+      if (attribs[i] == kEglWidth)
+        w = attribs[i + 1];
+      else if (attribs[i] == kEglHeight)
+        h = attribs[i + 1];
+    }
+    return g_native_gl_hooks.create_offscreen_surface(g_native_gl_hooks.user,
+                                                      config, w, h);
+  }
+  using Fn = void* (*)(void*, void*, const int*);
+  return g_mesa_egl_create_pbuffer != nullptr
+             ? reinterpret_cast<Fn>(g_mesa_egl_create_pbuffer)(dpy, config,
+                                                               attribs)
+             : nullptr;
+}
 // Mesa's real eglSwapBuffers, saved before the bridge slot is redirected to the
 // shim below.
 void* g_mesa_egl_swap = nullptr;
@@ -1076,6 +1148,18 @@ void install_gl_forwarders(BionicRuntime* rt) {
       else if (std::strcmp(kEglForwardSyms[i], "eglSwapBuffers") == 0) {
         g_mesa_egl_swap = egl_b.fns[i];
         egl_b.fns[i] = reinterpret_cast<void*>(&acl_native_egl_swap_buffers);
+      }
+      // Offscreen surfaces on a display with no pbuffer configs (a --split
+      // child's gbm display). Both shims forward to Mesa unless the runtime
+      // says the display is one.
+      else if (std::strcmp(kEglForwardSyms[i], "eglChooseConfig") == 0) {
+        g_mesa_egl_choose_config = egl_b.fns[i];
+        egl_b.fns[i] = reinterpret_cast<void*>(&acl_native_egl_choose_config);
+      } else if (std::strcmp(kEglForwardSyms[i], "eglCreatePbufferSurface") ==
+                 0) {
+        g_mesa_egl_create_pbuffer = egl_b.fns[i];
+        egl_b.fns[i] =
+            reinterpret_cast<void*>(&acl_native_egl_create_pbuffer_surface);
       }
     }
     // Let ANativeWindow_getWidth/Height (in the loaded libandroid.so) report

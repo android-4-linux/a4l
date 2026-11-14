@@ -37,6 +37,11 @@ struct DmabufFrame {
   bool host_mapped = false;  // export memory is host-visible (mmap/verifiable)
   bool modifier_tiled =
       false;  // true = direct/tiled path, false = linear copy-fallback
+  // Which of the producer's buffers this is, when the producer keeps a small
+  // fixed set and reuses them (a gbm window in hold mode): a stable index,
+  // the same every time this buffer comes round. -1 if the producer does not
+  // say.
+  int buffer_index = -1;
 
   std::uint32_t stride() const {
     return planes[0].stride;

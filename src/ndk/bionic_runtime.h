@@ -52,6 +52,18 @@ struct NativeGlHooks {
   // consumer + swap (via the GlWindow), and return true. False for any other
   // surface, so the bridge shim forwards to Mesa's real eglSwapBuffers.
   bool (*swap_surface)(void* egl_surface, void* user) = nullptr;
+  // Offscreen surfaces on a display that has no pbuffer configs. Mesa's gbm
+  // platform, which a --split child renders on, offers window configs only,
+  // and an engine that asks for a pbuffer config (Impeller's offscreen
+  // context) finds none. When `offscreen_on_window` answers true, the shims
+  // turn a request for a pbuffer config into one for a window config, and
+  // `create_offscreen_surface` backs eglCreatePbufferSurface with an
+  // offscreen window of that size. Unset, or false: Mesa answers as it is.
+  bool (*offscreen_on_window)(void* user) = nullptr;
+  void* (*create_offscreen_surface)(void* user,
+                                    void* egl_config,
+                                    int width,
+                                    int height) = nullptr;
   void* user = nullptr;
 };
 // Register the hooks (idempotent; last wins). Called by the runtime at EGL
