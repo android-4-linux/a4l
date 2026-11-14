@@ -16,12 +16,7 @@
 #include <string>
 #include <utility>
 
-#if ACL_HAVE_LIBCRYPTO
-#include <openssl/crypto.h>
-#include <openssl/evp.h>
-#include <openssl/rsa.h>
-#include <openssl/x509.h>
-#endif
+#include "pkg/crypto_dl.h"
 
 namespace acl::pkg {
 
@@ -159,6 +154,12 @@ SigResult verify_signature(const Apk& /*apk*/, int /*platform_sdk*/) {
 
 namespace {
 
+// libcrypto's functions. verify_signature() checks the table loaded before
+// anything here runs.
+const Crypto& C() noexcept {
+  return *crypto();
+}
+
 using Bytes = std::span<const std::uint8_t>;
 
 constexpr std::uint32_t kBlockV2 = 0x7109871a;
@@ -214,7 +215,7 @@ const Algorithm* find_algorithm(std::uint32_t id) noexcept {
 }
 
 const EVP_MD* md_for(Digest d) noexcept {
-  return d == Digest::Sha512 ? EVP_sha512() : EVP_sha256();
+  return d == Digest::Sha512 ? C().EVP_sha512() : C().EVP_sha256();
 }
 
 std::size_t digest_size(Digest d) noexcept {
@@ -265,13 +266,13 @@ class Reader {
 };
 
 struct EvpPkeyFree {
-  void operator()(EVP_PKEY* p) const noexcept { EVP_PKEY_free(p); }
+  void operator()(EVP_PKEY* p) const noexcept { C().EVP_PKEY_free(p); }
 };
 struct X509Free {
-  void operator()(X509* p) const noexcept { X509_free(p); }
+  void operator()(X509* p) const noexcept { C().X509_free(p); }
 };
 struct MdCtxFree {
-  void operator()(EVP_MD_CTX* p) const noexcept { EVP_MD_CTX_free(p); }
+  void operator()(EVP_MD_CTX* p) const noexcept { C().EVP_MD_CTX_free(p); }
 };
 using PkeyPtr = std::unique_ptr<EVP_PKEY, EvpPkeyFree>;
 using X509Ptr = std::unique_ptr<X509, X509Free>;
@@ -305,7 +306,7 @@ struct Step {
 };
 
 bool key_matches_kind(const EVP_PKEY* key, KeyKind kind) noexcept {
-  const int id = EVP_PKEY_get_base_id(key);
+  const int id = C().EVP_PKEY_get_base_id(key);
   switch (kind) {
     case KeyKind::Rsa:
       return id == EVP_PKEY_RSA;
@@ -321,24 +322,24 @@ bool verify_raw_signature(EVP_PKEY* key,
                           const Algorithm& alg,
                           Bytes data,
                           Bytes sig) noexcept {
-  const MdCtxPtr ctx(EVP_MD_CTX_new());
+  const MdCtxPtr ctx(C().EVP_MD_CTX_new());
   if (!ctx)
     return false;
   EVP_PKEY_CTX* pctx = nullptr;  // owned by ctx
   const EVP_MD* md = md_for(alg.digest);
-  if (EVP_DigestVerifyInit(ctx.get(), &pctx, md, nullptr, key) != 1)
+  if (C().EVP_DigestVerifyInit(ctx.get(), &pctx, md, nullptr, key) != 1)
     return false;
   if (alg.pss) {
     // Salt length equals the digest length, MGF1 over the same digest.
-    if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) != 1 ||
-        EVP_PKEY_CTX_set_rsa_pss_saltlen(
+    if (C().EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) != 1 ||
+        C().EVP_PKEY_CTX_set_rsa_pss_saltlen(
             pctx, static_cast<int>(digest_size(alg.digest))) != 1 ||
-        EVP_PKEY_CTX_set_rsa_mgf1_md(pctx, md) != 1) {
+        C().EVP_PKEY_CTX_set_rsa_mgf1_md(pctx, md) != 1) {
       return false;
     }
   }
-  return EVP_DigestVerify(ctx.get(), sig.data(), sig.size(), data.data(),
-                          data.size()) == 1;
+  return C().EVP_DigestVerify(ctx.get(), sig.data(), sig.size(), data.data(),
+                              data.size()) == 1;
 }
 
 // State carried across the blocks of one APK.
@@ -414,7 +415,7 @@ Step verify_signer(Bytes signer, int scheme, Context& ctx, ApkSigner& out) {
     return Step::fail("public key too large");
   const std::uint8_t* kp = public_key.data();
   const PkeyPtr key(
-      d2i_PUBKEY(nullptr, &kp, static_cast<long>(public_key.size())));
+      C().d2i_PUBKEY(nullptr, &kp, static_cast<long>(public_key.size())));
   if (!key || kp != public_key.data() + public_key.size())
     return Step::fail("malformed public key");
   if (!key_matches_kind(key.get(), best->key))
@@ -454,8 +455,8 @@ Step verify_signer(Bytes signer, int scheme, Context& ctx, ApkSigner& out) {
   auto [it, inserted] = ctx.content_digests.try_emplace(
       best->digest, content_digest.begin(), content_digest.end());
   if (!inserted && (it->second.size() != content_digest.size() ||
-                    CRYPTO_memcmp(it->second.data(), content_digest.data(),
-                                  content_digest.size()) != 0)) {
+                    C().CRYPTO_memcmp(it->second.data(), content_digest.data(),
+                                      content_digest.size()) != 0)) {
     return Step::fail("signers disagree on the content digest");
   }
 
@@ -467,7 +468,7 @@ Step verify_signer(Bytes signer, int scheme, Context& ctx, ApkSigner& out) {
     if (!cs.slice(der) || der.size() > kMaxDerSize)
       return Step::fail("malformed certificate list");
     const std::uint8_t* cp = der.data();
-    X509Ptr x(d2i_X509(nullptr, &cp, static_cast<long>(der.size())));
+    X509Ptr x(C().d2i_X509(nullptr, &cp, static_cast<long>(der.size())));
     if (!x || cp != der.data() + der.size())
       return Step::fail("malformed certificate");
     if (!first_x509) {
@@ -478,8 +479,8 @@ Step verify_signer(Bytes signer, int scheme, Context& ctx, ApkSigner& out) {
   if (!first_x509)
     return Step::fail("no certificates in signed data");
   // get0: borrowed from the certificate.
-  EVP_PKEY* cert_key = X509_get0_pubkey(first_x509.get());
-  if (cert_key == nullptr || EVP_PKEY_eq(cert_key, key.get()) != 1)
+  EVP_PKEY* cert_key = C().X509_get0_pubkey(first_x509.get());
+  if (cert_key == nullptr || C().EVP_PKEY_eq(cert_key, key.get()) != 1)
     return Step::fail("public key does not match the signing certificate");
 
   if (v3) {
@@ -533,8 +534,8 @@ Step verify_signer(Bytes signer, int scheme, Context& ctx, ApkSigner& out) {
 
   std::uint8_t cert_hash[32];
   unsigned int cert_hash_len = 0;
-  if (EVP_Digest(first_cert.data(), first_cert.size(), cert_hash,
-                 &cert_hash_len, EVP_sha256(), nullptr) != 1) {
+  if (C().EVP_Digest(first_cert.data(), first_cert.size(), cert_hash,
+                     &cert_hash_len, C().EVP_sha256(), nullptr) != 1) {
     return Step::fail("certificate digest failed");
   }
   out.cert_der.assign(first_cert.begin(), first_cert.end());
@@ -575,7 +576,7 @@ bool content_digest(Bytes file,
   for (int i = 0; i < 4; ++i)
     top[1 + i] = static_cast<std::uint8_t>(chunks >> (8 * i));
 
-  const MdCtxPtr ctx(EVP_MD_CTX_new());
+  const MdCtxPtr ctx(C().EVP_MD_CTX_new());
   if (!ctx)
     return false;
   std::size_t index = 0;
@@ -590,11 +591,11 @@ bool content_digest(Bytes file,
           static_cast<std::uint8_t>(n >> 24),
       };
       unsigned int got = 0;
-      if (EVP_DigestInit_ex(ctx.get(), md, nullptr) != 1 ||
-          EVP_DigestUpdate(ctx.get(), prefix, sizeof(prefix)) != 1 ||
-          EVP_DigestUpdate(ctx.get(), s.data() + off, n) != 1 ||
-          EVP_DigestFinal_ex(ctx.get(), top.data() + 5 + index * dlen, &got) !=
-              1 ||
+      if (C().EVP_DigestInit_ex(ctx.get(), md, nullptr) != 1 ||
+          C().EVP_DigestUpdate(ctx.get(), prefix, sizeof(prefix)) != 1 ||
+          C().EVP_DigestUpdate(ctx.get(), s.data() + off, n) != 1 ||
+          C().EVP_DigestFinal_ex(ctx.get(), top.data() + 5 + index * dlen,
+                                 &got) != 1 ||
           got != dlen) {
         return false;
       }
@@ -602,8 +603,8 @@ bool content_digest(Bytes file,
   }
   out.resize(dlen);
   unsigned int got = 0;
-  return EVP_Digest(top.data(), top.size(), out.data(), &got, md, nullptr) ==
-             1 &&
+  return C().EVP_Digest(top.data(), top.size(), out.data(), &got, md,
+                        nullptr) == 1 &&
          got == dlen;
 }
 
@@ -679,6 +680,12 @@ BlockOutcome verify_block(Bytes block, int scheme, Context& ctx) {
 
 SigResult verify_signature(const Apk& apk, int platform_sdk) {
   SigResult result;
+  if (crypto() == nullptr) {
+    result.status = SigStatus::Unavailable;
+    result.message =
+        "libcrypto.so.3 could not be loaded; no signature was checked";
+    return result;
+  }
   const Bytes file = apk.bytes();
   const Apk::Layout& z = apk.layout();
 
@@ -797,7 +804,7 @@ SigResult verify_signature(const Apk& apk, int platform_sdk) {
     if (!content_digest(file, block_offset, z, kind, actual))
       return invalid(label + ": content digest could not be computed");
     if (actual.size() != expected.size() ||
-        CRYPTO_memcmp(actual.data(), expected.data(), actual.size()) != 0) {
+        C().CRYPTO_memcmp(actual.data(), expected.data(), actual.size()) != 0) {
       return invalid(label + ": file contents do not match the signed digest");
     }
   }

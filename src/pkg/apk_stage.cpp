@@ -22,9 +22,7 @@
 #include <utility>
 #include <vector>
 
-#if ACL_HAVE_LIBCRYPTO
-#include <openssl/evp.h>
-#endif
+#include "pkg/crypto_dl.h"
 
 namespace acl::pkg {
 namespace {
@@ -207,8 +205,8 @@ namespace {
 std::string sha256_hex(std::span<const std::uint8_t> data) {
   std::uint8_t md[32];
   unsigned int len = 0;
-  if (EVP_Digest(data.data(), data.size(), md, &len, EVP_sha256(), nullptr) !=
-          1 ||
+  if (crypto()->EVP_Digest(data.data(), data.size(), md, &len,
+                           crypto()->EVP_sha256(), nullptr) != 1 ||
       len != sizeof(md)) {
     return {};
   }
@@ -285,6 +283,10 @@ StageResult stage_verified(const Apk& source,
                            const std::string& cache_root,
                            int platform_sdk) {
   StageResult res;
+  if (crypto() == nullptr) {
+    res.sig = verify_signature(source, platform_sdk);  // Unavailable
+    return res;
+  }
   // The signing block names the copy: it holds the signed digest of the rest
   // of the file, so a verified copy with this block is this APK. Without a
   // block there is nothing to stage; report what the source is.

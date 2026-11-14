@@ -312,8 +312,10 @@ if have_secret
 endif
 
 # pkg/ APK signature verification (ADR-0009 C1): OpenSSL's libcrypto (Apache-2.0 from 3.0) supplies
-# SHA-2, RSA, ECDSA and X.509 parsing. Absent -> the verifier reports "unavailable" and checks
-# nothing, which `--verify=require` treats as a refusal.
+# SHA-2, RSA, ECDSA and X.509 parsing. Only its headers are used at build time: libcrypto.so.3 is
+# loaded privately at run time (src/pkg/crypto_dl.cpp), because linking it would shadow the
+# BoringSSL that host ART loads into the same process. Absent at either time -> the verifier
+# reports "unavailable" and checks nothing, which `--verify=require` treats as a refusal.
 crypto_dep = dependency('libcrypto', version : '>= 3.0', required : false)
 have_libcrypto = crypto_dep.found()
 if have_libcrypto

@@ -50,7 +50,7 @@ enum class SigStatus {
   Unsigned,     // no v2/v3 signature block in the file
   Invalid,      // a signature block is present and does not verify
   Unsupported,  // signed only with algorithms this verifier does not implement
-  Unavailable,  // built without libcrypto; nothing was checked
+  Unavailable,  // no libcrypto at build or run time; nothing was checked
 };
 
 const char* sig_status_name(SigStatus status) noexcept;
