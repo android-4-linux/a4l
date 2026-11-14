@@ -71,7 +71,7 @@ if py3.found()
     test(
       'no-linked-crypto',
       py3,
-      args : [files('run_no_linked_crypto_test.py'), readelf, acl_exe],
+      args : [files('run_no_linked_crypto_test.py'), readelf.full_path(), acl_exe],
       depends : [acl_exe],
       timeout : 30,
     )
