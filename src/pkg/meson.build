@@ -6,7 +6,11 @@
 # binary-XML manifest parsing move to libandroidfw when it is vendored.
 module_libs += static_library(
   'acl_pkg',
-  files('pkg.cpp', 'apk.cpp', 'apk_stage.cpp', 'apk_verify.cpp', 'manifest.cpp'),
+  files('pkg.cpp', 'apk.cpp', 'apk_stage.cpp', 'apk_verify.cpp', 'crypto_dl.cpp', 'manifest.cpp'),
   include_directories : [config_inc, core_inc],
-  dependencies : [zlib_dep, crypto_dep],
+  # libcrypto's headers only. It is loaded at run time (crypto_dl.cpp), never linked: a NEEDED
+  # entry would put OpenSSL ahead of the BoringSSL that host ART loads into the same process.
+  dependencies : [zlib_dep,
+                  crypto_dep.partial_dependency(compile_args : true, includes : true),
+                  meson.get_compiler('cpp').find_library('dl', required : false)],
 )

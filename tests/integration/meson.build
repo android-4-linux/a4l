@@ -64,6 +64,19 @@ if py3.found()
     )
   endif
 
+  # a4l must not link OpenSSL: it would shadow the BoringSSL host ART loads into the same process
+  # (see src/pkg/crypto_dl.h). The fault needs host ART, which CI lacks, so check the NEEDED list.
+  readelf = find_program('readelf', required : false)
+  if readelf.found()
+    test(
+      'no-linked-crypto',
+      py3,
+      args : [files('run_no_linked_crypto_test.py'), readelf, acl_exe],
+      depends : [acl_exe],
+      timeout : 30,
+    )
+  endif
+
   # `acl tone` manual audio-check command: run silent (ACL_AUDIO=null) so it is
   # deterministic and device-independent; asserts generation + frame accounting and
   # that it never hangs. Needs only the binary.
