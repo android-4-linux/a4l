@@ -21,6 +21,7 @@
 #include <string_view>
 #include <vector>
 
+#include <fcntl.h>
 #include <spawn.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -30,6 +31,8 @@
 
 #include "acl_config.h"
 #include "audio/audio.h"
+#include "confine/confine.h"
+#include "confine/seccomp_filter.h"
 #include "dex/dex_to_jvm.h"
 #include "dex/dexfile.h"
 #include "log/log.h"
@@ -109,10 +112,20 @@ void print_usage() {
       "(comma-\n"
       "                       separated list; also $ACL_APK_SIGNER); implies "
       "require\n"
-      "  --split              run the app in a child process; this one keeps "
-      "the\n"
-      "                       display, input and APK verification (GPU present "
-      "only)\n"
+      "  --split              run the app in a confined child process; this "
+      "one keeps\n"
+      "                       the display, input and APK verification (GPU "
+      "present\n"
+      "                       only). The child is sandboxed with bubblewrap "
+      "and a\n"
+      "                       seccomp filter: no home directory, no session, "
+      "no\n"
+      "                       network. $ACL_SPLIT_RO adds read-only paths\n"
+      "  --split=unconfined   the same split with nothing confining the "
+      "child\n"
+      "  --net=host           with --split: share the host's network (and "
+      "with it\n"
+      "                       every local service and abstract socket)\n"
       "  --present            show the rendered content view in a Wayland "
       "window\n"
       "                       (wcs); no-op if no compositor / built without "
@@ -347,8 +360,37 @@ int cmd_verify(const std::vector<std::string>& args) {
 // that socket (wm/split_present.h). `apk_path` is the file already admitted,
 // the verified copy when the policy enforces; the child is told not to verify
 // again.
-int run_split(const std::string& apk_path,
-              const std::vector<std::string>& args) {
+// A colon-separated list of paths with every relative one made absolute. A
+// confined child starts in "/", so a path relative to this process's
+// directory would not name the same file there.
+std::string absolute_list(std::string_view list) {
+  std::string out;
+  while (!list.empty()) {
+    const std::size_t c = list.find(':');
+    const std::string_view part = list.substr(0, c);
+    if (!part.empty()) {
+      if (!out.empty())
+        out += ':';
+      out += std::filesystem::absolute(part).lexically_normal().string();
+    }
+    if (c == std::string_view::npos)
+      break;
+    list.remove_prefix(c + 1);
+  }
+  return out;
+}
+
+struct SplitOptions {
+  bool confine = true;     // --split, as opposed to --split=unconfined
+  bool share_net = false;  // --net=host
+  std::vector<std::string> ro_paths;  // --framework, --classpath
+  std::vector<std::string> rw_paths;  // --cache
+};
+
+int run_split(const acl::pkg::Apk& apk,
+              const std::string& apk_path,
+              const std::vector<std::string>& args,
+              const SplitOptions& opt) {
 #if ACL_HAVE_VULKAN && ACL_HAVE_WCS
   char self[4096];
   const ssize_t self_len = ::readlink("/proc/self/exe", self, sizeof(self) - 1);
@@ -369,40 +411,118 @@ int run_split(const std::string& apk_path,
   }
 
   // The child's command line: this one, minus what the broker already did.
-  std::vector<std::string> argv_s = {self, "run", apk_path};
+  std::vector<std::string> argv_s = {
+      self, "run",
+      std::filesystem::absolute(apk_path).lexically_normal().string()};
   bool positional_seen = false;
   for (const std::string& a : args) {
-    if (a == "--split" || a.rfind("--verify", 0) == 0 ||
-        a.rfind("--signer", 0) == 0)
+    if (a.rfind("--split", 0) == 0 || a.rfind("--verify", 0) == 0 ||
+        a.rfind("--signer", 0) == 0 || a.rfind("--net", 0) == 0)
       continue;
     if (!a.empty() && a[0] != '-' && !positional_seen) {
       positional_seen = true;  // the APK path, replaced above
       continue;
     }
-    argv_s.push_back(a);
+    bool rewritten = false;
+    for (const std::string_view key :
+         {"--framework=", "--classpath=", "--cache="}) {
+      if (a.rfind(key, 0) == 0) {
+        argv_s.push_back(std::string(key) +
+                         absolute_list(std::string_view(a).substr(key.size())));
+        rewritten = true;
+      }
+    }
+    if (!rewritten)
+      argv_s.push_back(a);
   }
   argv_s.emplace_back("--verify=off");
 
-  // The child's environment: no route to the compositor except the socket.
+  // Confinement (ADR-0009 C4): the plan for bubblewrap, which becomes the
+  // program this process starts, and the child's environment as an allowlist.
   static constexpr int kChildFd = 3;
-  static constexpr std::string_view kDropped[] = {
-      "WAYLAND_DISPLAY=", "WAYLAND_SOCKET=", "ACL_APK_VERIFY=",
-      "ACL_APK_SIGNER=",  "ACL_SPLIT_FD=",   "ACL_SPLIT_DISPLAY=",
-      "ACL_SPLIT_BROKER="};
   std::vector<std::string> env_s;
-  bool gpu_set = false;
-  for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
-    const std::string_view v(*e);
-    bool drop = false;
-    for (const std::string_view d : kDropped)
-      drop = drop || v.rfind(d, 0) == 0;
-    if (drop)
-      continue;
-    gpu_set = gpu_set || v.rfind("ACL_PRESENT_GPU=", 0) == 0;
-    env_s.emplace_back(v);
+  if (opt.confine) {
+    acl::confine::SeccompMode mode{};
+    const char* mode_text = std::getenv("ACL_SPLIT_SECCOMP");
+    if (!acl::confine::parse_seccomp_mode(mode_text ? mode_text : "", mode)) {
+      acl::log::e(kTag, "split: bad $ACL_SPLIT_SECCOMP '{}' (errno|kill|off)",
+                  mode_text);
+      return kUsage;
+    }
+    if (mode != acl::confine::SeccompMode::Off &&
+        acl::confine::allowed_syscalls().empty()) {
+      acl::log::e(kTag,
+                  "split: a4l has no system call list for this architecture, "
+                  "so it cannot confine the app process; --split=unconfined "
+                  "runs it without confinement");
+      return kBackendUnavailable;
+    }
+    acl::pkg::Manifest manifest;
+    acl::pkg::ZipError merr;
+    if (auto mbytes = apk.read("AndroidManifest.xml", merr))
+      (void)acl::pkg::parse_manifest(*mbytes, manifest);
+    acl::confine::Inputs in;
+    in.apk = argv_s[2];
+    in.package_dir = acl::pkg::safe_package_dir(manifest.package);
+    in.ro_paths = opt.ro_paths;
+    in.rw_paths = opt.rw_paths;
+    in.share_net = opt.share_net;
+    acl::confine::Launch launch;
+    std::string why;
+    if (!acl::confine::plan_launch(in, environ, launch, why)) {
+      acl::log::e(kTag,
+                  "split: cannot confine the app process: {}; "
+                  "--split=unconfined runs it without confinement",
+                  why);
+      return kBackendUnavailable;
+    }
+    const std::vector<std::string> wrap = acl::confine::bwrap_argv(launch.plan);
+    argv_s.insert(argv_s.begin(), wrap.begin(), wrap.end());
+    env_s = std::move(launch.env);
+    env_s.push_back("ACL_SPLIT_CONFINED=" +
+                    acl::confine::describe_namespaces(!opt.share_net));
+    acl::log::i(kTag,
+                "split: confining the app process: {} read-only path(s), "
+                "data {}, cache {}, {} GPU node(s), network {}, seccomp {}",
+                launch.plan.ro.size(), launch.data_dir, launch.cache_dir,
+                launch.plan.devices.size(),
+                opt.share_net ? "shared with the host" : "none",
+                mode == acl::confine::SeccompMode::Off    ? "OFF"
+                : mode == acl::confine::SeccompMode::Kill ? "kill"
+                                                          : "errno");
+    if (mode == acl::confine::SeccompMode::Off)
+      acl::log::w(kTag,
+                  "split: $ACL_SPLIT_SECCOMP=off: the app process has "
+                  "every system call");
+    if (opt.share_net)
+      acl::log::w(kTag,
+                  "split: --net=host: the app process can reach every "
+                  "abstract socket and local service of this host, "
+                  "an X server among them");
+  } else {
+    // Unconfined: the caller's environment, minus the route to the
+    // compositor and what the broker decides.
+    static constexpr std::string_view kDropped[] = {
+        "WAYLAND_DISPLAY=",  "WAYLAND_SOCKET=",    "ACL_APK_VERIFY=",
+        "ACL_APK_SIGNER=",   "ACL_SPLIT_FD=",      "ACL_SPLIT_DISPLAY=",
+        "ACL_SPLIT_BROKER=", "ACL_SPLIT_CONFINED="};
+    for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
+      const std::string_view v(*e);
+      bool drop = false;
+      for (const std::string_view d : kDropped)
+        drop = drop || v.rfind(d, 0) == 0;
+      if (!drop)
+        env_s.emplace_back(v);
+    }
+    env_s.push_back("ACL_SPLIT_BROKER=" + std::to_string(::getpid()));
+    acl::log::w(kTag,
+                "split: --split=unconfined: nothing confines the app "
+                "process");
   }
+  bool gpu_set = false;
+  for (const std::string& e : env_s)
+    gpu_set = gpu_set || e.rfind("ACL_PRESENT_GPU=", 0) == 0;
   env_s.push_back("ACL_SPLIT_FD=" + std::to_string(kChildFd));
-  env_s.push_back("ACL_SPLIT_BROKER=" + std::to_string(::getpid()));
   env_s.push_back("ACL_SPLIT_DISPLAY=" + std::to_string(dw) + "x" +
                   std::to_string(dh) + "@" + std::to_string(dscale));
   if (!gpu_set)
@@ -419,9 +539,15 @@ int run_split(const std::string& apk_path,
   posix_spawn_file_actions_t fa;
   posix_spawn_file_actions_init(&fa);
   posix_spawn_file_actions_adddup2(&fa, child_end.native_handle(), kChildFd);
+  // The child inherits the socket and the standard streams, nothing else
+  // this process happens to hold open. A confined child gets no terminal
+  // input either.
+  posix_spawn_file_actions_addclosefrom_np(&fa, kChildFd + 1);
+  if (opt.confine)
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
   pid_t pid = 0;
   const int rc =
-      ::posix_spawn(&pid, self, &fa, nullptr, argv.data(), envp.data());
+      ::posix_spawn(&pid, argv[0], &fa, nullptr, argv.data(), envp.data());
   posix_spawn_file_actions_destroy(&fa);
   child_end.close();
   if (rc != 0) {
@@ -449,24 +575,30 @@ int run_split(const std::string& apk_path,
     ::kill(pid, SIGKILL);
     ::waitpid(pid, &wstatus, 0);
   }
+  // Bubblewrap reports a child killed by signal N as exit status 128 + N.
+  const bool signaled =
+      reaped && (WIFSIGNALED(wstatus) || (opt.confine && WIFEXITED(wstatus) &&
+                                          WEXITSTATUS(wstatus) > 128));
   acl::log::i(kTag,
               "split: app process ended ({}); {} frame(s) presented, {} input "
               "event(s) forwarded, {} message(s) rejected, {} datagram(s) from "
               "the app and {} to it",
-              !reaped                ? "killed after the window closed"
-              : WIFEXITED(wstatus)   ? "exited"
-              : WIFSIGNALED(wstatus) ? "signaled"
-                                     : "stopped",
+              !reaped              ? "killed after the window closed"
+              : signaled           ? "signaled"
+              : WIFEXITED(wstatus) ? "exited"
+                                   : "stopped",
               stats.frames, stats.inputs, stats.rejected, stats.from_child,
               stats.to_child);
   if (!reaped || stats.window_closed)
     return kOk;
-  if (WIFEXITED(wstatus))
+  if (WIFEXITED(wstatus) && !signaled)
     return WEXITSTATUS(wstatus);
   return kRuntimeError;
 #else
+  (void)apk;
   (void)apk_path;
   (void)args;
+  (void)opt;
   acl::log::e(kTag,
               "split: this build has no GPU present path (needs Vulkan and "
               "wcs); --split is unavailable");
@@ -490,13 +622,48 @@ bool adopt_split_child() {
   if (const char* d = std::getenv("ACL_SPLIT_DISPLAY"))
     std::sscanf(d, "%dx%d@%d", &w, &h, &scale);
   // Die with the broker. If it went away before the prctl took effect, the
-  // parent is no longer the pid it gave.
+  // parent is no longer the pid it gave. A confined child's parent is
+  // bubblewrap, which dies with the broker itself.
   ::prctl(PR_SET_PDEATHSIG, SIGKILL);
+  const char* confined = std::getenv("ACL_SPLIT_CONFINED");
   const char* broker = std::getenv("ACL_SPLIT_BROKER");
-  if (broker != nullptr && *broker != '\0' &&
+  if (confined == nullptr && broker != nullptr && *broker != '\0' &&
       ::getppid() != static_cast<pid_t>(std::atol(broker))) {
     std::fprintf(stderr, "a4l: the split broker is gone\n");
     return false;
+  }
+  // Confined (ADR-0009 C4): install the system call filter now, before the
+  // APK is opened, and refuse to go on unless this process is where the
+  // broker meant it to be.
+  if (confined != nullptr) {
+    acl::confine::SeccompMode mode{};
+    const char* mode_text = std::getenv("ACL_SPLIT_SECCOMP");
+    std::string why;
+    if (!acl::confine::parse_seccomp_mode(mode_text ? mode_text : "", mode)) {
+      why = "bad $ACL_SPLIT_SECCOMP";
+    } else if (mode != acl::confine::SeccompMode::Off) {
+      acl::confine::install_filter(mode == acl::confine::SeccompMode::Kill
+                                       ? acl::confine::Deny::Kill
+                                       : acl::confine::Deny::Errno,
+                                   why);
+    }
+    if (why.empty()) {
+      acl::confine::SelfCheck check;
+      check.host_namespaces = confined;
+      check.ipc_fd = fd;
+      check.expect_filter = mode != acl::confine::SeccompMode::Off;
+      why = acl::confine::verify_confined(check);
+    }
+    if (!why.empty()) {
+      std::fprintf(stderr, "a4l: the app process is not confined: %s\n",
+                   why.c_str());
+      return false;
+    }
+    acl::log::i(kTag,
+                "split: app process confined ({}system call filter, "
+                "own user, mount, pid and ipc namespaces)",
+                mode == acl::confine::SeccompMode::Off ? "NO " : "");
+    ::unsetenv("ACL_SPLIT_CONFINED");
   }
   ::unsetenv("ACL_SPLIT_FD");
   ::unsetenv("WAYLAND_DISPLAY");
@@ -518,6 +685,8 @@ int cmd_run(const std::vector<std::string>& args) {
   bool convert_dex = false;
   bool present = false;
   bool split = false;
+  SplitOptions split_opt;
+  bool net_flag_seen = false;
   std::string present_frames;
   acl::pkg::VerifyPolicy verify_policy;
   if (const char* e = std::getenv("ACL_APK_VERIFY"); e && *e) {
@@ -560,6 +729,21 @@ int cmd_run(const std::vector<std::string>& args) {
       present = true;
     } else if (a == "--split") {
       split = true;
+    } else if (match_opt(a, "--split", v)) {
+      if (v != "confined" && v != "unconfined") {
+        std::fprintf(stderr, "run: bad --split '%s' (confined|unconfined)\n",
+                     v.c_str());
+        return kUsage;
+      }
+      split = true;
+      split_opt.confine = v == "confined";
+    } else if (match_opt(a, "--net", v)) {
+      if (v != "none" && v != "host") {
+        std::fprintf(stderr, "run: bad --net '%s' (none|host)\n", v.c_str());
+        return kUsage;
+      }
+      net_flag_seen = true;
+      split_opt.share_net = v == "host";
     } else if (match_opt(a, "--present-frames", v)) {
       present = true;
       present_frames = v;
@@ -634,8 +818,25 @@ int cmd_run(const std::vector<std::string>& args) {
   }
   // The broker stops here: the APK is admitted, and everything it supplies
   // runs in the child.
-  if (split)
-    return run_split(apk_path, args);
+  if (net_flag_seen && !(split && split_opt.confine)) {
+    std::fprintf(stderr, "run: --net applies to a confined --split only\n");
+    return kUsage;
+  }
+  if (split) {
+    for (const auto* list : {&framework_dirs, &extra_classpath}) {
+      for (const std::string& p : *list)
+        split_opt.ro_paths.push_back(absolute_list(p));
+    }
+#ifdef ACL_DEFAULT_FRAMEWORK
+    split_opt.ro_paths.emplace_back(ACL_DEFAULT_FRAMEWORK);
+#endif
+#ifdef ACL_DEFAULT_ANDROID_JAR
+    split_opt.ro_paths.emplace_back(ACL_DEFAULT_ANDROID_JAR);
+#endif
+    if (!cache_dir.empty())
+      split_opt.rw_paths.push_back(absolute_list(cache_dir));
+    return run_split(*apk, apk_path, args, split_opt);
+  }
 
   std::vector<std::string> dex_files;
   for (const auto& e : apk->entries()) {

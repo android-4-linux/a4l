@@ -5,8 +5,10 @@
 # admits the APK, starts the app process on the admitted file, and reports how
 # it ended. --vm=null makes the app process leave after the package layer, so
 # this covers the spawn, the argument and environment handoff and the exit
-# path. Frames and input across the boundary are in tests/unit/
-# split_present_test.cpp; pixels need a GPU and host ART and are not in CI.
+# path. It runs --split=unconfined so that it does not depend on bubblewrap;
+# confinement is run_confine_test.py. Frames and input across the boundary
+# are in tests/unit/split_present_test.cpp; pixels need a GPU and host ART
+# and are not in CI.
 #
 # Usage: run_split_test.py <a4l_binary> <apk_dir> <1 if the build has the GPU
 #        present path, else 0>
@@ -46,12 +48,12 @@ def main() -> int:
 
     try:
         if not has_gpu:
-            code, out = run("run", signed, "--split", "--vm=null")
+            code, out = run("run", signed, "--split=unconfined", "--vm=null")
             check(code == UNAVAILABLE, "--split without the GPU path: exit %d" % code, out)
             check("--split is unavailable" in out, "no 'unavailable' message", out)
         else:
             # Admitted: the broker verifies, the app process runs the copy.
-            code, out = run("run", signed, "--split", "--vm=null",
+            code, out = run("run", signed, "--split=unconfined", "--vm=null",
                             "--verify=require")
             check(code == OK, "split run of a signed APK: exit %d" % code, out)
             # The two processes share stderr and their lines interleave in
@@ -79,7 +81,7 @@ def main() -> int:
                     (unsigned, ["--verify=require"], {}),
                     (unsigned, [], {"ACL_APK_VERIFY": "require"}),
                     (signed, ["--signer=" + "ab" * 32], {})):
-                code, out = run("run", apk, "--split", "--vm=null", *args,
+                code, out = run("run", apk, "--split=unconfined", "--vm=null", *args,
                                 env=env)
                 check(code == REFUSED,
                       "refused %s %s: exit %d" % (os.path.basename(apk), args, code),
@@ -88,7 +90,7 @@ def main() -> int:
                       "an app process was started for a refused APK", out)
 
             # The app process's own failure is the broker's exit code.
-            code, out = run("run", signed, "--split", "--vm=nonesuch")
+            code, out = run("run", signed, "--split=unconfined", "--vm=nonesuch")
             check(code != OK, "a failing app process exited 0", out)
 
         # A stray ACL_SPLIT_FD is not adopted.

@@ -24,6 +24,12 @@ Repository tooling. Phase 0 placeholder for the items called out in `plan.md` §
   the framework shims require (see `docs/framework-bootstrap.md` A1.1), then `a4l run <apk>
   --vm=art`. Needs a host ART build (`$ACL_ART_HOME`) and the AOSP host toolchain; exits 77 (skip)
   when absent. Example: `ACL_ART_HOME=… tools/run-apk.sh app.apk --present`.
+- **`record-seccomp.py` - record the system calls a confined app process makes.** Runs APKs
+  through `run-apk.sh --split` under `strace` with the filter off and prints the calls the app
+  process made, as a list or as the body of `src/confine/seccomp_allow_x86_64.inc` (ADR-0009
+  C4). The output is reviewed before it is committed. Use a compositor that does not go idle
+  (`weston --idle-time=0`): one that stops sending frame callbacks records the start of an app
+  and nothing after it.
 
 These land as they are needed; nothing here is on the critical path for the Phase 0 skeleton
 build. Scripts added here follow the same SPDX + provenance + DCO rules as the rest of the tree.
