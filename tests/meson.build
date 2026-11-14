@@ -6,3 +6,6 @@
 # harness are scaffolded as READMEs and land in later phases.
 subdir('unit')
 subdir('integration')
+if get_option('fuzzers')
+  subdir('fuzz')
+endif

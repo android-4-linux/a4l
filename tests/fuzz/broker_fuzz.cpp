@@ -1,0 +1,266 @@
+// SPDX-License-Identifier: Apache-2.0
+// Provenance: original a4l fuzz harness (docs/adr/ADR-0009 C5); the libFuzzer
+// entry point as documented at llvm.org/docs/LibFuzzer.html. No GPL-3.0
+// sources.
+//
+// Fuzzes everything the --split broker does with what an app process sends:
+// ipc::Channel::recv, the broker loop, the validation in wm/split_validate.h.
+// The input is a script of datagrams. Each is queued on the child's end of a
+// real socket pair, with descriptors of the fuzzer's choosing attached, and
+// the broker then serves the socket to a presenter that stands in for the
+// compositor and aborts if anything reaches it that validation should have
+// stopped.
+//
+// Record format, repeated to the end of the input:
+//   u8  descriptors: bits 0-1 how many (0-3), bits 2-7 which kinds
+//   u16 length, little-endian, capped at 2048
+//   that many bytes: the datagram
+//
+// Build and run: see tests/fuzz/meson.build.
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "acl_config.h"
+#include "ipc/ipc.h"
+#include "log/log.h"
+#include "wm/split_present.h"
+
+#if !(ACL_HAVE_VULKAN && ACL_HAVE_WCS)
+#error "the broker is built only with the GPU present path (Vulkan and wcs)"
+#endif
+
+using namespace acl;
+
+namespace {
+
+const std::vector<std::uint64_t> kModifiers = {0x11, 0x0200000000401b03ull};
+
+[[noreturn]] void fail(const char* what) {
+  std::fprintf(stderr, "broker_fuzz: %s\n", what);
+  std::abort();
+}
+
+// Strict UTF-8 with no control characters: what the broker promises of a
+// label, checked by other code than the broker's.
+bool printable_utf8(std::string_view s) {
+  std::size_t i = 0;
+  while (i < s.size()) {
+    const auto b = static_cast<unsigned char>(s[i]);
+    std::size_t len = b < 0x80         ? 1
+                      : (b >> 5) == 6  ? 2
+                      : (b >> 4) == 14 ? 3
+                      : (b >> 3) == 30 ? 4
+                                       : 0;
+    if (len == 0 || i + len > s.size())
+      return false;
+    std::uint32_t cp = len == 1 ? b : b & (0xffu >> (len + 1));
+    for (std::size_t k = 1; k < len; ++k) {
+      const auto c = static_cast<unsigned char>(s[i + k]);
+      if ((c & 0xc0) != 0x80)
+        return false;
+      cp = (cp << 6) | (c & 0x3fu);
+    }
+    static constexpr std::uint32_t kMin[5] = {0, 0, 0x80, 0x800, 0x10000};
+    if (cp < kMin[len] || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff) ||
+        cp < 0x20 || (cp >= 0x7f && cp < 0xa0))
+      return false;
+    i += len;
+  }
+  return true;
+}
+
+struct Surface {
+  int w = 0, h = 0;
+};
+
+class Presenter final : public wm::IPresenter {
+ public:
+  explicit Presenter(Surface s) : surface_(s) {}
+  int fd() noexcept override { return -1; }
+  int repeat_fd() noexcept override { return -1; }
+  bool dispatch() noexcept override { return true; }
+  void dispatch_repeat() noexcept override {}
+  bool ready() const noexcept override { return (calls_ & 1) == 0; }
+  int next_buffer() const noexcept override { return 0; }
+  std::uint32_t free_mask() const noexcept override { return 0b111; }
+  std::uint64_t frame_time_ns() const noexcept override { return 1; }
+  bool last_present_feedback(std::uint64_t* present_ns,
+                             std::uint32_t* refresh_ns,
+                             std::uint32_t* flags) const noexcept override {
+    *present_ns = 1;
+    *refresh_ns = 1;
+    *flags = 0;
+    return true;
+  }
+  const std::vector<std::uint64_t>& modifiers() const noexcept override {
+    return kModifiers;
+  }
+  bool submit(const gfx::DmabufFrame& f, int slot) noexcept override {
+    ++calls_;
+    struct stat st{};
+    if (::fstat(f.fd, &st) != 0 || !S_ISREG(st.st_mode))
+      fail("a frame's descriptor is not a buffer");
+    if (static_cast<int>(f.width) != surface_.w ||
+        static_cast<int>(f.height) != surface_.h)
+      fail("a frame is not the surface's size");
+    if (f.drm_format != 0x34325241u && f.drm_format != 0x34325258u)
+      fail("a frame has a format the presenter does not import");
+    if (f.modifier != 0 && f.modifier != 0x00ffffffffffffffull &&
+        std::find(kModifiers.begin(), kModifiers.end(), f.modifier) ==
+            kModifiers.end())
+      fail("a frame has a modifier that was not advertised");
+    if (f.plane_count < 1 || f.plane_count > 4)
+      fail("a frame has a bad plane count");
+    const std::uint64_t end =
+        f.planes[0].offset +
+        static_cast<std::uint64_t>(f.planes[0].stride) * f.height;
+    if (f.planes[0].stride < 4ull * f.width ||
+        end > static_cast<std::uint64_t>(st.st_size))
+      fail("a frame's pixels do not fit its buffer");
+    for (std::uint32_t i = 1; i < f.plane_count; ++i) {
+      if (f.planes[i].stride == 0 ||
+          f.planes[i].offset >= static_cast<std::uint64_t>(st.st_size))
+        fail("an auxiliary plane is outside the buffer");
+    }
+    if (slot < -1 || slot > 63)
+      fail("a frame has a slot outside the ring");
+    return (calls_ % 3) != 0;  // refuse some, as a busy slot would
+  }
+  bool keepalive() noexcept override {
+    ++calls_;
+    return true;
+  }
+  bool closed() const noexcept override { return false; }
+  void set_ime_visible(bool) noexcept override {}
+  void set_clipboard(const std::string& text) noexcept override {
+    if (text.size() > ipc::kMaxText)
+      fail("clipboard text over the bound");
+  }
+
+ private:
+  Surface surface_;
+  unsigned calls_ = 0;
+};
+
+wm::BufferFacts facts_of_any_file(int fd) {
+  struct stat st{};
+  if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode))
+    return {};
+  return {true, static_cast<std::uint64_t>(st.st_size)};
+}
+
+// Descriptors a child could send, opened once.
+const std::vector<int>& descriptor_kinds() {
+  static const std::vector<int> kinds = [] {
+    std::vector<int> v;
+    const int big = ::memfd_create("big", MFD_CLOEXEC);
+    const int small = ::memfd_create("small", MFD_CLOEXEC);
+    if (big < 0 || small < 0 || ::ftruncate(big, 4 << 20) != 0 ||
+        ::ftruncate(small, 4096) != 0)
+      fail("cannot make buffers");
+    v = {big, small, ::open("/dev/null", O_RDWR | O_CLOEXEC),
+         ::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)};
+    return v;
+  }();
+  return kinds;
+}
+
+int open_descriptors() {
+  int n = 0;
+  for (int fd = 0; fd < 256; ++fd)
+    n += ::fcntl(fd, F_GETFD) != -1;
+  return n;
+}
+
+}  // namespace
+
+extern "C" int LLVMFuzzerInitialize(int*, char***) {
+  // The broker logs each surface and each first refusal; at fuzzing speed
+  // that is the run's whole cost. Errors still print.
+  log::set_min_level(log::Level::Error);
+  return 0;
+}
+
+extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
+                                      std::size_t size) {
+  const std::vector<int>& kinds = descriptor_kinds();
+  const int before = open_descriptors();
+  {
+    auto [child, broker_end] = ipc::Channel::make_pair();
+    if (!child.valid())
+      fail("socketpair");
+    const int sock = child.native_handle();
+
+    std::size_t at = 0;
+    int queued = 0;
+    while (at + 3 <= size && queued < 256) {
+      const std::uint8_t sel = data[at];
+      std::size_t len =
+          data[at + 1] | (static_cast<std::size_t>(data[at + 2]) << 8);
+      at += 3;
+      len = std::min<std::size_t>({len, 2048, size - at});
+      int fds[3];
+      const int nfds = sel & 3;
+      for (int i = 0; i < nfds; ++i)
+        fds[i] = kinds[((sel >> 2) + i) % kinds.size()];
+      iovec iov{const_cast<std::uint8_t*>(data + at), len};
+      msghdr mh{};
+      mh.msg_iov = &iov;
+      mh.msg_iovlen = 1;
+      alignas(cmsghdr) char cbuf[CMSG_SPACE(sizeof(fds))] = {};
+      if (nfds > 0) {
+        mh.msg_control = cbuf;
+        mh.msg_controllen = CMSG_SPACE(sizeof(int) * nfds);
+        cmsghdr* cm = CMSG_FIRSTHDR(&mh);
+        cm->cmsg_level = SOL_SOCKET;
+        cm->cmsg_type = SCM_RIGHTS;
+        cm->cmsg_len = CMSG_LEN(sizeof(int) * nfds);
+        std::memcpy(CMSG_DATA(cm), fds, sizeof(int) * nfds);
+      }
+      at += len;
+      if (::sendmsg(sock, &mh, MSG_NOSIGNAL | MSG_DONTWAIT) < 0)
+        break;  // the queue is full: serve what is there
+      ++queued;
+    }
+    child.close();  // the broker reads to the end and returns
+
+    Surface current;
+    const wm::PresenterFactory open =
+        [&](int w, int h, std::string_view title, std::string_view app_id,
+            wm::InputCallback, bool) -> std::unique_ptr<wm::IPresenter> {
+      if (w <= 0 || h <= 0 || w > static_cast<int>(ipc::kMaxSurfaceDim) ||
+          h > static_cast<int>(ipc::kMaxSurfaceDim))
+        fail("a surface of an impossible size");
+      if (title.empty() || title.size() > 256 || !printable_utf8(title))
+        fail("a title that is not fit to show");
+      if (app_id.empty() || app_id.size() > 256 || !printable_utf8(app_id))
+        fail("an app id that is not fit to show");
+      current = {w, h};
+      return std::make_unique<Presenter>(current);
+    };
+    wm::BrokerOptions options;
+    options.inspect = facts_of_any_file;
+    const wm::BrokerStats stats =
+        wm::serve_split_child(broker_end, open, options, /*linger_ms=*/0);
+    if (stats.from_child > static_cast<std::uint64_t>(queued))
+      fail("more datagrams counted than were sent");
+    if (stats.frames + stats.rejected > stats.from_child)
+      fail("more outcomes than datagrams");
+  }
+  if (open_descriptors() != before)
+    fail("a descriptor was kept");
+  return 0;
+}

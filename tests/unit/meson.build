@@ -15,6 +15,7 @@ unit_test_sources = files(
   'log_test.cpp',
   'ipc_test.cpp',
   'split_present_test.cpp',
+  'split_validate_test.cpp',
   'confine_test.cpp',
   'runtime_test.cpp',
   'pkg_test.cpp',

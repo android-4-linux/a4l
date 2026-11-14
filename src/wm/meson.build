@@ -11,7 +11,7 @@
 # <wl/xdg_shell.hpp>, so NO --emit-interface-tables there) and wayland_presenter.cpp
 # uploads a gfx::Surface into a wl_shm buffer. Otherwise wm/ is a stub.
 
-wm_sources = [files('wm.cpp', 'present_sink.cpp', 'split_present.cpp')]  # present_sink: split-process external-dma-buf present seam (S2)
+wm_sources = [files('wm.cpp', 'present_sink.cpp', 'split_present.cpp', 'split_validate.cpp')]  # present_sink: split-process external-dma-buf present seam (S2)
 wm_inc = [config_inc, core_inc]
 wm_deps = [fmt_dep]  # present_sink logs via log/log.h
 wm_cpp_args = []

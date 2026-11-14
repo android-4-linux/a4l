@@ -116,14 +116,35 @@ bool Channel::recv(Received& out, bool nonblock) {
   do {
     n = ::recvmsg(fd_, &mh, MSG_CMSG_CLOEXEC | (nonblock ? MSG_DONTWAIT : 0));
   } while (n < 0 && errno == EINTR);
-  if (n == 0) {  // clean EOF
-    errno = 0;
-    return false;
-  }
   if (n < 0)
     return false;
-  if (static_cast<size_t>(n) < sizeof(Message)) {  // truncated / bogus
-    errno = EPROTO;
+  // Harvest any passed fds (up to kMaxFds) before anything can return: the
+  // kernel has already installed them in this process, whatever the datagram
+  // turns out to hold.
+  int recvd[kMaxFds];
+  int nfds = 0;
+  for (cmsghdr* cm = CMSG_FIRSTHDR(&mh); cm != nullptr;
+       cm = CMSG_NXTHDR(&mh, cm)) {
+    if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS &&
+        cm->cmsg_len >= CMSG_LEN(0)) {
+      const size_t count = (cm->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+      for (size_t i = 0; i < count; ++i) {
+        int f;
+        std::memcpy(&f, CMSG_DATA(cm) + i * sizeof(int), sizeof(int));
+        if (nfds < kMaxFds)
+          recvd[nfds++] = f;
+        else
+          ::close(f);  // more than a message carries; not ours to keep
+      }
+    }
+  }
+
+  // Zero bytes is the peer closing. An empty datagram reads the same way, and
+  // a peer that sends one has ended the conversation just as well.
+  if (static_cast<size_t>(n) < sizeof(Message)) {  // EOF, truncated or bogus
+    for (int i = 0; i < nfds; ++i)
+      ::close(recvd[i]);
+    errno = n == 0 ? 0 : EPROTO;
     return false;
   }
 
@@ -136,20 +157,6 @@ bool Channel::recv(Received& out, bool nonblock) {
     out.extra.assign(buf.begin() + sizeof(Message),
                      buf.begin() + sizeof(Message) + extra_len);
 
-  // Harvest any passed fds (up to kMaxFds).
-  int recvd[kMaxFds];
-  int nfds = 0;
-  for (cmsghdr* cm = CMSG_FIRSTHDR(&mh); cm != nullptr;
-       cm = CMSG_NXTHDR(&mh, cm)) {
-    if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS) {
-      int count = (cm->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-      for (int i = 0; i < count && nfds < kMaxFds; ++i) {
-        int f;
-        std::memcpy(&f, CMSG_DATA(cm) + i * sizeof(int), sizeof(int));
-        recvd[nfds++] = f;
-      }
-    }
-  }
   if (nfds > 0)
     out.fd0 = recvd[0];
   if (nfds > 1)

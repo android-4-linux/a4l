@@ -18,4 +18,4 @@ with a new one and mark the old `Status: Superseded by ADR-XXXX`.
 | [0006](ADR-0006-windowing-scaling.md) | Windowing/scaling: wcs + fractional-scale + viewport | Accepted |
 | [0007](ADR-0007-cal-host-native-skia.md) | CAL template host renders native Skia; Flutter optional | Accepted |
 | [0008](ADR-0008-reuse-host-native-floor.md) | Framework native floor: reuse AOSP host libs, not clean-room reimplement | Accepted (refines 0002; Spike A) |
-| [0009](ADR-0009-containment-process-boundary.md) | Containment: a process boundary at the dma-buf seam; seccomp alone rejected | Accepted (refines 0003; split runs on x86-64 with the child confined; C3 and C5 open) |
+| [0009](ADR-0009-containment-process-boundary.md) | Containment: a process boundary at the dma-buf seam; seccomp alone rejected | Accepted (refines 0003; split runs on x86-64 with the child confined and the broker validating; C3 open) |

@@ -353,8 +353,10 @@ namespace {
 
 class Broker {
  public:
-  Broker(ipc::Channel& channel, const PresenterFactory& open) noexcept
-      : channel_(channel), open_(open) {}
+  Broker(ipc::Channel& channel,
+         const PresenterFactory& open,
+         const BrokerOptions& options) noexcept
+      : channel_(channel), open_(open), options_(options) {}
 
   BrokerStats run(int linger_ms) noexcept {
     using Clock = std::chrono::steady_clock;
@@ -407,7 +409,9 @@ class Broker {
   // False once the child is gone.
   bool drain_child() noexcept {
     ipc::Received r;
-    for (;;) {
+    // A bounded number per pass: what is left stays queued in the socket and
+    // poll() reports it again, after the compositor has had its turn.
+    for (int handled = 0; handled < options_.drain_budget; ++handled) {
       if (!channel_.recv(r, /*nonblock=*/true)) {
         // A child that exits with our messages unread resets the socket. The
         // error is reported once, ahead of what the child sent last; read on.
@@ -415,7 +419,14 @@ class Broker {
           reset_seen_ = true;
           continue;
         }
-        break;
+        // A datagram shorter than a message is the child's mistake, not the
+        // end of the connection.
+        if (errno == EPROTO) {
+          ++stats_.from_child;
+          ++stats_.rejected;
+          continue;
+        }
+        return would_block();
       }
       ++stats_.from_child;
       const bool keep = handle(r);
@@ -423,7 +434,7 @@ class Broker {
       if (!keep)
         return false;
     }
-    return would_block();
+    return true;  // budget spent; more may be queued
   }
 
   bool handle(ipc::Received& r) noexcept {
@@ -480,57 +491,93 @@ class Broker {
 
   void create_surface(const ipc::Received& r) noexcept {
     const ipc::SurfaceInfo& si = r.msg.surface;
-    if (si.w == 0 || si.h == 0 || si.w > ipc::kMaxSurfaceDim ||
-        si.h > ipc::kMaxSurfaceDim) {
+    if (!check_surface(si)) {
       ++stats_.rejected;
       reply_surface(false);
       return;
     }
-    // extra = title, NUL, app id. Either may be empty. Control bytes are
-    // dropped: both strings end up in the compositor's window list.
+    // Each surface is a toplevel on the user's screen. An app has a handful
+    // over its life; a child that asks for more is refused from then on.
+    if (surfaces_created_ >= options_.max_surfaces) {
+      if (surfaces_created_ == options_.max_surfaces) {
+        log::w(kTag,
+               "broker: the child asked for more than {} surfaces; "
+               "refusing further ones",
+               options_.max_surfaces);
+        ++surfaces_created_;
+      }
+      ++stats_.rejected;
+      reply_surface(false);
+      return;
+    }
+    ++surfaces_created_;
+    // extra = title, NUL, app id. Either may be empty. Both end up in the
+    // compositor's window list, so they are reduced to printable UTF-8. The
+    // app id is the broker's own when it has one.
     const std::string names = as_string(r.extra, 600);
     const std::size_t nul = names.find('\0');
-    const auto clean = [](std::string_view in, const char* fallback) {
-      std::string out;
-      for (const char c : in.substr(0, 256)) {
-        if (static_cast<unsigned char>(c) >= 0x20 && c != 0x7f)
-          out.push_back(c);
-      }
-      return out.empty() ? std::string(fallback) : out;
-    };
     const std::string title =
-        clean(std::string_view(names).substr(0, nul), "a4l");
-    const std::string app_id = clean(
-        nul == std::string::npos ? std::string_view{}
-                                 : std::string_view(names).substr(nul + 1),
-        "org.acl.app");
+        clean_label(std::string_view(names).substr(0, nul), 256, "a4l");
+    const std::string app_id =
+        !options_.app_id.empty()
+            ? options_.app_id
+            : clean_label(nul == std::string::npos
+                              ? std::string_view{}
+                              : std::string_view(names).substr(nul + 1),
+                          256, "org.acl.app");
 
     presenter_.reset();  // one surface at a time
     child_ready_ = false;
     sent_closed_ = false;
+    limits_ = FrameLimits{};
     presenter_ = open_(
         static_cast<int>(si.w), static_cast<int>(si.h), title, app_id,
         [this](const InputEvent& ev) { forward_input(ev); }, si.want_ime != 0);
-    if (!presenter_)
+    if (!presenter_) {
       log::w(kTag, "broker: presenter_open {}x{} failed", si.w, si.h);
-    else
+    } else {
       log::i(kTag, "broker: surface {}x{} '{}' for the child", si.w, si.h,
              app_id);
+      limits_.have_surface = true;
+      limits_.surface_w = si.w;
+      limits_.surface_h = si.h;
+    }
     reply_surface(presenter_ != nullptr);
   }
 
   void present(const ipc::Received& r) noexcept {
     const ipc::PresentFrame& p = r.msg.present;
-    const std::uint32_t planes = p.plane_count == 0 ? 1 : p.plane_count;
-    // buffer_id is the presenter's ring slot; -1 lets the presenter pick. The
-    // presenter range-checks the slot itself, so only reject the absurd.
-    const std::int32_t slot = static_cast<std::int32_t>(p.buffer_id);
-    if (!presenter_ || r.fd0 < 0 || p.w == 0 || p.h == 0 ||
-        p.w > ipc::kMaxSurfaceDim || p.h > ipc::kMaxSurfaceDim ||
-        planes > ipc::kMaxPlanes || p.stride == 0 || slot < -1 || slot > 63) {
+    // Everything below was written by the app process. Ask the kernel what
+    // the descriptor is and how large, then check the frame against that,
+    // the surface, and what the compositor advertised.
+    FrameLimits limits = limits_;
+    limits.have_surface = limits.have_surface && presenter_ != nullptr;
+    if (presenter_)
+      limits.modifiers = presenter_->modifiers();
+    const BufferFacts facts = r.fd0 >= 0 && limits.have_surface
+                                  ? options_.inspect(r.fd0)
+                                  : BufferFacts{};
+    const FrameVerdict verdict = check_frame(p, r.fd0 >= 0, facts, limits);
+    if (verdict != FrameVerdict::Ok) {
+      const auto v = static_cast<std::size_t>(verdict);
+      if (stats_.frame_verdicts[v]++ == 0)
+        log::w(kTag,
+               "broker: refused a frame from the app process: {} ({}x{} "
+               "format 0x{:x} modifier 0x{:x} stride {} offset {}, buffer of "
+               "{} bytes); further ones of this kind are counted, not logged",
+               verdict_name(verdict), p.w, p.h, p.drm_format, p.modifier,
+               p.stride, p.offset, facts.size);
       ++stats_.rejected;
+      // The child believes it submitted. Keep the frame loop alive so that a
+      // refused frame does not hang it.
+      if (presenter_) {
+        presenter_->keepalive();
+        child_ready_ = false;
+      }
       return;
     }
+    const std::uint32_t planes = p.plane_count == 0 ? 1 : p.plane_count;
+    const std::int32_t slot = static_cast<std::int32_t>(p.buffer_id);
     gfx::DmabufFrame fr{};
     fr.fd = r.fd0;  // borrowed: libwayland dups it when the buffer is built
     fr.width = p.w;
@@ -544,6 +591,7 @@ class Broker {
     }
     fr.modifier = p.modifier;
     fr.drm_format = p.drm_format;
+    fr.mem_size = facts.size;
     fr.modifier_tiled = p.modifier != 0;
     // A refused frame (busy slot, failed import) must not strand the vsync
     // loop: the child already believes it submitted.
@@ -617,6 +665,9 @@ class Broker {
 
   ipc::Channel& channel_;
   const PresenterFactory& open_;
+  const BrokerOptions& options_;
+  FrameLimits limits_;
+  int surfaces_created_ = 0;
   std::unique_ptr<IPresenter> presenter_;
   BrokerStats stats_;
   bool child_ready_ = false;  // the child's view of ready()
@@ -628,8 +679,9 @@ class Broker {
 
 BrokerStats serve_split_child(ipc::Channel& channel,
                               const PresenterFactory& open,
+                              const BrokerOptions& options,
                               int linger_ms) noexcept {
-  return Broker(channel, open).run(linger_ms);
+  return Broker(channel, open, options).run(linger_ms);
 }
 
 #endif  // ACL_HAVE_VULKAN && ACL_HAVE_WCS

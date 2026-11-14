@@ -2,8 +2,9 @@
 # ADR-0009: Containment -- a process boundary at the dma-buf seam; seccomp alone rejected
 
 - **Status:** Accepted (boundary decided; the process split runs on x86-64 as `--split`, with
-  the child confined by namespaces and a seccomp allowlist; C3 and C5 are open, so untrusted
-  APKs are still not a supported use). Refines ADR-0003.
+  the child confined by namespaces and a seccomp allowlist and the broker validating what it
+  sends; C3 is open and nothing here has had outside review, so untrusted APKs are still not a
+  supported use). Refines ADR-0003.
 - **Date:** 2026-11-13
 - **Provenance:** plan.md §4 Phase 5, §6 R-10; docs/ndk-scope.md (trust model);
   docs/split-process-art.md; ADR-0001, ADR-0003, ADR-0005; `src/ipc/`, `src/runtime/split_vm.cpp`
@@ -77,7 +78,7 @@ cross; audio, native GL and video do not. The child is confined as of the same d
 | C2 | Split path at S5: a real APK renders and takes input | x86-64, Skia path, 2026-11-14: `a4l run --split` runs the app in a child a4l process whose presenter is a proxy (`wm/split_present.cpp`); the broker holds the only compositor connection. 3 corpus apps render on host ART; one presents 1176 frames in 20 s split against 1178 single-process. Input is forwarded and unit-tested; there is no controlled live input test. Not done: arm64 (`acl-art-host` is still S1), audio (a confined child cannot reach PipeWire and is silent; unconfined it opens PipeWire itself) |
 | C3 | Native GL and video cross the boundary as dma-buf | not designed; see below |
 | C4 | Child confined per Decision 2 | x86-64, 2026-11-14: `--split` starts the child through bubblewrap (`src/confine/`) in its own user, mount, pid, ipc, uts and network namespaces, and the child installs a seccomp allowlist on itself before it opens the APK. See "C4 as built" below for what it can reach and what is not covered. arm64: none |
-| C5 | Broker validates every message; receive path fuzzed | partial: the `--split` broker bounds-checks sizes, plane count, slot and strings and drops what fails (`wm/split_present.cpp`). Not checked: that the fd is a dma-buf, the format and modifier against what the compositor advertised. Not fuzzed |
+| C5 | Broker validates every message; receive path fuzzed | x86-64 `--split` broker, 2026-11-14: every frame is checked against what the kernel says about its descriptor, the surface and the compositor's advertised modifiers before it reaches the presenter (`wm/split_validate.cpp`), and the receive path is fuzzed (`tests/fuzz/broker_fuzz.cpp`). See "C5 as built" below. Not covered: the arm64 `acl-art-host` receive path (`runtime/split_vm.cpp`), and what the compositor does with a buffer that passes |
 
 **What it costs.**
 - **The native-GL path changes shape.** Single-process, Mesa commits a4l's own `wl_surface`
@@ -160,6 +161,53 @@ Not covered, and what keeps C4 from being the last word:
   it can print escape sequences and change terminal settings.
 - **Landlock is not used.** Decision 2 allows either; this is the namespace form.
 - **arm64** has no system call list and no split child that renders.
+
+**C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
+
+- **A frame.** The broker asks the kernel, not the child, what the descriptor is: `fstatfs` must
+  report the dma-buf filesystem and `lseek` gives the size. The frame is then refused unless its
+  width and height are the surface's, its format is ARGB8888 or XRGB8888, its modifier is
+  linear or one the compositor advertised, it has at most four planes, plane 0's stride holds a
+  row and its last row ends inside the buffer (computed in 64 bits), each auxiliary plane has a
+  stride and starts inside the buffer, and the slot is in range. A refused frame is counted by
+  reason, logged once per reason, and answered with a keepalive so the child's frame loop does
+  not hang.
+- **A surface.** Size bounded as before. At most 16 over a connection's life, since each is a
+  toplevel on the user's screen.
+- **The window's identity.** The app id is the package name from the APK the broker admitted,
+  not what the child sends. The title is the child's, reduced to valid UTF-8 with control,
+  bidirectional-override and zero-width characters removed.
+- **Descriptors.** Every descriptor that arrives is closed after its message is handled,
+  including those attached to a datagram too short to be a message and those beyond the two a
+  message carries.
+- **Volume.** The broker handles at most 64 messages before it returns to the compositor's
+  events, so a flooding child cannot starve its own window's close button.
+- **Everything else** (unknown tags, tags that only the broker sends) is counted and dropped.
+
+Tested three ways. Unit tests reach every refusal, with a real dma-buf from `udmabuf` where the
+host allows one. A seeded run sends 24000 damaged datagrams through the broker to a presenter
+that counts anything malformed reaching it and checks that no descriptor is kept. A libFuzzer
+harness drives the same loop under AddressSanitizer and UBSan: 67.9 million executions in ten
+minutes on eight workers, with no crash, no sanitizer report and no descriptor kept. With the
+buffer-bounds check removed, the same harness fails on its seed inputs.
+
+Measured on host ART under headless Weston, 20 s each, confined: `octalsuntime` 1177 frames,
+`forkyz` 1167, `foss4g` 2, with no frame refused; the counts before validation were 1179, 1169
+and 2.
+
+Not covered:
+
+- **The compositor's own import.** The presenter builds the `wl_buffer` with `create_immed`. A
+  real dma-buf that passes every check here and that the compositor still cannot import can end
+  in a protocol error, which closes the broker's connection: the app loses its own window and
+  nothing else. Importing asynchronously (`create` and its `failed` event) would turn that into
+  a dropped frame.
+- **Auxiliary planes** are checked for position only; their layout is the driver's.
+- **The fuzzing is a run, not a service.** It is not in CI and has no continuous corpus. The
+  presenter behind it is a stand-in, so libwayland and the compositor are outside it.
+- **arm64.** `runtime/split_vm.cpp` receives frames from `acl-art-host` with none of this.
+- **The clipboard.** The child may set it, up to 60 KiB, as any Wayland client with input focus
+  may. It cannot read it.
 
 **Follow-on.**
 - The seccomp allowlist is recorded from the app corpus (docs/app-corpus-status.md), not written
