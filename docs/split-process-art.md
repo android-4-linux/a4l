@@ -151,10 +151,13 @@ art-host; `present_dmabuf_loop` + input stay in a4l.
 ## Boundaries / non-goals
 
 - x86 stays **single-process** (glibc host ART, no IPC) — the split is arm64-only, selected at runtime
-  by libc/arch, so desktop x86 pays nothing.
+  by libc/arch, so desktop x86 pays nothing. **Amended by ADR-0009 (2026-11-13):** that holds for
+  vetted APKs; the split is also the containment boundary, and becomes a supported x86-64
+  configuration for untrusted ones.
 - No Binder and no general RPC/IDL: the IPC is a fixed, small, buffer-centric message set, not a
   serialization framework. It is an a4l-internal transport, not an Android-visible interface.
 - This is a **bring-up** architecture for arm64. If/when B2 (single-libc arm64 host ART) is completed,
   arm64 can collapse back to the single-process model; the `Backend::ArtSplit` seam is the only thing
   that would retire. The two are not mutually exclusive — B1-split unblocks the Pi now; B2 remains the
-  eventual clean end-state.
+  eventual clean end-state. **Amended by ADR-0009 (2026-11-13):** B2 removes the ABI reason for the
+  seam, not the containment one. The seam does not retire.
