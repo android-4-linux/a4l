@@ -32,6 +32,9 @@ import java.util.ArrayList;
 public class Main extends Activity {
     static final String TAG = "acl";
     static final int W = 640, H = 360, LEFT = 120, TOP = 100, FPS = 30, LOOPS = 3;
+    // The size the SurfaceView is laid out at again once playback has started, as a player
+    // view does when it learns the picture's aspect ratio.
+    static final int W2 = 560, H2 = 315;
 
     private boolean started;
 
@@ -62,7 +65,7 @@ public class Main extends Activity {
                 FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(W, H);
                 lp.leftMargin = LEFT;
                 lp.topMargin = TOP;
-                sv.getHolder().addCallback(new Callback());
+                sv.getHolder().addCallback(new Callback(sv));
                 root.addView(sv, 0, lp);
             }
         };
@@ -76,10 +79,24 @@ public class Main extends Activity {
     }
 
     private final class Callback implements SurfaceHolder.Callback {
+        private final SurfaceView sv;
+        Callback(SurfaceView sv) {
+            this.sv = sv;
+        }
         public void surfaceCreated(SurfaceHolder h) {
             if (started) return;
             started = true;
             Log.i(TAG, "VIDEO: surfaceCreated");
+            // Lay the view out again at another size while the video plays. The surface must
+            // survive it: the app is told the new size and not that the surface is gone.
+            new Handler(getMainLooper()).postDelayed(new Runnable() {
+                public void run() {
+                    FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) sv.getLayoutParams();
+                    lp.width = W2;
+                    lp.height = H2;
+                    sv.setLayoutParams(lp);
+                }
+            }, 400);
             try {
                 play(h);
             } catch (Throwable e) {
@@ -87,8 +104,12 @@ public class Main extends Activity {
                 System.exit(3);
             }
         }
-        public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) {}
-        public void surfaceDestroyed(SurfaceHolder h) {}
+        public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) {
+            Log.i(TAG, "VIDEO: surfaceChanged " + w + "x" + hh);
+        }
+        public void surfaceDestroyed(SurfaceHolder h) {
+            Log.i(TAG, "VIDEO: surfaceDestroyed");
+        }
     }
 
     // The offsets at which access units start: every access unit delimiter (NAL type 9).

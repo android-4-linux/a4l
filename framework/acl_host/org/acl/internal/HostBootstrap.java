@@ -4506,6 +4506,8 @@ public final class HostBootstrap {
 
     // A video SurfaceView we have already backed with a real Surface (so we fire surfaceCreated once).
     private static java.lang.ref.WeakReference<android.view.SurfaceView> sVideoSv;
+    // The size the app was last told its video surface has.
+    private static int sVideoW, sVideoH;
 
     /** Forget the injected video SurfaceView (activity transition): the next screen re-arms fresh. */
     public static void forgetVideoSurface() { sVideoSv = null; }
@@ -4528,6 +4530,21 @@ public final class HostBootstrap {
             sv.getLocationInWindow(loc);
             if (sVideoSv != null && sVideoSv.get() == sv) {  // already backed — keep the plane aligned
                 PresentDriver.setVideoBounds(loc[0], loc[1], w, h);
+                if (w != sVideoW || h != sVideoH) {
+                    // The app laid its video View out again at another size: a media3 PlayerView
+                    // does once it knows the picture's aspect ratio. The surface is the same one;
+                    // the app is told its new size, as SurfaceView.updateSurface would.
+                    sVideoW = w;
+                    sVideoH = h;
+                    Class<?> c = android.view.SurfaceView.class;
+                    setIntField(c, sv, "mSurfaceWidth", w);
+                    setIntField(c, sv, "mSurfaceHeight", h);
+                    int fmt = getIntField(c, sv, "mFormat", android.graphics.PixelFormat.RGBX_8888);
+                    android.view.SurfaceHolder holder = sv.getHolder();
+                    for (android.view.SurfaceHolder.Callback cb : snapshotCallbacks(c, sv)) {
+                        if (cb != null) cb.surfaceChanged(holder, fmt, w, h);
+                    }
+                }
                 return;
             }
             if (System.getenv("ACL_MC_DIAG") != null) {  // one-shot: what region does the app lay the video into?
@@ -4549,7 +4566,11 @@ public final class HostBootstrap {
             if (surf == null) return;
             setField(android.view.Surface.class, surf, "mNativeObject", Long.valueOf(handle));
             int fmt = getIntField(c, sv, "mRequestedFormat", android.graphics.PixelFormat.RGBX_8888);
-            setField(c, sv, "mHaveFrame", Boolean.TRUE);
+            // mHaveFrame stays false. With it set, every later layout of the view runs
+            // SurfaceView.updateSurface, which finds no window surface under a4l (there is no
+            // ViewRootImpl surface), tells the app its surface is destroyed and throws on a
+            // native a4l does not have. The player then has nowhere to show its frames. Resizes
+            // are handled above instead.
             setField(c, sv, "mVisible", Boolean.TRUE);
             setField(c, sv, "mRequestedVisible", Boolean.TRUE);
             setField(c, sv, "mSurfaceCreated", Boolean.TRUE);
@@ -4589,6 +4610,8 @@ public final class HostBootstrap {
             if (sv.getParent() instanceof android.view.View)
                 ((android.view.View) sv.getParent()).invalidate();
             sVideoSv = new java.lang.ref.WeakReference<>(sv);
+            sVideoW = w;
+            sVideoH = h;
             android.util.Log.i("acl", "maybeInjectVideoSurface: video SurfaceView surfaceCreated ("
                     + w + "x" + h + " @" + loc[0] + "," + loc[1] + ") punchHole nodes=" + punched);
         } catch (Throwable t) {
