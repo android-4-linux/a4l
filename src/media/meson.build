@@ -5,13 +5,17 @@
 # (LGPL, dynamic link only). MediaPlayer facade. The zero-copy video-decode path
 # ([[flutter-texture-bridge]] M5): VideoDecoder produces DRM_PRIME dma-buf frames the
 # ImageReader consumer imports with no copy.
-media_sources = files('media.cpp')
-media_deps = []
+media_sources = files('media.cpp', 'audio_decoder.cpp', 'audio_codec.cpp')
+media_deps = [fmt_dep]   # via log/log.h
+if have_ffmpeg
+  # Headers only: FFmpeg is dlopen'd at run time (audio_decoder.cpp, video_decoder.cpp).
+  media_deps += ff_dep
+endif
 # VideoDecoder needs the GL/dma-buf interchange (gfx::DmabufFrame) and FFmpeg headers (dlopen'd at
 # runtime, RTLD_LOCAL — no link, like soundpool). Built only when both are present.
 if have_gl and have_ffmpeg
   media_sources += files('video_decoder.cpp')
-  media_deps += [ff_dep, gl_libdrm_dep]  # gl_libdrm_dep: drm_fourcc.h (DRM_FORMAT_MOD_*)
+  media_deps += [gl_libdrm_dep]  # drm_fourcc.h (DRM_FORMAT_MOD_*)
 endif
 media_lib = static_library(
   'acl_media',
@@ -31,6 +35,19 @@ if have_gl and have_ffmpeg
     include_directories : [config_inc, core_inc],
     link_with : [media_lib, gfx_lib, acl_log],
     dependencies : [fmt_dep, egl_dep, glesv2_dep, gbm_dep, gl_libdrm_dep] + ff_dep,
+    install : false,
+  )
+endif
+
+if have_ffmpeg
+  # Decodes an elementary audio stream through media::AudioDecoder as a MediaCodec client
+  # would, and reports what came out. Driven by tests/integration/run_audio_decode_test.py.
+  audio_decode_probe = executable(
+    'acl-audio-decode-probe',
+    files('audio_decode_probe_main.cpp'),
+    include_directories : [config_inc, core_inc],
+    link_with : [media_lib, acl_log],
+    dependencies : [fmt_dep],
     install : false,
   )
 endif

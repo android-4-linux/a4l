@@ -15,14 +15,19 @@
 #include <jni.h>
 
 #include <cstring>
+#include <iterator>
+#include <string>
+#include <vector>
 
 #include "log/log.h"
+#include "media/audio_decoder.h"
 
 namespace acl::runtime {
 namespace {
 constexpr const char* kTag = "acl.media.codeclist";
 
 // MediaCodecInfo flags + constants.
+constexpr jint FLAG_IS_SOFTWARE_ONLY = (1 << 2);
 constexpr jint FLAG_IS_HARDWARE_ACCELERATED = (1 << 3);
 constexpr jint COLOR_FormatSurface = 0x7F000789;         // 2130708361
 constexpr jint COLOR_FormatYUV420Flexible = 0x7F420888;  // 2135033992
@@ -52,18 +57,52 @@ const ProfLev kHevcProfiles[] = {{HEVCProfileMain, HEVCHighTierLevel51},
                                  {HEVCProfileMain10, HEVCHighTierLevel51}};
 const ProfLev kVp9Profiles[] = {{VP9Profile0, VP9Level51},
                                 {VP9Profile2, VP9Level51}};
+// AAC object types (MediaCodecInfo.CodecProfileLevel.AACObject*): LC, HE and
+// HE v2, which FFmpeg's decoder covers. The level field is unused for AAC.
+constexpr jint AACObjectLC = 2, AACObjectHE = 5, AACObjectHE_PS = 29;
+const ProfLev kAacProfiles[] = {{AACObjectLC, 0},
+                                {AACObjectHE, 0},
+                                {AACObjectHE_PS, 0}};
+
 struct CodecEntry {
   const char* name;
   const char* mime;
   const ProfLev* profiles;
   int nprofiles;
+  bool audio = false;
 };
-const CodecEntry kCodecs[] = {
+const CodecEntry kVideoCodecs[] = {
     {"acl.h264.decoder", "video/avc", kAvcProfiles, 3},
     {"acl.hevc.decoder", "video/hevc", kHevcProfiles, 2},
     {"acl.vp9.decoder", "video/x-vnd.on2.vp9", kVp9Profiles, 2},
 };
-constexpr int kCodecCount = sizeof(kCodecs) / sizeof(kCodecs[0]);
+// Software audio decoders over FFmpeg (media::AudioDecoder). Each is listed
+// only if the FFmpeg on this host has it, so that a player is not offered a
+// decoder that cannot be made.
+const CodecEntry kAudioCodecs[] = {
+    {"acl.aac.decoder", "audio/mp4a-latm", kAacProfiles, 3, true},
+    {"acl.mp3.decoder", "audio/mpeg", nullptr, 0, true},
+    {"acl.opus.decoder", "audio/opus", nullptr, 0, true},
+    {"acl.vorbis.decoder", "audio/vorbis", nullptr, 0, true},
+    {"acl.flac.decoder", "audio/flac", nullptr, 0, true},
+};
+
+// The list, built once: the video decoders, then the audio decoders that are
+// available.
+const std::vector<CodecEntry>& codecs() {
+  static const std::vector<CodecEntry> list = [] {
+    std::vector<CodecEntry> v(std::begin(kVideoCodecs), std::end(kVideoCodecs));
+    for (const CodecEntry& e : kAudioCodecs) {
+      if (media::AudioDecoder::available(e.mime))
+        v.push_back(e);
+    }
+    return v;
+  }();
+  return list;
+}
+int codec_count() {
+  return static_cast<int>(codecs().size());
+}
 
 // Cached ids.
 jclass g_profilelevel_cls = nullptr;
@@ -91,29 +130,31 @@ void put_str(JNIEnv* env, jobject m, const char* k, const char* v) {
 void JNICALL MCL_native_init(JNIEnv*, jclass) {}
 
 jint JNICALL MCL_native_getCodecCount(JNIEnv*, jclass) {
-  return kCodecCount;
+  return codec_count();
 }
 
 jstring JNICALL MCL_getCodecName(JNIEnv* env, jclass, jint index) {
-  if (index < 0 || index >= kCodecCount)
+  if (index < 0 || index >= codec_count())
     return env->NewStringUTF("");
-  return env->NewStringUTF(kCodecs[index].name);
+  return env->NewStringUTF(codecs()[index].name);
 }
 jstring JNICALL MCL_getCanonicalName(JNIEnv* env, jclass c, jint index) {
   return MCL_getCodecName(env, c, index);
 }
 
-jint JNICALL MCL_getAttributes(JNIEnv*, jclass, jint) {
-  return FLAG_IS_HARDWARE_ACCELERATED;  // a HW decoder; not encoder / vendor /
-                                        // software-only
+jint JNICALL MCL_getAttributes(JNIEnv*, jclass, jint index) {
+  // Video: a hardware decoder. Audio: software, in this process.
+  if (index >= 0 && index < codec_count() && codecs()[index].audio)
+    return FLAG_IS_SOFTWARE_ONLY;
+  return FLAG_IS_HARDWARE_ACCELERATED;
 }
 
 jobjectArray JNICALL MCL_getSupportedTypes(JNIEnv* env, jclass, jint index) {
   jclass str = env->FindClass("java/lang/String");
-  if (index < 0 || index >= kCodecCount)
+  if (index < 0 || index >= codec_count())
     return env->NewObjectArray(0, str, nullptr);
   jobjectArray arr = env->NewObjectArray(1, str, nullptr);
-  env->SetObjectArrayElement(arr, 0, env->NewStringUTF(kCodecs[index].mime));
+  env->SetObjectArrayElement(arr, 0, env->NewStringUTF(codecs()[index].mime));
   env->DeleteLocalRef(str);
   return arr;
 }
@@ -122,9 +163,9 @@ jobject JNICALL MCL_getCodecCapabilities(JNIEnv* env,
                                          jclass,
                                          jint index,
                                          jstring /*type*/) {
-  if (index < 0 || index >= kCodecCount || g_caps_cls == nullptr)
+  if (index < 0 || index >= codec_count() || g_caps_cls == nullptr)
     return nullptr;
-  const CodecEntry& e = kCodecs[index];
+  const CodecEntry& e = codecs()[index];
 
   // CodecProfileLevel[] — the profiles/levels ExoPlayer checks the stream
   // against.
@@ -141,8 +182,10 @@ jobject JNICALL MCL_getCodecCapabilities(JNIEnv* env,
   // colorFormats — Surface output + a flexible YUV (a HW surface decoder).
   const jint cfs[] = {COLOR_FormatSurface, COLOR_FormatYUV420Flexible,
                       COLOR_FormatYUV420Planar};
-  jintArray colFmts = env->NewIntArray(3);
-  env->SetIntArrayRegion(colFmts, 0, 3, cfs);
+  // An audio decoder has no color formats.
+  jintArray colFmts = env->NewIntArray(e.audio ? 0 : 3);
+  if (!e.audio)
+    env->SetIntArrayRegion(colFmts, 0, 3, cfs);
 
   // defaultFormatMap needs "mime" (the ctor reads it); capabilitiesMap can be
   // minimal — VideoCapabilities then uses permissive platform limits
@@ -152,6 +195,10 @@ jobject JNICALL MCL_getCodecCapabilities(JNIEnv* env,
   jobject caps = new_hashmap(env);
   put_str(env, caps, "mime", e.mime);
   put_str(env, caps, "max-concurrent-instances", "16");
+  // AudioCapabilities takes the rest from the platform's limits for the type;
+  // what a4l adds is its own ceiling on channels.
+  if (e.audio)
+    put_str(env, caps, "max-channel-count", "8");
 
   jobject result = env->NewObject(g_caps_cls, g_caps_ctor, profLevs, colFmts,
                                   JNI_FALSE, defFmt, caps);
@@ -180,8 +227,8 @@ jint JNICALL MCL_findCodecByName(JNIEnv* env, jclass, jstring name) {
   const char* s = env->GetStringUTFChars(name, nullptr);
   int idx = -1;
   if (s != nullptr) {
-    for (int i = 0; i < kCodecCount; ++i)
-      if (std::strcmp(s, kCodecs[i].name) == 0) {
+    for (int i = 0; i < codec_count(); ++i)
+      if (std::strcmp(s, codecs()[i].name) == 0) {
         idx = i;
         break;
       }
@@ -268,6 +315,13 @@ void register_media_codec_list_natives(JNIEnv* env) {
   log::write(ok ? log::Level::Info : log::Level::Warn, kTag,
              ok ? "MediaCodecList natives bound (advertising acl.h264.decoder)"
                 : "MediaCodecList native bind incomplete");
+  std::string names;
+  for (const CodecEntry& e : codecs()) {
+    if (e.audio)
+      names += std::string(names.empty() ? "" : ", ") + e.mime;
+  }
+  log::i(kTag, "MediaCodecList: audio decoders for {}",
+         names.empty() ? "nothing (no FFmpeg decoder found)" : names);
 }
 
 }  // namespace acl::runtime

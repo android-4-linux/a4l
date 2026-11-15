@@ -83,8 +83,10 @@ below cites the commit that closed it; `git show <sha>` carries the measurement.
   native side on host ART: streaming and static tracks of linear PCM, blocking and
   non-blocking writes, the playback position and timestamp, volume. Verified with
   `tests/fixtures/audio_track`: 2 s of blocking writes take 1895 ms, and the recorded output is
-  the tone that was written. `MediaCodec` still has no audio decoder, so a media player's sound
-  track stays silent unless the app decodes it itself. Details in ADR-0009, "`AudioTrack`".
+  the tone that was written. `MediaCodec` decodes AAC, MP3, Opus, Vorbis and FLAC to PCM in
+  software (`tests/fixtures/audio_codec`: AAC through `MediaCodec` to an `AudioTrack`, by
+  dequeue calls and by callback). No player app has been run with them yet. Details in
+  ADR-0009, "`AudioTrack`" and "Audio decoders in `MediaCodec`".
 - **`gles_jni` / `GLSurfaceView` is registered.** `com.google.android.gles_jni.EGLImpl` plus
   `android.opengl.GLES20`/`GLES30` natives exist (`4e96f6d`, `4e1661f`, `75fe3a7`), Surface
   injection and GL present make libGDX GL apps run (`eef2785`), they receive input (`ae15c49`), and

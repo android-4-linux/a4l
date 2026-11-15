@@ -283,9 +283,9 @@ Not covered:
 - **Video in a texture.** A Flutter `video_player` clip goes through `ImageReader` into a GL
   texture, not through the video plane. That path stays inside the app process; it has not
   been run under `--split`.
-- **A clip's sound track** is still silent, single-process as well. `AudioTrack` plays
-  as of 2026-11-15 and crosses the boundary, but `MediaCodec` has no audio decoder, so a
-  player has nothing to write to it unless it brings its own.
+- **A clip's sound track.** `AudioTrack` plays and `MediaCodec` decodes audio as of
+  2026-11-15 (below), so the pieces a player needs are there in both modes. No player app has
+  been run with them: the fixtures drive video and audio separately.
 - **Pixels are checked by eye.** The integration test counts frames at the broker. That the
   picture is right was read from screenshots.
 - **Each frame is imported by the compositor**, a new `wl_buffer` per frame, with the limit
@@ -393,9 +393,6 @@ scale and half volume) to the end, with no other gap. Nothing was played on a re
 
 Not covered:
 
-- **No audio decoder.** `MediaCodec` decodes video only. A media player that relies on the
-  platform to decode AAC or Opus has nothing to write to its `AudioTrack` and stays silent.
-  This is the next thing between a4l and a clip with sound.
 - **No ExoPlayer or media3 app was run.** The fixture uses the calls a player's audio output
   makes, but none is in the corpus.
 - **Speed and pitch** (`PlaybackParams`, `setPlaybackRate`) are refused or read back as 1:
@@ -409,6 +406,63 @@ Not covered:
 - **Eight tracks at once under `--split`**, the broker's limit on open streams, with
   `SoundPool` counting as one. A ninth fails to initialize. Single-process has no limit, and
   each track is a thread.
+
+**Audio decoders in `MediaCodec` (2026-11-15).** `MediaCodec` decoded video only, onto a
+Surface. It now decodes audio to byte buffers of 16-bit PCM, in software through FFmpeg, in
+the process that asks: under `--split` that is the confined app process, which is where data
+an app supplies is parsed. Nothing new crosses the boundary; the PCM goes on to an
+`AudioTrack` like any other.
+
+- **Codecs:** AAC, MP3, Opus, Vorbis and FLAC, each listed in `MediaCodecList` only if the
+  FFmpeg on the host has its decoder. AAC is listed with the LC, HE and HE v2 object types;
+  LC is the one that was run. Codec-specific data is taken as a
+  `MediaFormat` carries it; for Vorbis, whose two `csd` buffers FFmpeg wants as three laced
+  header packets, the missing comment header is supplied.
+- **The buffer model** is `media::AudioCodec`, with no JNI in it: four input buffers and
+  eight output buffers. An input buffer stays in flight until its access unit is decoded and
+  decoding stops when every output buffer is held, so a client that queues without reading
+  waits; nothing grows.
+- **Both ways of driving it:** `dequeueInputBuffer` and `dequeueOutputBuffer`, and a
+  `MediaCodec.Callback`. The format is announced before the first buffer and on a change,
+  the stream ends with one flagged buffer, and `flush()` holds callbacks until `start()`.
+
+Measured on host ART. The decoder, on a 1 s 440 Hz stereo tone the `ffmpeg` CLI encoded
+(`tests/integration/run_audio_decode_test.py`):
+
+| Codec | access units | frames out | rate | measured |
+|---|---|---|---|---|
+| AAC (ADTS) | 48 | 49152 | 48000 | 440.4 Hz |
+| MP3 | 41 | 47232 | 44100 | 439.8 Hz |
+| Opus (Ogg) | 51 | 48648 | 48000 | 440.1 Hz |
+| Vorbis (Ogg) | 49 | 48704 | 48000 | 439.6 Hz |
+| FLAC (Ogg) | 11 | 48000 | 48000 | 439.0 Hz |
+
+End to end, a fixture app (`tests/fixtures/audio_codec`) finds the AAC decoder through
+`MediaCodecList`, decodes a 2 s tone of 95 access units into an `AudioTrack`, flushes, and
+decodes the first ten again. Driven by dequeue calls and by a callback, single-process and
+under `--split` confined, all four runs give the same: 97280 frames and the end of the stream,
+then 10240 frames after the flush, the track's position at 107520 of 107520, and under
+`--split` 107520 frames at the broker with none dropped or refused. Recorded from a PipeWire
+null sink, single-process and split give the same 2.219 s of 440 Hz.
+
+Not covered:
+
+- **No player app.** ExoPlayer and media3 bring their own container parsers and use
+  `MediaCodec` and `AudioTrack` as this fixture does, but none has been run; none is in the
+  corpus. Audio and video have not been played together, so their synchronization is
+  untested.
+- **`MediaExtractor` and `MediaPlayer`** have no native side. An app that leaves the
+  container to the platform cannot open a file.
+- **The legacy buffer arrays** (`getInputBuffers`, `getOutputBuffers`) are not provided;
+  `getInputBuffer(index)` and `getOutputBuffer(index)` are.
+- **Output is 16-bit.** A stream decoded to float or 24-bit is converted down. A frame of
+  more than eight channels is dropped.
+- **Other codecs:** AC-3, E-AC-3, DTS, AMR, ALAC, raw PCM and anything encoded for
+  passthrough are not listed. No encoder.
+- **Only AAC went through the Java API.** The other four are tested at the decoder, below
+  JNI.
+- **Decoder flaws.** FFmpeg parses the stream in the app process. Under `--split` that
+  process is the sandbox; single-process it is a4l itself.
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 
