@@ -19,6 +19,7 @@ unit_test_sources = files(
   'gl_hold_test.cpp',
   'vsync_cap_test.cpp',
   'video_geometry_test.cpp',
+  'audio_track_test.cpp',
   'confine_test.cpp',
   'runtime_test.cpp',
   'pkg_test.cpp',
