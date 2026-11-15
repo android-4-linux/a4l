@@ -24,7 +24,9 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <memory>
 #include <mutex>
 #include <string_view>
@@ -293,9 +295,25 @@ void JNICALL AT_native_finalize(JNIEnv* env, jobject thiz) {
 
 // ── transport ────────────────────────────────────────────────────────────
 
+// ACL_MC_DIAG: when a track is started, written and asked where it is, on
+// CLOCK_MONOTONIC, to line a player's audio clock up against its video.
+bool diag() {
+  static const bool on = std::getenv("ACL_MC_DIAG") != nullptr;
+  return on;
+}
+std::int64_t diag_now_ns() {
+  timespec ts{};
+  ::clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<std::int64_t>(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
+}
+
 void JNICALL AT_native_start(JNIEnv* env, jobject thiz) {
-  if (auto c = ctx_of(env, thiz))
+  if (auto c = ctx_of(env, thiz)) {
+    if (diag())
+      log::i(kTag, "diag: play at {} ns, {} frames buffered", diag_now_ns(),
+             c->track->buffered_frames());
     c->track->play();
+  }
 }
 void JNICALL AT_native_stop(JNIEnv* env, jobject thiz) {
   if (auto c = ctx_of(env, thiz))
@@ -447,6 +465,13 @@ jint JNICALL AT_native_write_native_bytes(JNIEnv* env,
 
 jint JNICALL AT_native_get_position(JNIEnv* env, jobject thiz) {
   auto c = ctx_of(env, thiz);
+  if (c && diag()) {
+    static std::atomic<int> n{0};
+    if (n.fetch_add(1) % 50 == 0)
+      log::i(kTag, "diag: position {} at {} ns, {} buffered, {} to the sink",
+             c->track->position(), diag_now_ns(), c->track->buffered_frames(),
+             c->track->frames_to_sink());
+  }
   // The head position is a 32-bit count that wraps.
   return c ? static_cast<jint>(static_cast<std::uint32_t>(c->track->position()))
            : 0;

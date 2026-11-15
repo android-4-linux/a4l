@@ -10,6 +10,7 @@
 #define ACL_GFX_DMABUF_FRAME_H
 
 #include <cstdint>
+#include <memory>
 
 namespace acl::gfx {
 
@@ -42,6 +43,14 @@ struct DmabufFrame {
   // the same every time this buffer comes round. -1 if the producer does not
   // say.
   int buffer_index = -1;
+  // What keeps the memory behind `fd` from being reused while this frame is
+  // in use, when the fd alone does not: a hardware decoder's surface goes
+  // back to the decoder's pool when its frame is dropped, and the next
+  // picture is decoded into it, whoever still holds a dup of the fd. Copied
+  // with the frame, so that whoever keeps the frame (a queued output buffer,
+  // an imported AHardwareBuffer, a wl_buffer the compositor has not
+  // released) keeps the surface. Empty for a producer that owns its buffers.
+  std::shared_ptr<void> hold;
 
   std::uint32_t stride() const {
     return planes[0].stride;

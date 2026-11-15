@@ -487,11 +487,63 @@ also a check of the track's position. A screenshot from a headless sway during p
 
 Not covered:
 
-- **Synchronization** of picture and sound was not measured.
+- **Synchronization** was measured afterwards and was wrong; see "Picture against sound"
+  below.
 - **One clip, one player.** Local file, no seeking, pausing or looping, no streaming, no
   network. The app is not in the test suite: building it needs a Flutter SDK.
 - **The video plane.** `video_player` shows its frames through a GL texture. A player that
   uses a `SurfaceView` (a media3 `PlayerView`) with a sound track has not been run.
+
+**Picture against sound (2026-11-15).** Measured on the same app with a clip that flashes
+white and beeps at the same instants: a point of the screen and the sink's monitor captured
+on one clock (`tools/measure-av-sync.py`), and a reference player, mpv, through the same
+capture to take out the capture's own delay. Audio minus video, positive when the sound is
+late:
+
+| | ms |
+|---|---|
+| mpv, four runs | +16, +18, +16, +18 |
+| a4l as it was, single process | +277 to +342; five flashes seen for two shown |
+| with decoder surfaces held | +75, +73 |
+| and frames shown at the time asked: three runs | +18, +26, +21 |
+| the same, a clip with eight events | +26 |
+| `--split`, five runs of the eight-event clip | +30, +24, +35, +44, +21 |
+
+The sound was about 280 ms behind the picture, and frames were shown out of order. Three
+causes, none of them in the audio path, whose clock was checked against the wall clock and
+found exact:
+
+- **A queued frame showed a later picture.** A decoded frame is passed on as a descriptor of
+  the decoder's surface. Nothing kept the surface: the next `receive_frame()` returned it to
+  FFmpeg's pool, the decoder drew a later picture into it, and a frame still waiting in the
+  codec's output queue, up to eight deep, showed that picture. A frame now carries a hold on
+  its surface (`gfx::DmabufFrame::hold`), kept by whoever keeps the frame: a queued output
+  buffer, an imported `AHardwareBuffer`, a `wl_buffer` the compositor has not released, and
+  under `--split` the last eight frames sent to the broker. The decoder's pool is larger by
+  the same count (24 extra surfaces, was 12).
+- **Frames were shown as soon as released.** A player releases a frame with the time it is
+  to be shown, and ahead of it: media3 by 45 ms at the median here, 50 at most. Android holds
+  the buffer until then. a4l showed it at once. `MediaCodec.releaseOutputBuffer(index,
+  timeNs)` now waits for the time (`media::TimedRelease`).
+- **Under `--split` the video decoder sometimes would not start.** When the output surface
+  is not there yet, media3 makes a placeholder surface with Java EGL14. A split child has no
+  display server, so `eglInitialize` failed; with that fixed, no config matched, because the
+  app asks for a window config and Mesa's surfaceless platform has pbuffer configs only.
+  EGL14's default display is now the surfaceless platform where there is no display server,
+  and a window config request falls back to a pbuffer one. Before, three runs of four took
+  this path and failed; after, five of five complete, four of them through it.
+
+Not covered:
+
+- **The capture's resolution.** The screen is sampled every 16 ms, and a frame is on screen
+  for 33. Differences under about 15 ms are not resolved.
+- **Real outputs.** A null sink and a headless compositor have no latency of their own. A
+  real display adds a frame or two and a real audio device its buffer, and a4l does not yet
+  tell the player the device's latency: `AudioTrack`'s position counts what PipeWire holds in
+  a4l's queue, not what it holds further on.
+- **The video plane.** These frames go through a GL texture. A `SurfaceView` player's frames
+  are shown as they are decoded, paced by their input; they were not measured against sound.
+- **Seeking, pausing, speed.**
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 

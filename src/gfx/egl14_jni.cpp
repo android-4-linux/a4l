@@ -13,7 +13,11 @@
 #pragma GCC diagnostic ignored "-Wwrite-strings"
 
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
 #include "log/log.h"
 
 namespace acl::gfx {
@@ -108,15 +112,51 @@ jint JNICALL EGL14_eglGetError(JNIEnv*, jclass) {
   return eglGetError();
 }
 
+// The display for EGL_DEFAULT_DISPLAY. Java EGL14 is used here for offscreen
+// work (a player's placeholder surface, a pbuffer context), never for a
+// window. Mesa's default asks the display server named in the environment.
+// A process with none, which is what a --split app process is, gets Mesa's
+// surfaceless platform: pbuffers on the render node and no window system.
+// Without this eglInitialize fails there, and media3 fails to start a video
+// decoder whenever it needs its placeholder surface.
+EGLDisplay default_display() {
+  const char* wayland = std::getenv("WAYLAND_DISPLAY");
+  const char* x11 = std::getenv("DISPLAY");
+  const bool server = (wayland != nullptr && *wayland != '\0') ||
+                      (x11 != nullptr && *x11 != '\0');
+  if (!server) {
+    const char* ext = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
+    if (ext != nullptr &&
+        std::strstr(ext, "EGL_MESA_platform_surfaceless") != nullptr) {
+      const EGLDisplay d = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA,
+                                                 EGL_DEFAULT_DISPLAY, nullptr);
+      if (d != EGL_NO_DISPLAY) {
+        static bool once = false;
+        if (!once) {
+          once = true;
+          log::i("acl.gfx.egl14",
+                 "EGL14: no display server in the environment; the default "
+                 "display is Mesa's surfaceless platform");
+        }
+        return d;
+      }
+    }
+  }
+  return eglGetDisplay(EGL_DEFAULT_DISPLAY);
+}
+
+EGLDisplay display_for(intptr_t id) {
+  return id == 0 ? default_display()
+                 : eglGetDisplay(reinterpret_cast<EGLNativeDisplayType>(id));
+}
+
 jobject JNICALL EGL14_eglGetDisplayInt(JNIEnv* e, jclass, jint id) {
   return to_handle(e, g_dpy_cls, g_dpy_ctor,
-                   eglGetDisplay(reinterpret_cast<EGLNativeDisplayType>(
-                       static_cast<intptr_t>(id))));
+                   display_for(static_cast<intptr_t>(id)));
 }
 jobject JNICALL EGL14_eglGetDisplay(JNIEnv* e, jclass, jlong id) {
   return to_handle(e, g_dpy_cls, g_dpy_ctor,
-                   eglGetDisplay(reinterpret_cast<EGLNativeDisplayType>(
-                       static_cast<intptr_t>(id))));
+                   display_for(static_cast<intptr_t>(id)));
 }
 
 jboolean JNICALL EGL14_eglInitialize(JNIEnv* e,
@@ -162,6 +202,30 @@ jboolean JNICALL EGL14_eglChooseConfig(JNIEnv* e,
   EGLBoolean r =
       eglChooseConfig(from_handle(e, g_dpy_get, dpy),
                       a != nullptr ? a + ao : nullptr, c, configSize, &n);
+  // An app asks for a window config and then makes a pbuffer on it (media3's
+  // placeholder surface does): on Android one config serves both. Mesa's
+  // surfaceless platform has no window configs. Where nothing matched and a
+  // window was asked for, ask again for a pbuffer; the offscreen surface the
+  // app goes on to make is what that gives it.
+  if (r == EGL_TRUE && n == 0 && a != nullptr) {
+    std::vector<EGLint> retry;
+    bool asked_window = false;
+    for (const EGLint* p = a + ao; *p != EGL_NONE; p += 2) {
+      EGLint value = p[1];
+      if (p[0] == EGL_SURFACE_TYPE && (value & EGL_WINDOW_BIT) != 0) {
+        value = (value & ~EGL_WINDOW_BIT) | EGL_PBUFFER_BIT;
+        asked_window = true;
+      }
+      retry.push_back(p[0]);
+      retry.push_back(value);
+      if (retry.size() > 128)
+        break;  // not an attribute list
+    }
+    retry.push_back(EGL_NONE);
+    if (asked_window)
+      r = eglChooseConfig(from_handle(e, g_dpy_get, dpy), retry.data(), c,
+                          configSize, &n);
+  }
   if (r == EGL_TRUE && configs != nullptr) {
     for (EGLint i = 0; i < n && (co + i) < e->GetArrayLength(configs); ++i)
       e->SetObjectArrayElement(configs, co + i,

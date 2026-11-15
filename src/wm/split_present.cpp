@@ -369,6 +369,15 @@ class SplitPresenter final : public IPresenter {
     }
     v.dest = {x, y, w, h};
     channel_.send(m, {}, frame.fd);
+    // The broker and the compositor are told nothing of a decoder's surface
+    // pool; the datagram carries only the descriptor. The surface is kept
+    // here for as long as the broker may hold the frame on screen: the last
+    // kVideoHolds frames, twice what the plane keeps in flight.
+    if (frame.hold) {
+      std::lock_guard<std::mutex> lock(state_mu_);
+      video_holds_[video_hold_next_] = frame.hold;
+      video_hold_next_ = (video_hold_next_ + 1) % kVideoHolds;
+    }
   }
   void hide_video() noexcept override {
     ipc::Message m;
@@ -395,6 +404,8 @@ class SplitPresenter final : public IPresenter {
     {
       std::lock_guard<std::mutex> lock(state_mu_);
       video_bounds_set_ = false;
+      for (auto& h : video_holds_)
+        h.reset();
     }
     ipc::Message m;
     m.type = ipc::MsgType::VideoReset;
@@ -522,7 +533,10 @@ class SplitPresenter final : public IPresenter {
   std::uint32_t sent_frames_ = 0;     // PresentFrame messages sent
   std::uint32_t slot_seq_[32] = {};   // the last frame put in each slot
   std::uint32_t any_slot_seq_ = 0;    // the last frame the broker placed
-  ipc::VideoRect video_bounds_{};     // the last VideoBounds sent
+  static constexpr int kVideoHolds = 8;
+  std::shared_ptr<void> video_holds_[kVideoHolds];
+  int video_hold_next_ = 0;
+  ipc::VideoRect video_bounds_{};  // the last VideoBounds sent
   bool video_bounds_set_ = false;
 };
 
