@@ -207,6 +207,17 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 300,
       is_parallel : false,
     )
+    # A GLSurfaceView laid out again while it renders, single-process and under --split: the
+    # renderer must go on drawing and its surface must not be reported destroyed. Starts a
+    # headless Weston for itself. Needs host ART; SKIPs otherwise, which includes CI.
+    test(
+      'gl-surface-relayout',
+      py3,
+      args : [files('run_gl_surface_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+      is_parallel : false,
+    )
     # An audio decoder in MediaCodec, end to end: a fixture app decodes AAC through MediaCodec
     # (dequeue calls and a Callback) into an AudioTrack, single-process and under --split.
     # Counting sink: no sound. Needs host ART and FFmpeg; SKIPs otherwise, which includes CI.
