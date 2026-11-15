@@ -47,8 +47,9 @@ driver loaded, and the compositor is elsewhere.
 State of that path, from `git log` rather than from the doc: S1 (ART boots in the subprocess,
 x86-64 and a Pi 4) and the S2 present-sink seam landed 2026-07-15/16; nothing since on arm64.
 On x86-64 the split runs as of 2026-11-14 (`a4l run --split`, see C2 below): frames and input
-cross, for Skia and for native GL, and decoded video crosses to the video plane; audio does
-not. The child is confined as of the same date (C4).
+cross, for Skia and for native GL, and decoded video crosses to the video plane. Audio crosses
+as of 2026-11-15 (see "S4 as built: audio" below). The child is confined as of 2026-11-14
+(C4).
 
 ## Decision
 1. **The containment boundary is a process boundary at the dma-buf seam.** Everything an APK
@@ -97,7 +98,7 @@ not. The child is confined as of the same date (C4).
   the app supplies.
 - **On x86-64 the child is today's whole process minus present, input and audio**: glibc host ART
   plus the bionic bridge of ADR-0005. As built, it is the a4l binary itself, started by the broker
-  with the socket in `ACL_SPLIT_FD`; audio has not moved yet. On arm64 it is all-bionic and needs no `%fs` bridge.
+  with the socket in `ACL_SPLIT_FD`. On arm64 it is all-bionic and needs no `%fs` bridge.
 
 **What it does not fix.** A second process under the same UID is not a boundary by itself:
 unconfined (`--split=unconfined`) the child can open the user's files and, where Yama permits,
@@ -149,9 +150,11 @@ Not covered, and what keeps C4 from being the last word:
 - **The recording is narrow.** Nine APKs, no injected input, no reachable network. A call an app
   makes only on a touch or a completed connection may be off the list; it fails with `ENOSYS`.
   Nobody outside the project has reviewed the list.
-- **No audio, no system services.** With no D-Bus, connectivity, battery, power, Bluetooth,
+- **No system services.** With no D-Bus, connectivity, battery, power, Bluetooth,
   storage and service discovery fall back to their null backends, and the keystore is in memory.
-  These move to the broker with S4, not into the sandbox.
+  These belong in the broker, not in the sandbox; they have not moved. Audio has: the broker
+  plays the child's streams ("S4 as built: audio" below). The master volume has not, so
+  `AudioManager` volume calls do nothing under `--split`.
 - **Network is all or nothing.** The default is none. `--net=host` shares the host's network
   namespace, and with it every abstract socket and loopback service, an X server among them.
   A filtered network needs a proxy in the broker or a user-mode network stack.
@@ -280,7 +283,9 @@ Not covered:
 - **Video in a texture.** A Flutter `video_player` clip goes through `ImageReader` into a GL
   texture, not through the video plane. That path stays inside the app process; it has not
   been run under `--split`.
-- **Audio** does not cross. A clip plays silent.
+- **A clip's sound track** is still silent, single-process as well: on host ART
+  `AudioTrack` has no native side, and that is what a player writes decoded audio to. What
+  crosses the boundary is every `audio::Sink`, which today means `SoundPool`.
 - **Pixels are checked by eye.** The integration test counts frames at the broker. That the
   picture is right was read from screenshots.
 - **Each frame is imported by the compositor**, a new `wl_buffer` per frame, with the limit
@@ -296,6 +301,63 @@ an opaque background showed no video, and a `SurfaceView` present at launch was 
 surface. The fixture app now has an opaque background, and the test runs it with the
 `SurfaceView` there at launch and added later.
 
+**S4 as built: audio (x86-64, 2026-11-15).** The child has no audio device and no route to
+PipeWire. Every sound a4l makes goes through one interface, `audio::Sink`, and in a split
+child `audio::make_sink()` returns a sink that sends to the broker. The broker plays each
+stream through the sink it would have used single-process: PipeWire with `ACL_AUDIO=pipewire`,
+else the one that counts frames.
+
+- **Three messages.** `AudioOpen` states a stream's id, rate and channel count. `AudioWrite`
+  carries interleaved 16-bit samples for it, in the datagram, at most 16 KiB each.
+  `AudioClose` ends it.
+- **No shared memory.** The earlier sketch had a ring both processes map. A mapping the app
+  process can truncate is one the broker can fault on, and audio is small enough to copy:
+  about 176 kB a second for 44.1 kHz stereo.
+- **One way in.** `libsoundpool.so` carries its own copy of the audio code and cannot see the
+  a4l process's channel, so the sink reaches it through four functions the executable exports
+  by name (`acl_split_audio_*`). Only those are exported.
+
+What the broker checks (C5):
+
+- **The stream.** An id below 8, a rate from 4000 to 192000 Hz, 1 to 8 channels. At most 8
+  open at once, and at most 64 opened over a connection's life, since opening one can hold the
+  broker for half a second waiting on the audio daemon.
+- **A write.** For a stream that is open, not empty, and a whole number of frames.
+- **How much is held.** A write that would put more than 2 s of audio in the sink unplayed is
+  dropped and counted. A child that is ahead of the device is not malformed, but how much the
+  broker holds is not the child's to decide.
+
+Measured on host ART under headless Weston, confined, filter on. The fixture app
+(`tests/fixtures/sound_pool`) loads a 1 s 440 Hz tone and plays it twice through `SoundPool`.
+The app process sent 112128 frames at 44.1 kHz; the broker's sink got 112128, with none
+dropped and none refused. Single-process the same app writes 112128.
+
+Played through PipeWire into a null sink made for the purpose, and recorded from it, the two
+modes give the same sound: a tone of 2.008 s with its spectral peak at 439.2 Hz, the same
+level, and the same two gaps of about 2 ms. Nothing was played on a real output.
+
+Tested: unit tests for each refusal; broker tests that send 20000 frames and compare them
+sample for sample with what the sink was given, write from a second thread, and exercise the
+drop; the fuzz harness with a sink that reads every sample it is handed, 32.9 million
+executions in five minutes on eight workers with no finding.
+`tests/integration/run_split_audio_test.py` runs the fixture end to end with the counting
+sink, so it makes no sound; it needs host ART and so does not run in CI.
+
+Not covered:
+
+- **`AudioTrack`.** Not implemented on host ART in either mode, so a media player's sound
+  track, and any app that synthesizes its own audio, is silent. When it is built it uses
+  `audio::Sink` and crosses the same way.
+- **No backpressure.** A sink takes what it is given at once; `SoundPool` paces itself by the
+  clock. A producer that relies on a blocking write would run ahead and be dropped. Feeding
+  the device's progress back to the child, which `AudioTrack` needs for its playback
+  position too, is not built.
+- **Master volume and audio focus** stay unavailable in the child.
+- **Recording.** There is no path for audio input in either mode.
+- **One app, one format.** `SoundPool` mixes to 44.1 kHz stereo whatever the source; no other
+  rate or channel count has crossed outside the unit tests.
+- **Latency** was not measured.
+
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 
 - **A frame.** The broker asks the kernel, not the child, what the descriptor is: `fstatfs` must
@@ -307,6 +369,7 @@ surface. The fixture app now has an opaque background, and the test runs it with
   reason, logged once per reason, and answered with a keepalive so the child's frame loop does
   not hang.
 - **A video frame, a video rectangle.** See "C3 as built: video" above.
+- **An audio stream, an audio write.** See "S4 as built: audio" above.
 - **A surface.** Size bounded as before. At most 16 over a connection's life, since each is a
   toplevel on the user's screen.
 - **The window's identity.** The app id is the package name from the APK the broker admitted,

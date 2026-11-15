@@ -566,6 +566,9 @@ int run_split(const acl::pkg::Apk& apk,
   // name; such a window keeps the id the child gives, cleaned.
   if (package_dir != "app")
     broker_options.app_id = package_dir;
+  // The app process has no audio device; its streams are played here, by
+  // whatever ACL_AUDIO selects in this process.
+  broker_options.audio_sink = acl::audio::make_device_sink;
   const acl::wm::BrokerStats stats = acl::wm::serve_split_child(
       broker_end, acl::wm::presenter_open, broker_options);
   broker_end.close();
@@ -591,13 +594,15 @@ int run_split(const acl::pkg::Apk& apk,
   acl::log::i(kTag,
               "split: app process ended ({}); {} frame(s) presented, {} input "
               "event(s) forwarded, {} message(s) rejected, {} datagram(s) from "
-              "the app and {} to it, {} video frame(s) shown",
+              "the app and {} to it, {} video frame(s) shown, {} audio "
+              "frame(s) to the audio sink and {} dropped",
               !reaped              ? "killed after the window closed"
               : signaled           ? "signaled"
               : WIFEXITED(wstatus) ? "exited"
                                    : "stopped",
               stats.frames, stats.inputs, stats.rejected, stats.from_child,
-              stats.to_child, stats.video_frames);
+              stats.to_child, stats.video_frames, stats.audio_frames,
+              stats.audio_dropped);
   if (!reaped || stats.window_closed)
     return kOk;
   if (WIFEXITED(wstatus) && !signaled)

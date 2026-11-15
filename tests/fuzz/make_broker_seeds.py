@@ -19,6 +19,7 @@ MESSAGE_SIZE = 96
 HELLO, BYE, LOG, SURFACE_CREATE, SURFACE_RESIZE, PRESENT_FRAME = 1, 2, 3, 4, 5, 6
 KEEPALIVE, IME_VISIBLE, CLIPBOARD = 15, 16, 17
 VIDEO_FRAME, VIDEO_BOUNDS, VIDEO_HIDE, VIDEO_RESET = 18, 19, 20, 21
+AUDIO_OPEN, AUDIO_WRITE, AUDIO_CLOSE = 11, 12, 22
 AR24 = 0x34325241
 NV12 = 0x3231564E
 TILED = 0x0200000000401B03
@@ -60,6 +61,20 @@ def video(w, h, fmt=NV12, modifier=0, planes=2, dest=None, stride=None,
 
 def bounds(x, y, w, h):
     return message(VIDEO_BOUNDS, struct.pack("<4i", x, y, w, h))
+
+
+def audio_open(stream, rate=44100, channels=2):
+    return message(AUDIO_OPEN, struct.pack("<III", stream, rate, channels))
+
+
+def audio_write(stream, frames=64, channels=2):
+    pcm = struct.pack("<%dh" % (frames * channels),
+                      *[(i * 257) % 30000 - 15000 for i in range(frames * channels)])
+    return message(AUDIO_WRITE, struct.pack("<I", stream), pcm)
+
+
+def audio_close(stream):
+    return message(AUDIO_CLOSE, struct.pack("<I", stream))
 
 
 def seeds():
@@ -105,6 +120,20 @@ def seeds():
                             record(video(640, 360), 1, NULL) +
                             record(video(640, 360, dest=(0, 0, 0, 0)), 1) +
                             record(bounds(0, 0, -1, 0x7FFFFFFF)))
+    # Audio: two streams played and closed, with a window or without.
+    yield "audio", (record(audio_open(0)) + record(audio_write(0)) +
+                    record(audio_open(1, 48000, 1)) +
+                    record(audio_write(1, 100, 1)) + record(audio_write(0, 512)) +
+                    record(audio_close(0)) + record(audio_close(1)))
+    yield "audio-and-ui", (record(surface(640, 480)) + record(audio_open(3, 8000, 6)) +
+                           record(frame(640, 480, 0), 1) +
+                           record(audio_write(3, 32, 6)) + record(message(BYE)))
+    yield "audio-refused", (record(audio_write(0)) + record(audio_open(8)) +
+                            record(audio_open(0, 0, 2)) + record(audio_open(0, 44100, 0)) +
+                            record(audio_open(0)) +
+                            record(message(AUDIO_WRITE, struct.pack("<I", 0), b"\x01\x02\x03")) +
+                            record(audio_write(0, 3, 1)) + record(audio_close(99)) +
+                            record(audio_open(0, 96000, 1)) + record(audio_write(0, 9, 1)))
     yield "titles", record(surface(64, 64, b"\xe2\x80\xaeevil\x1b[2J\xff",
                                    b"\xc0\xaf\x80"))
 

@@ -9,6 +9,8 @@
 
 #include "audio/audio.h"
 
+#include <dlfcn.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -67,7 +69,89 @@ std::unique_ptr<Sink> make_null_sink() {
 std::unique_ptr<Sink> make_pipewire_sink();  // defined in pipewire_sink.cpp
 #endif
 
+namespace {
+
+// The --split app process has no audio device. Its samples go to the broker
+// over the channel the a4l executable holds. This file is also built into
+// libsoundpool.so, a separate copy that cannot see that channel, so both
+// copies reach it through three functions the executable exports by name.
+using SplitOpenFn = int (*)(int rate, int channels);
+using SplitWriteFn = int (*)(int stream, const std::int16_t* pcm, int n);
+using SplitCloseFn = void (*)(int stream);
+
+class SplitSink final : public Sink {
+ public:
+  SplitSink(SplitOpenFn open, SplitWriteFn write, SplitCloseFn close)
+      : open_(open), write_(write), close_(close) {}
+  ~SplitSink() override { close(); }
+
+  bool open(const Format& fmt) override {
+    fmt_ = fmt;
+    frames_ = 0;
+    stream_ = open_(fmt.sample_rate, fmt.channels);
+    if (stream_ < 0) {
+      log::w(kTag, "sink=split: the broker has no stream free");
+      return false;
+    }
+    log::i(kTag, "sink=split open: {} Hz, {} ch, S16 (stream {} at the broker)",
+           fmt.sample_rate, fmt.channels, stream_);
+    return true;
+  }
+  int write(const std::int16_t* pcm, int n_samples) override {
+    if (stream_ < 0 || n_samples <= 0)
+      return 0;
+    const int sent = write_(stream_, pcm, n_samples);
+    if (sent > 0)
+      frames_ +=
+          static_cast<std::uint64_t>(sent) /
+          static_cast<std::uint64_t>(fmt_.channels > 0 ? fmt_.channels : 1);
+    return sent;
+  }
+  void drain() override {}  // the broker plays what it holds
+  void close() override {
+    if (stream_ < 0)
+      return;
+    close_(stream_);
+    stream_ = -1;
+    log::i(kTag, "sink=split close: {} frames sent", frames_);
+  }
+  std::uint64_t frames_written() const override { return frames_; }
+
+ private:
+  SplitOpenFn open_;
+  SplitWriteFn write_;
+  SplitCloseFn close_;
+  Format fmt_;
+  int stream_ = -1;
+  std::uint64_t frames_ = 0;
+};
+
+std::unique_ptr<Sink> make_split_sink() {
+  using ActiveFn = int (*)();
+  const auto active = reinterpret_cast<ActiveFn>(
+      ::dlsym(RTLD_DEFAULT, "acl_split_audio_active"));
+  if (active == nullptr || active() == 0)
+    return nullptr;
+  const auto open = reinterpret_cast<SplitOpenFn>(
+      ::dlsym(RTLD_DEFAULT, "acl_split_audio_open"));
+  const auto write = reinterpret_cast<SplitWriteFn>(
+      ::dlsym(RTLD_DEFAULT, "acl_split_audio_write"));
+  const auto close = reinterpret_cast<SplitCloseFn>(
+      ::dlsym(RTLD_DEFAULT, "acl_split_audio_close"));
+  if (open == nullptr || write == nullptr || close == nullptr)
+    return nullptr;
+  return std::make_unique<SplitSink>(open, write, close);
+}
+
+}  // namespace
+
 std::unique_ptr<Sink> make_sink() {
+  if (auto split = make_split_sink())
+    return split;
+  return make_device_sink();
+}
+
+std::unique_ptr<Sink> make_device_sink() {
   const char* backend = std::getenv("ACL_AUDIO");
 #if ACL_HAVE_PIPEWIRE
   if (backend != nullptr && std::strcmp(backend, "pipewire") == 0) {

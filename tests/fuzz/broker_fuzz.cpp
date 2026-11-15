@@ -211,6 +211,57 @@ class Presenter final : public wm::IPresenter {
   unsigned calls_ = 0;
 };
 
+// What the broker plays the child's audio through. Checks what must hold for
+// anything that reaches an audio device, and reports itself part full so
+// that the drop path runs too.
+int g_sinks_open = 0;
+class Sink final : public audio::Sink {
+ public:
+  ~Sink() override { close(); }
+  bool open(const audio::Format& fmt) override {
+    if (fmt.sample_rate < static_cast<int>(ipc::kMinAudioRate) ||
+        fmt.sample_rate > static_cast<int>(ipc::kMaxAudioRate))
+      fail("an audio stream has a rate out of range");
+    if (fmt.channels < 1 ||
+        fmt.channels > static_cast<int>(ipc::kMaxAudioChannels))
+      fail("an audio stream has a channel count out of range");
+    fmt_ = fmt;
+    open_ = true;
+    if (++g_sinks_open > static_cast<int>(ipc::kMaxAudioStreams))
+      fail("more audio streams open than the limit");
+    return (fmt.sample_rate % 7) != 0;  // some devices do not open
+  }
+  int write(const std::int16_t* pcm, int n_samples) override {
+    if (!open_)
+      fail("a write to an audio stream that is not open");
+    if (n_samples <= 0 || n_samples % fmt_.channels != 0)
+      fail("an audio write is not a whole number of frames");
+    if (static_cast<std::size_t>(n_samples) * sizeof(std::int16_t) >
+        ipc::kMaxText)
+      fail("an audio write is larger than a datagram");
+    // Read every sample: under ASan this is the bounds check.
+    std::int32_t sum = 0;
+    for (int i = 0; i < n_samples; ++i)
+      sum += pcm[i];
+    pending_ += static_cast<std::uint64_t>(n_samples / fmt_.channels) +
+                static_cast<std::uint64_t>(sum & 1);
+    return n_samples;
+  }
+  void drain() override {}
+  void close() override {
+    if (open_)
+      --g_sinks_open;
+    open_ = false;
+  }
+  std::uint64_t frames_written() const override { return 0; }
+  std::uint64_t frames_pending() const override { return pending_; }
+
+ private:
+  audio::Format fmt_;
+  bool open_ = false;
+  std::uint64_t pending_ = 0;
+};
+
 wm::BufferFacts facts_of_any_file(int fd) {
   struct stat st{};
   if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode))
@@ -309,6 +360,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     };
     wm::BrokerOptions options;
     options.inspect = facts_of_any_file;
+    options.audio_sink = []() -> std::unique_ptr<audio::Sink> {
+      return std::make_unique<Sink>();
+    };
     const wm::BrokerStats stats =
         wm::serve_split_child(broker_end, open, options, /*linger_ms=*/0);
     if (stats.from_child > static_cast<std::uint64_t>(queued))
@@ -316,6 +370,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     if (stats.frames + stats.rejected > stats.from_child)
       fail("more outcomes than datagrams");
   }
+  if (g_sinks_open != 0)
+    fail("an audio stream outlived the broker");
   if (open_descriptors() != before)
     fail("a descriptor was kept");
   return 0;

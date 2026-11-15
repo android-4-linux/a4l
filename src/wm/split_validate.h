@@ -91,6 +91,14 @@ FrameVerdict check_video_frame(const ipc::VideoFrame& frame,
 // the arithmetic done on it cannot overflow.
 bool check_video_rect(const ipc::VideoRect& rect) noexcept;
 
+// True if an audio stream of this description may be opened: a stream id in
+// range, a rate and a channel count a device takes.
+bool check_audio_open(const ipc::AudioOpen& open) noexcept;
+
+// True if `bytes` of samples are a write the broker takes for a stream of
+// `channels`: not empty, and a whole number of 16-bit frames.
+bool check_audio_write(std::size_t bytes, std::uint32_t channels) noexcept;
+
 // True if a surface of this size may be created.
 bool check_surface(const ipc::SurfaceInfo& info) noexcept;
 

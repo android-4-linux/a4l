@@ -480,3 +480,44 @@ TEST_CASE("validate: video rectangles", "[split][validate]") {
   CHECK_FALSE(wm::check_video_rect({0, -0x7fffffff - 1, 1, 1}));
   CHECK_FALSE(wm::check_video_rect({0x7fffffff, 0x7fffffff, 0x7fffffff, 1}));
 }
+
+// ── Audio ────────────────────────────────────────────────────────────────
+
+TEST_CASE("validate: audio streams", "[split][validate]") {
+  const auto open = [](std::uint32_t stream, std::uint32_t rate,
+                       std::uint32_t channels) {
+    ipc::AudioOpen o{};
+    o.stream = stream;
+    o.rate = rate;
+    o.channels = channels;
+    return wm::check_audio_open(o);
+  };
+  CHECK(open(0, 44100, 2));
+  CHECK(open(ipc::kMaxAudioStreams - 1, 48000, 1));
+  CHECK(open(3, ipc::kMinAudioRate, ipc::kMaxAudioChannels));
+  CHECK(open(3, ipc::kMaxAudioRate, 6));
+  CHECK_FALSE(open(ipc::kMaxAudioStreams, 44100, 2));
+  CHECK_FALSE(open(0xffffffffu, 44100, 2));
+  CHECK_FALSE(open(0, 0, 2));
+  CHECK_FALSE(open(0, ipc::kMinAudioRate - 1, 2));
+  CHECK_FALSE(open(0, ipc::kMaxAudioRate + 1, 2));
+  CHECK_FALSE(open(0, 0xffffffffu, 2));
+  CHECK_FALSE(open(0, 44100, 0));
+  CHECK_FALSE(open(0, 44100, ipc::kMaxAudioChannels + 1));
+  CHECK_FALSE(open(0, 44100, 0x80000000u));
+}
+
+TEST_CASE("validate: audio writes are whole frames", "[split][validate]") {
+  CHECK(wm::check_audio_write(2, 1));
+  CHECK(wm::check_audio_write(4, 2));
+  CHECK(wm::check_audio_write(16384, 2));
+  CHECK(wm::check_audio_write(12, 6));
+  CHECK_FALSE(wm::check_audio_write(0, 2));  // nothing
+  CHECK_FALSE(wm::check_audio_write(1, 1));  // half a sample
+  CHECK_FALSE(wm::check_audio_write(2, 2));  // half a frame
+  CHECK_FALSE(wm::check_audio_write(6, 2));  // a frame and a half
+  CHECK_FALSE(wm::check_audio_write(10, 6));
+  CHECK_FALSE(wm::check_audio_write(4, 0));  // no channels
+  CHECK_FALSE(wm::check_audio_write(64, ipc::kMaxAudioChannels + 1));
+  CHECK_FALSE(wm::check_audio_write(ipc::kMaxText + 2, 1));  // over a datagram
+}
