@@ -13,6 +13,12 @@
 # A video SurfaceView failed all three before a4l stopped marking it as having a frame
 # (tests/fixtures/video_plane covers that); this holds the GL path to the same.
 #
+# Where sway is installed it also resizes the window, single process: a headless sway is
+# started, the app's window is floated and set to 800x600 once the renderer is up, and the
+# renderer must be told (onSurfaceChanged 800x600) and go on drawing. Weston's headless
+# backend has no way to resize a client's window, so this part needs sway; without it the
+# test says so and passes on the rest.
+#
 # Needs: a host ART build (ACL_ART_HOME), the AOSP toolchain, bubblewrap and a Wayland
 # compositor; it starts a headless Weston on its own socket unless ACL_TEST_WAYLAND_DISPLAY
 # names one. Exits 77 (skip) where any of these is missing.
@@ -25,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 SKIP = 77
@@ -65,6 +72,34 @@ def start_weston(runtime_dir, log_path):
     return None, "no headless Weston could be started"
 
 
+def start_sway(runtime_dir, work):
+    """A headless sway with one 1280x800 output. Returns (process, wayland socket, ipc
+    socket) or (None, reason, None)."""
+    sway, swaymsg = shutil.which("sway"), shutil.which("swaymsg")
+    if not sway or not swaymsg:
+        return None, "sway is not installed", None
+    conf = os.path.join(work, "sway.conf")
+    with open(conf, "w") as fh:
+        fh.write("output HEADLESS-1 resolution 1280x800\ndefault_border none\n")
+    ipc = os.path.join(work, "sway.sock")
+    before = set(glob.glob(os.path.join(runtime_dir, "wayland-*")))
+    env = {k: v for k, v in os.environ.items() if k not in ("WAYLAND_DISPLAY", "DISPLAY")}
+    env.update(WLR_BACKENDS="headless", WLR_LIBINPUT_NO_DEVICES="1", SWAYSOCK=ipc)
+    with open(os.path.join(work, "sway.log"), "wb") as log:
+        proc = subprocess.Popen([sway, "-c", conf], env=env, stdout=log, stderr=log,
+                                start_new_session=True)
+    for _ in range(50):
+        new = [p for p in glob.glob(os.path.join(runtime_dir, "wayland-*"))
+               if p not in before and not p.endswith(".lock")]
+        if new and os.path.exists(ipc):
+            return proc, os.path.basename(new[0]), ipc
+        if proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    proc.kill()
+    return None, "no headless sway could be started", None
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         sys.stderr.write("usage: run_gl_surface_test.py <a4l> <android.jar>\n")
@@ -99,6 +134,7 @@ def main() -> int:
     keep = os.environ.get("ACL_TEST_GLSURFACE_KEEP", "")
     work = tempfile.mkdtemp(prefix="a4l-glsurface-")
     weston = None
+    sway = None
     try:
         # 1. The fixture APK.
         app = os.path.join(work, "app")
@@ -197,7 +233,52 @@ def main() -> int:
             return fail(f"the app process {s.group(1)}", out)
         if int(s.group(2)) != 0:
             return fail(f"the broker rejected {s.group(2)} message(s)", out)
-        sys.stdout.write(f"OK: {single}; {split}\n")
+        # 5. A resize, single process, under sway.
+        sway, sway_display, ipc = start_sway(runtime_dir, work)
+        if sway is None:
+            sys.stdout.write(f"OK: {single}; {split}; resize not checked ({sway_display})\n")
+            return 0
+        renv = dict(env, WAYLAND_DISPLAY=sway_display)
+        p = subprocess.Popen(runner + ["--present"], env=renv, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, errors="replace")
+        lines, asked = [], False
+        deadline = time.time() + 120
+        for line in p.stdout:
+            lines.append(line)
+            if not asked and "GLV: onSurfaceChanged" in line:
+                asked = True
+
+                def resize():
+                    # The renderer is up before the window's first commit maps it, and
+                    # sway floats only a window it has: ask until it says it did.
+                    msg = [shutil.which("swaymsg"), "-s", ipc]
+                    for _ in range(40):
+                        r = subprocess.run(msg + ["floating", "enable"], capture_output=True,
+                                           text=True)
+                        if '"success": true' in r.stdout:
+                            break
+                        time.sleep(0.05)
+                    subprocess.run(msg + ["resize", "set", "800", "600"], capture_output=True)
+
+                threading.Thread(target=resize, daemon=True).start()
+            if time.time() > deadline:
+                p.kill()
+                break
+        p.wait(timeout=30)
+        out = "".join(lines)
+        if keep:
+            with open(os.path.join(keep, "run-resize.log"), "w") as fh:
+                fh.write(out)
+        if not asked:
+            return fail("resize: the renderer never came up under sway", out)
+        err, resized = check("resize", out)
+        if err:
+            return fail(f"resize: {err}", out)
+        if "GL session: resized to 800x600" not in out:
+            return fail("resize: a4l did not take up the compositor's 800x600", out)
+        if "GLV: onSurfaceChanged 800x600" not in out:
+            return fail("resize: the renderer was not told its surface is 800x600", out)
+        sys.stdout.write(f"OK: {single}; {split}; {resized}, renderer told 800x600\n")
         return 0
     except subprocess.CalledProcessError as e:
         sys.stderr.write(f"FAIL: build step: {e.cmd}\n{e.stderr}\n")
@@ -206,6 +287,12 @@ def main() -> int:
         sys.stderr.write(f"FAIL: timed out\n{(e.stdout or '')[-4000:]}\n")
         return 1
     finally:
+        if sway is not None:
+            sway.terminate()
+            try:
+                sway.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                sway.kill()
         if weston is not None:
             weston.terminate()
             try:

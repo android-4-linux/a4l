@@ -649,6 +649,25 @@ After a seek the sound is about 30 ms later against the picture than before it, 
 apps and both modes; the cause is not found. Not covered: seeking forward into data not yet
 read, seeking while paused, speeds other than 2, a real display.
 
+**Window size (2026-11-15).** An a4l window opens at a4l's size and, until now, kept it:
+`xdg_toplevel.configure`'s width and height were ignored on every path. A GL app in a single
+process now follows a resize. The presenter reports a size the compositor asks for after the
+first (`IPresenter::take_resize`); the GL session resizes its `wl_egl_window`, reports
+`surfaceChanged` to the `SurfaceView`'s holder, and lays the decor out at the new size.
+Checked under headless sway with the window floated and set to 800x600, 1000x700 and
+640x480: a `GLSurfaceView`'s renderer gets `onSurfaceChanged` at each and its picture fills
+the window; a Flutter app does the same and re-centers its content.
+
+Still fixed-size:
+
+- **`--split`.** The child renders into a gbm surface whose size the broker checks every
+  frame against. Following a resize needs the broker to tell the child (`SurfaceResize`
+  exists in the protocol and is not sent) and both to change together.
+- **The View-tree present path.** Its buffers, the decor's layout and the app's
+  `Configuration` all carry the opening size. On Android a resize is a configuration change.
+- **The first size.** A tiling compositor's first configure is its tile, not a4l's size; a4l
+  still opens at its own. Only a change after that is taken up.
+
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 
 - **A frame.** The broker asks the kernel, not the child, what the descriptor is: `fstatfs` must

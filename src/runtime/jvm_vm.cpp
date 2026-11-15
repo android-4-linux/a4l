@@ -2464,13 +2464,57 @@ jint JNICALL PresentDriver_nRepeatFd(JNIEnv*, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
   return (s != nullptr && s->presenter) ? s->presenter->repeat_fd() : -1;
 }
-jboolean JNICALL PresentDriver_nDispatch(JNIEnv*, jclass, jlong sp) {
+// The compositor resized a GL app's window. The app renders the toplevel
+// itself, so it has to be told: the wl_egl_window takes the new size (Mesa
+// allocates at it from the next swap), the SurfaceView's holder reports it
+// (a GLSurfaceView's renderer gets onSurfaceChanged; Flutter's engine resizes
+// its onscreen surface), and the decor is laid out at it (hit-testing, and
+// Flutter's viewport metrics). Main thread. Single process only: a --split
+// child's window is a gbm surface the broker checks frames against, and it
+// keeps its size.
+void gl_session_resize(JNIEnv* env, PresentSession* s, int w, int h) {
+  {
+    std::lock_guard<std::mutex> lk(g_gl_session.mtx);
+    if (g_gl_session.split)
+      return;
+    g_gl_session.w = w;
+    g_gl_session.h = h;
+    if (g_gl_session.window)
+      g_gl_session.window->resize(w, h, nullptr);
+  }
+  s->w = w;
+  s->h = h;
+  if (s->hostbootstrap_cls != nullptr) {
+    if (jmethodID m =
+            env->GetStaticMethodID(s->hostbootstrap_cls, "resizeGlSurface",
+                                   "(Landroid/view/View;II)V"))
+      env->CallStaticVoidMethod(s->hostbootstrap_cls, m, s->view, w, h);
+    if (env->ExceptionCheck() == JNI_TRUE)
+      env->ExceptionClear();
+  }
+  if (s->m_measure != nullptr && s->m_layout != nullptr) {
+    const jint mask = 0x3 << 30;  // MeasureSpec.EXACTLY(size)
+    env->CallVoidMethod(s->view, s->m_measure, (w & ~mask) | (1 << 30),
+                        (h & ~mask) | (1 << 30));
+    env->CallVoidMethod(s->view, s->m_layout, 0, 0, w, h);
+    if (env->ExceptionCheck() == JNI_TRUE)
+      env->ExceptionClear();
+  }
+  log::i(kTag, "GL session: resized to {}x{}", w, h);
+}
+
+jboolean JNICALL PresentDriver_nDispatch(JNIEnv* env, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
   if (s == nullptr || !s->presenter)
     return JNI_FALSE;
   const bool ok =
       s->presenter->dispatch();  // runs input callbacks; wp_presentation
                                  // OnPresented lands here
+  if (s->is_gl && s->view != nullptr) {
+    int rw = 0, rh = 0;
+    if (s->presenter->take_resize(&rw, &rh))
+      gl_session_resize(env, s, rw, rh);
+  }
   // Sample the latest real presentation feedback (present thread == OnPresented
   // thread) for the RenderThread to forward to Chromium's WebView compositor
   // next frame.

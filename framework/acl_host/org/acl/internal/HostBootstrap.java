@@ -4514,6 +4514,28 @@ public final class HostBootstrap {
         }
     }
 
+    // The compositor resized a GL app's window (nDispatch -> gl_session_resize). The Surface is
+    // the same one at a new size, so the holder's callbacks get surfaceChanged and not a
+    // destroy and create: a GLSurfaceView hands it to its renderer as onSurfaceChanged, and
+    // Flutter's FlutterSurfaceView to its engine. Main thread.
+    public static void resizeGlSurface(android.view.View decor, int w, int h) {
+        try {
+            android.view.SurfaceView sv = findSurfaceView(decor);
+            if (sv == null) return;
+            Class<?> c = android.view.SurfaceView.class;
+            setIntField(c, sv, "mSurfaceWidth", w);
+            setIntField(c, sv, "mSurfaceHeight", h);
+            int fmt = getIntField(c, sv, "mFormat", android.graphics.PixelFormat.RGBX_8888);
+            android.view.SurfaceHolder holder = sv.getHolder();
+            for (android.view.SurfaceHolder.Callback cb : snapshotCallbacks(c, sv)) {
+                if (cb != null) cb.surfaceChanged(holder, fmt, w, h);
+            }
+            android.util.Log.i("acl", "resizeGlSurface: surfaceChanged (" + w + "x" + h + ")");
+        } catch (Throwable t) {
+            android.util.Log.w("acl", "resizeGlSurface failed: " + t);
+        }
+    }
+
     // A video SurfaceView we have already backed with a real Surface (so we fire surfaceCreated once).
     private static java.lang.ref.WeakReference<android.view.SurfaceView> sVideoSv;
     // The size the app was last told its video surface has.

@@ -208,8 +208,10 @@ if py3.found() and have_gl and have_ffmpeg
       is_parallel : false,
     )
     # A GLSurfaceView laid out again while it renders, single-process and under --split: the
-    # renderer must go on drawing and its surface must not be reported destroyed. Starts a
-    # headless Weston for itself. Needs host ART; SKIPs otherwise, which includes CI.
+    # renderer must go on drawing and its surface must not be reported destroyed. Where sway
+    # is installed, the window is also resized and the renderer must be told. Starts a
+    # headless Weston (and sway) for itself. Needs host ART; SKIPs otherwise, which includes
+    # CI.
     test(
       'gl-surface-relayout',
       py3,
