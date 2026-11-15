@@ -85,8 +85,10 @@ below cites the commit that closed it; `git show <sha>` carries the measurement.
   `tests/fixtures/audio_track`: 2 s of blocking writes take 1895 ms, and the recorded output is
   the tone that was written. `MediaCodec` decodes AAC, MP3, Opus, Vorbis and FLAC to PCM in
   software (`tests/fixtures/audio_codec`: AAC through `MediaCodec` to an `AudioTrack`, by
-  dequeue calls and by callback). No player app has been run with them yet. Details in
-  ADR-0009, "`AudioTrack`" and "Audio decoders in `MediaCodec`".
+  dequeue calls and by callback). A Flutter `video_player` app (media3/ExoPlayer) plays a
+  clip with an AAC sound track to the end, single-process and under `--split`
+  (`tests/fixtures/flutter_video_player`). Details in ADR-0009, "`AudioTrack`", "Audio decoders
+  in `MediaCodec`" and "A clip with sound".
 - **`gles_jni` / `GLSurfaceView` is registered.** `com.google.android.gles_jni.EGLImpl` plus
   `android.opengl.GLES20`/`GLES30` natives exist (`4e96f6d`, `4e1661f`, `75fe3a7`), Surface
   injection and GL present make libGDX GL apps run (`eef2785`), they receive input (`ae15c49`), and

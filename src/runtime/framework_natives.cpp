@@ -331,7 +331,10 @@ jboolean JNICALL
 HardwareBuffer_nIsSupported(JNIEnv*, jclass, jint, jint, jint, jint, jlong) {
   return JNI_TRUE;
 }
-jlong JNICALL HardwareBuffer_nEstimateSize(JNIEnv*, jclass, jlong ptr) {
+// @CriticalNative in HardwareBuffer.java: ART passes the declared argument
+// and nothing else, no JNIEnv and no class. Taking them here read the handle
+// from the wrong register, which held whatever the caller left there.
+jlong JNICALL HardwareBuffer_nEstimateSize(jlong ptr) {
 #if ACL_HAVE_GL
   if (std::getenv("ACL_IR_DIAG") != nullptr)
     log::write(log::Level::Info, "acl.gfx",
