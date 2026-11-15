@@ -195,6 +195,18 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 300,
       is_parallel : false,
     )
+    # android.media.AudioTrack on host ART, single-process and under --split: a fixture app
+    # plays two streaming tracks with blocking writes; the test asserts every frame reached
+    # the sink, the playback position reached the end, and the writes took as long as the
+    # audio. Counting sink: no sound. Needs host ART; SKIPs otherwise, which includes CI.
+    test(
+      'audio-track',
+      py3,
+      args : [files('run_audio_track_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+      is_parallel : false,
+    )
   endif
 endif
 

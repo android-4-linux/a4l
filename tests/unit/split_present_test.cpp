@@ -874,6 +874,49 @@ TEST_CASE("split: audio ahead of the device is dropped, not held",
   CHECK(rig.world.streams[0].samples.size() == 1999);
 }
 
+TEST_CASE("split: a closed stream plays out before its sink is closed",
+          "[split][audio]") {
+  Rig rig;
+  World& w = rig.world;
+  const int id = wm::split_audio_open_on(rig.child, 8000, 1);
+  REQUIRE(id >= 0);
+  const std::vector<std::int16_t> pcm(800, 3);
+  CHECK(wm::split_audio_write_on(rig.child, id, pcm.data(), 800) == 800);
+  REQUIRE(settle(w, [&] {
+    return !w.streams.empty() && w.streams[0].samples.size() == 800;
+  }));
+  {
+    // The device has not taken them yet.
+    std::lock_guard<std::mutex> lock(w.mu);
+    w.audio_pending = 800;
+  }
+  // The app is done with the track the moment it has written it.
+  wm::split_audio_close_on(rig.child, id);
+  // The id is free for the child at once, and a new stream on it is a new
+  // sink: the old one is still sounding.
+  const int again = wm::split_audio_open_on(rig.child, 8000, 1);
+  CHECK(again == id);
+  REQUIRE(settle(w, [&] { return w.streams.size() == 2; }));
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  {
+    std::lock_guard<std::mutex> lock(w.mu);
+    CHECK_FALSE(w.streams[0].closed);
+    CHECK_FALSE(w.streams[1].closed);
+    w.audio_pending = 0;  // played out
+  }
+  // Closed soon after it empties, with the broker otherwise idle.
+  CHECK(settle(w, [&] { return w.streams[0].closed; }));
+  {
+    std::lock_guard<std::mutex> lock(w.mu);
+    CHECK_FALSE(w.streams[1].closed);  // still open
+  }
+  wm::split_audio_close_on(rig.child, again);
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.rejected == 0);
+  // Whatever was open or playing out when the child left is closed then.
+  CHECK(w.streams[1].closed);
+}
+
 TEST_CASE("split: audio with no device is taken and not played",
           "[split][audio]") {
   Rig rig(200, {}, /*start_now=*/false);

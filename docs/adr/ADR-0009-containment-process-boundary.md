@@ -283,9 +283,9 @@ Not covered:
 - **Video in a texture.** A Flutter `video_player` clip goes through `ImageReader` into a GL
   texture, not through the video plane. That path stays inside the app process; it has not
   been run under `--split`.
-- **A clip's sound track** is still silent, single-process as well: on host ART
-  `AudioTrack` has no native side, and that is what a player writes decoded audio to. What
-  crosses the boundary is every `audio::Sink`, which today means `SoundPool`.
+- **A clip's sound track** is still silent, single-process as well. `AudioTrack` plays
+  as of 2026-11-15 and crosses the boundary, but `MediaCodec` has no audio decoder, so a
+  player has nothing to write to it unless it brings its own.
 - **Pixels are checked by eye.** The integration test counts frames at the broker. That the
   picture is right was read from screenshots.
 - **Each frame is imported by the compositor**, a new `wl_buffer` per frame, with the limit
@@ -345,18 +345,70 @@ sink, so it makes no sound; it needs host ART and so does not run in CI.
 
 Not covered:
 
-- **`AudioTrack`.** Not implemented on host ART in either mode, so a media player's sound
-  track, and any app that synthesizes its own audio, is silent. When it is built it uses
-  `audio::Sink` and crosses the same way.
-- **No backpressure.** A sink takes what it is given at once; `SoundPool` paces itself by the
-  clock. A producer that relies on a blocking write would run ahead and be dropped. Feeding
-  the device's progress back to the child, which `AudioTrack` needs for its playback
-  position too, is not built.
+- **No word back from the device.** A sink takes what it is given at once, and the child is
+  not told how far the device has got. `SoundPool` and `AudioTrack` (below) each pace
+  themselves by the clock, which holds as long as that clock and the device's agree. They
+  drift apart by parts per million; over hours the broker's 2 s limit would drop a little.
 - **Master volume and audio focus** stay unavailable in the child.
 - **Recording.** There is no path for audio input in either mode.
 - **One app, one format.** `SoundPool` mixes to 44.1 kHz stereo whatever the source; no other
   rate or channel count has crossed outside the unit tests.
 - **Latency** was not measured.
+
+**`AudioTrack` (2026-11-15).** The framework's `android.media.AudioTrack` had no native side
+on host ART; the first call an app made on it was an `UnsatisfiedLinkError`. It has one now
+(`runtime/audio_track_jni.cpp` over `audio::Track`), single-process and under `--split` alike,
+since it plays through `audio::Sink`.
+
+- **Blocking writes block.** A track is a bounded buffer that a pump drains into the sink at
+  the stream's rate, 30 ms ahead of the clock. A writer waits for room. This is what paces an
+  app that writes in a loop, and it needs nothing from the device, so it is the same in a
+  split child.
+- **The position follows the clock.** A frame counts as played when its time comes, not when
+  it is handed to the sink, less whatever the sink says it still holds.
+- **A closed stream plays out.** An app closes a track when it has written the last of it.
+  The broker keeps a closed stream's sink until it has emptied, at most 2.5 s, instead of
+  cutting its tail. Before this, 40 to 70 ms were lost from the end of a track under
+  `--split`.
+- **Linear PCM only**: 8-bit, 16-bit, 24-bit packed, 32-bit and float, 1 to 8 channels,
+  converted to 16-bit. Streaming and static tracks.
+
+Measured on host ART under headless Weston with the fixture app
+(`tests/fixtures/audio_track`): 2 s at 48 kHz stereo 16-bit written as `short[]`, `byte[]`
+and a direct `ByteBuffer`, then 0.5 s at 44.1 kHz mono float.
+
+| | single process | `--split`, confined |
+|---|---|---|
+| natives bound | 54 of 54 | 54 of 54 |
+| 2 s of blocking writes took | 1895 ms | 1890 ms |
+| 0.5 s blocking write took | 394 ms | 394 ms |
+| frames at the sink | 96000 + 22050 | 118050 at the broker, 0 dropped, 0 refused |
+| playback position at the end | 96000, 22050 | 96000, 22050 |
+
+A blocking write is expected to take the audio's length less the 80 ms buffer and the 30 ms
+lead: 1890 ms and 390 ms. Recorded from a PipeWire null sink, three runs in each mode: a
+440 Hz tone at peak 8000 for 2.000 s, a silence where the app changes track (27 ms
+single-process, 5 to 6 ms split), then 880 Hz at peak 4097 (the float tone at a quarter
+scale and half volume) to the end, with no other gap. Nothing was played on a real output.
+
+Not covered:
+
+- **No audio decoder.** `MediaCodec` decodes video only. A media player that relies on the
+  platform to decode AAC or Opus has nothing to write to its `AudioTrack` and stays silent.
+  This is the next thing between a4l and a clip with sound.
+- **No ExoPlayer or media3 app was run.** The fixture uses the calls a player's audio output
+  makes, but none is in the corpus.
+- **Speed and pitch** (`PlaybackParams`, `setPlaybackRate`) are refused or read back as 1:
+  there is no resampler or time-stretcher.
+- **Not built:** volume shapers, effects, routing, static-track looping and seeking answer
+  with an error or a default. A marker or a position period is stored and its callback
+  never fires. An aux-effect send level and an output device are accepted and do nothing.
+- **Device latency** is not in the position: what PipeWire holds past its own queue is not
+  known to the track. Not measured.
+- **Encoded and offloaded tracks** are refused at setup.
+- **Eight tracks at once under `--split`**, the broker's limit on open streams, with
+  `SoundPool` counting as one. A ninth fails to initialize. Single-process has no limit, and
+  each track is a thread.
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 

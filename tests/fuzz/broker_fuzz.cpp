@@ -227,8 +227,10 @@ class Sink final : public audio::Sink {
       fail("an audio stream has a channel count out of range");
     fmt_ = fmt;
     open_ = true;
-    if (++g_sinks_open > static_cast<int>(ipc::kMaxAudioStreams))
-      fail("more audio streams open than the limit");
+    // Open, or closed by the child and still playing out: never more than
+    // the child may open over a connection.
+    if (++g_sinks_open > wm::BrokerOptions{}.max_audio_opens)
+      fail("more audio sinks alive than the child may open");
     return (fmt.sample_rate % 7) != 0;  // some devices do not open
   }
   int write(const std::int16_t* pcm, int n_samples) override {

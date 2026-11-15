@@ -602,6 +602,23 @@ class Broker {
          const BrokerOptions& options) noexcept
       : channel_(channel), open_(open), options_(options) {}
 
+  // The child is gone or the window is. What its streams still hold is
+  // played out, so that a sound's tail is not cut by the app exiting.
+  ~Broker() {
+    for (AudioStream& st : audio_) {
+      if (st.sink) {
+        st.sink->drain();
+        st.sink->close();
+      }
+    }
+    for (ClosingSink& c : closing_) {
+      c.sink->drain();
+      c.sink->close();
+    }
+  }
+  Broker(const Broker&) = delete;
+  Broker& operator=(const Broker&) = delete;
+
   BrokerStats run(int linger_ms) noexcept {
     using Clock = std::chrono::steady_clock;
     // A child that stops reading must not block the broker. A PresentState
@@ -631,8 +648,12 @@ class Broker {
           return stats_;  // the child did not leave; the caller ends it
         timeout = static_cast<int>(left.count());
       }
+      // A closed stream that is still playing out is looked at again soon.
+      if (!closing_.empty() && (timeout < 0 || timeout > kAudioReapMs))
+        timeout = kAudioReapMs;
       if (::poll(fds, n, timeout) < 0 && errno != EINTR)
         return stats_;
+      reap_audio();
 
       if (pi != 0 && fds[pi].revents != 0)
         presenter_->dispatch();
@@ -1017,11 +1038,40 @@ class Broker {
       stats_.audio_frames += static_cast<std::uint64_t>(taken) / st.channels;
   }
 
+  // The child closes a stream when it has written the last of it, which is
+  // before the last of it has played: the sink still holds what the device
+  // has not taken. So the sink is not closed here but when it has emptied,
+  // or after as long as it can hold, whichever is first.
   void audio_close(std::uint32_t id) noexcept {
     AudioStream& st = audio_[id];
-    if (st.sink)
-      st.sink->close();
+    if (st.sink) {
+      const auto hard = std::chrono::steady_clock::now() +
+                        std::chrono::seconds(options_.max_audio_seconds) +
+                        std::chrono::milliseconds(500);
+      closing_.push_back({std::move(st.sink), hard, false});
+    }
     st = AudioStream{};
+  }
+
+  void reap_audio() noexcept {
+    if (closing_.empty())
+      return;
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = closing_.begin(); it != closing_.end();) {
+      if (!it->emptied && it->sink->frames_pending() == 0) {
+        // Empty here; the device's own last period is still sounding.
+        it->emptied = true;
+        const auto soon = now + std::chrono::milliseconds(kAudioTailMs);
+        if (soon < it->deadline)
+          it->deadline = soon;
+      }
+      if (now >= it->deadline) {
+        it->sink->close();
+        it = closing_.erase(it);
+      } else {
+        ++it;
+      }
+    }
   }
 
   void forward_input(const InputEvent& ev) noexcept {
@@ -1098,6 +1148,15 @@ class Broker {
     std::unique_ptr<audio::Sink> sink;
   };
   AudioStream audio_[ipc::kMaxAudioStreams];
+  // Streams the child closed that are playing out what they hold.
+  struct ClosingSink {
+    std::unique_ptr<audio::Sink> sink;
+    std::chrono::steady_clock::time_point deadline;
+    bool emptied;
+  };
+  std::vector<ClosingSink> closing_;
+  static constexpr int kAudioReapMs = 20;
+  static constexpr int kAudioTailMs = 60;
   int audio_opens_ = 0;
   std::vector<std::int16_t> audio_scratch_;
   // What the compositor advertised for the video format last seen.

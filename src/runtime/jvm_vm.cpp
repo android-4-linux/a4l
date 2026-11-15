@@ -73,6 +73,7 @@
 #include "ndk/native_bind.h"
 #include "ndk/webview_functor_vk.h"  // WebView AwDrawFn Vulkan functor %fs-bridge wrappers
 #include "pkg/apk.h"  // AAssetManager provider: read+inflate app assets from the APK
+#include "runtime/audio_track_jni.h"  // the framework AudioTrack over audio::Track
 #include "runtime/framework_natives.h"
 #include "runtime/image_reader_jni.h"  // media_jni loadLibrary -> ImageReader natives (M3c)
 #include "runtime/media_codec_jni.h"  // media_jni loadLibrary -> MediaCodec natives (M5)
@@ -6556,6 +6557,10 @@ class ArtVm final : public JniVm {
                "(channel/sample-rate maxima, session id)");
       env->DeleteLocalRef(as_cls);
     }
+    // android.media.AudioTrack: the host libandroid_runtime registers none of
+    // its natives (it has no audio HAL), so the first call an app makes on
+    // it is an UnsatisfiedLinkError. a4l's own, over audio::Track.
+    register_audio_track_natives(env);
     // androidx.media3 / MediaSessionCompat build AudioAttributes from a legacy
     // stream type (setPlaybackToLocal ->
     // AudioAttributes.Builder.setLegacyStreamType), which consults

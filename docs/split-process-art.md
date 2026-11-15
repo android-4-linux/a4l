@@ -157,8 +157,7 @@ art-host; `present_dmabuf_loop` + input stay in a4l.
   a tappable UI responds.
 - **S4 — audio.** SoundPool/AudioTrack PCM → PipeWire sink in a4l. Built for the x86-64
   `--split` path on 2026-11-15, without the shm ring: samples travel in the datagram
-  (ADR-0009, "S4 as built: audio"). `SoundPool` crosses; `AudioTrack` has no native side on
-  host ART yet.
+  (ADR-0009, "S4 as built: audio"). `SoundPool` and `AudioTrack` both cross.
 - **S5 — a real APK.** A launcher-activity app (the framework boot classpath, ADR-0002) rendering and
   interactive on the Pi via `acl run app.apk --vm=art`.
 

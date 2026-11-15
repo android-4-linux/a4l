@@ -3,7 +3,7 @@
 #
 # audio/ — the AudioTrack sink: a counting/null backend (always) plus a PipeWire
 # backend that streams to the running daemon (built when libpipewire is present).
-audio_sources = files('audio.cpp')
+audio_sources = files('audio.cpp', 'audio_track.cpp')
 audio_deps = [fmt_dep]   # via log/log.h
 
 if have_pipewire
