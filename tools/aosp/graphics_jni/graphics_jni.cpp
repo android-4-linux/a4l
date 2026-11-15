@@ -6404,12 +6404,20 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
       (it.kind == DisplayItem::Kind::Picture ? np
        : it.kind == DisplayItem::Kind::Child ? nc
                                              : nl)++;
+    // The items in drawing order: p = picture, c = child node, l = layer.
+    char order[33] = {0};
+    for (std::size_t i = 0; i < n->display_list.size() && i < 32; ++i) {
+      const DisplayItem::Kind k = n->display_list[i].kind;
+      order[i] = k == DisplayItem::Kind::Picture ? 'p'
+                 : k == DisplayItem::Kind::Child ? 'c'
+                                                 : 'l';
+    }
     std::fprintf(stderr,
                  "[acl.walk] node ltrb=(%d,%d,%d,%d) alpha=%.2f clip=%d dl=%zu "
-                 "(pic=%d child=%d layer=%d) pic=%p\n",
+                 "(pic=%d child=%d layer=%d) order=%s punch=%d pic=%p\n",
                  n->left, n->top, n->right, n->bottom, n->alpha,
-                 n->clipToBounds, n->display_list.size(), np, nc, nl,
-                 static_cast<void*>(n->picture.get()));
+                 n->clipToBounds, n->display_list.size(), np, nc, nl, order,
+                 n->punch_hole ? 1 : 0, static_cast<void*>(n->picture.get()));
   }
   if (!n->display_list.empty()) {
     const std::vector<DisplayItem>& dl = n->display_list;
@@ -7161,17 +7169,61 @@ void RecordingCanvas_nDrawWebViewFunctor(jlong canvas, jint functor) {
     acl_graphics_draw_webview_functor(reinterpret_cast<void*>(sk),
                                       static_cast<int>(functor));
 }
-// nPunchHole (SurfaceView transparency) is @FastNative on BaseRecordingCanvas
-// -> keep env/jclass.
+// nPunchHole: how a SurfaceView makes itself a window onto what lies below
+// the app's surface. SurfaceView calls Canvas.punchHole() from its own draw,
+// so the hole lands after everything its ancestors drew, their backgrounds
+// included, and before whatever the app draws over the video. The rectangle
+// (rounded by rx,ry) is written transparent with kSrc, so it replaces what is
+// there instead of blending with it.
+//
+// A hole only shows something where the surface below has something to show:
+// a4l's video plane, under an ARGB toplevel. Elsewhere it shows black, which
+// is what Android shows before a SurfaceView's first frame.
+//
+// @FastNative on BaseRecordingCanvas -> keep env/jclass.
 void BaseRecordingCanvas_nPunchHole(JNIEnv*,
                                     jclass,
-                                    jlong,
-                                    jfloat,
-                                    jfloat,
-                                    jfloat,
-                                    jfloat,
-                                    jfloat,
-                                    jfloat) {}
+                                    jlong canvas,
+                                    jfloat l,
+                                    jfloat t,
+                                    jfloat r,
+                                    jfloat b,
+                                    jfloat rx,
+                                    jfloat ry) {
+  auto* c = canvas_sk(canvas);
+  static int diag = 0;
+  if (std::getenv("ACL_MC_DIAG") != nullptr && (diag++ % 60 == 0)) {
+    SkIRect clip = SkIRect::MakeEmpty();
+    SkMatrix m = SkMatrix::I();
+    if (c != nullptr) {
+      clip = c->getDeviceClipBounds();
+      m = c->getTotalMatrix();
+    }
+    __android_log_print(
+        4, "acl.punch",
+        "punchHole #%d ltrb=(%.0f,%.0f,%.0f,%.0f) r=(%.0f,%.0f) "
+        "canvas=%s recorder=%d t=(%.0f,%.0f) clip=(%d,%d,%d,%d)",
+        diag, l, t, r, b, rx, ry, c != nullptr ? "ok" : "none",
+        is_recorder_handle(canvas) ? 1 : 0, m.getTranslateX(),
+        m.getTranslateY(), clip.fLeft, clip.fTop, clip.fRight, clip.fBottom);
+  }
+  if (c == nullptr || !(r > l) || !(b > t))
+    return;
+  tick_draw();
+  SkPaint hole;
+  hole.setBlendMode(SkBlendMode::kSrc);
+  // ACL_PUNCH_DEBUG: translucent magenta, to see where holes land.
+  hole.setColor(std::getenv("ACL_PUNCH_DEBUG") != nullptr
+                    ? 0x80FF00FFu
+                    : SK_ColorTRANSPARENT);
+  const SkRect rect = SkRect::MakeLTRB(l, t, r, b);
+  if (rx > 0 && ry > 0) {
+    hole.setAntiAlias(true);
+    c->drawRoundRect(rect, rx, ry, hole);
+  } else {
+    c->drawRect(rect, hole);
+  }
+}
 
 const JNINativeMethod kBaseRecordingExtra[] = {
     {"nPunchHole", "(JFFFFFF)V",

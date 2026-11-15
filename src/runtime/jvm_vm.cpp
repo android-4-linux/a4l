@@ -4411,16 +4411,17 @@ class JniVm : public Vm {
   // Proves View(Context) + a real measure/layout/draw traversal over the app's
   // view tree renders verifiable output (no compositor).
 #if ACL_GL_PRESENT
-  // Stage 3 routing: does the decor tree host an android.view.SurfaceView (e.g.
-  // a GLSurfaceView)?
-  bool has_surface_view(jobject view) {
+  // Stage 3 routing: does the decor tree host a SurfaceView the app renders GL
+  // into (a GLSurfaceView, an engine's own subclass)? A plain SurfaceView is a
+  // video surface and stays on the View-tree present; HostBootstrap decides.
+  bool has_gl_surface_view(jobject view) {
     jclass boot = env_->FindClass("org/acl/internal/HostBootstrap");
     if (boot == nullptr) {
       clear_exception();
       return false;
     }
     bool r = false;
-    if (jmethodID m = env_->GetStaticMethodID(boot, "hasSurfaceView",
+    if (jmethodID m = env_->GetStaticMethodID(boot, "hasGlSurfaceView",
                                               "(Landroid/view/View;)Z"))
       r = env_->CallStaticBooleanMethod(boot, m, view) == JNI_TRUE;
     clear_exception();
@@ -4722,11 +4723,12 @@ class JniVm : public Vm {
       if (const char* gpu = std::getenv("ACL_PRESENT_GPU");
           gpu != nullptr && *gpu != '\0') {
 #if ACL_GL_PRESENT
-        // GLSurfaceView (Stage 3): if the content hosts a SurfaceView, its own
-        // GLThread renders GL to a wl_surface — route to the dedicated GL
+        // GLSurfaceView (Stage 3): if the content hosts a GL SurfaceView, its
+        // own GLThread renders GL to a wl_surface — route to the dedicated GL
         // present (the toplevel IS the GL surface), not the Skia View-tree
-        // present, which cannot show the GL content.
-        if (has_surface_view(view)) {
+        // present, which cannot show the GL content. A video SurfaceView is
+        // not one: it goes on with the View-tree present below.
+        if (has_gl_surface_view(view)) {
           // Looper-driven GL present (Flutter needs the Choreographer ticked
           // for vsync). Falls back to the self-rendering external loop if
           // PresentDriver.runGl is unavailable.

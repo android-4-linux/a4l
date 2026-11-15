@@ -286,10 +286,15 @@ Not covered:
 - **Each frame is imported by the compositor**, a new `wl_buffer` per frame, with the limit
   noted under C5: a buffer that passes every check and that the compositor still cannot import
   ends the broker's connection.
-- **Two limits that are not the split's.** A `SurfaceView` over an opaque background shows no
-  video, because a4l clears the View's ancestors and each ancestor's background is drawn after
-  that; this is so single-process as well. A `SurfaceView` present at launch is taken for a GL
-  surface.
+- **Which `SurfaceView` is video** is decided at launch from its class: the platform
+  `SurfaceView` itself and `VideoView` are video, any other subclass is GL. An app that renders
+  GL from native code into a plain `SurfaceView` is taken for video; `ACL_SURFACEVIEW=gl`
+  overrides. This is not the split's; it is the same single-process.
+
+Two limits found while building this were fixed after it, in both modes: a `SurfaceView` over
+an opaque background showed no video, and a `SurfaceView` present at launch was taken for a GL
+surface. The fixture app now has an opaque background, and the test runs it with the
+`SurfaceView` there at launch and added later.
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 
