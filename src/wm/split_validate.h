@@ -66,6 +66,31 @@ FrameVerdict check_frame(const ipc::PresentFrame& frame,
                          const BufferFacts& facts,
                          const FrameLimits& limits) noexcept;
 
+// What a video frame is checked against. It goes on its own subsurface, so
+// its size is the decoded picture's and not the surface's.
+struct VideoLimits {
+  bool have_surface = false;
+  // The modifiers the compositor advertised for the frame's own format.
+  std::span<const std::uint64_t> modifiers;
+};
+
+// True for the formats a video frame may have: what a hardware decoder
+// exports. NV12 (8-bit 4:2:0) and P010 (10-bit 4:2:0).
+bool video_format_accepted(std::uint32_t drm_format) noexcept;
+
+// A video frame as the compositor would be asked to import it. Stricter on
+// the modifier than check_frame(): the pair of format and modifier must have
+// been advertised, linear included, because a compositor need not take YUV
+// at all.
+FrameVerdict check_video_frame(const ipc::VideoFrame& frame,
+                               bool fd_present,
+                               const BufferFacts& facts,
+                               const VideoLimits& limits) noexcept;
+
+// True if the rectangle has an area and lies within kMaxVideoCoord, so that
+// the arithmetic done on it cannot overflow.
+bool check_video_rect(const ipc::VideoRect& rect) noexcept;
+
 // True if a surface of this size may be created.
 bool check_surface(const ipc::SurfaceInfo& info) noexcept;
 

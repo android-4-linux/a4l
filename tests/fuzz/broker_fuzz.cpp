@@ -37,6 +37,7 @@
 #include "ipc/ipc.h"
 #include "log/log.h"
 #include "wm/split_present.h"
+#include "wm/video_geometry.h"
 
 #if !(ACL_HAVE_VULKAN && ACL_HAVE_WCS)
 #error "the broker is built only with the GPU present path (Vulkan and wcs)"
@@ -144,6 +145,54 @@ class Presenter final : public wm::IPresenter {
     return true;
   }
   bool closed() const noexcept override { return false; }
+  // The video plane: NV12 is advertised with two modifiers, P010 is not.
+  std::vector<std::uint64_t> modifiers_for(
+      std::uint32_t drm_format) const noexcept override {
+    if (drm_format == 0x3231564eu)
+      return {0, 0x0200000000401b03ull};
+    return {};
+  }
+  void present_video(const gfx::DmabufFrame& f,
+                     int x,
+                     int y,
+                     int w,
+                     int h) noexcept override {
+    struct stat st{};
+    if (::fstat(f.fd, &st) != 0 || !S_ISREG(st.st_mode))
+      fail("a video frame's descriptor is not a buffer");
+    const auto size = static_cast<std::uint64_t>(st.st_size);
+    if (f.width == 0 || f.height == 0 || f.width > ipc::kMaxSurfaceDim ||
+        f.height > ipc::kMaxSurfaceDim)
+      fail("a video frame has a size out of range");
+    if (f.drm_format != 0x3231564eu)
+      fail("a video frame has a format that was not advertised");
+    if (f.modifier != 0 && f.modifier != 0x0200000000401b03ull)
+      fail("a video frame has a modifier that was not advertised");
+    if (f.plane_count < 2 || f.plane_count > 4)
+      fail("a video frame has a bad plane count");
+    if (f.planes[0].stride < f.width ||
+        f.planes[0].offset +
+                static_cast<std::uint64_t>(f.planes[0].stride) * f.height >
+            size)
+      fail("a video frame's luma does not fit its buffer");
+    if (f.planes[1].stride < (f.width + 1) / 2 * 2 ||
+        f.planes[1].offset + static_cast<std::uint64_t>(f.planes[1].stride) *
+                                 ((f.height + 1) / 2) >
+            size)
+      fail("a video frame's chroma does not fit its buffer");
+    check_rect(x, y, w, h);
+    // What the real presenter does with the rectangle next.
+    const wm::VideoPlacement p =
+        wm::place_video(x, y, w, h, surface_.w, surface_.h, f.width, f.height);
+    if (p.visible && (p.sw < 1.0 || p.sh < 1.0 || p.sx < 0 || p.sy < 0 ||
+                      p.sx + p.sw > f.width || p.sy + p.sh > f.height ||
+                      p.w <= 0 || p.h <= 0 || p.x < 0 || p.y < 0 ||
+                      p.x + p.w > surface_.w || p.y + p.h > surface_.h))
+      fail("a video frame would be placed where the compositor refuses it");
+  }
+  void set_video_bounds(int x, int y, int w, int h) noexcept override {
+    check_rect(x, y, w, h);
+  }
   void set_ime_visible(bool) noexcept override {}
   void set_clipboard(const std::string& text) noexcept override {
     if (text.size() > ipc::kMaxText)
@@ -151,6 +200,13 @@ class Presenter final : public wm::IPresenter {
   }
 
  private:
+  static void check_rect(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0 || w > ipc::kMaxVideoCoord ||
+        h > ipc::kMaxVideoCoord || x < -ipc::kMaxVideoCoord ||
+        x > ipc::kMaxVideoCoord || y < -ipc::kMaxVideoCoord ||
+        y > ipc::kMaxVideoCoord)
+      fail("a video rectangle is out of range");
+  }
   Surface surface_;
   unsigned calls_ = 0;
 };

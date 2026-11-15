@@ -39,19 +39,29 @@ enum class MsgType : std::uint32_t {
   Keepalive,     // child -> acl: a frame was dropped; keep the vsync loop alive
   ImeVisible,    // child -> acl: show/hide the compositor's text input (u32)
   Clipboard,     // child -> acl: put text on the clipboard (extra = UTF-8)
+  // Appended for the video plane: a decoded frame goes to a subsurface below
+  // the app's window, not through the app's own buffers.
+  VideoFrame,   // child -> acl: a decoded frame (carries a dma-buf fd)
+  VideoBounds,  // child -> acl: where the app's video View is in its surface
+  VideoHide,    // child -> acl: take the picture off the video plane
+  VideoReset,   // child -> acl: the screen changed; drop the plane and its hole
 };
 
 // Sent in Hello. Bump when Message changes size or a payload changes layout:
 // both ends are built from this header, and a datagram of another size is
 // refused as truncated. 2: PresentFrame planes, Input keysym, PresentState.
-// 3: PresentState.frames_seen.
-inline constexpr std::uint32_t kProtocolVersion = 3;
+// 3: PresentState.frames_seen. 4: the Video* messages.
+inline constexpr std::uint32_t kProtocolVersion = 4;
 
 // Bounds both ends enforce on what the other sends.
 inline constexpr std::uint32_t kMaxSurfaceDim = 16384;
 inline constexpr std::uint32_t kMaxPlanes = 4;
 inline constexpr std::uint32_t kMaxModifiers = 256;
 inline constexpr std::size_t kMaxText = 60 * 1024;  // fits one datagram
+// A video rectangle's origin lies within this of the surface's, and its
+// sides are no longer. An app may lay its video View out larger than the
+// window and partly off it (a zoom that crops), but not without limit.
+inline constexpr std::int32_t kMaxVideoCoord = 4 * 16384;
 
 struct SurfaceInfo {  // Create/Resize payload
   std::uint32_t surface_id;
@@ -98,6 +108,23 @@ struct PresentFrame {
   std::uint32_t plane_stride[3], plane_offset[3];
   // the dma-buf fd (and, if >=0, an acquire-fence fd) travel as SCM_RIGHTS
   // ancillary data.
+};
+
+// A rectangle in the app surface's coordinates.
+struct VideoRect {
+  std::int32_t x, y, w, h;
+};
+
+// One decoded frame for the video plane. Each is its own dma-buf; there are
+// no slots, and the broker keeps at most a few alive.
+struct VideoFrame {
+  std::uint32_t w, h;        // the decoded picture, not the surface
+  std::uint32_t drm_format;  // fourcc: a YUV format the decoder produced
+  std::uint32_t plane_count;
+  std::uint64_t modifier;
+  std::uint32_t stride[4], offset[4];
+  VideoRect dest;  // where to show it, unless VideoBounds has said
+  // the dma-buf fd travels as SCM_RIGHTS ancillary data.
 };
 
 struct FrameReleased {
@@ -147,6 +174,8 @@ struct Message {
     PresentState present_state;
     PresentFrame present;
     FrameReleased released;
+    VideoFrame video;
+    VideoRect video_rect;  // VideoBounds
     Input input;
     Lifecycle lifecycle;
     AudioOpen audio_open;

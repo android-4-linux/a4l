@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <deque>
@@ -69,6 +70,17 @@ struct World {
   std::vector<Frame> frames;
   int violations = 0;  // frames that reached submit() and should not have
   int keepalives = 0;
+  // The video plane.
+  struct Video {
+    std::uint32_t w, h, format, planes, stride1, offset1;
+    std::uint64_t modifier;
+    int x, y, dw, dh;
+    char byte;
+  };
+  std::vector<Video> video;
+  std::vector<std::array<int, 4>> video_bounds;
+  int video_hides = 0, video_resets = 0, video_pumps = 0;
+  int video_violations = 0;  // video frames that should not have got through
   std::vector<bool> ime;
   std::vector<std::string> clipboard;
 
@@ -166,6 +178,65 @@ class FakePresenter final : public wm::IPresenter {
   bool closed() const noexcept override {
     std::lock_guard<std::mutex> lock(world_.mu);
     return world_.closed;
+  }
+  std::vector<std::uint64_t> modifiers_for(
+      std::uint32_t drm_format) const noexcept override {
+    // NV12 only, linear and one tiled modifier; P010 is not advertised.
+    if (drm_format == 0x3231564eu)
+      return {0, 0x0200000000401b03ull};
+    return {};
+  }
+  void present_video(const gfx::DmabufFrame& frame,
+                     int x,
+                     int y,
+                     int w,
+                     int h) noexcept override {
+    char byte = 0;
+    (void)!::pread(frame.fd, &byte, 1, 0);
+    struct stat st{};
+    const bool file = ::fstat(frame.fd, &st) == 0 && S_ISREG(st.st_mode);
+    const auto size = static_cast<std::uint64_t>(st.st_size);
+    const std::uint64_t luma_end =
+        frame.planes[0].offset +
+        static_cast<std::uint64_t>(frame.planes[0].stride) * frame.height;
+    const std::uint64_t chroma_end =
+        frame.planes[1].offset +
+        static_cast<std::uint64_t>(frame.planes[1].stride) *
+            ((frame.height + 1) / 2);
+    std::lock_guard<std::mutex> lock(world_.mu);
+    // What must hold for any video frame that reaches the compositor.
+    if (!file || frame.drm_format != 0x3231564eu || frame.width == 0 ||
+        frame.height == 0 || frame.width > 16384 || frame.height > 16384 ||
+        frame.plane_count < 2 || frame.plane_count > 4 ||
+        (frame.modifier != 0 && frame.modifier != 0x0200000000401b03ull) ||
+        frame.planes[0].stride < frame.width ||
+        frame.planes[1].stride < (frame.width + 1) / 2 * 2 || luma_end > size ||
+        chroma_end > size || w <= 0 || h <= 0 || w > 65536 || h > 65536 ||
+        x < -65536 || x > 65536 || y < -65536 || y > 65536)
+      ++world_.video_violations;
+    world_.video.push_back({frame.width, frame.height, frame.drm_format,
+                            frame.plane_count, frame.planes[1].stride,
+                            frame.planes[1].offset, frame.modifier, x, y, w, h,
+                            byte});
+  }
+  void hide_video() noexcept override {
+    std::lock_guard<std::mutex> lock(world_.mu);
+    ++world_.video_hides;
+  }
+  void set_video_bounds(int x, int y, int w, int h) noexcept override {
+    std::lock_guard<std::mutex> lock(world_.mu);
+    if (w <= 0 || h <= 0 || w > 65536 || h > 65536 || x < -65536 || x > 65536 ||
+        y < -65536 || y > 65536)
+      ++world_.video_violations;
+    world_.video_bounds.push_back({x, y, w, h});
+  }
+  void pump_video() noexcept override {
+    std::lock_guard<std::mutex> lock(world_.mu);
+    ++world_.video_pumps;
+  }
+  void reset_video_overlay() noexcept override {
+    std::lock_guard<std::mutex> lock(world_.mu);
+    ++world_.video_resets;
   }
   void set_ime_visible(bool visible) noexcept override {
     std::lock_guard<std::mutex> lock(world_.mu);
@@ -423,6 +494,157 @@ TEST_CASE("split: keepalive, IME and clipboard are forwarded", "[split]") {
   CHECK(rig.world.keepalives == 1);
   CHECK(rig.world.ime == std::vector<bool>{true, false});
   CHECK(rig.world.clipboard == std::vector<std::string>{"copied"});
+}
+
+// A 640x360 NV12 frame in the memfd buffer_fd() makes.
+gfx::DmabufFrame video_of(int fd) {
+  gfx::DmabufFrame f{};
+  f.fd = fd;
+  f.width = 640;
+  f.height = 360;
+  f.plane_count = 2;
+  f.planes[0].stride = 640;
+  f.planes[1].stride = 640;
+  f.planes[1].offset = 640 * 360;
+  f.modifier = 0x0200000000401b03ull;
+  f.drm_format = 0x3231564e;  // NV12
+  return f;
+}
+
+TEST_CASE("split: video frames cross to the broker's video plane", "[split]") {
+  Rig rig;
+  auto p =
+      wm::split_presenter_open_on(rig.child, 1280, 800, "t", "a", {}, false);
+  REQUIRE(p != nullptr);
+  // The proxy has no plane of its own to wake.
+  CHECK(p->video_wake_fd() == -1);
+
+  // The app lays out every frame; the rectangle is sent when it changes.
+  p->set_video_bounds(120, 164, 640, 360);
+  p->set_video_bounds(120, 164, 640, 360);
+  p->set_video_bounds(-640, 0, 2560, 1440);
+
+  // From another thread, as the decoder calls it.
+  std::thread decoder([&] {
+    for (char c : {'a', 'b', 'c'}) {
+      const int fd = buffer_fd(c);
+      p->present_video(video_of(fd), 0, 0, 640, 360);
+      ::close(fd);  // the decoder reuses its descriptor at once
+    }
+  });
+  decoder.join();
+  p->hide_video();
+  p->reset_video_overlay();
+  // After a reset the same rectangle is news again.
+  p->set_video_bounds(-640, 0, 2560, 1440);
+
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.video_frames == 3);
+  CHECK(stats.rejected == 0);
+  CHECK(stats.frames == 0);
+  World& w = rig.world;
+  REQUIRE(w.video.size() == 3);
+  CHECK(w.video[0].byte == 'a');
+  CHECK(w.video[2].byte == 'c');
+  CHECK(w.video[1].w == 640);
+  CHECK(w.video[1].h == 360);
+  CHECK(w.video[1].format == 0x3231564eu);
+  CHECK(w.video[1].planes == 2);
+  CHECK(w.video[1].stride1 == 640);
+  CHECK(w.video[1].offset1 == 640 * 360);
+  CHECK(w.video[1].modifier == 0x0200000000401b03ull);
+  CHECK(w.video[1].dw == 640);
+  CHECK(w.video[1].dh == 360);
+  // Each frame and the hide were shown at once, on the broker's thread.
+  CHECK(w.video_pumps == 4);
+  CHECK(w.video_hides == 1);
+  CHECK(w.video_resets == 1);
+  REQUIRE(w.video_bounds.size() == 3);
+  CHECK(w.video_bounds[0] == std::array<int, 4>{120, 164, 640, 360});
+  CHECK(w.video_bounds[1] == std::array<int, 4>{-640, 0, 2560, 1440});
+  CHECK(w.video_bounds[2] == std::array<int, 4>{-640, 0, 2560, 1440});
+  CHECK(w.video_violations == 0);
+}
+
+TEST_CASE("split: the broker drops video that fails validation", "[split]") {
+  Rig rig;
+  const int fd = buffer_fd('v');
+  const int not_a_buffer = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+  REQUIRE(not_a_buffer >= 0);
+  const auto video = [&](const std::function<void(ipc::VideoFrame&)>& spoil,
+                         int with_fd) {
+    ipc::Message m;
+    m.type = ipc::MsgType::VideoFrame;
+    ipc::VideoFrame& v = m.video;
+    v.w = 640;
+    v.h = 360;
+    v.drm_format = 0x3231564e;
+    v.plane_count = 2;
+    v.stride[0] = v.stride[1] = 640;
+    v.offset[1] = 640 * 360;
+    v.dest = {0, 0, 640, 360};
+    spoil(v);
+    REQUIRE(rig.child.send(m, {}, with_fd));
+  };
+  const auto bounds = [&](ipc::VideoRect rect) {
+    ipc::Message m;
+    m.type = ipc::MsgType::VideoBounds;
+    m.video_rect = rect;
+    REQUIRE(rig.child.send(m));
+  };
+  const auto as_is = [](ipc::VideoFrame&) {};
+
+  video(as_is, fd);  // 1: no surface yet
+  // Before a surface these have nothing to act on; they are not errors.
+  bounds({0, 0, 640, 360});
+  ipc::Message hide;
+  hide.type = ipc::MsgType::VideoHide;
+  REQUIRE(rig.child.send(hide));
+
+  auto p =
+      wm::split_presenter_open_on(rig.child, 1280, 800, "t", "a", {}, false);
+  REQUIRE(p != nullptr);
+  using V = wm::FrameVerdict;
+  video([](auto& v) { v.w = 0; }, fd);                        // 2
+  video([](auto& v) { v.h = ipc::kMaxSurfaceDim + 1; }, fd);  // 3
+  video([](auto& v) { v.dest.w = 0; }, fd);                   // 4
+  video([](auto& v) { v.dest.x = 0x7fffffff; }, fd);          // 5
+  video([](auto& v) { v.drm_format = 0x34325241; }, fd);      // 6: ARGB
+  video([](auto& v) { v.drm_format = 0x30313050; }, fd);    // 7: P010, unlisted
+  video([](auto& v) { v.modifier = 0x33; }, fd);            // 8
+  video([](auto& v) { v.plane_count = 1; }, fd);            // 9
+  video([](auto& v) { v.plane_count = 0x80000000u; }, fd);  // 10
+  video([](auto& v) { v.stride[0] = 1; }, fd);              // 11
+  video([](auto& v) { v.stride[1] = 0xffffffffu; }, fd);    // 12: would wrap
+  video([](auto& v) { v.offset[1] = 4u << 20; }, fd);       // 13: past the end
+  video(as_is, -1);                                         // 14: no fd
+  video(as_is, not_a_buffer);                               // 15
+  bounds({0, 0, 0, 0});                                     // 16
+  bounds({0, 0, 0x7fffffff, 0x7fffffff});                   // 17
+  bounds({-0x7fffffff, 0, 640, 360});                       // 18
+  video(as_is, fd);  // and one that is fine
+  ::close(fd);
+  ::close(not_a_buffer);
+
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.rejected == 18);
+  CHECK(stats.video_frames == 1);
+  const auto count = [&](V v) {
+    return stats.frame_verdicts[static_cast<std::size_t>(v)];
+  };
+  CHECK(count(V::NoSurface) == 1);
+  CHECK(count(V::BadSize) == 4);
+  CHECK(count(V::BadFormat) == 2);
+  CHECK(count(V::BadModifier) == 1);
+  CHECK(count(V::BadPlanes) == 2);
+  CHECK(count(V::BadLayout) == 3);
+  CHECK(count(V::NoBuffer) == 1);
+  CHECK(count(V::NotDmabuf) == 1);
+  CHECK(rig.world.video.size() == 1);
+  CHECK(rig.world.video_bounds.empty());
+  CHECK(rig.world.video_violations == 0);
+  // A refused video frame does not touch the window's own frame loop.
+  CHECK(rig.world.keepalives == 0);
 }
 
 TEST_CASE("split: the broker drops what fails validation", "[split]") {

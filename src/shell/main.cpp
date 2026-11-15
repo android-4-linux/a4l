@@ -591,13 +591,13 @@ int run_split(const acl::pkg::Apk& apk,
   acl::log::i(kTag,
               "split: app process ended ({}); {} frame(s) presented, {} input "
               "event(s) forwarded, {} message(s) rejected, {} datagram(s) from "
-              "the app and {} to it",
+              "the app and {} to it, {} video frame(s) shown",
               !reaped              ? "killed after the window closed"
               : signaled           ? "signaled"
               : WIFEXITED(wstatus) ? "exited"
                                    : "stopped",
               stats.frames, stats.inputs, stats.rejected, stats.from_child,
-              stats.to_child);
+              stats.to_child, stats.video_frames);
   if (!reaped || stats.window_closed)
     return kOk;
   if (WIFEXITED(wstatus) && !signaled)

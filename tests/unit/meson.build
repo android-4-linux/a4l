@@ -18,6 +18,7 @@ unit_test_sources = files(
   'split_validate_test.cpp',
   'gl_hold_test.cpp',
   'vsync_cap_test.cpp',
+  'video_geometry_test.cpp',
   'confine_test.cpp',
   'runtime_test.cpp',
   'pkg_test.cpp',
