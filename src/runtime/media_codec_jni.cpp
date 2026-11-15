@@ -38,6 +38,7 @@
 #include "gfx/ahardware_buffer.h"
 #include "gfx/buffer_queue.h"
 #include "log/log.h"
+#include "media/audio_codec.h"
 #include "media/video_decoder.h"
 #include "runtime/image_reader_jni.h"
 #include "wm/present.h"  // wm::active_video_presenter (route decoded video to the HW plane)
@@ -83,6 +84,14 @@ struct CodecCtx {
   std::vector<std::uint8_t>
       csd;  // codec-specific data (csd-0[+csd-1]) from the configure format
   std::unique_ptr<media::CodecDecoder> dec;
+  // An audio decoder: byte buffers in, 16-bit PCM in byte buffers out. Set at
+  // start() when the MIME is audio/; everything video below is then unused.
+  std::unique_ptr<media::AudioCodec> audio;
+  std::map<int, std::vector<std::uint8_t>> csd_parts;  // csd-N, by N
+  int sample_rate = 0, channels = 0;                   // the format's hints
+  // Async audio: flush() stops callbacks until start() is called again, as
+  // MediaCodec specifies; a client discards what arrives in between.
+  std::atomic<bool> await_start{false};
   gfx::BufferQueue* out_queue =
       nullptr;  // the configured Surface's ImageReader BufferQueue (or null)
   bool started = false;
@@ -153,6 +162,10 @@ struct CodecCtx {
   std::int64_t pace_first_pts = 0;
   std::chrono::steady_clock::time_point pace_first_wall{};
 };
+
+bool is_audio(const CodecCtx* ctx) {
+  return ctx->mime.rfind("audio/", 0) == 0;
+}
 
 CodecCtx* ctx_of(JNIEnv* env, jobject thiz) {
   return g_mc_ctx_fid != nullptr ? reinterpret_cast<CodecCtx*>(
@@ -231,6 +244,17 @@ jobject build_format_map(JNIEnv* env, CodecCtx* ctx) {
     if (jv)
       env->DeleteLocalRef(jv);
   };
+  if (is_audio(ctx)) {
+    // What a decoder of audio puts out: 16-bit PCM at the stream's own rate
+    // and channel count, known once the first frame has been decoded.
+    const int rate = ctx->audio ? ctx->audio->sample_rate() : 0;
+    const int channels = ctx->audio ? ctx->audio->channels() : 0;
+    put_str("mime", "audio/raw");
+    put_int("sample-rate", rate > 0 ? rate : ctx->sample_rate);
+    put_int("channel-count", channels > 0 ? channels : ctx->channels);
+    put_int("pcm-encoding", 2);  // AudioFormat.ENCODING_PCM_16BIT
+    return m;
+  }
   put_str("mime", "video/raw");
   put_int("width", ctx->width);
   put_int("height", ctx->height);
@@ -489,6 +513,92 @@ void async_driver(CodecCtx* ctx) {
   ctx->vm->DetachCurrentThread();
 }
 
+// The async driver for an audio codec. The AudioCodec holds the buffers and
+// the decoder; this thread turns its state into MediaCodec callbacks: an
+// input buffer the client may fill, the output format, a buffer of PCM.
+void audio_async_driver(CodecCtx* ctx) {
+  JNIEnv* env = nullptr;
+  if (ctx->vm->AttachCurrentThread(reinterpret_cast<void**>(&env), nullptr) !=
+      JNI_OK)
+    return;
+  auto post = [&](jint cb, jint arg2, jobject obj) {
+    env->CallVoidMethod(ctx->self, g_post_event, EVENT_CALLBACK, cb, arg2, obj);
+    if (env->ExceptionCheck())
+      env->ExceptionClear();
+  };
+  media::AudioCodec& codec = *ctx->audio;
+  while (!ctx->stop.load(std::memory_order_acquire)) {
+    if (ctx->await_start.load(std::memory_order_acquire)) {
+      codec.wait_for_work(20);
+      continue;
+    }
+    bool worked = false;
+    for (int idx = codec.dequeue_input(); idx >= 0;
+         idx = codec.dequeue_input()) {
+      post(CB_INPUT_AVAILABLE, idx, nullptr);
+      worked = true;
+    }
+    for (;;) {
+      const media::AudioCodec::Output out = codec.dequeue_output();
+      if (out.kind == media::AudioCodec::Output::Kind::TryAgain)
+        break;
+      worked = true;
+      if (out.kind == media::AudioCodec::Output::Kind::FormatChanged) {
+        jobject fmt = build_format_map(env, ctx);
+        post(CB_OUTPUT_FORMAT_CHANGE, 0, fmt);
+        if (fmt)
+          env->DeleteLocalRef(fmt);
+        continue;
+      }
+      jobject info = env->NewObject(g_bufinfo_cls, g_bufinfo_ctor);
+      if (info != nullptr) {
+        env->CallVoidMethod(info, g_bufinfo_set, 0,
+                            static_cast<jint>(out.bytes),
+                            static_cast<jlong>(out.pts_us),
+                            out.end_of_stream ? BUFFER_FLAG_END_OF_STREAM : 0);
+        post(CB_OUTPUT_AVAILABLE, out.index, info);
+        env->DeleteLocalRef(info);
+      }
+      if (ctx->stop.load(std::memory_order_acquire) ||
+          ctx->await_start.load(std::memory_order_acquire))
+        break;
+    }
+    if (!worked)
+      codec.wait_for_work(20);
+  }
+  ctx->vm->DetachCurrentThread();
+}
+
+// A direct ByteBuffer over `size` bytes at `mem`, in native byte order: PCM
+// is read from it as shorts.
+jobject pcm_byte_buffer(JNIEnv* env, void* mem, std::size_t size) {
+  jobject bb = env->NewDirectByteBuffer(mem, static_cast<jlong>(size));
+  if (bb == nullptr)
+    return nullptr;
+  jclass order_cls = env->FindClass("java/nio/ByteOrder");
+  jclass bb_cls = env->FindClass("java/nio/ByteBuffer");
+  if (order_cls != nullptr && bb_cls != nullptr) {
+    const jmethodID native_order = env->GetStaticMethodID(
+        order_cls, "nativeOrder", "()Ljava/nio/ByteOrder;");
+    const jmethodID set_order = env->GetMethodID(
+        bb_cls, "order", "(Ljava/nio/ByteOrder;)Ljava/nio/ByteBuffer;");
+    if (native_order != nullptr && set_order != nullptr) {
+      jobject order = env->CallStaticObjectMethod(order_cls, native_order);
+      if (order != nullptr) {
+        env->DeleteLocalRef(env->CallObjectMethod(bb, set_order, order));
+        env->DeleteLocalRef(order);
+      }
+    }
+  }
+  if (env->ExceptionCheck())
+    env->ExceptionClear();
+  if (order_cls)
+    env->DeleteLocalRef(order_cls);
+  if (bb_cls)
+    env->DeleteLocalRef(bb_cls);
+  return bb;
+}
+
 // ── android.media.MediaCodec natives
 // ──────────────────────────────────────────────────────────────
 void JNICALL MC_native_init(JNIEnv*, jclass) {}  // ids cached at register time
@@ -552,6 +662,10 @@ void JNICALL MC_native_configure(JNIEnv* env,
         ctx->width = int_value(env, v);
       } else if (std::strcmp(ks, "height") == 0) {
         ctx->height = int_value(env, v);
+      } else if (std::strcmp(ks, "sample-rate") == 0) {
+        ctx->sample_rate = int_value(env, v);
+      } else if (std::strcmp(ks, "channel-count") == 0) {
+        ctx->channels = int_value(env, v);
       } else if (std::strncmp(ks, "csd-", 4) == 0) {
         append_bytebuffer(
             env, v, csd_parts[std::atoi(ks + 4)]);  // by index: csd-0, csd-1, …
@@ -565,6 +679,7 @@ void JNICALL MC_native_configure(JNIEnv* env,
   }
   for (auto& [idx, part] : csd_parts)
     ctx->csd.insert(ctx->csd.end(), part.begin(), part.end());
+  ctx->csd_parts = std::move(csd_parts);  // audio wants them apart
   // Resolve the output Surface -> its ImageReader BufferQueue (zero-copy sink).
   // null = no surface (buffer-mode decode, not supported for the zero-copy path
   // yet).
@@ -580,9 +695,35 @@ void JNICALL MC_native_configure(JNIEnv* env,
 
 void JNICALL MC_native_start(JNIEnv* env, jobject thiz) {
   CodecCtx* ctx = ctx_of(env, thiz);
-  if (ctx == nullptr || ctx->started)
+  if (ctx == nullptr)
     return;
+  if (ctx->started) {
+    // start() after flush() resumes an asynchronous codec.
+    if (ctx->audio && ctx->await_start.exchange(false))
+      ctx->audio->wake();
+    return;
+  }
   std::string err;
+  if (is_audio(ctx)) {
+    media::AudioDecoder::Config cfg;
+    cfg.mime = ctx->mime;
+    cfg.sample_rate = ctx->sample_rate;
+    cfg.channels = ctx->channels;
+    for (auto& [idx, part] : ctx->csd_parts)
+      cfg.csd.push_back(part);
+    ctx->audio = media::AudioCodec::create(cfg, &err);
+    if (!ctx->audio) {
+      log::w(kTag, "start: no audio decoder for '{}': {}", ctx->mime, err);
+      return;
+    }
+    ctx->started = true;
+    ctx->await_start = false;
+    if (ctx->async && ctx->vm != nullptr && ctx->self != nullptr)
+      ctx->driver = std::thread(audio_async_driver, ctx);
+    log::i(kTag, "native_start: audio decoder up{} for {}, {} csd buffer(s)",
+           ctx->async ? " (ASYNC)" : "", ctx->mime, cfg.csd.size());
+    return;
+  }
   ctx->dec = media::CodecDecoder::configure(
       ctx->mime, ctx->csd.empty() ? nullptr : ctx->csd.data(), ctx->csd.size(),
       ctx->width, ctx->height, &err);
@@ -611,12 +752,32 @@ void JNICALL MC_native_start(JNIEnv* env, jobject thiz) {
   }
 }
 
+// How long a synchronous dequeue with a timeout waits when it has nothing:
+// the timeout, capped, so that a client polling with one does not spin.
+int dequeue_wait_ms(jlong timeout_us) {
+  if (timeout_us == 0)
+    return 0;
+  if (timeout_us < 0 || timeout_us > 20000)
+    return 20;
+  return static_cast<int>(timeout_us / 1000);
+}
+
 jint JNICALL MC_native_dequeueInputBuffer(JNIEnv* env,
                                           jobject thiz,
-                                          jlong /*timeoutUs*/) {
+                                          jlong timeoutUs) {
   CodecCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr || !ctx->started)
     return INFO_TRY_AGAIN_LATER;
+  if (ctx->audio) {
+    int idx = ctx->audio->dequeue_input();
+    if (idx < 0) {
+      if (const int ms = dequeue_wait_ms(timeoutUs); ms > 0) {
+        ctx->audio->wait_for_work(ms);
+        idx = ctx->audio->dequeue_input();
+      }
+    }
+    return idx >= 0 ? idx : INFO_TRY_AGAIN_LATER;
+  }
   for (std::size_t i = 0; i < ctx->inbufs.size(); ++i)
     if (ctx->inbufs[i].free) {
       ctx->inbufs[i].free = false;
@@ -633,6 +794,24 @@ jobject JNICALL MC_getBuffer(JNIEnv* env,
   CodecCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr)
     return nullptr;
+  if (ctx->audio) {
+    if (input == JNI_TRUE) {
+      std::uint8_t* mem = ctx->audio->input_data(index);
+      return mem != nullptr
+                 ? env->NewDirectByteBuffer(
+                       mem, static_cast<jlong>(ctx->audio->input_bytes()))
+                 : nullptr;
+    }
+    std::size_t bytes = 0;
+    const std::int16_t* pcm = ctx->audio->output_data(index, &bytes);
+    if (pcm == nullptr)
+      return nullptr;
+    // The memory is the codec's and is reused after releaseOutputBuffer.
+    // MediaCodec.java frees the ByteBuffer it tracks for an index when the
+    // index is released or the codec is flushed, so a stale one throws
+    // instead of reaching the memory.
+    return pcm_byte_buffer(env, const_cast<std::int16_t*>(pcm), bytes);
+  }
   if (input == JNI_TRUE) {
     if (index < 0 || static_cast<std::size_t>(index) >= ctx->inbufs.size())
       return nullptr;
@@ -651,7 +830,25 @@ void JNICALL MC_native_queueInputBuffer(JNIEnv* env,
                                         jlong pts,
                                         jint flags) {
   CodecCtx* ctx = ctx_of(env, thiz);
-  if (ctx == nullptr || !ctx->started || ctx->dec == nullptr)
+  if (ctx == nullptr || !ctx->started)
+    return;
+  if (ctx->audio) {
+    // Codec configuration queued as a buffer is what the format's csd already
+    // said; the buffer is taken back empty.
+    const bool config = (flags & BUFFER_FLAG_CODEC_CONFIG) != 0;
+    const bool eos = (flags & BUFFER_FLAG_END_OF_STREAM) != 0;
+    if (!ctx->audio->queue_input(index, config ? 0 : offset, config ? 0 : size,
+                                 pts, eos)) {
+      static int logged = 0;
+      if (logged++ < 4)
+        log::w(kTag,
+               "queueInputBuffer: index {} offset {} size {} is not a buffer "
+               "the client holds, or runs past it; ignored",
+               index, offset, size);
+    }
+    return;
+  }
+  if (ctx->dec == nullptr)
     return;
   std::string err;
   if (ctx->async) {
@@ -708,9 +905,30 @@ void JNICALL MC_native_queueInputBuffer(JNIEnv* env,
 jint JNICALL MC_native_dequeueOutputBuffer(JNIEnv* env,
                                            jobject thiz,
                                            jobject info,
-                                           jlong /*timeoutUs*/) {
+                                           jlong timeoutUs) {
   CodecCtx* ctx = ctx_of(env, thiz);
-  if (ctx == nullptr || !ctx->started || ctx->dec == nullptr)
+  if (ctx == nullptr || !ctx->started)
+    return INFO_TRY_AGAIN_LATER;
+  if (ctx->audio) {
+    using Kind = media::AudioCodec::Output::Kind;
+    media::AudioCodec::Output out = ctx->audio->dequeue_output();
+    if (out.kind == Kind::TryAgain) {
+      if (const int ms = dequeue_wait_ms(timeoutUs); ms > 0) {
+        ctx->audio->wait_for_work(ms);
+        out = ctx->audio->dequeue_output();
+      }
+    }
+    if (out.kind == Kind::TryAgain)
+      return INFO_TRY_AGAIN_LATER;
+    if (out.kind == Kind::FormatChanged)
+      return INFO_OUTPUT_FORMAT_CHANGED;
+    if (g_bufinfo_set != nullptr && info != nullptr)
+      env->CallVoidMethod(info, g_bufinfo_set, 0, static_cast<jint>(out.bytes),
+                          static_cast<jlong>(out.pts_us),
+                          out.end_of_stream ? BUFFER_FLAG_END_OF_STREAM : 0);
+    return out.index;
+  }
+  if (ctx->dec == nullptr)
     return INFO_TRY_AGAIN_LATER;
   // Signal the output format once before the first frame (ExoPlayer's
   // MediaCodecRenderer reads getOutputFormat() on this, then continues
@@ -758,6 +976,10 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env,
   CodecCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr || index < 0)
     return;
+  if (ctx->audio) {
+    ctx->audio->release_output(index);
+    return;
+  }
   ::AHardwareBuffer* ahb = nullptr;
   std::int64_t rel_pts = 0;
   {
@@ -809,8 +1031,13 @@ void teardown(CodecCtx* ctx) {
                   std::memory_order_release);  // stop the async driver (if any)
                                                // before the decoder
   ctx->acv.notify_all();
+  if (ctx->audio)
+    ctx->audio->wake();
   if (ctx->driver.joinable())
     ctx->driver.join();
+  ctx->audio.reset();
+  ctx->stop.store(false,
+                  std::memory_order_release);  // a codec may be started again
   for (auto& s : ctx->outslots)
     if (s.used && s.ahb != nullptr)
       gfx::ahb_release(s.ahb);
@@ -828,6 +1055,13 @@ void JNICALL MC_native_flush(JNIEnv* env, jobject thiz) {
       thiz);  // drop any pending imported outputs; the decoder keeps its config
   if (ctx == nullptr)
     return;
+  if (ctx->audio) {
+    // Asynchronous: no callbacks until start() is called again.
+    if (ctx->async)
+      ctx->await_start = true;
+    ctx->audio->flush();
+    return;
+  }
   for (auto& s : ctx->outslots)
     if (s.used && s.ahb != nullptr) {
       gfx::ahb_release(s.ahb);

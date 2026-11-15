@@ -207,7 +207,32 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 300,
       is_parallel : false,
     )
+    # An audio decoder in MediaCodec, end to end: a fixture app decodes AAC through MediaCodec
+    # (dequeue calls and a Callback) into an AudioTrack, single-process and under --split.
+    # Counting sink: no sound. Needs host ART and FFmpeg; SKIPs otherwise, which includes CI.
+    test(
+      'audio-codec',
+      py3,
+      args : [files('run_audio_codec_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 400,
+      is_parallel : false,
+    )
   endif
+endif
+
+# media::AudioDecoder on each codec a4l names a decoder for (AAC, MP3, Opus, Vorbis, FLAC): a
+# tone encoded by the ffmpeg CLI is cut into access units as an Android player would receive
+# them, decoded, and measured. Needs the ffmpeg CLI and libraries; a codec either lacks is
+# skipped and named.
+if py3.found() and have_ffmpeg
+  test(
+    'audio-decode',
+    py3,
+    args : [files('run_audio_decode_test.py'), audio_decode_probe],
+    depends : [audio_decode_probe],
+    timeout : 120,
+  )
 endif
 
 if py3.found() and have_jni
