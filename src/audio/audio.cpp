@@ -78,11 +78,15 @@ namespace {
 using SplitOpenFn = int (*)(int rate, int channels);
 using SplitWriteFn = int (*)(int stream, const std::int16_t* pcm, int n);
 using SplitCloseFn = void (*)(int stream);
+using SplitLatencyFn = long long (*)(int stream);
 
 class SplitSink final : public Sink {
  public:
-  SplitSink(SplitOpenFn open, SplitWriteFn write, SplitCloseFn close)
-      : open_(open), write_(write), close_(close) {}
+  SplitSink(SplitOpenFn open,
+            SplitWriteFn write,
+            SplitCloseFn close,
+            SplitLatencyFn latency)
+      : open_(open), write_(write), close_(close), latency_(latency) {}
   ~SplitSink() override { close(); }
 
   bool open(const Format& fmt) override {
@@ -116,11 +120,19 @@ class SplitSink final : public Sink {
     log::i(kTag, "sink=split close: {} frames sent", frames_);
   }
   std::uint64_t frames_written() const override { return frames_; }
+  // The broker's device, as the broker last reported it.
+  std::int64_t latency_ns() const override {
+    if (stream_ < 0 || latency_ == nullptr)
+      return 0;
+    const long long us = latency_(stream_);
+    return us < 0 ? -1 : us * 1000;
+  }
 
  private:
   SplitOpenFn open_;
   SplitWriteFn write_;
   SplitCloseFn close_;
+  SplitLatencyFn latency_;
   Format fmt_;
   int stream_ = -1;
   std::uint64_t frames_ = 0;
@@ -140,7 +152,9 @@ std::unique_ptr<Sink> make_split_sink() {
       ::dlsym(RTLD_DEFAULT, "acl_split_audio_close"));
   if (open == nullptr || write == nullptr || close == nullptr)
     return nullptr;
-  return std::make_unique<SplitSink>(open, write, close);
+  const auto latency = reinterpret_cast<SplitLatencyFn>(
+      ::dlsym(RTLD_DEFAULT, "acl_split_audio_latency_us"));
+  return std::make_unique<SplitSink>(open, write, close, latency);
 }
 
 }  // namespace

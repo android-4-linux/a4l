@@ -7,11 +7,13 @@
 #include <poll.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -73,6 +75,14 @@ struct ChildAudio {
   std::mutex mu;
   std::uint32_t open_mask = 0;
   std::uint32_t channels[ipc::kMaxAudioStreams] = {};
+  // What the broker says of each stream's device. Written by the thread
+  // that reads the channel, read by the app's audio threads.
+  // -1 until it has said.
+  std::atomic<std::int64_t> latency_us[ipc::kMaxAudioStreams];
+  ChildAudio() {
+    for (auto& l : latency_us)
+      l.store(-1, std::memory_order_relaxed);
+  }
 };
 ChildAudio& child_audio() noexcept {
   static ChildAudio a;
@@ -102,6 +112,7 @@ int split_audio_open_on(ipc::Channel& channel, int rate, int channels) {
       return -1;
     a.open_mask |= 1u << id;
     a.channels[id] = static_cast<std::uint32_t>(channels);
+    a.latency_us[id].store(-1, std::memory_order_relaxed);
   }
   ipc::Message m;
   m.type = ipc::MsgType::AudioOpen;
@@ -186,6 +197,26 @@ extern "C" void acl_split_audio_close(int stream) {
   ChildState& s = child_state();
   if (s.active)
     split_audio_close_on(s.channel, stream);
+}
+extern "C" long long acl_split_audio_latency_us(int stream) {
+  return split_audio_latency_us(stream);
+}
+
+void split_audio_note_latency(const ipc::AudioLatency& l) noexcept {
+  // From the broker, which this process trusts; bounded all the same, since
+  // a player does arithmetic on it.
+  if (l.stream >= ipc::kMaxAudioStreams)
+    return;
+  child_audio().latency_us[l.stream].store(
+      l.latency_us < ipc::kMaxAudioLatencyUs ? l.latency_us
+                                             : ipc::kMaxAudioLatencyUs,
+      std::memory_order_relaxed);
+}
+
+long long split_audio_latency_us(int stream) noexcept {
+  if (stream < 0 || stream >= static_cast<int>(ipc::kMaxAudioStreams))
+    return 0;
+  return child_audio().latency_us[stream].load(std::memory_order_relaxed);
 }
 
 #if ACL_HAVE_VULKAN && ACL_HAVE_WCS
@@ -469,6 +500,9 @@ class SplitPresenter final : public IPresenter {
       }
       case ipc::MsgType::Input:
         deliver(r);
+        break;
+      case ipc::MsgType::AudioLatency:
+        split_audio_note_latency(r.msg.audio_latency);
         break;
       case ipc::MsgType::Bye: {
         {
@@ -1050,6 +1084,32 @@ class Broker {
                                      static_cast<int>(audio_scratch_.size()));
     if (taken > 0)
       stats_.audio_frames += static_cast<std::uint64_t>(taken) / st.channels;
+    report_latency(id);
+  }
+
+  // The child's player times its picture against sound it cannot see leave
+  // the device, so it is told the device's latency: with a stream's first
+  // samples the device has a figure for, and after that when it has moved
+  // by kLatencyStepUs. At most
+  // one message per write the child made, and none for a steady device.
+  void report_latency(std::uint32_t id) noexcept {
+    AudioStream& st = audio_[id];
+    const std::int64_t ns = st.sink->latency_ns();
+    if (ns < 0)
+      return;  // the device has not run yet; the child waits for the first
+    const std::int64_t us =
+        std::min<std::int64_t>(ns / 1000, ipc::kMaxAudioLatencyUs);
+    if (st.latency_sent_us >= 0 &&
+        std::abs(us - st.latency_sent_us) < kLatencyStepUs)
+      return;
+    ipc::Message m;
+    m.type = ipc::MsgType::AudioLatency;
+    m.audio_latency.stream = id;
+    m.audio_latency.latency_us = static_cast<std::uint32_t>(us);
+    if (channel_.send(m)) {
+      ++stats_.to_child;
+      st.latency_sent_us = us;
+    }
   }
 
   // The child closes a stream when it has written the last of it, which is
@@ -1160,8 +1220,10 @@ class Broker {
     bool open = false;
     std::uint32_t rate = 0, channels = 0;
     std::unique_ptr<audio::Sink> sink;
+    std::int64_t latency_sent_us = -1;  // -1: not yet told
   };
   AudioStream audio_[ipc::kMaxAudioStreams];
+  static constexpr std::int64_t kLatencyStepUs = 2000;
   // Streams the child closed that are playing out what they hold.
   struct ClosingSink {
     std::unique_ptr<audio::Sink> sink;

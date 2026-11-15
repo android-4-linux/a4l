@@ -36,6 +36,13 @@ class Sink {
   // Frames accepted and not yet played. 0 for a sink that keeps none. What a
   // caller that must bound memory (the --split broker) checks before a write.
   virtual std::uint64_t frames_pending() const { return 0; }
+  // How long a frame takes to sound once it is no longer pending: the
+  // device's own delay (its period, a resampler, a Bluetooth link). 0 for a
+  // sink that has none or cannot say; -1 for one that will say and has not
+  // yet, which is so until its device has run once. A player subtracts it
+  // to keep picture and sound together; it changes when the device does, so
+  // it is read each time.
+  virtual std::int64_t latency_ns() const { return 0; }
 };
 
 // Create the configured sink. ACL_AUDIO=pipewire selects the PipeWire backend

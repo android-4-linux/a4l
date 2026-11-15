@@ -36,6 +36,7 @@ acl_exe = executable(
     '-Wl,--export-dynamic-symbol=acl_split_audio_open',
     '-Wl,--export-dynamic-symbol=acl_split_audio_write',
     '-Wl,--export-dynamic-symbol=acl_split_audio_close',
+    '-Wl,--export-dynamic-symbol=acl_split_audio_latency_us',
   ],
   install : true,
 )

@@ -51,6 +51,9 @@ int acl_split_audio_open(int rate, int channels);
 // Send interleaved 16-bit samples. Returns how many were sent.
 int acl_split_audio_write(int stream, const std::int16_t* pcm, int n_samples);
 void acl_split_audio_close(int stream);
+// What the broker last said of the stream's device latency, in microseconds.
+// -1 until it has said; 0 for a stream id out of range.
+long long acl_split_audio_latency_us(int stream);
 }
 // The same over a channel the caller owns: what the functions above call
 // with the installed channel, and the test seam. The table of open streams
@@ -61,6 +64,10 @@ int split_audio_write_on(ipc::Channel& channel,
                          const std::int16_t* pcm,
                          int n_samples);
 void split_audio_close_on(ipc::Channel& channel, int stream);
+// The broker's word on a stream's device latency: taken from the channel,
+// and read back by the stream's sink.
+void split_audio_note_latency(const ipc::AudioLatency& latency) noexcept;
+long long split_audio_latency_us(int stream) noexcept;
 
 #if ACL_HAVE_VULKAN && ACL_HAVE_WCS
 

@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <string>
 #include <thread>
@@ -90,8 +91,9 @@ struct World {
     std::vector<std::int16_t> samples;
     bool closed = false;
   };
-  std::vector<Stream> streams;      // in the order they were opened
-  std::uint64_t audio_pending = 0;  // what every sink reports as unplayed
+  std::vector<Stream> streams;        // in the order they were opened
+  std::uint64_t audio_pending = 0;    // what every sink reports as unplayed
+  std::int64_t audio_latency_ns = 0;  // and as its device's latency
   bool audio_open_fails = false;
   int audio_violations = 0;  // writes that were not whole frames
 
@@ -293,6 +295,10 @@ class FakeSink final : public audio::Sink {
   std::uint64_t frames_pending() const override {
     std::lock_guard<std::mutex> lock(world_.mu);
     return world_.audio_pending;
+  }
+  std::int64_t latency_ns() const override {
+    std::lock_guard<std::mutex> lock(world_.mu);
+    return world_.audio_latency_ns;
   }
 
  private:
@@ -777,6 +783,80 @@ TEST_CASE("split: a child cannot hold more streams than the limit",
   const wm::BrokerStats stats = rig.finish();
   CHECK(stats.rejected == 0);
   CHECK(rig.world.streams.size() == ipc::kMaxAudioStreams);
+}
+
+TEST_CASE("split: the broker tells the child its device's latency",
+          "[split][audio]") {
+  Rig rig;
+  const int id = wm::split_audio_open_on(rig.child, 48000, 2);
+  REQUIRE(id >= 0);
+  CHECK(wm::split_audio_latency_us(id) == -1);  // not yet told
+  const std::vector<std::int16_t> pcm(96, 3);
+  std::size_t written = 0;
+  // Write, wait for the sink to have it, and take whatever the broker sent
+  // back: the next AudioLatency, or nothing.
+  const auto write_and_hear = [&]() -> std::optional<ipc::AudioLatency> {
+    CHECK(wm::split_audio_write_on(rig.child, id, pcm.data(), 96) == 96);
+    written += 96;
+    REQUIRE(settle(rig.world, [&] {
+      return !rig.world.streams.empty() &&
+             rig.world.streams[0].samples.size() == written;
+    }));
+    // The report follows the write in the same handler; give it a moment.
+    for (int i = 0; i < 20; ++i) {
+      ipc::Received r;
+      if (rig.child.recv(r, true)) {
+        REQUIRE(r.msg.type == ipc::MsgType::AudioLatency);
+        return r.msg.audio_latency;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return std::nullopt;
+  };
+  const auto set = [&](std::int64_t ns) {
+    std::lock_guard<std::mutex> lock(rig.world.mu);
+    rig.world.audio_latency_ns = ns;
+  };
+
+  set(-1);  // the device has not run
+  CHECK_FALSE(write_and_hear().has_value());
+  set(21'000'000);
+  auto l = write_and_hear();
+  REQUIRE(l.has_value());
+  CHECK(l->stream == static_cast<std::uint32_t>(id));
+  CHECK(l->latency_us == 21'000);
+  CHECK_FALSE(write_and_hear().has_value());  // steady: said once
+  set(22'000'000);                            // within the step
+  CHECK_FALSE(write_and_hear().has_value());
+  set(221'000'000);  // another device
+  l = write_and_hear();
+  REQUIRE(l.has_value());
+  CHECK(l->latency_us == 221'000);
+  set(INT64_MAX);  // a sink gone wrong is bounded before it is sent
+  l = write_and_hear();
+  REQUIRE(l.has_value());
+  CHECK(l->latency_us == ipc::kMaxAudioLatencyUs);
+
+  // The child's side: what arrives is what the stream's sink reads.
+  wm::split_audio_note_latency(
+      ipc::AudioLatency{static_cast<std::uint32_t>(id), 221'000});
+  CHECK(wm::split_audio_latency_us(id) == 221'000);
+  wm::split_audio_note_latency(
+      ipc::AudioLatency{static_cast<std::uint32_t>(id), 0xffffffffu});
+  CHECK(wm::split_audio_latency_us(id) == ipc::kMaxAudioLatencyUs);
+  wm::split_audio_note_latency(
+      ipc::AudioLatency{ipc::kMaxAudioStreams, 5});  // no such stream
+  CHECK(wm::split_audio_latency_us(ipc::kMaxAudioStreams) == 0);
+  CHECK(wm::split_audio_latency_us(-1) == 0);
+  // A stream opened on the same id does not inherit the figure.
+  wm::split_audio_close_on(rig.child, id);
+  const int again = wm::split_audio_open_on(rig.child, 44100, 1);
+  REQUIRE(again == id);
+  CHECK(wm::split_audio_latency_us(again) == -1);
+  wm::split_audio_close_on(rig.child, again);
+
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.rejected == 0);
 }
 
 TEST_CASE("split: the broker drops audio that fails validation",
