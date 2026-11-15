@@ -78,6 +78,20 @@ class GlWindow {
   // may be null when the caller doesn't need the export.
   virtual bool swap(DmabufFrame* out, std::string* error) = 0;
 
+  // Hold mode, for a consumer in another process (ADR-0009 C3). By default a
+  // gbm window keeps one front buffer: swap() gives back the previous one, on
+  // the understanding that the presenter is done with it. A consumer across a
+  // socket is done when it says so, not when the next frame is drawn. With
+  // hold mode on, swap() releases nothing: every exported buffer stays locked
+  // (the GL driver will not render into it) until release_buffer() names it.
+  // Each frame's DmabufFrame::buffer_index says which buffer it is. Gbm only;
+  // false elsewhere.
+  virtual bool set_hold_buffers(bool /*hold*/) { return false; }
+  // Give buffer `index` back to the GL driver. No-op if it is not held.
+  virtual void release_buffer(int /*index*/) {}
+  // How many buffers are held right now.
+  virtual int held_buffers() const { return 0; }
+
   // Resize (SurfaceHolder.surfaceChanged). Wayland resizes the wl_egl_window;
   // gbm recreates the gbm_surface. Cheap no-op when unchanged.
   virtual bool resize(int width, int height, std::string* error) = 0;

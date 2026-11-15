@@ -21,6 +21,8 @@
 #include <string>
 #include <thread>
 #include <utility>
+
+#include <poll.h>
 #include <variant>
 #include <vector>
 
@@ -168,6 +170,19 @@ struct GlPresentSession {
   // immediately and take the gbm fallback, instead of blocking the full 10s
   // timeout.
   bool no_gl_session = false;
+  // A --split child (ADR-0009 C3): there is no wl_surface in this process.
+  // The window is a gbm surface on `device`, and each swapped buffer goes to
+  // the broker through `split_presenter` (owned by the PresentSession).
+  std::atomic<bool> split{false};
+  wm::IPresenter* split_presenter = nullptr;
+  std::vector<std::uint64_t> split_modifiers;  // what the compositor imports
+  // Which of the presenter's slots holds window buffer i, or -1 if the
+  // buffer is not with the broker.
+  int slot_of[4] = {-1, -1, -1, -1};
+  // Held for the whole of a split swap, and by the close that takes the
+  // presenter away, so that a swap in progress on a render thread never
+  // outlives the presenter it is talking to. Taken before `mtx`.
+  std::mutex split_swap_mtx;
 };
 GlPresentSession g_gl_session;
 // The headless gbm GL device: acl's fallback for GL that isn't a GLSurfaceView
@@ -303,6 +318,118 @@ bool st_readback_and_swap(void* egl_surface) {
 // it must NOT block for the wayland device (that only comes after onCreate) —
 // only the app's separate GLThread blocks.
 std::thread::id g_gl_main_thread;
+
+#if ACL_GL_PRESENT
+// The GL window of a --split child: a gbm surface whose buffers cross to the
+// broker as dma-bufs. Called under g_gl_session.mtx.
+std::unique_ptr<gfx::GlWindow> make_split_gl_window(void* config,
+                                                    std::string* err) {
+  auto win = g_gl_session.device->make_window(
+      g_gl_session.w, g_gl_session.h, nullptr, g_gl_session.split_modifiers,
+      err, config);
+  if (win && !win->set_hold_buffers(true)) {
+    *err = "the GL device cannot hold buffers for another process";
+    win.reset();
+  }
+  // The previous window's buffers went with it; the broker still shows the
+  // last of them until a new frame replaces it.
+  for (int& slot : g_gl_session.slot_of)
+    slot = -1;
+  return win;
+}
+
+// eglSwapBuffers for the GL window of a --split child. Returns false if
+// `egl_surface` is not that window. Single-process, Mesa's Wayland platform
+// does three things inside the swap: it hands the finished buffer to the
+// compositor, takes back the ones the compositor released, and blocks until
+// the compositor wants another frame. Here the same three are done against
+// the broker. Runs on whatever thread the app swaps on, with the app's
+// context current.
+bool split_gl_swap(void* egl_surface) {
+  if (!g_gl_session.split)
+    return false;  // set once, at session creation: no lock for the common no
+  std::lock_guard<std::mutex> swapping(g_gl_session.split_swap_mtx);
+  gfx::GlWindow* win = nullptr;
+  wm::IPresenter* presenter = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(g_gl_session.mtx);
+    if (!g_gl_session.split || !g_gl_session.window ||
+        g_gl_session.window->egl_surface() != egl_surface)
+      return false;
+    win = g_gl_session.window.get();
+    presenter = g_gl_session.split_presenter;
+  }
+  if (presenter == nullptr)
+    return true;  // the session is closing; nothing to show the frame on
+  static constexpr int kSlots = 3;  // the presenter's ring
+
+  // Take back what the compositor released: a slot the broker reports free
+  // again. The driver may render into those buffers from here on.
+  std::uint32_t free = presenter->free_mask();
+  for (int& slot : g_gl_session.slot_of) {
+    if (slot >= 0 && (free & (1u << slot)) != 0) {
+      win->release_buffer(static_cast<int>(&slot - g_gl_session.slot_of));
+      slot = -1;
+    }
+  }
+
+  gfx::DmabufFrame frame;
+  std::string err;
+  if (!win->swap(&frame, &err)) {
+    static bool once = false;
+    if (!std::exchange(once, true))
+      log::w(kTag, "split GL: swap failed: {}", err);
+    return true;
+  }
+  // Put the buffer in a free slot: the one of its own number if that is
+  // free, so that a slot's wl_buffer in the broker keeps wrapping the same
+  // dma-buf, else any. The broker builds a new wl_buffer when a slot's
+  // buffer changes. With no slot free the frame is dropped and the loop kept
+  // alive.
+  const int i = frame.buffer_index;
+  int slot = -1;
+  if (i >= 0 && i < 4) {
+    if (i < kSlots && (free & (1u << i)) != 0)
+      slot = i;
+    for (int k = 0; slot < 0 && k < kSlots; ++k) {
+      if ((free & (1u << k)) != 0)
+        slot = k;
+    }
+  }
+  if (slot >= 0 && presenter->submit(frame, slot)) {
+    g_gl_session.slot_of[i] = slot;
+  } else {
+    win->release_buffer(i);
+    presenter->keepalive();
+    static bool once = false;
+    if (!std::exchange(once, true))
+      log::w(kTag,
+             "split GL: a frame was dropped (no free slot at the broker); "
+             "further drops are not logged");
+  }
+
+  // Wait for the compositor to want the next frame, as a swap interval of
+  // one does. Bounded: a hidden window gets no frame callbacks, and the app
+  // must keep running.
+  static constexpr int kWaitMs = 100;
+  if (std::this_thread::get_id() != g_gl_main_thread) {
+    presenter->wait_ready(kWaitMs);
+  } else {
+    // The looper that reads the broker's messages is this thread: read them
+    // here.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(kWaitMs);
+    while (!presenter->ready() && !presenter->closed() &&
+           std::chrono::steady_clock::now() < deadline) {
+      pollfd pfd{presenter->fd(), POLLIN, 0};
+      ::poll(&pfd, 1, 2);
+      presenter->dispatch();
+    }
+  }
+  return true;
+}
+#endif  // ACL_GL_PRESENT
+
 // A GL present session created EARLY (by the native-EGL get_display hook,
 // during the Flutter engine's on-main-thread GL init inside onCreate) before
 // PresentDriver.runGl -> nGlOpen runs. nGlOpen adopts it (attaches the decor
@@ -3191,15 +3318,11 @@ PresentSession* create_gl_session_core(JavaVM* vm,
                                        int h,
                                        const std::string& title,
                                        const std::string& appId) {
-  // Native GL has Mesa commit a4l's wl_surface from inside the app process.
-  // A split child has no wl_surface; the broker does (ADR-0009 C3, not built).
-  if (wm::split_child_active()) {
-    log::e(kTag,
-           "GL session: native GL does not cross the process boundary yet; "
-           "run this app without --split");
-    return nullptr;
-  }
-  if (!wm::wayland_available()) {
+  // Single-process, Mesa commits a4l's wl_surface from inside this process.
+  // A split child has no wl_surface: it renders into a gbm surface and sends
+  // each buffer to the broker (ADR-0009 C3; split_gl_swap above).
+  const bool split = wm::split_child_active();
+  if (!split && !wm::wayland_available()) {
     log::i(kTag, "GL session: no Wayland compositor reachable");
     return nullptr;
   }
@@ -3224,9 +3347,12 @@ PresentSession* create_gl_session_core(JavaVM* vm,
   s->presenter->wait_configured(
       2000);  // GL device is built on the configured toplevel surface
   std::string err;
-  auto dev = gfx::GlDevice::CreateWayland(s->presenter->gl_display(), &err);
+  auto dev =
+      split ? gfx::GlDevice::CreateGbm(&err)
+            : gfx::GlDevice::CreateWayland(s->presenter->gl_display(), &err);
   if (!dev) {
-    log::w(kTag, "GL session: CreateWayland failed: {}", err);
+    log::w(kTag, "GL session: {} failed: {}",
+           split ? "CreateGbm" : "CreateWayland", err);
     s->presenter.reset();
     delete s;
     return nullptr;
@@ -3234,7 +3360,11 @@ PresentSession* create_gl_session_core(JavaVM* vm,
   {
     std::lock_guard<std::mutex> lk(g_gl_session.mtx);
     g_gl_session.device = std::move(dev);
-    g_gl_session.wl_surface = s->presenter->gl_surface();
+    g_gl_session.wl_surface = split ? nullptr : s->presenter->gl_surface();
+    g_gl_session.split = split;
+    g_gl_session.split_presenter = split ? s->presenter.get() : nullptr;
+    g_gl_session.split_modifiers =
+        split ? s->presenter->modifiers() : std::vector<std::uint64_t>{};
     g_gl_session.w = w;
     g_gl_session.h = h;
     g_gl_session.ready = true;
@@ -3247,8 +3377,15 @@ PresentSession* create_gl_session_core(JavaVM* vm,
     its.it_interval.tv_nsec = 16'666'666;  // 60 Hz
     ::timerfd_settime(s->vsync_fd, 0, &its, nullptr);
   }
-  log::i(kTag, "GL session: device on acl's toplevel wl_surface ({}x{}, {})", w,
-         h, g_gl_session.device->renderer());
+  if (split)
+    log::i(kTag,
+           "GL session: gbm device, frames go to the broker ({}x{}, {}, {} "
+           "modifier(s))",
+           w, h, g_gl_session.device->renderer(),
+           g_gl_session.split_modifiers.size());
+  else
+    log::i(kTag, "GL session: device on acl's toplevel wl_surface ({}x{}, {})",
+           w, h, g_gl_session.device->renderer());
   return s;
 }
 
@@ -3441,10 +3578,13 @@ void JNICALL PresentDriver_nGlClose(JNIEnv* env, jclass, jlong sp) {
       g_pending_gl_session = nullptr;
   }
   {
+    std::lock_guard<std::mutex> swapping(g_gl_session.split_swap_mtx);
     std::lock_guard<std::mutex> lk(g_gl_session.mtx);
     g_gl_session.window.reset();
     g_gl_session.device.reset();
     g_gl_session.wl_surface = nullptr;
+    g_gl_session.split = false;
+    g_gl_session.split_presenter = nullptr;
     g_gl_session.ready = false;
   }
   if (s->vsync_fd >= 0)
@@ -7112,7 +7252,7 @@ class ArtVm final : public JniVm {
       // identity and back it with the session's toplevel. Pass the app's chosen
       // `config` so the surface matches its context (eglMakeCurrent).
       if (g_gl_session.device == nullptr ||
-          g_gl_session.wl_surface == nullptr) {
+          (g_gl_session.wl_surface == nullptr && !g_gl_session.split)) {
         log::w(
             kTag,
             "egl10: eglCreateWindowSurface with no active GL present session");
@@ -7122,20 +7262,23 @@ class ArtVm final : public JniVm {
       // backing a new surface, so a surface recreation never leaves two
       // wl_egl_windows on the wl_surface (which makes the new surface
       // EGL_BAD_SURFACE at eglMakeCurrent). See the native-egl hook below.
+      std::lock_guard<std::mutex> lk(g_gl_session.mtx);
       g_gl_session.window.reset();
       std::string err;
-      auto win = g_gl_session.device->make_window(
-          g_gl_session.w, g_gl_session.h, g_gl_session.wl_surface, {}, &err,
-          config);
+      auto win = g_gl_session.split
+                     ? make_split_gl_window(config, &err)
+                     : g_gl_session.device->make_window(
+                           g_gl_session.w, g_gl_session.h,
+                           g_gl_session.wl_surface, {}, &err, config);
       if (!win) {
         log::w(kTag, "egl10: make_window failed: {}", err);
         return EGL_NO_SURFACE;
       }
       auto* egl = static_cast<EGLSurface>(win->egl_surface());
       g_gl_session.window = std::move(win);  // keep the wl_egl_window alive
-      log::i(kTag,
-             "egl10: eglCreateWindowSurface -> GL window on acl's toplevel "
-             "wl_surface");
+      log::i(kTag, "egl10: eglCreateWindowSurface -> GL window on {}",
+             g_gl_session.split ? "a gbm surface, presented by the broker"
+                                : "acl's toplevel wl_surface");
       return egl;
     };
     hooks.create_surfacetexture_surface =
@@ -7181,7 +7324,8 @@ class ArtVm final : public JniVm {
       return egl;
     };
     hooks.swap_surfacetexture = [](void* egl_surface, void*) -> bool {
-      return st_readback_and_swap(egl_surface);  // Java EGL10 swap path
+      // Java EGL10 swap path: the split child's window, or a producer.
+      return split_gl_swap(egl_surface) || st_readback_and_swap(egl_surface);
     };
     hooks.is_surfacetexture_surface = [](void* egl_surface, void*) -> bool {
       std::lock_guard<std::mutex> lk(g_st_gl_mtx);
@@ -7256,7 +7400,7 @@ class ArtVm final : public JniVm {
     nhooks.create_window_surface = [](void*, void* cfg) -> void* {
       std::lock_guard<std::mutex> lk(g_gl_session.mtx);
       if (g_gl_session.device == nullptr ||
-          g_gl_session.wl_surface == nullptr) {
+          (g_gl_session.wl_surface == nullptr && !g_gl_session.split)) {
         log::w(kTag,
                "native egl: eglCreateWindowSurface with no active GL session");
         return nullptr;
@@ -7271,18 +7415,20 @@ class ArtVm final : public JniVm {
       // occupant of the wl_surface.
       g_gl_session.window.reset();
       std::string err;
-      auto win = g_gl_session.device->make_window(
-          g_gl_session.w, g_gl_session.h, g_gl_session.wl_surface, {}, &err,
-          static_cast<EGLConfig>(cfg));
+      auto win = g_gl_session.split ? make_split_gl_window(cfg, &err)
+                                    : g_gl_session.device->make_window(
+                                          g_gl_session.w, g_gl_session.h,
+                                          g_gl_session.wl_surface, {}, &err,
+                                          static_cast<EGLConfig>(cfg));
       if (!win) {
         log::w(kTag, "native egl: make_window failed: {}", err);
         return nullptr;
       }
       void* egl = static_cast<void*>(win->egl_surface());
       g_gl_session.window = std::move(win);  // keep the wl_egl_window alive
-      log::i(kTag,
-             "native egl: eglCreateWindowSurface -> GL window on acl's "
-             "toplevel wl_surface");
+      log::i(kTag, "native egl: eglCreateWindowSurface -> GL window on {}",
+             g_gl_session.split ? "a gbm surface, presented by the broker"
+                                : "acl's toplevel wl_surface");
       return egl;
     };
     nhooks.window_size =
@@ -7300,7 +7446,38 @@ class ArtVm final : public JniVm {
     // GlWindow already swapped with the gbm lock/release Mesa's raw swap would
     // omit).
     nhooks.swap_surface = [](void* egl_surface, void*) -> bool {
-      return st_readback_and_swap(egl_surface);
+      return split_gl_swap(egl_surface) || st_readback_and_swap(egl_surface);
+    };
+    // A --split child renders on Mesa's gbm platform, which has window
+    // configs only. An engine's offscreen (pbuffer) surface is backed by a
+    // gbm window of its size that is never presented.
+    nhooks.offscreen_on_window = [](void*) -> bool {
+      return g_gl_session.split;  // set once, before the engine can ask
+    };
+    nhooks.create_offscreen_surface = [](void*, void* cfg, int w,
+                                         int h) -> void* {
+      std::lock_guard<std::mutex> lk(g_gl_session.mtx);
+      if (g_gl_session.device == nullptr || w <= 0 || h <= 0 || w > 16384 ||
+          h > 16384)
+        return nullptr;
+      std::string err;
+      auto win = g_gl_session.device->make_window(w, h, nullptr, {}, &err,
+                                                  static_cast<EGLConfig>(cfg));
+      if (!win) {
+        log::w(kTag, "native egl: offscreen {}x{} surface failed: {}", w, h,
+               err);
+        return nullptr;
+      }
+      void* egl = static_cast<void*>(win->egl_surface());
+      // Kept for the life of the process: the engine destroys the EGLSurface
+      // through Mesa, and an engine has one or two of these.
+      static std::vector<std::unique_ptr<gfx::GlWindow>> keep;
+      keep.push_back(std::move(win));
+      log::i(kTag,
+             "native egl: eglCreatePbufferSurface {}x{} -> offscreen gbm "
+             "window (the gbm platform has no pbuffers)",
+             w, h);
+      return egl;
     };
     // Flutter external textures: the engine imports an app/producer
     // AHardwareBuffer as an EGLImage via

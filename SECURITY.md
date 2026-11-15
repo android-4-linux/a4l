@@ -36,23 +36,22 @@ where the project is, stated so that nobody spends a report on them:
   checked: v1 (JAR) signatures, fs-verity digests, and a key-rotation lineage. Two limits
   remain. A valid signature says who signed the code, not that the code is safe. And the cache
   is protected by file ownership, so a process already running as you can rewrite it.
-- **The default has no sandbox, and the sandbox that exists is not finished.** By default an
-  app's native code runs as arbitrary code in a4l's single glibc process, with no per-app UID,
-  SELinux domain or seccomp filter of the kind on-device Android provides, so it can reach ART,
-  Mesa and the Wayland connection.
-  [`docs/adr/ADR-0009`](docs/adr/ADR-0009-containment-process-boundary.md) puts everything an
-  APK supplies in a confined child process that holds no display, audio or session connection,
-  and lists the five conditions (C1-C5) that gate any claim to run untrusted APKs. C1, signature
-  verification, is met with the limits above. C2 and C4 are met on x86-64 for apps that draw
-  through Skia: `a4l run --split` runs the app in a child process inside a bubblewrap sandbox
-  (its own user, mount, pid, ipc and network namespaces; no home directory, no `/run`, no
-  network) under a seccomp allowlist, and the first process keeps the display. C5 is met for
-  that path: the first process validates each frame the child sends against the kernel's own
-  account of the buffer, and its receive path is fuzzed. C3 is not met: apps that use native GL
-  or video (Flutter, libGDX) are refused under `--split`. The sandbox has had no review
-  outside the project, its system call list was recorded from five apps, and the GPU render
-  node stays reachable from inside it. `--split=unconfined` and `--net=host` each remove part
-  of it and say so when used.
+- **The default has no sandbox, and the sandbox that exists is not finished.** By default an app's
+  native code runs as arbitrary code in a4l's single glibc process, with no per-app UID, SELinux
+  domain or seccomp filter of the kind on-device Android provides, so it can reach ART, Mesa and
+  the Wayland connection. [`docs/adr/ADR-0009`](docs/adr/ADR-0009-containment-process-boundary.md)
+  puts everything an APK supplies in a confined child process that holds no display, audio or
+  session connection, and lists the five conditions (C1-C5) that gate any claim to run untrusted
+  APKs. C1, signature verification, is met with the limits above. C2 and C4 are met on x86-64:
+  `a4l run --split` runs the app in a child process inside a bubblewrap sandbox (its own user,
+  mount, pid, ipc and network namespaces; no home directory, no `/run`, no network) under a
+  seccomp allowlist, and the first process keeps the display. C5 is met for that path: the first
+  process validates each frame the child sends against the kernel's own account of the buffer, and
+  its receive path is fuzzed. C3 is met for native GL: Flutter and libGDX apps render under
+  `--split`. It is not met for video, which is not shown there. The sandbox has had no review
+  outside the project, its system call list was recorded from nine apps with no input and no
+  network, and the GPU render node stays reachable from inside it. `--split=unconfined` and
+  `--net=host` each remove part of it and say so when used.
 
 The consequence is the thing to take away: **treat an APK you run under a4l as native code running
 with your own privileges, because that is what it is.** Running an untrusted APK is not yet a

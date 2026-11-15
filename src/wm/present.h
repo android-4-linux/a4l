@@ -278,6 +278,14 @@ class IPresenter {
   // True once the compositor/user has closed the toplevel.
   virtual bool closed() const noexcept = 0;
 
+  // Block the calling thread until ready() or closed(), or `timeout_ms`
+  // passes; returns ready(). For a render thread that is not the thread
+  // dispatching this presenter and wants to pace itself to the compositor,
+  // as a swap interval of one does. The default does not wait: a presenter
+  // whose state only changes inside dispatch() on the caller's own thread
+  // has nothing to wait for.
+  virtual bool wait_ready(int /*timeout_ms*/) noexcept { return ready(); }
+
   // ── GL mode (Mesa owns buffers/commit)
   // ────────────────────────────────────────────── For a native-GL app
   // (Flutter), Mesa renders + commits the toplevel wl_surface itself (inside

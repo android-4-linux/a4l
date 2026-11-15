@@ -350,6 +350,7 @@ class GbmGlWindow final : public GlWindow {
       : GlWindow(GlBackend::Gbm, dpy, ctx, cfg), gbm_(gbm) {}
   ~GbmGlWindow() override {
     release_front();
+    release_all_held();
     if (egl_ != nullptr)
       eglDestroySurface(static_cast<EGLDisplay>(dpy_),
                         static_cast<EGLSurface>(egl_));
@@ -401,16 +402,49 @@ class GbmGlWindow final : public GlWindow {
                        static_cast<EGLSurface>(egl_)) != EGL_TRUE)
       return set(with_egl("eglSwapBuffers failed"));
 
-    release_front();
+    if (!hold_)
+      release_front();
     gbm_bo* bo = gbm_surface_lock_front_buffer(surf_);
     if (bo == nullptr)
       return set("gbm_surface_lock_front_buffer returned null");
-    locked_ = bo;
+    int index = -1;
+    if (hold_) {
+      // The driver hands back the same gbm_bo object each time a buffer
+      // comes round, so the pointer is its identity.
+      for (int i = 0; i < kMaxHeld; ++i) {
+        if (held_[i].bo == bo)
+          index = i;
+      }
+      for (int i = 0; index < 0 && i < kMaxHeld; ++i) {
+        if (held_[i].bo == nullptr)
+          index = i;
+      }
+      if (index < 0) {
+        gbm_surface_release_buffer(surf_, bo);
+        return set("more gbm buffers in rotation than can be tracked");
+      }
+      if (held_[index].locked) {
+        // Locked twice without a release in between: the driver gave us a
+        // buffer we still hold. Drop the new lock and keep the old.
+        gbm_surface_release_buffer(surf_, bo);
+        return set("the GL driver reused a buffer that is still held");
+      }
+      held_[index].bo = bo;
+      held_[index].locked = true;
+    } else {
+      locked_ = bo;
+    }
     const int fd =
-        gbm_bo_get_fd(bo);  // a fresh dup we own; closed on next swap/destroy
-    if (fd < 0)
+        gbm_bo_get_fd(bo);  // a fresh dup we own; closed on release/destroy
+    if (fd < 0) {
+      if (hold_)
+        release_buffer(index);
       return set("gbm_bo_get_fd failed");
-    exported_fd_ = fd;
+    }
+    if (hold_)
+      held_[index].fd = fd;
+    else
+      exported_fd_ = fd;
 
     if (out != nullptr) {
       *out = DmabufFrame{};
@@ -438,8 +472,34 @@ class GbmGlWindow final : public GlWindow {
       out->modifier_tiled = out->modifier != DRM_FORMAT_MOD_LINEAR &&
                             out->modifier != DRM_FORMAT_MOD_INVALID;
       out->host_mapped = false;
+      out->buffer_index = index;
     }
     return true;
+  }
+
+  bool set_hold_buffers(bool hold) override {
+    if (hold == hold_)
+      return true;
+    release_front();
+    release_all_held();
+    hold_ = hold;
+    return true;
+  }
+  void release_buffer(int index) override {
+    if (index < 0 || index >= kMaxHeld || !held_[index].locked)
+      return;
+    if (held_[index].fd >= 0)
+      ::close(held_[index].fd);
+    held_[index].fd = -1;
+    held_[index].locked = false;
+    if (surf_ != nullptr)
+      gbm_surface_release_buffer(surf_, held_[index].bo);
+  }
+  int held_buffers() const override {
+    int n = 0;
+    for (const Held& h : held_)
+      n += h.locked ? 1 : 0;
+    return n;
   }
 
   // CPU-map the presented (front) buffer -> top-down RGBA_8888. No GL context
@@ -484,6 +544,7 @@ class GbmGlWindow final : public GlWindow {
     if (w == width_ && h == height_)
       return true;
     release_front();
+    release_all_held();
     if (egl_ != nullptr) {
       eglDestroySurface(static_cast<EGLDisplay>(dpy_),
                         static_cast<EGLSurface>(egl_));
@@ -540,6 +601,25 @@ class GbmGlWindow final : public GlWindow {
       locked_ = nullptr;
     }
   }
+
+  // Give every held buffer back and forget them: the surface is going away
+  // or changing, and its gbm_bo objects with it.
+  void release_all_held() {
+    for (int i = 0; i < kMaxHeld; ++i) {
+      release_buffer(i);
+      held_[i] = Held{};
+    }
+  }
+
+  // Hold mode. Mesa's gbm surface rotates at most four color buffers.
+  static constexpr int kMaxHeld = 4;
+  struct Held {
+    gbm_bo* bo = nullptr;  // identity; stays set after a release
+    int fd = -1;           // the exported dma-buf, ours, open while locked
+    bool locked = false;
+  };
+  Held held_[kMaxHeld];
+  bool hold_ = false;
 
   gbm_device* gbm_ = nullptr;  // borrowed from the device
   gbm_surface* surf_ = nullptr;

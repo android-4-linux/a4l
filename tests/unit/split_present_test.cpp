@@ -817,6 +817,88 @@ TEST_CASE("split: a broker that goes away closes the proxy", "[split]") {
   CHECK(p->closed());
 }
 
+TEST_CASE(
+    "split: a state written before a frame arrived does not free "
+    "its slot",
+    "[split]") {
+  // The broker here is scripted, so that it can say things a real one says
+  // only when the timing is unlucky: a PresentState that left the broker
+  // just before the child's frame reached it.
+  auto pair = ipc::Channel::make_pair();
+  ipc::Channel child = std::move(pair.first);
+  ipc::Channel end = std::move(pair.second);
+  const auto state = [&](std::uint32_t ready, std::uint32_t mask,
+                         std::uint32_t frames_seen) {
+    ipc::Message m;
+    m.type = ipc::MsgType::PresentState;
+    m.present_state.ready = ready;
+    m.present_state.free_mask = mask;
+    m.present_state.frames_seen = frames_seen;
+    REQUIRE(end.send(m));
+  };
+  std::thread opener([&] {
+    ipc::Received r;
+    REQUIRE(end.recv(r));  // SurfaceCreate
+    ipc::Message m;
+    m.type = ipc::MsgType::SurfaceReady;
+    m.surface_ready.ok = 1;
+    REQUIRE(end.send(m));
+  });
+  auto p = wm::split_presenter_open_on(child, 640, 480, "t", "a", {}, false);
+  opener.join();
+  REQUIRE(p != nullptr);
+
+  state(1, 0b111, 0);  // nothing sent yet: all free, ready
+  REQUIRE(pump(*p, [&] { return p->ready(); }));
+  CHECK(p->free_mask() == 0b111u);
+
+  const int fd = buffer_fd('s');
+  REQUIRE(p->submit(frame_of(fd), 1));  // frame 1, slot 1
+  CHECK(p->free_mask() == 0b101u);
+  CHECK_FALSE(p->ready());
+
+  // Stale: written when the broker had seen no frame. Slot 1 is not free
+  // and the compositor is not waiting, whatever it says.
+  state(1, 0b111, 0);
+  p->dispatch();
+  CHECK(p->free_mask() == 0b101u);
+  CHECK_FALSE(p->ready());
+  CHECK_FALSE(p->wait_ready(20));  // and a render thread keeps waiting
+
+  // Current: the broker has seen frame 1 and the slot is in use.
+  state(0, 0b101, 1);
+  p->dispatch();
+  CHECK(p->free_mask() == 0b101u);
+  // The compositor released it and wants a frame.
+  state(1, 0b111, 1);
+  p->dispatch();
+  CHECK(p->free_mask() == 0b111u);
+  CHECK(p->ready());
+
+  // A second frame, in a slot of the broker's choosing: nothing is free
+  // until the broker has seen it.
+  REQUIRE(p->submit(frame_of(fd), -1));  // frame 2
+  state(1, 0b111, 1);                    // stale again
+  p->dispatch();
+  CHECK(p->free_mask() == 0u);
+  CHECK_FALSE(p->ready());
+  state(1, 0b110, 2);
+  p->dispatch();
+  CHECK(p->free_mask() == 0b110u);
+  CHECK(p->ready());
+
+  // wait_ready returns when a state arrives on another thread's dispatch.
+  REQUIRE(p->submit(frame_of(fd), 2));  // frame 3
+  std::thread looper([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    state(1, 0b011, 3);
+    pump(*p, [&] { return p->ready(); });
+  });
+  CHECK(p->wait_ready(2000));
+  looper.join();
+  ::close(fd);
+}
+
 #else  // !(ACL_HAVE_VULKAN && ACL_HAVE_WCS)
 
 TEST_CASE("split: needs the GPU present path", "[split]") {

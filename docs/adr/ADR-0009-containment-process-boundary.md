@@ -3,8 +3,8 @@
 
 - **Status:** Accepted (boundary decided; the process split runs on x86-64 as `--split`, with
   the child confined by namespaces and a seccomp allowlist and the broker validating what it
-  sends; C3 is open and nothing here has had outside review, so untrusted APKs are still not a
-  supported use). Refines ADR-0003.
+  sends; native GL crosses, video does not, and nothing here has had outside review, so
+  untrusted APKs are still not a supported use). Refines ADR-0003.
 - **Date:** 2026-11-13
 - **Provenance:** plan.md §4 Phase 5, §6 R-10; docs/ndk-scope.md (trust model);
   docs/split-process-art.md; ADR-0001, ADR-0003, ADR-0005; `src/ipc/`, `src/runtime/split_vm.cpp`
@@ -47,7 +47,8 @@ driver loaded, and the compositor is elsewhere.
 State of that path, from `git log` rather than from the doc: S1 (ART boots in the subprocess,
 x86-64 and a Pi 4) and the S2 present-sink seam landed 2026-07-15/16; nothing since on arm64.
 On x86-64 the split runs as of 2026-11-14 (`a4l run --split`, see C2 below): frames and input
-cross; audio, native GL and video do not. The child is confined as of the same date (C4).
+cross, for Skia and for native GL; audio and video do not. The child is confined as of the
+same date (C4).
 
 ## Decision
 1. **The containment boundary is a process boundary at the dma-buf seam.** Everything an APK
@@ -76,7 +77,7 @@ cross; audio, native GL and video do not. The child is confined as of the same d
 |---|---|---|
 | C1 | APK v2/v3 verification in `pkg/`, in the broker | met, 2026-11-14: `--verify=require` or `--signer` runs a private copy that is verified on every run (`pkg/apk_verify.cpp`, `pkg/apk_stage.cpp`). Under `--split` the broker does this before it starts the child, and the child is handed the copy. ART's compiled-code cache is trusted by location, not verified |
 | C2 | Split path at S5: a real APK renders and takes input | x86-64, Skia path, 2026-11-14: `a4l run --split` runs the app in a child a4l process whose presenter is a proxy (`wm/split_present.cpp`); the broker holds the only compositor connection. 3 corpus apps render on host ART; one presents 1176 frames in 20 s split against 1178 single-process. Input is forwarded and unit-tested; there is no controlled live input test. Not done: arm64 (`acl-art-host` is still S1), audio (a confined child cannot reach PipeWire and is silent; unconfined it opens PipeWire itself) |
-| C3 | Native GL and video cross the boundary as dma-buf | not designed; see below |
+| C3 | Native GL and video cross the boundary as dma-buf | native GL: x86-64, 2026-11-14. In a `--split` child the app's GL window is a gbm surface and each swapped buffer goes to the broker as a `PresentFrame`, like a Skia frame. 2 libGDX apps and 4 Flutter example apps render confined. See "C3 as built" below. Video: not built; a decoded frame has no message to cross in and is not shown |
 | C4 | Child confined per Decision 2 | x86-64, 2026-11-14: `--split` starts the child through bubblewrap (`src/confine/`) in its own user, mount, pid, ipc, uts and network namespaces, and the child installs a seccomp allowlist on itself before it opens the APK. See "C4 as built" below for what it can reach and what is not covered. arm64: none |
 | C5 | Broker validates every message; receive path fuzzed | x86-64 `--split` broker, 2026-11-14: every frame is checked against what the kernel says about its descriptor, the surface and the compositor's advertised modifiers before it reaches the presenter (`wm/split_validate.cpp`), and the receive path is fuzzed (`tests/fuzz/broker_fuzz.cpp`). See "C5 as built" below. Not covered: the arm64 `acl-art-host` receive path (`runtime/split_vm.cpp`), and what the compositor does with a buffer that passes |
 
@@ -126,10 +127,11 @@ and no child is started.
   selection. `WAYLAND_DISPLAY`, the D-Bus address, agent sockets and anything unrecognized are
   not passed.
 - **Descriptors.** Standard output and error, `/dev/null` as input, and the IPC socket.
-- **seccomp.** An allowlist of 173 system calls installed by the child on itself, after a4l has
+- **seccomp.** An allowlist of 175 system calls installed by the child on itself, after a4l has
   started and before it opens the APK; a call off the list answers `ENOSYS`
-  (`ACL_SPLIT_SECCOMP=kill` kills instead). 84 were recorded from the five corpus APKs
-  (`tools/record-seccomp.py`); 89 were added in review as fallbacks and siblings of recorded
+  (`ACL_SPLIT_SECCOMP=kill` kills instead). 98 were recorded from nine APKs, the five of the
+  corpus and four Flutter examples (`tools/record-seccomp.py`); 77 were added in review as
+  fallbacks and siblings of recorded
   calls. Three calls are checked by argument: `clone` may not create a namespace, `socket` is
   limited to four address families, `ioctl` may not push terminal input. `execve`, `fork`,
   `ptrace`, `mount`, `unshare`, `bpf`, `io_uring` and the like are absent.
@@ -144,7 +146,7 @@ which the C library uses `clone`.
 Not covered, and what keeps C4 from being the last word:
 
 - **The GPU.** The render node's ioctls are not filtered. This is the exposure named above.
-- **The recording is narrow.** Five APKs, no injected input, no reachable network. A call an app
+- **The recording is narrow.** Nine APKs, no injected input, no reachable network. A call an app
   makes only on a touch or a completed connection may be off the list; it fails with `ENOSYS`.
   Nobody outside the project has reviewed the list.
 - **No audio, no system services.** With no D-Bus, connectivity, battery, power, Bluetooth,
@@ -161,6 +163,62 @@ Not covered, and what keeps C4 from being the last word:
   it can print escape sequences and change terminal settings.
 - **Landlock is not used.** Decision 2 allows either; this is the namespace form.
 - **arm64** has no system call list and no split child that renders.
+
+**C3 as built (x86-64, 2026-11-14): native GL.** Single-process, Mesa's Wayland platform does
+three things inside `eglSwapBuffers`: it hands the finished buffer to the compositor, takes back
+the buffers the compositor released, and blocks until the compositor wants another frame. A
+split child has no compositor connection, so a4l does the same three against the broker.
+
+- **The window is a gbm surface.** The child's GL device is Mesa's gbm platform on the render
+  node. The surface is created with the modifiers the compositor advertised, which the broker
+  passed on when the surface was made.
+- **Swap exports.** On swap the front buffer is locked and exported as a dma-buf, and sent as
+  a `PresentFrame`. It stays locked, so the driver will not draw into it, until the broker
+  reports its slot free again (`gfx::GlWindow` hold mode). With no slot free the frame is
+  dropped and the frame loop kept alive.
+- **Swap paces.** The swapping thread then waits for the broker to report the compositor's
+  frame callback, up to 100 ms, as a swap interval of one does.
+- **Buffers change under a slot.** An engine recreates its window surface (Flutter does, twice
+  at start), and a gbm surface rotates up to four buffers through the presenter's three slots.
+  The presenter now rebuilds a slot's `wl_buffer` when the dma-buf in it changes, told apart by
+  inode number.
+- **Offscreen surfaces.** Mesa's gbm platform has window configs only. An engine that asks for
+  a pbuffer config (Impeller's offscreen context) gets a window config, and its pbuffer is a
+  gbm surface of that size that is never presented.
+- **No stale "free".** `PresentState` now carries the number of frames the broker had handled
+  when it wrote the state. A state written before the child's latest frame arrived no longer
+  marks that frame's slot free. This closes a window that the Skia path had as well.
+
+The frames are ordinary `PresentFrame` messages and pass the C5 checks unchanged: XRGB8888, an
+advertised modifier, two planes on this driver.
+
+Measured on host ART, confined, filter on, 20 s each:
+
+| App | confined | `--split=unconfined` |
+|---|---|---|
+| `halma` (libGDX), frames | 1216 | 1216 |
+| `doodledudette` (libGDX), frames | 1212 | 1212 |
+| Flutter `image_list` with `--net=host`, frames in 25 s | 1365 | 1367 |
+| Flutter `hello_world`, `layers`, `platform_channel` | 2 each | 2 for `hello_world` |
+
+The three Flutter apps with two frames are static: they draw once per window and stop.
+Screenshots from a headless sway show the libGDX menu and Flutter's text, upright and in the
+right colors. In 40 s traced runs of five of these apps the filter denied only `clone3`.
+
+Not covered:
+
+- **Video.** `MediaCodec` output to a `SurfaceView` reaches the presenter through
+  `present_video`, which the child's proxy does not forward. The video plane stays empty.
+- **`image_list` without a network** fails in the app, before it draws: it fetches from
+  `localhost` by name, and name lookup in an empty network namespace finds no address.
+- **Live input** under `--split` is still unverified for both paths.
+- **Resize.** The surface keeps the size it was created with.
+- **The offscreen substitute leaks** one small gbm surface per pbuffer the engine destroys.
+- **One GPU, one driver.** AMD with radeonsi. Not run on Intel or on a driver whose gbm
+  surfaces behave differently.
+- **Tests.** The gbm hold mode and the state numbering have unit tests. The swap path itself,
+  the slot rebuild and the pbuffer substitute are covered only by the runs above; none of them
+  runs in CI, which has no GPU.
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 
@@ -211,8 +269,8 @@ Not covered:
 
 **Follow-on.**
 - The seccomp allowlist is recorded from the app corpus (docs/app-corpus-status.md), not written
-  by hand, then reviewed. A hand-written list is wrong in both directions. As built, 84 of its
-  173 entries are recorded and 89 are review additions; widening the recording (input, network,
+  by hand, then reviewed. A hand-written list is wrong in both directions. As built, 98 of its
+  175 entries are recorded and 77 are review additions; widening the recording (input, network,
   the full corpus) is what moves entries from the second group to the first.
 - The multi-app decision in Phase 5 is constrained by Decision 1: however apps map to processes,
   no app code holds the display connection. Per-app UIDs and binderfs (ADR-0003) remain open and

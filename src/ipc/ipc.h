@@ -44,7 +44,8 @@ enum class MsgType : std::uint32_t {
 // Sent in Hello. Bump when Message changes size or a payload changes layout:
 // both ends are built from this header, and a datagram of another size is
 // refused as truncated. 2: PresentFrame planes, Input keysym, PresentState.
-inline constexpr std::uint32_t kProtocolVersion = 2;
+// 3: PresentState.frames_seen.
+inline constexpr std::uint32_t kProtocolVersion = 3;
 
 // Bounds both ends enforce on what the other sends.
 inline constexpr std::uint32_t kMaxSurfaceDim = 16384;
@@ -75,6 +76,12 @@ struct PresentState {
   std::uint64_t present_ns;
   std::uint32_t refresh_ns;
   std::uint32_t feedback_flags;
+  // Appended. How many PresentFrame messages the broker had handled when it
+  // wrote this. A state written before the child's latest frame arrived says
+  // nothing about that frame's slot, and the child must not read it as "the
+  // slot is free": it would draw into a buffer that is on its way to the
+  // screen.
+  std::uint32_t frames_seen;
 };
 
 struct PresentFrame {
