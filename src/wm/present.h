@@ -306,6 +306,14 @@ class IPresenter {
   virtual bool wait_configured(int /*timeout_ms*/) noexcept {
     return true;
   }  // pump until first configure
+  // A size the compositor has asked the toplevel to take since the last
+  // call, other than the one it first gave: true once per change, with the
+  // size in surface units. A caller that renders the toplevel itself (the GL
+  // path) resizes to it; one that does not ask keeps its own size, which is
+  // what every presenter did before. Present thread.
+  virtual bool take_resize(int* /*width*/, int* /*height*/) noexcept {
+    return false;
+  }
 
   // The modifiers the compositor advertises for `drm_format`, in any role.
   // The video plane's formats are not the toplevel's, so modifiers() does
