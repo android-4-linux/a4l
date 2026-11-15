@@ -492,7 +492,8 @@ Not covered:
 - **One clip, one player.** Local file, no seeking, pausing or looping, no streaming, no
   network. The app is not in the test suite: building it needs a Flutter SDK.
 - **The video plane.** `video_player` shows its frames through a GL texture. A player that
-  uses a `SurfaceView` (a media3 `PlayerView`) with a sound track has not been run.
+  uses a `SurfaceView` (a media3 `PlayerView`) was run afterwards; see "A `SurfaceView`
+  player" below.
 
 **Picture against sound (2026-11-15).** Measured on the same app with a clip that flashes
 white and beeps at the same instants: a point of the screen and the sink's monitor captured
@@ -540,8 +541,8 @@ Not covered:
 - **Real outputs.** A null sink and a headless compositor have no latency of their own. A
   real display adds a frame or two, which is not measured. A real audio device adds its
   buffer; see "Device latency" below.
-- **The video plane.** These frames go through a GL texture. A `SurfaceView` player's frames
-  are shown as they are decoded, paced by their input; they were not measured against sound.
+- **The video plane.** These frames go through a GL texture. A `SurfaceView` player was
+  measured afterwards; see "A `SurfaceView` player" below.
 - **Seeking, pausing, speed.**
 
 **Device latency (2026-11-15).** `AudioTrack`'s position counted what PipeWire held in a4l's
@@ -585,6 +586,27 @@ about 30 ms of the reference single-process and 60 under `--split`, where it was
 Not covered: a real device (the delayed sink is a loopback, not Bluetooth or HDMI); a device
 that changes during playback, which is covered by a unit test and was not measured; the
 display's own latency; `SoundPool`, which has no timestamps to correct.
+
+**A `SurfaceView` player (2026-11-15).** A media3 `PlayerView` on its default `SurfaceView`
+(`tests/fixtures/media3_player_view`), same clip and capture. It had no picture: 0 flashes
+seen for 2 beeps heard, in both modes. A `PlayerView` lays its `SurfaceView` out again once it
+knows the picture's aspect ratio. a4l had set the view's `mHaveFrame`, so that layout ran
+`SurfaceView.updateSurface`, which found no window surface, told the player its surface was
+destroyed and threw on `Surface.nativeForceScopedDisconnect`, once per frame. a4l now leaves
+`mHaveFrame` unset and reports the new size to the app's `surfaceChanged` itself. Audio minus
+video after, ms:
+
+| | ms |
+|---|---|
+| mpv, two runs | +26, +24 |
+| a4l, single process, five runs | +42, +51, +43, +51, +49 |
+| a4l, `--split`, four runs | +51, +37, +49, +29 |
+
+Each a4l figure is the mean of a run's two events. The sound is about 20 ms later against the
+picture than the reference's, in both modes; a frame of the clip is 33 ms. The `video_plane`
+fixture now lays its `SurfaceView` out again while it plays, and `split-video` fails on the
+old code. Not covered: seeking, pausing, speed; a `PlayerView` in a Compose screen; a
+`GLSurfaceView` laid out again, whose path sets the same field and was not changed.
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 

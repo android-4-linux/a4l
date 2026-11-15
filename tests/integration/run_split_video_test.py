@@ -163,7 +163,9 @@ def main() -> int:
                 return skip(display)
 
         total = FRAMES_PER_LOOP * LOOPS
-        want_hole = 640 * 360  # Main.W x Main.H; nothing is drawn over the video
+        # Main.W2 x Main.H2, the size the fixture lays its SurfaceView out at again once it
+        # is playing; nothing is drawn over the video.
+        want_hole = 560 * 315
         split_args = os.environ.get("ACL_TEST_VIDEO_ARGS", "--split --present").split()
         check_hole = "ACL_TEST_VIDEO_ARGS" not in os.environ
         notes = []
@@ -219,6 +221,8 @@ def main() -> int:
                                 out[-2000:])
                 if "maybeInjectVideoSurface: video SurfaceView surfaceCreated" not in out:
                     return fail("the SurfaceView never got a video surface", out)
+                if "VIDEO: surfaceDestroyed" in out or "UnsatisfiedLinkError" in out:
+                    return fail("laying the SurfaceView out again destroyed its surface", out)
                 opaque, clear, partial, w, h = alpha[-1]
                 if clear != want_hole or partial != 0 or opaque != w * h - want_hole:
                     return fail(
@@ -239,6 +243,13 @@ def main() -> int:
             m = re.search(r"VIDEO: fed (\d+) rendered (\d+)", out)
             if not m:
                 return fail("the fixture did not finish", out)
+            # The fixture lays the SurfaceView out again while it plays. A player loses its
+            # picture if that is reported as the surface going away.
+            if "VIDEO: surfaceDestroyed" in out:
+                return fail("the app was told its surface was destroyed when its view was "
+                            "laid out again", out)
+            if "VIDEO: surfaceChanged 560x315" not in out:
+                return fail("the app was not told its surface's new size", out)
             fed, rendered = int(m.group(1)), int(m.group(2))
             if rendered < total * 9 // 10:
                 return fail(f"the app rendered {rendered} of {total} frames", out)
