@@ -76,6 +76,7 @@
 #include "runtime/framework_natives.h"
 #include "runtime/image_reader_jni.h"  // media_jni loadLibrary -> ImageReader natives (M3c)
 #include "runtime/media_codec_jni.h"  // media_jni loadLibrary -> MediaCodec natives (M5)
+#include "runtime/vsync_cap.h"
 #include "svc/svc.h"
 #include "wm/present.h"
 #include "wm/split_present.h"
@@ -2491,10 +2492,14 @@ void JNICALL PresentDriver_nSetVsyncDelivered(JNIEnv*, jclass, jlong sp) {
   if (s != nullptr && s->vsync_set_immediate != nullptr)
     s->vsync_set_immediate(0);
 }
-void JNICALL PresentDriver_nMaybeDeliverVsync(JNIEnv* env, jclass, jlong sp) {
+// Clock a vsync if the compositor is ready and a frame was requested. Returns
+// 0 when there is nothing to wait for (delivered, or not ready), else the
+// nanoseconds after which the caller must ask again: the rate cap held the
+// vsync back, and no compositor event is coming to wake the loop for it.
+jlong JNICALL PresentDriver_nMaybeDeliverVsync(JNIEnv* env, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
   if (s == nullptr || !s->presenter || s->deliver_vsync == nullptr)
-    return;
+    return 0;
   const bool rdy = s->presenter->ready();
   const bool pend = (s->vsync_pending == nullptr || s->vsync_pending() != 0);
   static int diag = 0;
@@ -2503,7 +2508,7 @@ void JNICALL PresentDriver_nMaybeDeliverVsync(JNIEnv* env, jclass, jlong sp) {
     ++diag;
   }
   if (!(rdy && pend))
-    return;
+    return 0;
   // Cap delivery to at most one per refresh period. The normal path already
   // paces on the compositor's wl_surface.frame callback (>= refresh), but
   // ready()'s ACL_IGNORE_SUSPEND / occlusion branch bypasses that gate
@@ -2511,19 +2516,23 @@ void JNICALL PresentDriver_nMaybeDeliverVsync(JNIEnv* env, jclass, jlong sp) {
   // app's ~60fps recomposition into a visible overlay shimmer. This wall-clock
   // floor bounds it to the display rate in every path (a no-op when the
   // frame-callback already spaced the vsyncs). Opt out with ACL_NO_VSYNC_CAP.
+  //
+  // An early vsync is held, not dropped. A compositor may answer a frame
+  // callback at once (sway does for the first commits of a new toplevel, and
+  // always on its headless backend); it then has nothing more to send, so a
+  // dropped vsync would stop the loop for good.
   static const bool cap = std::getenv("ACL_NO_VSYNC_CAP") == nullptr;
   if (cap) {
     static std::uint64_t last_deliver_ns = 0;
     const std::uint64_t now = present_now_ns();
-    const std::uint32_t rns = s->pf_refresh_ns.load(std::memory_order_relaxed);
-    const std::uint64_t refresh = rns > 0 ? rns : 16'666'667ull;
-    const std::uint64_t min_gap =
-        refresh - refresh / 8;  // 7/8 refresh: caps free-run, still passes 60Hz
-    if (last_deliver_ns != 0 && now - last_deliver_ns < min_gap)
-      return;
+    const std::uint64_t wait = vsync_cap_wait_ns(
+        now, last_deliver_ns, s->pf_refresh_ns.load(std::memory_order_relaxed));
+    if (wait != 0)
+      return static_cast<jlong>(wait);
     last_deliver_ns = now;
   }
   s->deliver_vsync(env, static_cast<jlong>(s->presenter->frame_time_ns()));
+  return 0;
 }
 // Create a real MediaCodec-decodable producer Surface handle (a ReaderCtx over
 // a BufferQueue) for an app's on-screen video SurfaceView (e.g. media3
@@ -3657,7 +3666,7 @@ void register_present_driver_natives(JNIEnv* env) {
        reinterpret_cast<void*>(PresentDriver_nDispatchRepeat)},
       {const_cast<char*>("nSetVsyncDelivered"), const_cast<char*>("(J)V"),
        reinterpret_cast<void*>(PresentDriver_nSetVsyncDelivered)},
-      {const_cast<char*>("nMaybeDeliverVsync"), const_cast<char*>("(J)V"),
+      {const_cast<char*>("nMaybeDeliverVsync"), const_cast<char*>("(J)J"),
        reinterpret_cast<void*>(PresentDriver_nMaybeDeliverVsync)},
       {const_cast<char*>("nTraverse"), const_cast<char*>("(J)V"),
        reinterpret_cast<void*>(PresentDriver_nTraverse)},
