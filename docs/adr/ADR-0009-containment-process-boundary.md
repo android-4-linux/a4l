@@ -283,9 +283,8 @@ Not covered:
 - **Video in a texture.** A Flutter `video_player` clip goes through `ImageReader` into a GL
   texture, not through the video plane. That path stays inside the app process; it has not
   been run under `--split`.
-- **A clip's sound track.** `AudioTrack` plays and `MediaCodec` decodes audio as of
-  2026-11-15 (below), so the pieces a player needs are there in both modes. No player app has
-  been run with them: the fixtures drive video and audio separately.
+- **A clip's sound track** plays as of 2026-11-15: see "A clip with sound" below. That clip
+  goes through a GL texture, not this video plane; the two have not been run together.
 - **Pixels are checked by eye.** The integration test counts frames at the broker. That the
   picture is right was read from screenshots.
 - **Each frame is imported by the compositor**, a new `wl_buffer` per frame, with the limit
@@ -393,8 +392,6 @@ scale and half volume) to the end, with no other gap. Nothing was played on a re
 
 Not covered:
 
-- **No ExoPlayer or media3 app was run.** The fixture uses the calls a player's audio output
-  makes, but none is in the corpus.
 - **Speed and pitch** (`PlaybackParams`, `setPlaybackRate`) are refused or read back as 1:
   there is no resampler or time-stretcher.
 - **Not built:** volume shapers, effects, routing, static-track looping and seeking answer
@@ -447,10 +444,6 @@ null sink, single-process and split give the same 2.219 s of 440 Hz.
 
 Not covered:
 
-- **No player app.** ExoPlayer and media3 bring their own container parsers and use
-  `MediaCodec` and `AudioTrack` as this fixture does, but none has been run; none is in the
-  corpus. Audio and video have not been played together, so their synchronization is
-  untested.
 - **`MediaExtractor` and `MediaPlayer`** have no native side. An app that leaves the
   container to the platform cannot open a file.
 - **The legacy buffer arrays** (`getInputBuffers`, `getOutputBuffers`) are not provided;
@@ -463,6 +456,42 @@ Not covered:
   JNI.
 - **Decoder flaws.** FFmpeg parses the stream in the app process. Under `--split` that
   process is the sandbox; single-process it is a4l itself.
+
+**A clip with sound (2026-11-15).** A Flutter app whose content is the `video_player` plugin
+(media3's ExoPlayer) playing a bundled 5 s clip, H.264 320x240 with a 440 Hz AAC stereo track
+(`tests/fixtures/flutter_video_player`). ExoPlayer parses the MP4 itself and uses
+`MediaCodecList`, `MediaCodec` in callback mode for both tracks, and `AudioTrack`. The same
+app played video alone in July; with a sound track in the clip it met two more gaps:
+
+- **Audio HAL queries.** Before it picks an audio renderer, media3 asks
+  `AudioSystem.getParameters` and `native_get_offload_support`, which had no native side; the
+  playback thread died of an `UnsatisfiedLinkError`. They, and the neighbors a player asks
+  (direct playback support, the primary output's rate and buffer, latency), now answer that
+  nothing is offloaded or passed through and describe the output a track plays into.
+- **A `@CriticalNative` signature.** `HardwareBuffer.nEstimateSize` is `@CriticalNative`; a4l's
+  native took a `JNIEnv*` and a class as well, so it read the handle from the wrong register.
+  It crashed on the raster thread in the first seconds of playback (`SIGSEGV` at `0x12`).
+
+Measured on host ART, single-process and under `--split` confined, the same in both:
+
+| | |
+|---|---|
+| decoders ExoPlayer chose | `acl.h264.decoder`, `acl.aac.decoder`, both in callback mode |
+| position the player reports | 0 to 5000 ms, about 500 ms per half second, then completed |
+| frames at the audio sink | 240640 (235 AAC frames of 1024; 5.013 s at 48 kHz) |
+| recorded from a PipeWire null sink | 4.997 s of 440 Hz, no gap, the same in both modes |
+
+ExoPlayer takes its clock from the `AudioTrack`, so the position advancing in real time is
+also a check of the track's position. A screenshot from a headless sway during playback under
+`--split` shows the test pattern at clip time 3.267 s.
+
+Not covered:
+
+- **Synchronization** of picture and sound was not measured.
+- **One clip, one player.** Local file, no seeking, pausing or looping, no streaming, no
+  network. The app is not in the test suite: building it needs a Flutter SDK.
+- **The video plane.** `video_player` shows its frames through a GL texture. A player that
+  uses a `SurfaceView` (a media3 `PlayerView`) with a sound track has not been run.
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 

@@ -6555,6 +6555,75 @@ class ArtVm final : public JniVm {
         log::i(kTag,
                "android.media.AudioSystem <clinit> getters bound "
                "(channel/sample-rate maxima, session id)");
+      // A media player asks the audio HAL what it can do with key=value
+      // queries (media3: "offloadVariableRateSupported" before it picks an
+      // audio renderer). There is no HAL: the answer to every query is the
+      // empty string, which a caller reads as "not supported", and a set is
+      // accepted and does nothing. Bound one at a time, apart from the
+      // getters above, so that a framework without one of them keeps the
+      // rest.
+      {
+        const JNINativeMethod params[] = {
+            {const_cast<char*>("getParameters"),
+             const_cast<char*>("(Ljava/lang/String;)Ljava/lang/String;"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv* e, jclass, jstring) -> jstring {
+                   return e->NewStringUTF("");
+                 })},
+            {const_cast<char*>("setParameters"),
+             const_cast<char*>("(Ljava/lang/String;)I"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv*, jclass, jstring) -> jint { return 0; })},
+            // What else a player asks before it opens a track. No offload and
+            // no direct (passthrough) playback: audio is decoded to PCM and
+            // mixed by the host. 0 is OFFLOAD_NOT_SUPPORTED and
+            // DIRECT_PLAYBACK_NOT_SUPPORTED.
+            {const_cast<char*>("native_get_offload_support"),
+             const_cast<char*>("(IIIII)I"),
+             reinterpret_cast<void*>(+[](JNIEnv*, jclass, jint, jint, jint,
+                                         jint, jint) -> jint { return 0; })},
+            {const_cast<char*>("getDirectPlaybackSupport"),
+             const_cast<char*>("(Landroid/media/AudioFormat;Landroid/media/"
+                               "AudioAttributes;)I"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv*, jclass, jobject, jobject) -> jint { return 0; })},
+            // No direct profiles: SUCCESS with the caller's list left empty.
+            {const_cast<char*>("getDirectProfilesForAttributes"),
+             const_cast<char*>(
+                 "(Landroid/media/AudioAttributes;Ljava/util/ArrayList;)I"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv*, jclass, jobject, jobject) -> jint { return 0; })},
+            // The output a track plays into, as audio::Track describes it:
+            // 48 kHz, an 80 ms buffer.
+            {const_cast<char*>("getPrimaryOutputSamplingRate"),
+             const_cast<char*>("()I"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv*, jclass) -> jint { return 48000; })},
+            {const_cast<char*>("getPrimaryOutputFrameCount"),
+             const_cast<char*>("()I"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv*, jclass) -> jint { return 3840; })},
+            {const_cast<char*>("getOutputLatency"), const_cast<char*>("(I)I"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv*, jclass, jint) -> jint { return 80; })},
+            {const_cast<char*>("isStreamActive"), const_cast<char*>("(II)Z"),
+             reinterpret_cast<void*>(+[](JNIEnv*, jclass, jint, jint)
+                                         -> jboolean { return JNI_FALSE; })},
+            {const_cast<char*>("getMasterMute"), const_cast<char*>("()Z"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv*, jclass) -> jboolean { return JNI_FALSE; })},
+            {const_cast<char*>("isMicrophoneMuted"), const_cast<char*>("()Z"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv*, jclass) -> jboolean { return JNI_FALSE; })},
+            {const_cast<char*>("checkAudioFlinger"), const_cast<char*>("()I"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv*, jclass) -> jint { return 0; })},
+        };
+        for (const JNINativeMethod& p : params) {
+          if (env->RegisterNatives(as_cls, &p, 1) != JNI_OK)
+            env->ExceptionClear();
+        }
+      }
       env->DeleteLocalRef(as_cls);
     }
     // android.media.AudioTrack: the host libandroid_runtime registers none of
