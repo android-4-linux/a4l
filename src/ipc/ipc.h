@@ -30,8 +30,8 @@ enum class MsgType : std::uint32_t {
   Input,          // acl -> art-host
   Lifecycle,      // both directions (resumed/paused/stopped + config)
   Vsync,          // acl -> art-host (Choreographer tick from wp_presentation)
-  AudioOpen,      // art-host -> acl (carries a shm-ring fd)
-  AudioWrite,     // art-host -> acl (ring write cursor advanced)
+  AudioOpen,      // child -> acl: a PCM stream begins (id, rate, channels)
+  AudioWrite,     // child -> acl: samples for a stream (extra = S16LE)
   // Appended for the looper-driven present path (wm/split_present.h), so the
   // tags above keep their values.
   SurfaceReady,  // acl -> child: the surface exists (extra = u64 modifiers)
@@ -45,13 +45,15 @@ enum class MsgType : std::uint32_t {
   VideoBounds,  // child -> acl: where the app's video View is in its surface
   VideoHide,    // child -> acl: take the picture off the video plane
   VideoReset,   // child -> acl: the screen changed; drop the plane and its hole
+  AudioClose,   // child -> acl: a PCM stream ends (u32 = stream id)
 };
 
 // Sent in Hello. Bump when Message changes size or a payload changes layout:
 // both ends are built from this header, and a datagram of another size is
 // refused as truncated. 2: PresentFrame planes, Input keysym, PresentState.
-// 3: PresentState.frames_seen. 4: the Video* messages.
-inline constexpr std::uint32_t kProtocolVersion = 4;
+// 3: PresentState.frames_seen. 4: the Video* messages. 5: audio as samples
+// in the datagram (AudioOpen and AudioWrite changed, AudioClose added).
+inline constexpr std::uint32_t kProtocolVersion = 5;
 
 // Bounds both ends enforce on what the other sends.
 inline constexpr std::uint32_t kMaxSurfaceDim = 16384;
@@ -62,6 +64,11 @@ inline constexpr std::size_t kMaxText = 60 * 1024;  // fits one datagram
 // sides are no longer. An app may lay its video View out larger than the
 // window and partly off it (a zoom that crops), but not without limit.
 inline constexpr std::int32_t kMaxVideoCoord = 4 * 16384;
+// Audio: streams open at once, and what a stream may be.
+inline constexpr std::uint32_t kMaxAudioStreams = 8;
+inline constexpr std::uint32_t kMaxAudioChannels = 8;
+inline constexpr std::uint32_t kMinAudioRate = 4000;
+inline constexpr std::uint32_t kMaxAudioRate = 192000;
 
 struct SurfaceInfo {  // Create/Resize payload
   std::uint32_t surface_id;
@@ -151,14 +158,18 @@ struct Lifecycle {
   std::uint32_t w, h, density;
 };
 
+// A PCM stream: interleaved signed 16-bit samples, as AudioTrack's
+// ENCODING_PCM_16BIT. The samples travel in the datagram, not in shared
+// memory: a mapping the app process can truncate is one the broker could
+// fault on, and audio is small enough to copy.
 struct AudioOpen {
-  std::uint32_t rate, channels, ring_bytes;
-  // the shm ring fd travels as ancillary data.
+  std::uint32_t stream;  // 0 to kMaxAudioStreams - 1, the child's choice
+  std::uint32_t rate, channels;
 };
 
 struct AudioWrite {
-  std::uint64_t write_cursor;  // total frames written to the ring
-  std::uint32_t frames;        // frames in this advance
+  std::uint32_t stream;
+  // extra = the samples, little-endian, a whole number of frames.
 };
 
 // One datagram = a fixed header + optional trailing bytes (in `extra`) + up to

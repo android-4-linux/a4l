@@ -148,13 +148,17 @@ art-host; `present_dmabuf_loop` + input stay in a4l.
   each dma-buf. Same libc on both sides, so none of `acl-art-host` is involved; the arm64 child
   above is unchanged and still at S1. Covers the Skia dma-buf path and native GL (a gbm surface
   in the child, each swapped buffer sent the same way; ADR-0009 C3), and decoded video, which
-  goes to the broker's video subsurface frame by frame. Audio does not cross. The child is
+  goes to the broker's video subsurface frame by frame. Audio crosses as samples in the
+  datagram (S4 below; no shared ring), and the broker plays it. The child is
   confined
   (ADR-0009 C4, `src/confine/`): bubblewrap namespaces and a seccomp allowlist, so it has no
   route to the compositor, PipeWire or D-Bus but the broker's socket.
 - **S3 — input roundtrip.** Wayland pointer/key in a4l → `Input` → injected into the View in art-host;
   a tappable UI responds.
-- **S4 — audio.** SoundPool/AudioTrack PCM → shm ring → PipeWire sink in a4l.
+- **S4 — audio.** SoundPool/AudioTrack PCM → PipeWire sink in a4l. Built for the x86-64
+  `--split` path on 2026-11-15, without the shm ring: samples travel in the datagram
+  (ADR-0009, "S4 as built: audio"). `SoundPool` crosses; `AudioTrack` has no native side on
+  host ART yet.
 - **S5 — a real APK.** A launcher-activity app (the framework boot classpath, ADR-0002) rendering and
   interactive on the Pi via `acl run app.apk --vm=art`.
 

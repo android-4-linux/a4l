@@ -190,6 +190,19 @@ bool check_video_rect(const ipc::VideoRect& r) noexcept {
          r.y <= ipc::kMaxVideoCoord;
 }
 
+bool check_audio_open(const ipc::AudioOpen& open) noexcept {
+  return open.stream < ipc::kMaxAudioStreams &&
+         open.rate >= ipc::kMinAudioRate && open.rate <= ipc::kMaxAudioRate &&
+         open.channels >= 1 && open.channels <= ipc::kMaxAudioChannels;
+}
+
+bool check_audio_write(std::size_t bytes, std::uint32_t channels) noexcept {
+  if (channels == 0 || channels > ipc::kMaxAudioChannels)
+    return false;
+  const std::size_t frame = channels * sizeof(std::int16_t);
+  return bytes != 0 && bytes <= ipc::kMaxText && bytes % frame == 0;
+}
+
 bool check_surface(const ipc::SurfaceInfo& info) noexcept {
   return info.w != 0 && info.h != 0 && info.w <= ipc::kMaxSurfaceDim &&
          info.h <= ipc::kMaxSurfaceDim;

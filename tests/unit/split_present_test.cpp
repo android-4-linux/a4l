@@ -84,6 +84,17 @@ struct World {
   std::vector<bool> ime;
   std::vector<std::string> clipboard;
 
+  // Audio: what the broker's sinks were given.
+  struct Stream {
+    int rate = 0, channels = 0;
+    std::vector<std::int16_t> samples;
+    bool closed = false;
+  };
+  std::vector<Stream> streams;      // in the order they were opened
+  std::uint64_t audio_pending = 0;  // what every sink reports as unplayed
+  bool audio_open_fails = false;
+  int audio_violations = 0;  // writes that were not whole frames
+
   ~World() { ::close(wake); }
 
   // Queue `fn` to run on the broker thread, as a compositor event would.
@@ -252,6 +263,44 @@ class FakePresenter final : public wm::IPresenter {
   std::vector<std::uint64_t> modifiers_{0x11, 0x22, 0x0200000000401b03ull};
 };
 
+// What the broker plays a child's audio through: records what it is given.
+class FakeSink final : public audio::Sink {
+ public:
+  explicit FakeSink(World& world) : world_(world) {}
+  bool open(const audio::Format& fmt) override {
+    std::lock_guard<std::mutex> lock(world_.mu);
+    if (world_.audio_open_fails)
+      return false;
+    index_ = world_.streams.size();
+    world_.streams.push_back({fmt.sample_rate, fmt.channels, {}, false});
+    channels_ = fmt.channels;
+    return true;
+  }
+  int write(const std::int16_t* pcm, int n_samples) override {
+    std::lock_guard<std::mutex> lock(world_.mu);
+    if (n_samples <= 0 || channels_ <= 0 || n_samples % channels_ != 0)
+      ++world_.audio_violations;
+    auto& s = world_.streams[index_].samples;
+    s.insert(s.end(), pcm, pcm + n_samples);
+    return n_samples;
+  }
+  void drain() override {}
+  void close() override {
+    std::lock_guard<std::mutex> lock(world_.mu);
+    world_.streams[index_].closed = true;
+  }
+  std::uint64_t frames_written() const override { return 0; }
+  std::uint64_t frames_pending() const override {
+    std::lock_guard<std::mutex> lock(world_.mu);
+    return world_.audio_pending;
+  }
+
+ private:
+  World& world_;
+  std::size_t index_ = 0;
+  int channels_ = 0;
+};
+
 // A broker on its own thread over one end of a socket pair; the test holds
 // the other end, as the child does.
 // Tests have no dma-buf to send. The broker is told that whatever regular
@@ -281,6 +330,9 @@ struct Rig {
                bool start_now = true) {
     options = std::move(opts);
     options.inspect = facts_of_any_file;
+    options.audio_sink = [this]() -> std::unique_ptr<audio::Sink> {
+      return std::make_unique<FakeSink>(world);
+    };
     linger = linger_ms;
     auto pair = ipc::Channel::make_pair();
     child = std::move(pair.first);
@@ -645,6 +697,197 @@ TEST_CASE("split: the broker drops video that fails validation", "[split]") {
   CHECK(rig.world.video_violations == 0);
   // A refused video frame does not touch the window's own frame loop.
   CHECK(rig.world.keepalives == 0);
+}
+
+TEST_CASE("split: audio crosses to the broker's sink, sample for sample",
+          "[split][audio]") {
+  Rig rig;
+  // No window is needed for sound.
+  const int a = wm::split_audio_open_on(rig.child, 44100, 2);
+  const int b = wm::split_audio_open_on(rig.child, 48000, 1);
+  REQUIRE(a >= 0);
+  REQUIRE(b >= 0);
+  REQUIRE(a != b);
+
+  // More than one datagram's worth, and a count that is not a whole frame:
+  // the odd sample is not sent.
+  std::vector<std::int16_t> stereo(40001);
+  for (std::size_t i = 0; i < stereo.size(); ++i)
+    stereo[i] = static_cast<std::int16_t>(i * 7 - 12345);
+  CHECK(wm::split_audio_write_on(rig.child, a, stereo.data(),
+                                 static_cast<int>(stereo.size())) == 40000);
+  const std::int16_t mono[] = {1, -2, 3, -32768, 32767};
+  // From another thread, as an app's audio thread writes.
+  std::thread writer(
+      [&] { CHECK(wm::split_audio_write_on(rig.child, b, mono, 5) == 5); });
+  writer.join();
+  // Not open, out of range, nothing to send.
+  CHECK(wm::split_audio_write_on(rig.child, 5, mono, 5) == 0);
+  CHECK(wm::split_audio_write_on(rig.child, -1, mono, 5) == 0);
+  CHECK(wm::split_audio_write_on(rig.child, 99, mono, 5) == 0);
+  CHECK(wm::split_audio_write_on(rig.child, b, mono, 0) == 0);
+  CHECK(wm::split_audio_write_on(rig.child, b, nullptr, 5) == 0);
+  wm::split_audio_close_on(rig.child, a);
+  CHECK(wm::split_audio_write_on(rig.child, a, mono, 4) == 0);  // closed
+  // The id is free again.
+  const int c = wm::split_audio_open_on(rig.child, 22050, 2);
+  CHECK(c == a);
+  wm::split_audio_close_on(rig.child, c);
+  wm::split_audio_close_on(rig.child, b);
+  wm::split_audio_close_on(rig.child, b);  // twice is nothing
+
+  // Formats no device takes are refused before anything is sent.
+  CHECK(wm::split_audio_open_on(rig.child, 0, 2) == -1);
+  CHECK(wm::split_audio_open_on(rig.child, 44100, 0) == -1);
+  CHECK(wm::split_audio_open_on(rig.child, 44100, 9) == -1);
+  CHECK(wm::split_audio_open_on(rig.child, 1 << 30, 2) == -1);
+
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.rejected == 0);
+  CHECK(stats.audio_frames == 20000 + 5);
+  CHECK(stats.audio_dropped == 0);
+  World& w = rig.world;
+  REQUIRE(w.streams.size() == 3);
+  CHECK(w.streams[0].rate == 44100);
+  CHECK(w.streams[0].channels == 2);
+  stereo.pop_back();
+  CHECK(w.streams[0].samples == stereo);
+  CHECK(w.streams[0].closed);
+  CHECK(w.streams[1].rate == 48000);
+  CHECK(w.streams[1].channels == 1);
+  CHECK(w.streams[1].samples ==
+        std::vector<std::int16_t>{1, -2, 3, -32768, 32767});
+  CHECK(w.streams[1].closed);
+  CHECK(w.streams[2].rate == 22050);
+  CHECK(w.streams[2].samples.empty());
+  CHECK(w.audio_violations == 0);
+}
+
+TEST_CASE("split: a child cannot hold more streams than the limit",
+          "[split][audio]") {
+  Rig rig;
+  std::vector<int> ids;
+  for (std::uint32_t i = 0; i < ipc::kMaxAudioStreams; ++i) {
+    ids.push_back(wm::split_audio_open_on(rig.child, 44100, 2));
+    CHECK(ids.back() == static_cast<int>(i));
+  }
+  CHECK(wm::split_audio_open_on(rig.child, 44100, 2) == -1);
+  for (int id : ids)
+    wm::split_audio_close_on(rig.child, id);
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.rejected == 0);
+  CHECK(rig.world.streams.size() == ipc::kMaxAudioStreams);
+}
+
+TEST_CASE("split: the broker drops audio that fails validation",
+          "[split][audio]") {
+  wm::BrokerOptions opts;
+  opts.max_audio_opens = 4;
+  Rig rig(200, opts);
+  const auto open = [&](std::uint32_t stream, std::uint32_t rate,
+                        std::uint32_t channels) {
+    ipc::Message m;
+    m.type = ipc::MsgType::AudioOpen;
+    m.audio_open.stream = stream;
+    m.audio_open.rate = rate;
+    m.audio_open.channels = channels;
+    REQUIRE(rig.child.send(m));
+  };
+  const auto write = [&](std::uint32_t stream, std::size_t bytes) {
+    const std::vector<std::byte> pcm(bytes, std::byte{0x11});
+    ipc::Message m;
+    m.type = ipc::MsgType::AudioWrite;
+    m.audio_write.stream = stream;
+    m.extra_len = static_cast<std::uint32_t>(bytes);
+    REQUIRE(rig.child.send(m, pcm));
+  };
+  const auto close = [&](std::uint32_t stream) {
+    ipc::Message m;
+    m.type = ipc::MsgType::AudioClose;
+    m.u32 = stream;
+    REQUIRE(rig.child.send(m));
+  };
+
+  write(0, 16);                           // 1: no such stream
+  open(ipc::kMaxAudioStreams, 44100, 2);  // 2
+  open(0, 0, 2);                          // 3
+  open(0, 1u << 31, 2);                   // 4
+  open(0, 44100, 0);                      // 5
+  open(0, 44100, 0xffff);                 // 6
+  open(1, 44100, 2);                      // accepted (1 of 4)
+  write(1, 0);                            // 7: nothing
+  write(1, 3);                            // 8: not whole samples
+  write(1, 6);                            // 9: a frame and a half
+  write(0xffffffffu, 16);                 // 10: no such id
+  write(1, 16);                           // fine: 4 frames
+  close(ipc::kMaxAudioStreams + 7);       // 11
+  close(1);
+  write(1, 16);       // 12: closed
+  close(5);           // never opened: nothing to do
+  open(1, 48000, 6);  // accepted (2 of 4)
+  open(1, 8000, 1);   // accepted (3 of 4): replaces the last
+  write(1, 10);       // fine for one channel: 5 frames
+  open(2, 44100, 2);  // accepted (4 of 4)
+  open(3, 44100, 2);  // 13: past the limit on opens
+  open(4, 44100, 2);  // 14
+  write(3, 16);       // 15: was never opened
+
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.rejected == 15);
+  CHECK(stats.audio_frames == 4 + 5);
+  World& w = rig.world;
+  REQUIRE(w.streams.size() == 4);
+  CHECK(w.streams[0].samples.size() == 8);
+  CHECK(w.streams[0].closed);
+  CHECK(w.streams[1].channels == 6);
+  CHECK(w.streams[1].closed);  // replaced by the reopen
+  CHECK(w.streams[2].rate == 8000);
+  CHECK(w.streams[2].samples.size() == 5);
+  CHECK(w.audio_violations == 0);
+}
+
+TEST_CASE("split: audio ahead of the device is dropped, not held",
+          "[split][audio]") {
+  wm::BrokerOptions opts;
+  opts.max_audio_seconds = 1;
+  Rig rig(200, opts);
+  const int id = wm::split_audio_open_on(rig.child, 8000, 1);
+  REQUIRE(id >= 0);
+  const std::vector<std::int16_t> pcm(1000, 7);
+  CHECK(wm::split_audio_write_on(rig.child, id, pcm.data(), 1000) == 1000);
+  REQUIRE(settle(rig.world, [&] {
+    return !rig.world.streams.empty() &&
+           rig.world.streams[0].samples.size() == 1000;
+  }));
+  {
+    // The sink now holds all but 999 frames of its second.
+    std::lock_guard<std::mutex> lock(rig.world.mu);
+    rig.world.audio_pending = 8000 - 999;
+  }
+  CHECK(wm::split_audio_write_on(rig.child, id, pcm.data(), 1000) == 1000);
+  CHECK(wm::split_audio_write_on(rig.child, id, pcm.data(), 999) == 999);
+  wm::split_audio_close_on(rig.child, id);
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.rejected == 0);  // a child that is ahead is not malformed
+  CHECK(stats.audio_dropped == 1000);
+  CHECK(stats.audio_frames == 1000 + 999);
+  CHECK(rig.world.streams[0].samples.size() == 1999);
+}
+
+TEST_CASE("split: audio with no device is taken and not played",
+          "[split][audio]") {
+  Rig rig(200, {}, /*start_now=*/false);
+  rig.world.audio_open_fails = true;
+  rig.start();
+  const int id = wm::split_audio_open_on(rig.child, 44100, 2);
+  REQUIRE(id >= 0);
+  const std::int16_t pcm[8] = {};
+  CHECK(wm::split_audio_write_on(rig.child, id, pcm, 8) == 8);
+  wm::split_audio_close_on(rig.child, id);
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.rejected == 0);
+  CHECK(stats.audio_frames == 4);
+  CHECK(rig.world.streams.empty());
 }
 
 TEST_CASE("split: the broker drops what fails validation", "[split]") {

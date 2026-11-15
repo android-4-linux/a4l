@@ -33,11 +33,20 @@ class Sink {
   // Total frames (samples / channels) accepted since open() — the
   // deterministic, device-independent measure the tests assert on.
   virtual std::uint64_t frames_written() const = 0;
+  // Frames accepted and not yet played. 0 for a sink that keeps none. What a
+  // caller that must bound memory (the --split broker) checks before a write.
+  virtual std::uint64_t frames_pending() const { return 0; }
 };
 
 // Create the configured sink. ACL_AUDIO=pipewire selects the PipeWire backend
 // (only if built with it); anything else (default) is the counting/null sink.
+// In a --split app process it is neither: the samples go to the broker, which
+// has the audio device and makes this choice itself (see make_device_sink).
 std::unique_ptr<Sink> make_sink();
+
+// make_sink() without the --split case: the sink for a process that has the
+// audio device. What the broker plays a child's stream through.
+std::unique_ptr<Sink> make_device_sink();
 
 // The deterministic counting/null sink, exposed for a graceful fallback when a
 // selected device backend (e.g. PipeWire with no reachable daemon) fails to

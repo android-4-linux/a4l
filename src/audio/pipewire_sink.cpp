@@ -161,6 +161,11 @@ class PipeWireSink final : public Sink {
   }
 
   std::uint64_t frames_written() const override { return frames_; }
+  std::uint64_t frames_pending() const override {
+    std::lock_guard<std::mutex> lk(mu_);
+    return fifo_.size() /
+           static_cast<std::size_t>(fmt_.channels > 0 ? fmt_.channels : 1);
+  }
 
  private:
   static void on_process(void* data) {
@@ -207,7 +212,7 @@ class PipeWireSink final : public Sink {
   Format fmt_;
   pw_thread_loop* loop_ = nullptr;
   pw_stream* stream_ = nullptr;
-  std::mutex mu_;
+  mutable std::mutex mu_;
   std::deque<std::int16_t> fifo_;
   std::uint64_t frames_ = 0;
   bool inited_ = false;

@@ -63,6 +63,131 @@ bool split_child_display(int& width, int& height, int& scale) noexcept {
   return true;
 }
 
+// ── Child: audio ────────────────────────────────────────────────────────
+
+namespace {
+
+// Which stream ids are open, and each one's channel count. Opened and
+// written from whatever thread the app's audio runs on.
+struct ChildAudio {
+  std::mutex mu;
+  std::uint32_t open_mask = 0;
+  std::uint32_t channels[ipc::kMaxAudioStreams] = {};
+};
+ChildAudio& child_audio() noexcept {
+  static ChildAudio a;
+  return a;
+}
+
+// Samples per datagram: 16 KiB, under a tenth of a second at 48 kHz stereo,
+// so that one write does not fill the socket.
+constexpr int kAudioChunkBytes = 16 * 1024;
+
+}  // namespace
+
+int split_audio_open_on(ipc::Channel& channel, int rate, int channels) {
+  if (!channel.valid() || rate < static_cast<int>(ipc::kMinAudioRate) ||
+      rate > static_cast<int>(ipc::kMaxAudioRate) || channels < 1 ||
+      channels > static_cast<int>(ipc::kMaxAudioChannels))
+    return -1;
+  ChildAudio& a = child_audio();
+  int id = -1;
+  {
+    std::lock_guard<std::mutex> lock(a.mu);
+    for (std::uint32_t i = 0; i < ipc::kMaxAudioStreams && id < 0; ++i) {
+      if ((a.open_mask & (1u << i)) == 0)
+        id = static_cast<int>(i);
+    }
+    if (id < 0)
+      return -1;
+    a.open_mask |= 1u << id;
+    a.channels[id] = static_cast<std::uint32_t>(channels);
+  }
+  ipc::Message m;
+  m.type = ipc::MsgType::AudioOpen;
+  m.audio_open.stream = static_cast<std::uint32_t>(id);
+  m.audio_open.rate = static_cast<std::uint32_t>(rate);
+  m.audio_open.channels = static_cast<std::uint32_t>(channels);
+  if (!channel.send(m)) {
+    std::lock_guard<std::mutex> lock(a.mu);
+    a.open_mask &= ~(1u << id);
+    return -1;
+  }
+  return id;
+}
+
+int split_audio_write_on(ipc::Channel& channel,
+                         int stream,
+                         const std::int16_t* pcm,
+                         int n_samples) {
+  if (!channel.valid() || pcm == nullptr || n_samples <= 0 || stream < 0 ||
+      stream >= static_cast<int>(ipc::kMaxAudioStreams))
+    return 0;
+  std::uint32_t channels = 0;
+  {
+    ChildAudio& a = child_audio();
+    std::lock_guard<std::mutex> lock(a.mu);
+    if ((a.open_mask & (1u << stream)) == 0)
+      return 0;
+    channels = a.channels[stream];
+  }
+  // Whole frames only, in datagrams of whole frames.
+  const int frame = static_cast<int>(channels);
+  const int chunk =
+      kAudioChunkBytes / static_cast<int>(sizeof(std::int16_t)) / frame * frame;
+  int sent = 0;
+  const int total = n_samples / frame * frame;
+  while (sent < total) {
+    const int n = total - sent < chunk ? total - sent : chunk;
+    ipc::Message m;
+    m.type = ipc::MsgType::AudioWrite;
+    m.audio_write.stream = static_cast<std::uint32_t>(stream);
+    m.extra_len = static_cast<std::uint32_t>(n) * sizeof(std::int16_t);
+    if (!channel.send(
+            m, {reinterpret_cast<const std::byte*>(pcm + sent), m.extra_len}))
+      break;
+    sent += n;
+  }
+  return sent;
+}
+
+void split_audio_close_on(ipc::Channel& channel, int stream) {
+  if (stream < 0 || stream >= static_cast<int>(ipc::kMaxAudioStreams))
+    return;
+  {
+    ChildAudio& a = child_audio();
+    std::lock_guard<std::mutex> lock(a.mu);
+    if ((a.open_mask & (1u << stream)) == 0)
+      return;
+    a.open_mask &= ~(1u << stream);
+  }
+  if (!channel.valid())
+    return;
+  ipc::Message m;
+  m.type = ipc::MsgType::AudioClose;
+  m.u32 = static_cast<std::uint32_t>(stream);
+  channel.send(m);
+}
+
+extern "C" int acl_split_audio_active() {
+  return child_state().active ? 1 : 0;
+}
+extern "C" int acl_split_audio_open(int rate, int channels) {
+  ChildState& s = child_state();
+  return s.active ? split_audio_open_on(s.channel, rate, channels) : -1;
+}
+extern "C" int acl_split_audio_write(int stream,
+                                     const std::int16_t* pcm,
+                                     int n_samples) {
+  ChildState& s = child_state();
+  return s.active ? split_audio_write_on(s.channel, stream, pcm, n_samples) : 0;
+}
+extern "C" void acl_split_audio_close(int stream) {
+  ChildState& s = child_state();
+  if (s.active)
+    split_audio_close_on(s.channel, stream);
+}
+
 #if ACL_HAVE_VULKAN && ACL_HAVE_WCS
 
 namespace {
@@ -601,6 +726,18 @@ class Broker {
         if (presenter_)
           presenter_->reset_video_overlay();
         break;
+      case ipc::MsgType::AudioOpen:
+        audio_open(r);
+        break;
+      case ipc::MsgType::AudioWrite:
+        audio_write(r);
+        break;
+      case ipc::MsgType::AudioClose:
+        if (r.msg.u32 < ipc::kMaxAudioStreams)
+          audio_close(r.msg.u32);
+        else
+          ++stats_.rejected;
+        break;
       case ipc::MsgType::Hello:
       case ipc::MsgType::Log:
         break;
@@ -801,6 +938,92 @@ class Broker {
     ++stats_.video_frames;
   }
 
+  // ── Audio. The child has no audio device; the broker plays its streams.
+  // A stream is a format the child states and samples it sends, so what is
+  // checked is the format's range, that samples come in whole frames for a
+  // stream that is open, and how much the sink is asked to hold.
+
+  void audio_open(const ipc::Received& r) noexcept {
+    const ipc::AudioOpen& o = r.msg.audio_open;
+    if (!check_audio_open(o)) {
+      ++stats_.rejected;
+      return;
+    }
+    if (audio_opens_ >= options_.max_audio_opens) {
+      if (audio_opens_ == options_.max_audio_opens) {
+        log::w(kTag,
+               "broker: the child opened more than {} audio streams; "
+               "refusing further ones",
+               options_.max_audio_opens);
+        ++audio_opens_;
+      }
+      ++stats_.rejected;
+      return;
+    }
+    ++audio_opens_;
+    audio_close(o.stream);  // an id opened twice starts over
+    AudioStream& st = audio_[o.stream];
+    st.rate = o.rate;
+    st.channels = o.channels;
+    st.open = true;
+    if (options_.audio_sink) {
+      st.sink = options_.audio_sink();
+      if (st.sink &&
+          !st.sink->open(audio::Format{static_cast<int>(o.rate),
+                                       static_cast<int>(o.channels)})) {
+        log::w(kTag,
+               "broker: audio stream {} ({} Hz, {} ch) could not be opened; "
+               "its samples are taken and not played",
+               o.stream, o.rate, o.channels);
+        st.sink.reset();
+      }
+    }
+  }
+
+  void audio_write(const ipc::Received& r) noexcept {
+    const std::uint32_t id = r.msg.audio_write.stream;
+    if (id >= ipc::kMaxAudioStreams || !audio_[id].open ||
+        !check_audio_write(r.extra.size(), audio_[id].channels)) {
+      ++stats_.rejected;
+      return;
+    }
+    AudioStream& st = audio_[id];
+    const std::uint64_t frames =
+        r.extra.size() / (st.channels * sizeof(std::int16_t));
+    if (!st.sink) {
+      stats_.audio_frames += frames;  // taken, with nothing to play it
+      return;
+    }
+    // A child ahead of the device by more than the limit: drop, do not hold.
+    const std::uint64_t limit =
+        static_cast<std::uint64_t>(st.rate) *
+        static_cast<std::uint64_t>(options_.max_audio_seconds);
+    if (st.sink->frames_pending() + frames > limit) {
+      if (stats_.audio_dropped == 0)
+        log::w(kTag,
+               "broker: audio stream {} is more than {} s ahead of the "
+               "device; dropping (further drops are counted, not logged)",
+               id, options_.max_audio_seconds);
+      stats_.audio_dropped += frames;
+      return;
+    }
+    // The datagram's bytes are not aligned for int16_t.
+    audio_scratch_.resize(r.extra.size() / sizeof(std::int16_t));
+    std::memcpy(audio_scratch_.data(), r.extra.data(),
+                audio_scratch_.size() * sizeof(std::int16_t));
+    const int taken = st.sink->write(audio_scratch_.data(),
+                                     static_cast<int>(audio_scratch_.size()));
+    if (taken > 0)
+      stats_.audio_frames += static_cast<std::uint64_t>(taken) / st.channels;
+  }
+
+  void audio_close(std::uint32_t id) noexcept {
+    AudioStream& st = audio_[id];
+    if (st.sink)
+      st.sink->close();
+    st = AudioStream{};
+  }
+
   void forward_input(const InputEvent& ev) noexcept {
     ipc::Message m;
     m.type = ipc::MsgType::Input;
@@ -869,6 +1092,14 @@ class Broker {
   FrameLimits limits_;
   int surfaces_created_ = 0;
   std::uint32_t frames_seen_ = 0;  // PresentFrame messages handled
+  struct AudioStream {
+    bool open = false;
+    std::uint32_t rate = 0, channels = 0;
+    std::unique_ptr<audio::Sink> sink;
+  };
+  AudioStream audio_[ipc::kMaxAudioStreams];
+  int audio_opens_ = 0;
+  std::vector<std::int16_t> audio_scratch_;
   // What the compositor advertised for the video format last seen.
   std::uint32_t video_mods_format_ = 0;
   std::vector<std::uint64_t> video_mods_;

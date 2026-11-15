@@ -183,6 +183,18 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 300,
       is_parallel : false,
     )
+    # Audio across the --split boundary (ADR-0009): a fixture app plays a tone through
+    # SoundPool in the confined app process, and the test asserts every frame it sent reached
+    # the broker's audio sink. The sink is the counting one: no sound, no audio daemon. Needs
+    # host ART, ffmpeg and bubblewrap; SKIPs otherwise, which includes CI.
+    test(
+      'split-audio',
+      py3,
+      args : [files('run_split_audio_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+      is_parallel : false,
+    )
   endif
 endif
 

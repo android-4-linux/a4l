@@ -30,6 +30,12 @@ acl_exe = executable(
     '-Wl,--export-dynamic-symbol=acl_gl_run_on_donor',
     '-Wl,--export-dynamic-symbol=acl_gl_donor_route_get',
     '-Wl,--export-dynamic-symbol=acl_gl_donor_route_set',
+    # The --split child's audio: libsoundpool.so's own copy of audio/ reaches the IPC channel
+    # through these (wm/split_present.h).
+    '-Wl,--export-dynamic-symbol=acl_split_audio_active',
+    '-Wl,--export-dynamic-symbol=acl_split_audio_open',
+    '-Wl,--export-dynamic-symbol=acl_split_audio_write',
+    '-Wl,--export-dynamic-symbol=acl_split_audio_close',
   ],
   install : true,
 )

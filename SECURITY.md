@@ -48,9 +48,10 @@ where the project is, stated so that nobody spends a report on them:
   seccomp allowlist, and the first process keeps the display. C5 is met for that path: the first
   process validates each frame the child sends against the kernel's own account of the buffer, and
   its receive path is fuzzed. C3 is met: Flutter and libGDX apps render under `--split`, and
-  decoded video is shown there (one fixture app, H.264; audio does not cross). The sandbox has
-  had no review outside the project, its system call list was recorded from nine apps with no
-  input and no network, and the GPU render node stays reachable from inside it. `--split=unconfined` and
+  decoded video is shown there (one fixture app, H.264). `SoundPool` audio is played by the
+  first process, which checks each write. The sandbox has had no review outside the project,
+  its system call list was recorded from nine apps with no input and no network, and the GPU
+  render node stays reachable from inside it. `--split=unconfined` and
   `--net=host` each remove part of it and say so when used.
 
 The consequence is the thing to take away: **treat an APK you run under a4l as native code running

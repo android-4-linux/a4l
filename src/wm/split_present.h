@@ -22,6 +22,7 @@
 #include <string_view>
 
 #include "acl_config.h"
+#include "audio/audio.h"
 #include "ipc/ipc.h"
 #include "wm/present.h"
 #include "wm/split_validate.h"
@@ -37,6 +38,29 @@ void split_child_install(int ipc_fd, int display_w, int display_h, int scale);
 bool split_child_active() noexcept;
 // The display the broker reported. False if this is not a split child.
 bool split_child_display(int& width, int& height, int& scale) noexcept;
+
+// The child's audio, as audio::make_sink() reaches it: by name, because
+// libsoundpool.so carries its own copy of the audio code and cannot see this
+// process's channel. Exported from the executable (src/shell/meson.build).
+extern "C" {
+// 1 in a split child.
+int acl_split_audio_active();
+// Open a stream. Returns its id, or -1 if this is not a split child, the
+// format is out of range, or kMaxAudioStreams are open.
+int acl_split_audio_open(int rate, int channels);
+// Send interleaved 16-bit samples. Returns how many were sent.
+int acl_split_audio_write(int stream, const std::int16_t* pcm, int n_samples);
+void acl_split_audio_close(int stream);
+}
+// The same over a channel the caller owns: what the functions above call
+// with the installed channel, and the test seam. The table of open streams
+// is the process's, whichever channel is used.
+int split_audio_open_on(ipc::Channel& channel, int rate, int channels);
+int split_audio_write_on(ipc::Channel& channel,
+                         int stream,
+                         const std::int16_t* pcm,
+                         int n_samples);
+void split_audio_close_on(ipc::Channel& channel, int stream);
 
 #if ACL_HAVE_VULKAN && ACL_HAVE_WCS
 
@@ -73,11 +97,13 @@ struct BrokerStats {
   std::uint64_t rejected = 0;  // messages refused by validation
   // Of those, refused frames by reason, indexed by FrameVerdict.
   std::uint64_t frame_verdicts[kFrameVerdictCount] = {};
-  std::uint64_t video_frames = 0;  // VideoFrame messages given to the plane
-  std::uint64_t inputs = 0;        // input events forwarded
-  std::uint64_t from_child = 0;    // datagrams received
-  std::uint64_t to_child = 0;      // datagrams sent
-  bool window_closed = false;      // the toplevel closed before the child left
+  std::uint64_t video_frames = 0;   // VideoFrame messages given to the plane
+  std::uint64_t audio_frames = 0;   // PCM frames given to a sink
+  std::uint64_t audio_dropped = 0;  // PCM frames dropped: the sink was full
+  std::uint64_t inputs = 0;         // input events forwarded
+  std::uint64_t from_child = 0;     // datagrams received
+  std::uint64_t to_child = 0;       // datagrams sent
+  bool window_closed = false;       // the toplevel closed before the child left
 };
 
 // What the broker decides for the child and does not take from it.
@@ -92,6 +118,16 @@ struct BrokerOptions {
   // Surfaces the child may create over the connection's life. Each is a new
   // toplevel on the user's screen.
   int max_surfaces = 16;
+  // What plays a stream the child opens (audio::make_device_sink outside
+  // tests). Empty: the child's audio is taken and not played.
+  std::function<std::unique_ptr<audio::Sink>()> audio_sink;
+  // Streams the child may open over the connection's life. Opening one can
+  // take half a second in the broker, waiting for the audio daemon.
+  int max_audio_opens = 64;
+  // Seconds of audio a stream's sink may hold unplayed. Past that a write is
+  // dropped: the child is ahead of the device, and holding more is memory the
+  // child decides the size of.
+  int max_audio_seconds = 2;
   // Messages handled before the broker returns to the compositor's events,
   // so that a child that floods the socket cannot starve the window.
   int drain_budget = 64;
