@@ -608,6 +608,47 @@ fixture now lays its `SurfaceView` out again while it plays, and `split-video` f
 old code. Not covered: seeking, pausing, speed; a `PlayerView` in a Compose screen; a
 `GLSurfaceView` laid out again, whose path sets the same field and was not changed.
 
+**Pause, seek, speed (2026-11-15).** Both player apps were scripted to pause for 1.5 s, seek
+back, and seek back again at twice the speed, with the clip's two events after each. On the
+`PlayerView` app, before: after the pause the sound came 1.5 s after the picture; after the
+seek the player never left buffering. After, audio minus video in ms, two events per run
+(mpv playing straight through: +14 +20, +14 +22):
+
+| | after a pause | after a seek | at twice the speed |
+|---|---|---|---|
+| `PlayerView`, single process, four runs | +30 +43, +40 +35, +44 +46, +53 +44 | +71 +68, +73 +70, +60 +57, +58 +55 | +48 +62, +64 +62, +44 +49, +62 +68 |
+| `PlayerView`, `--split`, three runs | +51 +47, +41 +36, +41 +36 | +80 +73, +80 +76, +84 +79 | +61 +59, +70 +68, +67 +64 |
+| `video_player`, single process, two runs | +30 +27, +43 +41 | +61 +60, +48 +47 | +38 +37, +32 +30 |
+| `video_player`, `--split`, two runs | +31 +27, +41 +38 | +61 +58, +53 +52 | +48 +46, +47 +45 |
+
+At twice the speed the flashes are 96 ms long and 1.25 s apart, as they should be.
+
+- **A `SurfaceView`'s frames were shown on a4l's clock, not the player's.** The video plane
+  fed the decoder each packet when its timestamp fell due on the wall clock, showed each
+  frame as it was decoded, and handed the player an empty buffer to release. A paused player
+  stops releasing; a4l went on showing. Frames for the plane now wait in the codec's output
+  slots, holding their decoder surfaces, and go to the plane when the player releases them,
+  at the time it gives (`media::TimedRelease`), as frames for a texture already did. The
+  fixed pool of eight slots is what holds the decoder to the player's rate.
+- **`MediaCodec.flush()` did not flush a video codec.** It dropped the output slots and
+  nothing else. The input buffers the player had been offered stayed marked as held, so none
+  was offered again and the player waited. Flush now empties the packet queue, frees every
+  input buffer and output slot, cancels frames waiting for their time, flushes the FFmpeg
+  decoder (`CodecDecoder::flush`), and in asynchronous mode delivers nothing until `start()`.
+  It takes a lock the decode thread holds for each pass, so it does not run into one.
+- **Input is bounded.** With no pacing a player fills every buffer it is offered; buffers are
+  offered only while fewer than 16 packets wait.
+- **`MediaCodec.setParameters`** was missing; a player calls it when the speed changes. It is
+  taken and ignored.
+- **A rebuilt debug Flutter app ran its old code.** Found on the way: Flutter's debug-mode
+  extractor keeps its copy of the Dart code while the package's version code and
+  `lastUpdateTime` are unchanged, and a4l reported 0. `PackageInfo.lastUpdateTime` and
+  `firstInstallTime` are now the APK's modification time.
+
+After a seek the sound is about 30 ms later against the picture than before it, in both
+apps and both modes; the cause is not found. Not covered: seeking forward into data not yet
+read, seeking while paused, speeds other than 2, a real display.
+
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 
 - **A frame.** The broker asks the kernel, not the child, what the descriptor is: `fstatfs` must

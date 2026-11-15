@@ -7,6 +7,10 @@
 // a4l puts those frames on a subsurface below the window (the video plane). The stream is
 // assets/clip.h264, Annex B with an access unit delimiter before every frame; it is played
 // LOOPS times and the process then exits, so a test can read the totals.
+//
+// It does what a player does: each frame is released at the time it is due, since a decoder
+// produces frames as fast as it is fed and showing them at the right moment is the app's job;
+// and after the first loop it flushes the codec and starts it again, as a seek does.
 package com.acl.videoplane;
 
 import android.app.Activity;
@@ -148,18 +152,43 @@ public class Main extends Activity {
         final Handler handler = new Handler(ht.getLooper());
         final int[] fed = {0};
         final int[] out = {0};
+        final int[] lost = {0};         // frames in the codec when it was flushed
+        final int[] generation = {0};   // bumped by the flush: older buffers are void
+        final boolean[] flushing = {false};
+        final boolean[] flushed = {false};
+        final long[] base = {0};        // System.nanoTime() at which pts 0 is due
         final boolean[] done = {false};
         final Runnable finish = new Runnable() {
             public void run() {
                 if (done[0]) return;
                 done[0] = true;
-                Log.i(TAG, "VIDEO: fed " + fed[0] + " rendered " + out[0]);
+                Log.i(TAG, "VIDEO: fed " + fed[0] + " rendered " + out[0] + " lost " + lost[0]);
                 System.exit(0);
             }
         };
         c.setCallback(new MediaCodec.Callback() {
-            public void onInputBufferAvailable(MediaCodec mc, int idx) {
+            public void onInputBufferAvailable(final MediaCodec mc, int idx) {
                 try {
+                    if (flushing[0]) return;  // offered before the flush; void
+                    if (!flushed[0] && fed[0] == au.size()) {
+                        // One loop in: flush and start again, as a seek does. Buffers the
+                        // codec handed out before this are void, and so are callbacks already
+                        // on their way, which is why start() is posted behind them.
+                        flushed[0] = true;
+                        flushing[0] = true;
+                        generation[0]++;
+                        lost[0] = fed[0] - out[0];
+                        Log.i(TAG, "VIDEO: flush with " + lost[0] + " frame(s) in the codec");
+                        mc.flush();
+                        handler.post(new Runnable() {
+                            public void run() {
+                                flushing[0] = false;
+                                mc.start();
+                                Log.i(TAG, "VIDEO: started after the flush");
+                            }
+                        });
+                        return;
+                    }
                     if (fed[0] >= total) {
                         if (fed[0] == total) {
                             mc.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
@@ -179,15 +208,28 @@ public class Main extends Activity {
                     Log.e(TAG, "VIDEO: onInput", e);
                 }
             }
-            public void onOutputBufferAvailable(MediaCodec mc, int idx, MediaCodec.BufferInfo info) {
-                try {
-                    mc.releaseOutputBuffer(idx, true);
-                    // a4l paces the decoder to the stream's own clock, so the last frame
-                    // comes out when it is due. Give it time to reach the screen.
-                    if (++out[0] == total) handler.postDelayed(finish, 500);
-                } catch (Throwable e) {
-                    Log.e(TAG, "VIDEO: onOutput", e);
-                }
+            public void onOutputBufferAvailable(final MediaCodec mc, final int idx,
+                    MediaCodec.BufferInfo info) {
+                if (flushing[0]) return;  // decoded before the flush; void
+                // Hold the buffer until its frame is due, then release it for that time.
+                if (base[0] == 0) base[0] = System.nanoTime() + 50000000L - info.presentationTimeUs * 1000L;
+                final long due = base[0] + info.presentationTimeUs * 1000L;
+                final int gen = generation[0];
+                final Runnable release = new Runnable() {
+                    public void run() {
+                        if (gen != generation[0]) return;  // flushed meanwhile
+                        try {
+                            mc.releaseOutputBuffer(idx, due);
+                            // Give the last frame time to reach the screen.
+                            if (++out[0] + lost[0] == total) handler.postDelayed(finish, 500);
+                        } catch (Throwable e) {
+                            Log.e(TAG, "VIDEO: onOutput", e);
+                        }
+                    }
+                };
+                long waitMs = (due - System.nanoTime()) / 1000000L - 20;
+                if (waitMs > 0) handler.postDelayed(release, waitMs);
+                else release.run();
             }
             public void onOutputFormatChanged(MediaCodec mc, MediaFormat fmt) {
                 Log.i(TAG, "VIDEO: format " + fmt.getInteger(MediaFormat.KEY_WIDTH) + "x"

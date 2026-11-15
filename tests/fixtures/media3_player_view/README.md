@@ -62,6 +62,27 @@ played on with nowhere to show its frames. a4l now leaves that mark unset and te
 the surface's new size itself. `tests/fixtures/video_plane` lays its `SurfaceView` out again
 while it plays, and the `split-video` test fails on the old code.
 
-Not covered: seeking, pausing, speed; a `PlayerView` inside a Compose screen; a
+## Pause, seek, speed
+
+With `SVP_SCRIPT=1` in the environment, or an asset named `script` in the APK (a confined
+`--split` app process does not get a4l's environment), the app pauses for 1.5 s at 1.0 s,
+seeks from 6.5 s back to 2.0 s, and from 6.5 s back to 2.0 s again at twice the speed. The
+clip's two events follow each, so a 30 s capture has six.
+
+Measured 2026-11-15, audio minus video in ms, two events per run; mpv playing straight
+through gave +14 +20 and +14 +22:
+
+| | after a pause | after a seek | at twice the speed |
+|---|---|---|---|
+| `PlayerView`, single process, four runs | +30 +43, +40 +35, +44 +46, +53 +44 | +71 +68, +73 +70, +60 +57, +58 +55 | +48 +62, +64 +62, +44 +49, +62 +68 |
+| `PlayerView`, `--split`, three runs | +51 +47, +41 +36, +41 +36 | +80 +73, +80 +76, +84 +79 | +61 +59, +70 +68, +67 +64 |
+
+Before: after the pause the sound came 1.5 s after the picture (+1525 for both events), and
+after the seek the player stayed in buffering. a4l showed a `SurfaceView`'s frames on its own
+clock, whatever the player released, and `MediaCodec.flush()` left the codec waiting on
+input buffers the player no longer held. `docs/adr/ADR-0009-containment-process-boundary.md`,
+"Pause, seek, speed", has the causes.
+
+Not covered: a `PlayerView` inside a Compose screen; a
 `GLSurfaceView` that is laid out again, which takes the same mark in a4l's GL path and was not
-changed or tested here.
+changed here; seeking forward into data not yet read, or while paused; speeds other than 2.

@@ -129,6 +129,11 @@ class CodecDecoder {
                     std::int64_t* pts_us,
                     std::string* error);
 
+  // Discard what the decoder holds, as MediaCodec.flush() does for a seek:
+  // packets sent and not yet decoded, and frames decoded and not yet
+  // received. The configuration stays. The next packet must be a key frame.
+  void flush();
+
  private:
   CodecDecoder();
   struct CImpl;

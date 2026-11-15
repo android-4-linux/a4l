@@ -240,9 +240,19 @@ def main() -> int:
                 return skip(why, out[-2000:])
             if "-> GL present" in out:
                 return fail("the SurfaceView was taken for a GL surface", out)
-            m = re.search(r"VIDEO: fed (\d+) rendered (\d+)", out)
+            m = re.search(r"VIDEO: fed (\d+) rendered (\d+) lost (\d+)", out)
             if not m:
                 return fail("the fixture did not finish", out)
+            # The fixture flushes the codec after its first loop and starts it again, as a
+            # seek does. Frames in the codec at that moment are discarded; the rest must come
+            # out, which they do not if the flush leaves the codec waiting on buffers the
+            # app no longer holds.
+            if "VIDEO: started after the flush" not in out:
+                return fail("the fixture did not flush its codec", out)
+            lost = int(m.group(3))
+            if lost > FRAMES_PER_LOOP // 2:
+                return fail(f"the flush discarded {lost} frames", out)
+            total = FRAMES_PER_LOOP * LOOPS - lost
             # The fixture lays the SurfaceView out again while it plays. A player loses its
             # picture if that is reported as the surface going away.
             if "VIDEO: surfaceDestroyed" in out:
@@ -252,7 +262,8 @@ def main() -> int:
                 return fail("the app was not told its surface's new size", out)
             fed, rendered = int(m.group(1)), int(m.group(2))
             if rendered < total * 9 // 10:
-                return fail(f"the app rendered {rendered} of {total} frames", out)
+                return fail(f"the app rendered {rendered} of {total} frames after a flush "
+                            f"that discarded {lost}", out)
             if "--split" not in split_args:
                 notes.append(f"{tag}: single process, fed {fed}, rendered {rendered}")
                 continue
