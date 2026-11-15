@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,7 @@ struct Ff {
   FF_FN(av_strerror);
   FF_FN(av_frame_alloc);
   FF_FN(av_frame_free);
+  FF_FN(av_frame_clone);
   FF_FN(av_frame_unref);
   FF_FN(av_packet_alloc);
   FF_FN(av_packet_free);
@@ -112,6 +114,7 @@ bool load_ffmpeg() {
   FF_BIND(av_strerror);
   FF_BIND(av_frame_alloc);
   FF_BIND(av_frame_free);
+  FF_BIND(av_frame_clone);
   FF_BIND(av_frame_unref);
   FF_BIND(av_packet_alloc);
   FF_BIND(av_packet_free);
@@ -650,7 +653,10 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
       if (v >= 0)
         return v;
     }
-    return 12;
+    // A frame's surface is held until the last user of the frame lets go
+    // (DmabufFrame::hold): the codec's queued output buffers (8), the
+    // images a consumer has acquired, the plane's in-flight buffers (4).
+    return 24;
   }();
   if (g_ff.avcodec_open2(d->codec, codec, nullptr) < 0)
     return fail("avcodec_open2 failed");
@@ -733,6 +739,26 @@ int CodecDecoder::receive_frame(gfx::DmabufFrame* out,
     return err("invalid DRM descriptor");
   if (pts_us)
     *pts_us = d->hw_frame->pts;
+  // Keep the surface out of the decoder's pool for as long as the frame is
+  // in use. Without this the next receive_frame() returns it to the pool,
+  // the decoder draws a later picture into it, and a frame still waiting to
+  // be shown shows that later picture.
+  struct Hold {
+    AVFrame* hw = nullptr;
+    AVFrame* drm = nullptr;
+    ~Hold() {
+      if (drm != nullptr)
+        g_ff.av_frame_free(&drm);
+      if (hw != nullptr)
+        g_ff.av_frame_free(&hw);
+    }
+  };
+  auto hold = std::make_shared<Hold>();
+  hold->hw = g_ff.av_frame_clone(d->hw_frame);
+  hold->drm = g_ff.av_frame_clone(d->drm_frame);
+  if (hold->hw == nullptr)
+    return err("out of memory holding the decoded frame");
+  out->hold = std::move(hold);
   return 1;
 }
 

@@ -308,6 +308,7 @@ class SubsurfacePlane {
       return;  // wires wl_buffer.release -> busy=false
     slot->buf.Get()->busy = &slot->busy;
     slot->busy = true;
+    slot->hold = frame.hold;
     // Arm the next-frame tick before commit — its OnDone re-sets frame_ready_,
     // which (via the readable wl fd) wakes the looper to drain + present the
     // next decoded frame.
@@ -344,6 +345,9 @@ class SubsurfacePlane {
   struct InFlight {
     wl::WlPtr<BufferH> buf;
     bool busy = false;
+    // The frame's hold on its decoder surface, kept until the compositor
+    // releases the buffer.
+    std::shared_ptr<void> hold;
   };
   wl::WlPtr<SurfaceH> surface_;
   wl::WlPtr<SubsurfaceH> subsurface_;

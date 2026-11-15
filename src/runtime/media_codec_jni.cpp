@@ -39,6 +39,7 @@
 #include "gfx/buffer_queue.h"
 #include "log/log.h"
 #include "media/audio_codec.h"
+#include "media/timed_release.h"
 #include "media/video_decoder.h"
 #include "runtime/image_reader_jni.h"
 #include "wm/present.h"  // wm::active_video_presenter (route decoded video to the HW plane)
@@ -84,6 +85,8 @@ struct CodecCtx {
   std::vector<std::uint8_t>
       csd;  // codec-specific data (csd-0[+csd-1]) from the configure format
   std::unique_ptr<media::CodecDecoder> dec;
+  // Video frames released for display at a time, waiting for it.
+  media::TimedRelease present;
   // An audio decoder: byte buffers in, 16-bit PCM in byte buffers out. Set at
   // start() when the MIME is audio/; everything video below is then unused.
   std::unique_ptr<media::AudioCodec> audio;
@@ -1013,12 +1016,27 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env,
   if (diag && (tot_rel <= 40 || tot_rel % 30 == 1))
     log::i(kTag,
            "app releaseOutputBuffer idx={} render={} pts={}us timeNs={} "
-           "(render-tot={} drop-tot={} recv={})",
+           "(render-tot={} drop-tot={} recv={}) early={}us",
            index, render == JNI_TRUE, rel_pts, timeNs, ctx->tot_rel_render,
-           ctx->tot_rel_drop, ctx->tot_recv);
+           ctx->tot_rel_drop, ctx->tot_recv,
+           (timeNs - std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count()) /
+               1000);
   if (render == JNI_TRUE && ctx->out_queue != nullptr) {
-    ctx->out_queue->queue_imported(
-        ahb);  // zero-copy: hand the frame to the ImageReader consumer
+    // Zero-copy: hand the frame to the ImageReader consumer, at the time the
+    // app asked for. A player releases a frame ahead of its display time
+    // (media3: up to 50 ms) and leaves the wait to the platform; shown at
+    // once, the picture leads the sound by that much. ACL_VIDEO_RELEASE_NOW
+    // shows it at once, for comparison.
+    static const bool now = std::getenv("ACL_VIDEO_RELEASE_NOW") != nullptr;
+    gfx::BufferQueue* queue = ctx->out_queue;
+    ctx->present.at(now ? 0 : timeNs, [queue, ahb](bool due) {
+      if (due)
+        queue->queue_imported(ahb);
+      else
+        gfx::ahb_release(ahb);
+    });
   } else {
     gfx::ahb_release(ahb);  // not rendered (or no surface) — drop
   }
@@ -1031,6 +1049,7 @@ void teardown(CodecCtx* ctx) {
                   std::memory_order_release);  // stop the async driver (if any)
                                                // before the decoder
   ctx->acv.notify_all();
+  ctx->present.cancel_all();  // frames waiting for their time are dropped
   if (ctx->audio)
     ctx->audio->wake();
   if (ctx->driver.joinable())
@@ -1062,6 +1081,7 @@ void JNICALL MC_native_flush(JNIEnv* env, jobject thiz) {
     ctx->audio->flush();
     return;
   }
+  ctx->present.cancel_all();  // a seek: what was to be shown is stale
   for (auto& s : ctx->outslots)
     if (s.used && s.ahb != nullptr) {
       gfx::ahb_release(s.ahb);
@@ -1089,6 +1109,8 @@ void JNICALL MC_native_finalize(JNIEnv* env, jobject thiz) {
 // doesn't drive.
 void JNICALL MC_native_setSurface(JNIEnv* env, jobject thiz, jobject surface) {
   CodecCtx* ctx = ctx_of(env, thiz);
+  if (ctx != nullptr)
+    ctx->present.cancel_all();  // they were for the old surface
   if (ctx != nullptr)
     ctx->out_queue = surface != nullptr
                          ? image_reader_queue_from_surface(env, surface)

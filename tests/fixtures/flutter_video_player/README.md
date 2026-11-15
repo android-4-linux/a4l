@@ -50,3 +50,41 @@ Measured 2026-11-15, Flutter 3.33.0-pre, `video_player` 2.x with media3, host AR
 clip plays to the end in both modes, the position advancing in real time; 240640 frames reach
 the sink; the recording is 4.997 s of 440 Hz with no gap, the same single-process and under
 `--split`; a screenshot during playback shows the test pattern.
+
+## Measuring picture against sound
+
+`tools/measure-av-sync.py` grabs a point of the screen and records a sink's monitor on one
+clock and reports, for a clip that flashes and beeps at the same instants, how far each beep
+is from its flash. Use a clip whose events cannot be mistaken for one another:
+
+```sh
+ffmpeg -f lavfi -i "color=c=0x101010:s=320x240:r=30:d=8,drawbox=x=0:y=0:w=320:h=240:color=white:t=fill:enable='between(t\,3\,3.199)+between(t\,5.5\,5.699)'" \
+       -f lavfi -i "aevalsrc='0.5*sin(2*PI*1000*t)*(between(t\,3\,3.2)+between(t\,5.5\,5.7))':s=48000:d=8:c=stereo" \
+       -c:v libx264 -pix_fmt yuv420p -profile:v baseline -bf 0 -g 30 -c:a aac -b:a 128k -shortest assets/test.mp4
+```
+
+On a headless sway (`WLR_BACKENDS=headless sway`) with a null sink
+(`pactl load-module module-null-sink sink_name=a4l-test`):
+
+```sh
+tools/measure-av-sync.py wayland-1 a4l-test 24 640,400 a4l &
+WAYLAND_DISPLAY=wayland-1 ACL_AUDIO=pipewire PIPEWIRE_NODE=a4l-test ACL_PRESENT_GPU=1 \
+    tools/run-apk.sh app-debug.apk --present
+```
+
+The capture has a constant delay of its own in each path, so run a reference player the same
+way and compare: `mpv --vo=gpu --gpu-context=wayland --ao=pipewire
+--audio-device=pipewire/a4l-test --fs assets/test.mp4`.
+
+Measured 2026-11-15, audio minus video, positive when the sound is late:
+
+| | ms |
+|---|---|
+| mpv, the reference, four runs | +16, +18, +16, +18 |
+| a4l before, single process | +277 to +342, and five flashes seen for two shown |
+| a4l, single process, three runs of the two-event clip | +18, +26, +21 |
+| a4l, single process, a clip with eight events | +26 |
+| a4l, `--split`, five runs of the eight-event clip | +30, +24, +35, +44, +21 |
+
+So a4l is within about 10 ms of the reference single-process and 25 ms under `--split`. The
+screen is sampled every 16 ms, which is the resolution of each number.
