@@ -509,6 +509,12 @@ void register_framework_natives(JNIEnv* env) {
   if (env == nullptr)
     return;
 
+  // The framework's SystemClock declares these four @CriticalNative, and
+  // the functions below take a JNIEnv* and a class. They are left so on
+  // purpose: none has a declared argument, so there is nothing to misread
+  // whichever way it is called, and the JVM backend's shim class calls the
+  // same functions the ordinary way. tools/audit-native-abi.py lists them
+  // as benign.
   if (jclass cls = env->FindClass("android/os/SystemClock"); cls != nullptr) {
     const std::array<JNINativeMethod, 4> methods{{
         {const_cast<char*>("uptimeMillis"), const_cast<char*>("()J"),

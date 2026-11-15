@@ -7046,19 +7046,22 @@ class ArtVm final : public JniVm {
     }
     // android.os.Binder identity statics: no Binder, so a single fixed
     // in-process identity.
+    //
+    // The identity and StrictMode natives are @CriticalNative in Binder.java:
+    // ART passes the declared arguments and nothing else, no JNIEnv and no
+    // class. A function that takes those two reads its arguments from the
+    // wrong registers (tools/audit-native-abi.py checks every table for
+    // this).
     if (jclass c = env->FindClass("android/os/Binder")) {
       JNINativeMethod m[] = {
           {const_cast<char*>("getCallingUid"), const_cast<char*>("()I"),
-           reinterpret_cast<void*>(
-               +[](JNIEnv*, jclass) -> jint { return 1000; })},
+           reinterpret_cast<void*>(+[]() -> jint { return 1000; })},
           {const_cast<char*>("getCallingPid"), const_cast<char*>("()I"),
-           reinterpret_cast<void*>(+[](JNIEnv*, jclass) -> jint { return 0; })},
+           reinterpret_cast<void*>(+[]() -> jint { return 0; })},
           {const_cast<char*>("clearCallingIdentity"), const_cast<char*>("()J"),
-           reinterpret_cast<void*>(
-               +[](JNIEnv*, jclass) -> jlong { return 0; })},
+           reinterpret_cast<void*>(+[]() -> jlong { return 0; })},
           {const_cast<char*>("restoreCallingIdentity"),
-           const_cast<char*>("(J)V"),
-           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jlong) {})},
+           const_cast<char*>("(J)V"), reinterpret_cast<void*>(+[](jlong) {})},
           // Binder object construction (getNativeBBinderHolder) → a non-null
           // sentinel (the NativeAllocationRegistry rejects null). A Binder with
           // no native backing: framework client stubs (e.g.
@@ -7084,16 +7087,17 @@ class ArtVm final : public JniVm {
            reinterpret_cast<void*>(+[](JNIEnv*, jclass) {})},
           // StrictMode thread policy rides in the Binder thread-local
           // (device-side it maps to the driver). No Binder → keep it in a
-          // process-local slot so set/get round-trips.
+          // process-local slot so set/get round-trips. With the JNI shape
+          // this stored whatever was in the third argument register, and
+          // StrictMode then read that back as the thread's policy mask.
           {const_cast<char*>("setThreadStrictModePolicy"),
-           const_cast<char*>("(I)V"),
-           reinterpret_cast<void*>(+[](JNIEnv*, jclass, jint policy) {
+           const_cast<char*>("(I)V"), reinterpret_cast<void*>(+[](jint policy) {
              g_strict_mode_policy = policy;
            })},
           {const_cast<char*>("getThreadStrictModePolicy"),
-           const_cast<char*>("()I"),
-           reinterpret_cast<void*>(
-               +[](JNIEnv*, jclass) -> jint { return g_strict_mode_policy; })},
+           const_cast<char*>("()I"), reinterpret_cast<void*>(+[]() -> jint {
+             return g_strict_mode_policy;
+           })},
       };
       if (env->RegisterNatives(c, m, sizeof(m) / sizeof(m[0])) != JNI_OK)
         env->ExceptionClear();
