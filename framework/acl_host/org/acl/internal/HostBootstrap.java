@@ -4435,6 +4435,33 @@ public final class HostBootstrap {
         return findSurfaceView(v) != null;
     }
 
+    // Does the view tree contain a SurfaceView the app renders GL into? Such an app is given
+    // the GL present, where the whole window is the GL surface. Any other SurfaceView is a
+    // video surface: the app stays on the View-tree present and the SurfaceView gets a decoder
+    // Surface when it is laid out (maybeInjectVideoSurface).
+    public static boolean hasGlSurfaceView(android.view.View v) {
+        android.view.SurfaceView sv = findSurfaceView(v);
+        if (sv == null) return false;
+        boolean gl = isGlSurfaceView(sv);
+        android.util.Log.i("acl", "SurfaceView at launch: " + sv.getClass().getName()
+                + (gl ? " -> GL present" : " -> video surface on the View-tree present"));
+        return gl;
+    }
+
+    // Nothing at launch says what an app will do with a SurfaceView, so the class decides.
+    // Every engine that renders GL brings its own subclass: GLSurfaceView and what extends it
+    // (libGDX, cocos), Flutter's FlutterSurfaceView, SDL's SDLSurface. A player lays out the
+    // platform class itself, or VideoView. So android.view.SurfaceView exactly, and VideoView,
+    // are video; any other subclass is GL. An app that renders GL into a plain SurfaceView
+    // from native code is the case this gets wrong; ACL_SURFACEVIEW=gl (or =video) overrides.
+    static boolean isGlSurfaceView(android.view.SurfaceView sv) {
+        String mode = System.getenv("ACL_SURFACEVIEW");
+        if ("gl".equals(mode)) return true;
+        if ("video".equals(mode)) return false;
+        if (sv instanceof android.widget.VideoView) return false;
+        return sv.getClass() != android.view.SurfaceView.class;
+    }
+
     private static android.view.SurfaceView findSurfaceView(android.view.View v) {
         if (v instanceof android.view.SurfaceView) return (android.view.SurfaceView) v;
         if (v instanceof android.view.ViewGroup) {
@@ -4549,6 +4576,18 @@ public final class HostBootstrap {
                 long rn = renderNodeHandle((android.view.View) v);
                 if (rn != 0L) { PresentDriver.setVideoPunchHole(rn, true); punched++; }
             }
+            // And let the SurfaceView punch its own hole, as it does on Android once its surface
+            // has drawn (mDrawFinished): SurfaceView.draw/dispatchDraw then calls
+            // Canvas.punchHole() over its bounds. That hole lands after the ancestors' backgrounds,
+            // which the node punches above do not survive: an ancestor's background is drawn after
+            // its node is cleared. Without this a video over an opaque background stays hidden.
+            setField(c, sv, "mDrawFinished", Boolean.TRUE);
+            sv.invalidate();
+            // The parent recorded this child while it had nothing to draw, and a4l records such
+            // a child inline instead of by reference. Record the parent again so that it refers
+            // to the SurfaceView's node, which now holds the hole.
+            if (sv.getParent() instanceof android.view.View)
+                ((android.view.View) sv.getParent()).invalidate();
             sVideoSv = new java.lang.ref.WeakReference<>(sv);
             android.util.Log.i("acl", "maybeInjectVideoSurface: video SurfaceView surfaceCreated ("
                     + w + "x" + h + " @" + loc[0] + "," + loc[1] + ") punchHole nodes=" + punched);

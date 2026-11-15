@@ -75,6 +75,10 @@ below cites the commit that closed it; `git show <sha>` carries the measurement.
   the UI above it (`3cc990d`, which also had to make the toplevel buffer ARGB8888 — Mutter ignores
   an XRGB toplevel's alpha, so the hole rendered black), scaled to the View's bounds with
   `wp_viewport` (`110762c`). This is the video case, not a general GL or camera `SurfaceView`.
+  As of 2026-11-14 the `SurfaceView` punches its own hole (`Canvas.punchHole`, as on Android),
+  so the video shows through an opaque background behind it, and a plain `SurfaceView` or a
+  `VideoView` that is in the window at launch is a video surface; before, any `SurfaceView` at
+  launch was given the GL present. Verified with `tests/fixtures/video_plane`, one app.
 - **`gles_jni` / `GLSurfaceView` is registered.** `com.google.android.gles_jni.EGLImpl` plus
   `android.opengl.GLES20`/`GLES30` natives exist (`4e96f6d`, `4e1661f`, `75fe3a7`), Surface
   injection and GL present make libGDX GL apps run (`eef2785`), they receive input (`ae15c49`), and

@@ -11,7 +11,6 @@ package com.acl.videoplane;
 
 import android.app.Activity;
 import android.graphics.Color;
-import android.graphics.drawable.ColorDrawable;
 import android.media.MediaCodec;
 import android.media.MediaCodecList;
 import android.media.MediaFormat;
@@ -39,12 +38,10 @@ public class Main extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
-        // Nothing opaque lies under the video: no window background and none on the root, as
-        // in a full-window player. a4l clears the video View's ancestors to transparent so the
-        // plane below shows through; an ancestor's own background, drawn after that, would
-        // cover it again.
-        getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        // An opaque background under the video, as most apps have: the SurfaceView has to
+        // punch through it for the plane below the window to show.
         final FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.rgb(0x20, 0x30, 0x40));
         TextView label = new TextView(this);
         label.setText("a4l video plane");
         label.setTextColor(Color.WHITE);
@@ -56,11 +53,10 @@ public class Main extends Activity {
         root.addView(label, tp);
         setContentView(root);
 
-        // The SurfaceView joins the window after its first frames, as a player's does once
-        // the app has something to play. a4l takes a SurfaceView that is there at launch for a
-        // GL surface (a GLSurfaceView) and gives it the whole window; one that appears later is
-        // a video surface.
-        new Handler(getMainLooper()).postDelayed(new Runnable() {
+        // The SurfaceView is in the window from the start, as a player screen's is. MainLate
+        // adds it after the first frames instead, as an app does that builds its player once
+        // it has something to play. a4l must give both a video surface.
+        final Runnable add = new Runnable() {
             public void run() {
                 SurfaceView sv = new SurfaceView(Main.this);
                 FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(W, H);
@@ -69,7 +65,14 @@ public class Main extends Activity {
                 sv.getHolder().addCallback(new Callback());
                 root.addView(sv, 0, lp);
             }
-        }, 500);
+        };
+        if (addLate()) new Handler(getMainLooper()).postDelayed(add, 500);
+        else add.run();
+    }
+
+    /** Whether the SurfaceView joins the window after launch. */
+    protected boolean addLate() {
+        return false;
     }
 
     private final class Callback implements SurfaceHolder.Callback {
