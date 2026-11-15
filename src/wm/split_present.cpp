@@ -217,6 +217,65 @@ class SplitPresenter final : public IPresenter {
     return ready();
   }
 
+  // The video plane. Called from the decode thread: one sendmsg, which the
+  // kernel keeps whole against the looper thread's. The decoder reuses the
+  // descriptor after this returns; the datagram holds its own reference.
+  // A broker that falls behind makes this block, which holds the decoder to
+  // the rate the screen takes.
+  void present_video(const gfx::DmabufFrame& frame,
+                     int x,
+                     int y,
+                     int w,
+                     int h) noexcept override {
+    if (closed() || frame.fd < 0 || frame.plane_count == 0 ||
+        frame.plane_count > ipc::kMaxPlanes)
+      return;
+    ipc::Message m;
+    m.type = ipc::MsgType::VideoFrame;
+    ipc::VideoFrame& v = m.video;
+    v.w = frame.width;
+    v.h = frame.height;
+    v.drm_format = frame.drm_format;
+    v.plane_count = frame.plane_count;
+    v.modifier = frame.modifier;
+    for (std::uint32_t i = 0; i < frame.plane_count; ++i) {
+      v.stride[i] = frame.planes[i].stride;
+      v.offset[i] = frame.planes[i].offset;
+    }
+    v.dest = {x, y, w, h};
+    channel_.send(m, {}, frame.fd);
+  }
+  void hide_video() noexcept override {
+    ipc::Message m;
+    m.type = ipc::MsgType::VideoHide;
+    channel_.send(m);
+  }
+  void set_video_bounds(int x, int y, int w, int h) noexcept override {
+    // The app lays out every frame; only a change is worth a datagram.
+    const ipc::VideoRect rect{x, y, w, h};
+    {
+      std::lock_guard<std::mutex> lock(state_mu_);
+      if (video_bounds_set_ &&
+          std::memcmp(&rect, &video_bounds_, sizeof(rect)) == 0)
+        return;
+      video_bounds_ = rect;
+      video_bounds_set_ = true;
+    }
+    ipc::Message m;
+    m.type = ipc::MsgType::VideoBounds;
+    m.video_rect = rect;
+    channel_.send(m);
+  }
+  void reset_video_overlay() noexcept override {
+    {
+      std::lock_guard<std::mutex> lock(state_mu_);
+      video_bounds_set_ = false;
+    }
+    ipc::Message m;
+    m.type = ipc::MsgType::VideoReset;
+    channel_.send(m);
+  }
+
   void set_ime_visible(bool visible) noexcept override {
     ipc::Message m;
     m.type = ipc::MsgType::ImeVisible;
@@ -338,6 +397,8 @@ class SplitPresenter final : public IPresenter {
   std::uint32_t sent_frames_ = 0;     // PresentFrame messages sent
   std::uint32_t slot_seq_[32] = {};   // the last frame put in each slot
   std::uint32_t any_slot_seq_ = 0;    // the last frame the broker placed
+  ipc::VideoRect video_bounds_{};     // the last VideoBounds sent
+  bool video_bounds_set_ = false;
 };
 
 }  // namespace
@@ -517,6 +578,29 @@ class Broker {
         if (presenter_)
           presenter_->set_clipboard(as_string(r.extra, ipc::kMaxText));
         break;
+      case ipc::MsgType::VideoFrame:
+        present_video(r);
+        break;
+      case ipc::MsgType::VideoBounds:
+        if (!presenter_)
+          break;
+        if (!check_video_rect(r.msg.video_rect)) {
+          ++stats_.rejected;
+          break;
+        }
+        presenter_->set_video_bounds(r.msg.video_rect.x, r.msg.video_rect.y,
+                                     r.msg.video_rect.w, r.msg.video_rect.h);
+        break;
+      case ipc::MsgType::VideoHide:
+        if (presenter_) {
+          presenter_->hide_video();
+          presenter_->pump_video();
+        }
+        break;
+      case ipc::MsgType::VideoReset:
+        if (presenter_)
+          presenter_->reset_video_overlay();
+        break;
       case ipc::MsgType::Hello:
       case ipc::MsgType::Log:
         break;
@@ -588,6 +672,8 @@ class Broker {
     child_ready_ = false;
     sent_closed_ = false;
     limits_ = FrameLimits{};
+    video_mods_format_ = 0;
+    video_mods_.clear();
     presenter_ = open_(
         static_cast<int>(si.w), static_cast<int>(si.h), title, app_id,
         [this](const InputEvent& ev) { forward_input(ev); }, si.want_ime != 0);
@@ -661,6 +747,60 @@ class Broker {
     child_ready_ = false;
   }
 
+  // A decoded frame for the video plane. Checked like a window frame, but
+  // against its own format's advertisement: the compositor is asked to
+  // import whatever passes, and one it refuses ends the connection.
+  void present_video(const ipc::Received& r) noexcept {
+    const ipc::VideoFrame& v = r.msg.video;
+    VideoLimits limits;
+    limits.have_surface = limits_.have_surface && presenter_ != nullptr;
+    if (limits.have_surface && video_format_accepted(v.drm_format)) {
+      // Asked once per format and surface: the app sends one per frame.
+      if (video_mods_format_ != v.drm_format) {
+        video_mods_ = presenter_->modifiers_for(v.drm_format);
+        video_mods_format_ = v.drm_format;
+      }
+      limits.modifiers = video_mods_;
+    }
+    const BufferFacts facts = r.fd0 >= 0 && limits.have_surface
+                                  ? options_.inspect(r.fd0)
+                                  : BufferFacts{};
+    const FrameVerdict verdict =
+        check_video_frame(v, r.fd0 >= 0, facts, limits);
+    if (verdict != FrameVerdict::Ok) {
+      const auto i = static_cast<std::size_t>(verdict);
+      if (stats_.frame_verdicts[i]++ == 0)
+        log::w(kTag,
+               "broker: refused a video frame from the app process: {} "
+               "({}x{} format 0x{:x} modifier 0x{:x}, {} plane(s), strides "
+               "{}/{}, buffer of {} bytes); further ones of this kind are "
+               "counted, not logged",
+               verdict_name(verdict), v.w, v.h, v.drm_format, v.modifier,
+               v.plane_count, v.stride[0], v.stride[1], facts.size);
+      ++stats_.rejected;
+      return;
+    }
+    gfx::DmabufFrame fr{};
+    fr.fd = r.fd0;  // borrowed: the presenter takes its own reference
+    fr.width = v.w;
+    fr.height = v.h;
+    fr.plane_count = v.plane_count;
+    for (std::uint32_t i = 0; i < v.plane_count; ++i) {
+      fr.planes[i].stride = v.stride[i];
+      fr.planes[i].offset = v.offset[i];
+    }
+    fr.modifier = v.modifier;
+    fr.drm_format = v.drm_format;
+    fr.mem_size = facts.size;
+    fr.modifier_tiled = v.modifier != 0;
+    presenter_->present_video(fr, v.dest.x, v.dest.y, v.dest.w, v.dest.h);
+    // This is the presenter's own thread: show the frame now. A frame the
+    // compositor has no room for is dropped there, so a child that sends
+    // faster than the screen takes them costs a descriptor at a time.
+    presenter_->pump_video();
+    ++stats_.video_frames;
+  }
+
   void forward_input(const InputEvent& ev) noexcept {
     ipc::Message m;
     m.type = ipc::MsgType::Input;
@@ -729,6 +869,9 @@ class Broker {
   FrameLimits limits_;
   int surfaces_created_ = 0;
   std::uint32_t frames_seen_ = 0;  // PresentFrame messages handled
+  // What the compositor advertised for the video format last seen.
+  std::uint32_t video_mods_format_ = 0;
+  std::vector<std::uint64_t> video_mods_;
   std::unique_ptr<IPresenter> presenter_;
   BrokerStats stats_;
   bool child_ready_ = false;  // the child's view of ready()

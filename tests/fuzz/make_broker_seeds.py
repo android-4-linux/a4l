@@ -18,7 +18,9 @@ import sys
 MESSAGE_SIZE = 96
 HELLO, BYE, LOG, SURFACE_CREATE, SURFACE_RESIZE, PRESENT_FRAME = 1, 2, 3, 4, 5, 6
 KEEPALIVE, IME_VISIBLE, CLIPBOARD = 15, 16, 17
+VIDEO_FRAME, VIDEO_BOUNDS, VIDEO_HIDE, VIDEO_RESET = 18, 19, 20, 21
 AR24 = 0x34325241
+NV12 = 0x3231564E
 TILED = 0x0200000000401B03
 BIG, SMALL, NULL = 0, 1, 2  # descriptor kinds, in the harness's order
 
@@ -46,6 +48,20 @@ def frame(w, h, slot=0, stride=None, offset=0, modifier=TILED, fmt=AR24,
     return message(PRESENT_FRAME, body)
 
 
+def video(w, h, fmt=NV12, modifier=0, planes=2, dest=None, stride=None,
+          chroma_offset=None):
+    stride = w if stride is None else stride
+    chroma_offset = stride * h if chroma_offset is None else chroma_offset
+    dest = (0, 0, w, h) if dest is None else dest
+    body = struct.pack("<IIIIQ4I4I4i", w, h, fmt, planes, modifier,
+                       stride, stride, 0, 0, 0, chroma_offset, 0, 0, *dest)
+    return message(VIDEO_FRAME, body)
+
+
+def bounds(x, y, w, h):
+    return message(VIDEO_BOUNDS, struct.pack("<4i", x, y, w, h))
+
+
 def seeds():
     hello = record(message(HELLO, struct.pack("<I", 2)))
     yield "session", (hello + record(surface(640, 480)) +
@@ -70,6 +86,25 @@ def seeds():
     yield "not-a-buffer", (record(surface(640, 480)) +
                            record(frame(640, 480), 1, NULL))
     yield "short", record(surface(640, 480)) + record(b"\x06\0\0", 2)
+    # The video plane: a clip played, moved, hidden and reset.
+    yield "video", (record(surface(1280, 800)) + record(bounds(120, 164, 640, 360)) +
+                    b"".join(record(video(640, 360), 1) for _ in range(3)) +
+                    record(bounds(-640, 0, 2560, 1440)) +
+                    record(video(640, 360, modifier=TILED), 1) +
+                    record(message(VIDEO_HIDE)) + record(message(VIDEO_RESET)))
+    yield "video-and-ui", (record(surface(640, 480)) +
+                           record(frame(640, 480, 0), 1) +
+                           record(video(1920, 1080, dest=(0, 0, 640, 360)), 1) +
+                           record(frame(640, 480, 1), 1))
+    yield "video-refused", (record(video(640, 360), 1) +
+                            record(surface(640, 480)) +
+                            record(video(640, 360, fmt=AR24), 1) +
+                            record(video(640, 360, modifier=0x33), 1) +
+                            record(video(640, 360, planes=1), 1) +
+                            record(video(640, 360), 1, SMALL) +
+                            record(video(640, 360), 1, NULL) +
+                            record(video(640, 360, dest=(0, 0, 0, 0)), 1) +
+                            record(bounds(0, 0, -1, 0x7FFFFFFF)))
     yield "titles", record(surface(64, 64, b"\xe2\x80\xaeevil\x1b[2J\xff",
                                    b"\xc0\xaf\x80"))
 

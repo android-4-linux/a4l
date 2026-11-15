@@ -171,6 +171,18 @@ if py3.found() and have_gl and have_ffmpeg
       depends : [acl_exe],
       timeout : 300,
     )
+    # Video across the --split boundary (ADR-0009 C3): a fixture app decodes an H.264 clip onto
+    # a SurfaceView in the confined app process, and the test asserts the decoded frames reach
+    # the broker's video plane with none refused. Starts a headless Weston for itself. Needs
+    # host ART, ffmpeg, VA-API and bubblewrap; SKIPs otherwise, which includes CI.
+    test(
+      'split-video',
+      py3,
+      args : [files('run_split_video_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+      is_parallel : false,
+    )
   endif
 endif
 

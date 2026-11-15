@@ -3,8 +3,8 @@
 
 - **Status:** Accepted (boundary decided; the process split runs on x86-64 as `--split`, with
   the child confined by namespaces and a seccomp allowlist and the broker validating what it
-  sends; native GL crosses, video does not, and nothing here has had outside review, so
-  untrusted APKs are still not a supported use). Refines ADR-0003.
+  sends; native GL and video cross; nothing here has had outside review, so untrusted APKs
+  are still not a supported use). Refines ADR-0003.
 - **Date:** 2026-11-13
 - **Provenance:** plan.md §4 Phase 5, §6 R-10; docs/ndk-scope.md (trust model);
   docs/split-process-art.md; ADR-0001, ADR-0003, ADR-0005; `src/ipc/`, `src/runtime/split_vm.cpp`
@@ -47,8 +47,8 @@ driver loaded, and the compositor is elsewhere.
 State of that path, from `git log` rather than from the doc: S1 (ART boots in the subprocess,
 x86-64 and a Pi 4) and the S2 present-sink seam landed 2026-07-15/16; nothing since on arm64.
 On x86-64 the split runs as of 2026-11-14 (`a4l run --split`, see C2 below): frames and input
-cross, for Skia and for native GL; audio and video do not. The child is confined as of the
-same date (C4).
+cross, for Skia and for native GL, and decoded video crosses to the video plane; audio does
+not. The child is confined as of the same date (C4).
 
 ## Decision
 1. **The containment boundary is a process boundary at the dma-buf seam.** Everything an APK
@@ -77,7 +77,7 @@ same date (C4).
 |---|---|---|
 | C1 | APK v2/v3 verification in `pkg/`, in the broker | met, 2026-11-14: `--verify=require` or `--signer` runs a private copy that is verified on every run (`pkg/apk_verify.cpp`, `pkg/apk_stage.cpp`). Under `--split` the broker does this before it starts the child, and the child is handed the copy. ART's compiled-code cache is trusted by location, not verified |
 | C2 | Split path at S5: a real APK renders and takes input | x86-64, Skia path, 2026-11-14: `a4l run --split` runs the app in a child a4l process whose presenter is a proxy (`wm/split_present.cpp`); the broker holds the only compositor connection. 3 corpus apps render on host ART; one presents 1176 frames in 20 s split against 1178 single-process. Input is forwarded and unit-tested; there is no controlled live input test. Not done: arm64 (`acl-art-host` is still S1), audio (a confined child cannot reach PipeWire and is silent; unconfined it opens PipeWire itself) |
-| C3 | Native GL and video cross the boundary as dma-buf | native GL: x86-64, 2026-11-14. In a `--split` child the app's GL window is a gbm surface and each swapped buffer goes to the broker as a `PresentFrame`, like a Skia frame. 2 libGDX apps and 4 Flutter example apps render confined. See "C3 as built" below. Video: not built; a decoded frame has no message to cross in and is not shown |
+| C3 | Native GL and video cross the boundary as dma-buf | native GL: x86-64, 2026-11-14. In a `--split` child the app's GL window is a gbm surface and each swapped buffer goes to the broker as a `PresentFrame`, like a Skia frame. 2 libGDX apps and 4 Flutter example apps render confined. See "C3 as built" below. Video: x86-64, 2026-11-14. Each frame a `MediaCodec` decodes for a video `SurfaceView` goes to the broker as a `VideoFrame` with its own dma-buf, and the broker puts it on the subsurface below the window. One fixture app, H.264 through VA-API: 180 of 180 frames crossed, confined. See "C3 as built: video" below |
 | C4 | Child confined per Decision 2 | x86-64, 2026-11-14: `--split` starts the child through bubblewrap (`src/confine/`) in its own user, mount, pid, ipc, uts and network namespaces, and the child installs a seccomp allowlist on itself before it opens the APK. See "C4 as built" below for what it can reach and what is not covered. arm64: none |
 | C5 | Broker validates every message; receive path fuzzed | x86-64 `--split` broker, 2026-11-14: every frame is checked against what the kernel says about its descriptor, the surface and the compositor's advertised modifiers before it reaches the presenter (`wm/split_validate.cpp`), and the receive path is fuzzed (`tests/fuzz/broker_fuzz.cpp`). See "C5 as built" below. Not covered: the arm64 `acl-art-host` receive path (`runtime/split_vm.cpp`), and what the compositor does with a buffer that passes |
 
@@ -207,8 +207,7 @@ right colors. In 40 s traced runs of five of these apps the filter denied only `
 
 Not covered:
 
-- **Video.** `MediaCodec` output to a `SurfaceView` reaches the presenter through
-  `present_video`, which the child's proxy does not forward. The video plane stays empty.
+- **Video** crosses by its own messages; see the next section.
 - **`image_list` without a network** fails in the app, before it draws: it fetches from
   `localhost` by name, and name lookup in an empty network namespace finds no address.
 - **Live input** under `--split` is still unverified for both paths.
@@ -220,6 +219,78 @@ Not covered:
   the slot rebuild and the pbuffer substitute are covered only by the runs above; none of them
   runs in CI, which has no GPU.
 
+**C3 as built: video (x86-64, 2026-11-14).** Single-process, a decoded frame for a video
+`SurfaceView` does not pass through the app's own buffers. The decoder hands the presenter a
+dma-buf, and the presenter attaches it to a subsurface below the window, scaled and cropped to
+the View's rectangle by `wp_viewport`; the app draws that rectangle transparent. In a split
+child the decoder still runs in the app process (VA-API on the render node, which the sandbox
+already binds), and four messages carry the rest to the broker.
+
+- **`VideoFrame`** carries one decoded frame: its dma-buf, size, format, modifier and plane
+  layout, and where to show it. It is sent from the decode thread. The broker hands it to the
+  real presenter and shows it at once.
+- **`VideoBounds`** carries the View's rectangle in the window, sent when it changes.
+- **`VideoHide`** and **`VideoReset`** take the picture off the plane, the second when the app
+  changes screen.
+- **Pacing.** The decoder is already paced to the stream's clock. A broker that falls behind
+  makes the child's send block; a compositor that falls behind makes the broker drop the frame
+  (at most four are held).
+
+What the broker checks (C5) before a video frame reaches the compositor:
+
+- **The buffer.** The kernel must report the descriptor as a dma-buf, as for a window frame.
+- **Format and modifier.** The format is NV12 or P010, and the pair of format and modifier is
+  one the compositor advertised. This is stricter than for a window frame: linear is not
+  assumed, because a compositor need not take YUV at all.
+- **Layout.** Two to four planes. Each luma row and each chroma row fits its stride, and the
+  last row of each plane ends inside the buffer, computed in 64 bits.
+- **Size.** The picture is 1 to 16384 pixels each way. It is the decoder's size, not the
+  window's.
+- **Rectangles.** A rectangle has an area and lies within 65536 of the window's origin.
+- **Placement.** The rectangle is cut to the window and the frame cropped to match
+  (`wm/video_geometry.h`). A crop that is empty or reaches outside the frame is a protocol
+  error in `wp_viewport`, which would close the broker's connection; the function returns no
+  such crop for any input, and a rectangle that shows less than one pixel of the frame shows
+  nothing.
+
+A refused video frame is counted by reason and logged once per reason. It does not touch the
+window's own frame loop.
+
+Measured on host ART under headless Weston, confined, filter on: the fixture app
+(`tests/fixtures/video_plane`) decodes a 640x360 H.264 clip of 60 frames three times onto a
+`SurfaceView`. 180 of 180 frames crossed and none was refused; the window itself presented 416
+frames in the same run. Single-process, the same app renders 180. Screenshots from a headless
+sway, taken at the same point of the clip in both modes, are the same picture: the test
+pattern at the View's position, in the right colors, with the app's text drawn over the
+window. A traced run made no system call outside the allowlist but `clone3`, which is answered
+as before; the list is unchanged.
+
+Tested: unit tests reach every refusal of a video frame and of a rectangle, and run the
+placement function over 200000 random inputs against what the protocol accepts. The broker
+tests send video from a second thread, as the decoder does, and send each malformed form. The
+fuzz harness checks the same properties on whatever reaches the presenter: 29.2 million
+executions in five minutes on eight workers, no finding. `tests/integration/run_split_video_test.py`
+runs the fixture app end to end and skips without a GPU, so it does not run in CI.
+
+Not covered:
+
+- **One app, one clip, one decoder.** A fixture app, H.264 at 640x360 as NV12, VA-API on AMD.
+  No media3 or ExoPlayer app has run under `--split`; none is in the corpus. P010, HEVC and
+  VP9 are accepted by the check and have not been sent.
+- **Video in a texture.** A Flutter `video_player` clip goes through `ImageReader` into a GL
+  texture, not through the video plane. That path stays inside the app process; it has not
+  been run under `--split`.
+- **Audio** does not cross. A clip plays silent.
+- **Pixels are checked by eye.** The integration test counts frames at the broker. That the
+  picture is right was read from screenshots.
+- **Each frame is imported by the compositor**, a new `wl_buffer` per frame, with the limit
+  noted under C5: a buffer that passes every check and that the compositor still cannot import
+  ends the broker's connection.
+- **Two limits that are not the split's.** A `SurfaceView` over an opaque background shows no
+  video, because a4l clears the View's ancestors and each ancestor's background is drawn after
+  that; this is so single-process as well. A `SurfaceView` present at launch is taken for a GL
+  surface.
+
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 
 - **A frame.** The broker asks the kernel, not the child, what the descriptor is: `fstatfs` must
@@ -230,6 +301,7 @@ Not covered:
   stride and starts inside the buffer, and the slot is in range. A refused frame is counted by
   reason, logged once per reason, and answered with a keepalive so the child's frame loop does
   not hang.
+- **A video frame, a video rectangle.** See "C3 as built: video" above.
 - **A surface.** Size bounded as before. At most 16 over a connection's life, since each is a
   toplevel on the user's screen.
 - **The window's identity.** The app id is the package name from the APK the broker admitted,

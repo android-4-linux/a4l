@@ -317,3 +317,166 @@ TEST_CASE("validate: a label is made fit to show", "[split][validate]") {
   // An embedded NUL is a control character like any other.
   CHECK(clean_label(std::string("a\0b", 3), 256, "x") == "ab");
 }
+
+// ── Video frames ─────────────────────────────────────────────────────────
+
+namespace {
+
+constexpr std::uint32_t kNv12 = 0x3231564eu;
+constexpr std::uint32_t kP010 = 0x30313050u;
+const std::vector<std::uint64_t> kVideoAdvertised = {0, kTiled};
+
+// A 640x360 NV12 frame: luma, then chroma at 640 * 360.
+ipc::VideoFrame good_video() {
+  ipc::VideoFrame v{};
+  v.w = 640;
+  v.h = 360;
+  v.drm_format = kNv12;
+  v.plane_count = 2;
+  v.modifier = 0;
+  v.stride[0] = 640;
+  v.stride[1] = 640;
+  v.offset[1] = 640 * 360;
+  v.dest = {120, 164, 640, 360};
+  return v;
+}
+constexpr wm::BufferFacts kVideoBuffer{true, 640ull * 360 * 3 / 2};
+
+FrameVerdict check_video(const ipc::VideoFrame& v) {
+  wm::VideoLimits l;
+  l.have_surface = true;
+  l.modifiers = kVideoAdvertised;
+  return wm::check_video_frame(v, true, kVideoBuffer, l);
+}
+
+}  // namespace
+
+TEST_CASE("validate: a well-formed video frame passes", "[split][validate]") {
+  CHECK(check_video(good_video()) == FrameVerdict::Ok);
+
+  // Not the surface's size: the picture is the decoder's.
+  ipc::VideoFrame odd = good_video();
+  odd.w = 639;
+  odd.h = 359;  // 180 chroma rows of 640 bytes still fit
+  CHECK(check_video(odd) == FrameVerdict::Ok);
+
+  ipc::VideoFrame tiled = good_video();
+  tiled.modifier = kTiled;
+  CHECK(check_video(tiled) == FrameVerdict::Ok);
+
+  // P010: two bytes a sample.
+  ipc::VideoFrame deep = good_video();
+  deep.drm_format = kP010;
+  deep.w = 320;
+  deep.h = 180;
+  deep.stride[0] = deep.stride[1] = 640;
+  deep.offset[1] = 640 * 180;
+  CHECK(check_video(deep) == FrameVerdict::Ok);
+
+  CHECK(wm::video_format_accepted(kNv12));
+  CHECK(wm::video_format_accepted(kP010));
+  CHECK_FALSE(wm::video_format_accepted(kAr24));
+  CHECK_FALSE(wm::video_format_accepted(0));
+}
+
+TEST_CASE("validate: each way a video frame is refused", "[split][validate]") {
+  using V = FrameVerdict;
+  const auto with = [](auto spoil) {
+    ipc::VideoFrame v = good_video();
+    spoil(v);
+    return check_video(v);
+  };
+  wm::VideoLimits ok;
+  ok.have_surface = true;
+  ok.modifiers = kVideoAdvertised;
+
+  SECTION("no surface, no descriptor, not a dma-buf") {
+    wm::VideoLimits none = ok;
+    none.have_surface = false;
+    CHECK(wm::check_video_frame(good_video(), true, kVideoBuffer, none) ==
+          V::NoSurface);
+    CHECK(wm::check_video_frame(good_video(), false, kVideoBuffer, ok) ==
+          V::NoBuffer);
+    CHECK(wm::check_video_frame(good_video(), true, {false, 1 << 20}, ok) ==
+          V::NotDmabuf);
+    CHECK(wm::check_video_frame(good_video(), true, {true, 0}, ok) ==
+          V::NotDmabuf);
+  }
+  SECTION("size") {
+    CHECK(with([](auto& v) { v.w = 0; }) == V::BadSize);
+    CHECK(with([](auto& v) { v.h = 0; }) == V::BadSize);
+    CHECK(with([](auto& v) { v.w = ipc::kMaxSurfaceDim + 1; }) == V::BadSize);
+    CHECK(with([](auto& v) { v.dest.w = 0; }) == V::BadSize);
+    CHECK(with([](auto& v) { v.dest.h = -1; }) == V::BadSize);
+    CHECK(with([](auto& v) { v.dest.x = ipc::kMaxVideoCoord + 1; }) ==
+          V::BadSize);
+    CHECK(with([](auto& v) { v.dest.y = -ipc::kMaxVideoCoord - 1; }) ==
+          V::BadSize);
+    CHECK(with([](auto& v) { v.dest.w = 0x7fffffff; }) == V::BadSize);
+  }
+  SECTION("format and modifier") {
+    CHECK(with([](auto& v) { v.drm_format = kAr24; }) == V::BadFormat);
+    CHECK(with([](auto& v) { v.drm_format = 0; }) == V::BadFormat);
+    CHECK(with([](auto& v) { v.modifier = 0x33; }) == V::BadModifier);
+    // "No explicit modifier" is refused unless the compositor listed it.
+    CHECK(with([](auto& v) { v.modifier = 0x00ffffffffffffffull; }) ==
+          V::BadModifier);
+    // A compositor that advertised nothing for the format takes none of it,
+    // linear included.
+    wm::VideoLimits nothing = ok;
+    nothing.modifiers = {};
+    CHECK(wm::check_video_frame(good_video(), true, kVideoBuffer, nothing) ==
+          V::BadFormat);
+  }
+  SECTION("planes") {
+    CHECK(with([](auto& v) { v.plane_count = 0; }) == V::BadPlanes);
+    CHECK(with([](auto& v) { v.plane_count = 1; }) == V::BadPlanes);
+    CHECK(with([](auto& v) { v.plane_count = ipc::kMaxPlanes + 1; }) ==
+          V::BadPlanes);
+    CHECK(with([](auto& v) { v.plane_count = 0xffffffffu; }) == V::BadPlanes);
+    // A third plane must have a stride and start inside the buffer.
+    CHECK(with([](auto& v) { v.plane_count = 3; }) == V::BadPlanes);
+    CHECK(with([](auto& v) {
+            v.plane_count = 3;
+            v.stride[2] = 64;
+            v.offset[2] = 1u << 30;
+          }) == V::BadPlanes);
+    CHECK(with([](auto& v) {
+            v.plane_count = 3;
+            v.stride[2] = 64;
+            v.offset[2] = 4096;
+          }) == V::Ok);
+  }
+  SECTION("layout") {
+    CHECK(with([](auto& v) { v.stride[0] = 639; }) == V::BadLayout);
+    CHECK(with([](auto& v) { v.stride[1] = 0; }) == V::BadLayout);
+    CHECK(with([](auto& v) { v.stride[1] = 639; }) == V::BadLayout);
+    // The luma plane's last row would end one byte past the buffer.
+    CHECK(with([](auto& v) { v.offset[0] = 640 * 180 + 1; }) == V::BadLayout);
+    // Planes that overlap are the sender's loss, not a reach outside it.
+    CHECK(with([](auto& v) { v.offset[0] = 1; }) == V::Ok);
+    CHECK(with([](auto& v) { v.offset[1] += 1; }) == V::BadLayout);
+    CHECK(with([](auto& v) { v.offset[1] = 0xffffffffu; }) == V::BadLayout);
+    // Would wrap in 32 bits.
+    CHECK(with([](auto& v) { v.stride[0] = 0x80000000u; }) == V::BadLayout);
+    CHECK(with([](auto& v) { v.stride[1] = 0xffffffffu; }) == V::BadLayout);
+    // A taller picture than the buffer holds.
+    CHECK(with([](auto& v) { v.h = 361; }) == V::BadLayout);
+    // P010 rows are twice as wide.
+    CHECK(with([](auto& v) { v.drm_format = kP010; }) == V::BadLayout);
+  }
+}
+
+TEST_CASE("validate: video rectangles", "[split][validate]") {
+  CHECK(wm::check_video_rect({0, 0, 1, 1}));
+  CHECK(wm::check_video_rect({-640, 0, 2560, 1440}));
+  CHECK(wm::check_video_rect({ipc::kMaxVideoCoord, -ipc::kMaxVideoCoord,
+                              ipc::kMaxVideoCoord, ipc::kMaxVideoCoord}));
+  CHECK_FALSE(wm::check_video_rect({0, 0, 0, 1}));
+  CHECK_FALSE(wm::check_video_rect({0, 0, 1, 0}));
+  CHECK_FALSE(wm::check_video_rect({0, 0, -5, 5}));
+  CHECK_FALSE(wm::check_video_rect({0, 0, ipc::kMaxVideoCoord + 1, 1}));
+  CHECK_FALSE(wm::check_video_rect({ipc::kMaxVideoCoord + 1, 0, 1, 1}));
+  CHECK_FALSE(wm::check_video_rect({0, -0x7fffffff - 1, 1, 1}));
+  CHECK_FALSE(wm::check_video_rect({0x7fffffff, 0x7fffffff, 0x7fffffff, 1}));
+}

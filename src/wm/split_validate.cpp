@@ -24,7 +24,9 @@ constexpr std::uint32_t kArgb8888 = 0x34325241u;  // 'AR24'
 constexpr std::uint32_t kXrgb8888 = 0x34325258u;  // 'XR24'
 constexpr std::uint64_t kModLinear = 0;
 constexpr std::uint64_t kModInvalid = 0x00ffffffffffffffull;
-constexpr std::uint32_t kBytesPerPixel = 4;  // both formats above
+constexpr std::uint32_t kBytesPerPixel = 4;   // both formats above
+constexpr std::uint32_t kNv12 = 0x3231564eu;  // 'NV12'
+constexpr std::uint32_t kP010 = 0x30313050u;  // 'P010'
 
 }  // namespace
 
@@ -126,6 +128,66 @@ FrameVerdict check_frame(const ipc::PresentFrame& p,
   if (slot < -1 || slot >= limits.slots)
     return FrameVerdict::BadSlot;
   return FrameVerdict::Ok;
+}
+
+bool video_format_accepted(std::uint32_t drm_format) noexcept {
+  return drm_format == kNv12 || drm_format == kP010;
+}
+
+FrameVerdict check_video_frame(const ipc::VideoFrame& v,
+                               bool fd_present,
+                               const BufferFacts& facts,
+                               const VideoLimits& limits) noexcept {
+  if (!limits.have_surface)
+    return FrameVerdict::NoSurface;
+  if (!fd_present)
+    return FrameVerdict::NoBuffer;
+  if (!facts.is_dmabuf || facts.size == 0)
+    return FrameVerdict::NotDmabuf;
+
+  if (v.w == 0 || v.h == 0 || v.w > ipc::kMaxSurfaceDim ||
+      v.h > ipc::kMaxSurfaceDim || !check_video_rect(v.dest))
+    return FrameVerdict::BadSize;
+
+  // No advertisement for the format at all: the compositor does not take it.
+  if (!video_format_accepted(v.drm_format) || limits.modifiers.empty())
+    return FrameVerdict::BadFormat;
+  if (std::find(limits.modifiers.begin(), limits.modifiers.end(), v.modifier) ==
+      limits.modifiers.end())
+    return FrameVerdict::BadModifier;
+
+  // Both formats are two planes: luma, then interleaved chroma at half
+  // resolution each way. More are a driver's auxiliary planes.
+  if (v.plane_count < 2 || v.plane_count > ipc::kMaxPlanes)
+    return FrameVerdict::BadPlanes;
+
+  // Every luma row and every chroma row fits its stride, and the last row
+  // of each ends inside the buffer. 64-bit: stride is 32 bits and the
+  // height at most kMaxSurfaceDim, so the products cannot wrap.
+  const std::uint64_t sample = v.drm_format == kP010 ? 2 : 1;
+  const std::uint64_t luma_row = static_cast<std::uint64_t>(v.w) * sample;
+  const std::uint64_t chroma_row =
+      (static_cast<std::uint64_t>(v.w) + 1) / 2 * 2 * sample;
+  const std::uint64_t chroma_rows = (static_cast<std::uint64_t>(v.h) + 1) / 2;
+  if (v.stride[0] < luma_row || v.stride[1] < chroma_row)
+    return FrameVerdict::BadLayout;
+  if (v.offset[0] + static_cast<std::uint64_t>(v.stride[0]) * v.h >
+          facts.size ||
+      v.offset[1] + static_cast<std::uint64_t>(v.stride[1]) * chroma_rows >
+          facts.size)
+    return FrameVerdict::BadLayout;
+  for (std::uint32_t i = 2; i < v.plane_count; ++i) {
+    if (v.stride[i] == 0 || v.offset[i] >= facts.size)
+      return FrameVerdict::BadPlanes;
+  }
+  return FrameVerdict::Ok;
+}
+
+bool check_video_rect(const ipc::VideoRect& r) noexcept {
+  return r.w > 0 && r.h > 0 && r.w <= ipc::kMaxVideoCoord &&
+         r.h <= ipc::kMaxVideoCoord && r.x >= -ipc::kMaxVideoCoord &&
+         r.x <= ipc::kMaxVideoCoord && r.y >= -ipc::kMaxVideoCoord &&
+         r.y <= ipc::kMaxVideoCoord;
 }
 
 bool check_surface(const ipc::SurfaceInfo& info) noexcept {

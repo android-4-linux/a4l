@@ -10,9 +10,10 @@
 // broker process (the parent) owns the only Wayland connection: it opens the
 // real presenter, imports each frame, and forwards input.
 //
-// Covered: the Skia dma-buf path (ACL_PRESENT_GPU). Not covered: native GL,
-// where Mesa needs the wl_surface in the app process, and the video
-// subsurface. Both are ADR-0009 C3.
+// Covered: the Skia dma-buf path (ACL_PRESENT_GPU), and the video plane: a
+// decoded frame is sent as its own dma-buf and the broker puts it on the
+// subsurface below the window. Native GL crosses by other means
+// (runtime/jvm_vm.cpp: a gbm surface in the child, its frames sent here).
 #ifndef ACL_WM_SPLIT_PRESENT_H
 #define ACL_WM_SPLIT_PRESENT_H
 
@@ -72,10 +73,11 @@ struct BrokerStats {
   std::uint64_t rejected = 0;  // messages refused by validation
   // Of those, refused frames by reason, indexed by FrameVerdict.
   std::uint64_t frame_verdicts[kFrameVerdictCount] = {};
-  std::uint64_t inputs = 0;      // input events forwarded
-  std::uint64_t from_child = 0;  // datagrams received
-  std::uint64_t to_child = 0;    // datagrams sent
-  bool window_closed = false;    // the toplevel closed before the child left
+  std::uint64_t video_frames = 0;  // VideoFrame messages given to the plane
+  std::uint64_t inputs = 0;        // input events forwarded
+  std::uint64_t from_child = 0;    // datagrams received
+  std::uint64_t to_child = 0;      // datagrams sent
+  bool window_closed = false;      // the toplevel closed before the child left
 };
 
 // What the broker decides for the child and does not take from it.

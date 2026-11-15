@@ -307,6 +307,14 @@ class IPresenter {
     return true;
   }  // pump until first configure
 
+  // The modifiers the compositor advertises for `drm_format`, in any role.
+  // The video plane's formats are not the toplevel's, so modifiers() does
+  // not answer for them. Empty: the format cannot be shown. Present thread.
+  virtual std::vector<std::uint64_t> modifiers_for(
+      std::uint32_t /*drm_format*/) const noexcept {
+    return {};
+  }
+
   // Video HW-plane path: present a decoded video frame (a distinct dma-buf per
   // frame) DIRECTLY on a wl_subsurface under the app's surface at the given
   // on-screen rect — the compositor scans it out on a DRM overlay plane

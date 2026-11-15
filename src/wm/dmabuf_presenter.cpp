@@ -16,6 +16,7 @@
 
 #include "wm/present.h"
 #include "wm/split_present.h"
+#include "wm/video_geometry.h"
 
 #if ACL_HAVE_WCS && ACL_HAVE_VULKAN
 
@@ -872,6 +873,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       oq_dirty_ = false;
     }
   }
+  std::vector<std::uint64_t> modifiers_for(
+      std::uint32_t drm_format) const noexcept override {
+    return feedback_.Current().ModifiersFor(drm_format);
+  }
   int video_wake_fd() const noexcept override { return video_wake_fd_; }
   // Present-thread: drain the wake eventfd, commit the pending video frame,
   // flush the display. Driven by the present loop's epoll on video_wake_fd() so
@@ -952,9 +957,13 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       video_plane_.hide();
     if (!has)
       return;
+    // From here the frame's descriptor is ours to close on every way out.
     if (subcomp_.Get() == nullptr || comp_.Get() == nullptr ||
-        surface_.Get() == nullptr)
+        surface_.Get() == nullptr) {
+      if (frame.fd >= 0)
+        ::close(frame.fd);
       return;
+    }
     if (!video_plane_.created()) {
       std::string err;
       if (!video_plane_.create(
@@ -962,6 +971,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
               [this]() -> wl_proxy* { return feedback_.CreateParams(); },
               &err)) {
         log::w(kTag, "video HW-plane: subsurface create failed: {}", err);
+        if (frame.fd >= 0)
+          ::close(frame.fd);
         return;
       }
       log::i(kTag, "video HW-plane: wl_subsurface created (viewport={})",
@@ -975,19 +986,19 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     // the video fills the on-screen video area without the subsurface spilling
     // past the window edges onto the desktop (subsurfaces aren't clipped by the
     // parent).
-    const int winW = w_ > 0 ? w_ : w, winH = h_ > 0 ? h_ : h;
-    const int vx = std::max(x, 0), vy = std::max(y, 0);
-    const int vr = std::min(x + w, winW), vb = std::min(y + h, winH);
-    const int vw = vr - vx, vh = vb - vy;
-    if (vw <= 0 || vh <= 0 || w <= 0 || h <= 0) {
+    // place_video() also keeps the crop inside the buffer and non-empty:
+    // wp_viewport answers anything else with a protocol error, and under
+    // --split the rectangle is the app process's.
+    const VideoPlacement place =
+        place_video(x, y, w, h, w_ > 0 ? w_ : w, h_ > 0 ? h_ : h, frame.width,
+                    frame.height);
+    if (!place.visible) {
       if (frame.fd >= 0)
         ::close(frame.fd);
       return;
     }
-    const double sx = static_cast<double>(vx - x) / w * frame.width;
-    const double sy = static_cast<double>(vy - y) / h * frame.height;
-    const double sw = static_cast<double>(vw) / w * frame.width;
-    const double sh = static_cast<double>(vh) / h * frame.height;
+    const int vx = place.x, vy = place.y, vw = place.w, vh = place.h;
+    const double sx = place.sx, sy = place.sy, sw = place.sw, sh = place.sh;
     if (video_diag_) {
       static std::uint64_t gdbg = 0;
       if (gdbg++ % 60 == 0)
