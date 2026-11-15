@@ -120,3 +120,24 @@ Measured 2026-11-15, audio minus video, each a4l figure the mean of a run's two 
 The reference figures on the null sink differ from the table above (+4 here, +16 to +18
 there): they were taken in another session of the audio daemon, and only differences within
 one session mean anything.
+
+### Pause, seek, speed
+
+Set `kScript` to `true` in `main.dart` and rebuild: the app then pauses for 1.5 s at 1.0 s,
+seeks from 6.5 s back to 2.0 s, and from 6.5 s back to 2.0 s again at twice the speed. The
+clip's two events follow each, so a 30 s capture has six.
+
+Measured 2026-11-15, audio minus video in ms, two events per run; mpv playing straight
+through gave +14 +20 and +14 +22:
+
+| | after a pause | after a seek | at twice the speed |
+|---|---|---|---|
+| single process, two runs | +30 +27, +43 +41 | +61 +60, +48 +47 | +38 +37, +32 +30 |
+| `--split`, two runs | +31 +27, +41 +38 | +61 +58, +53 +52 | +48 +46, +47 +45 |
+
+This app was not run through the script before the fixes that
+`tests/fixtures/media3_player_view/README.md` describes, so there is no "before" for it.
+
+A rebuilt debug APK must be picked up: Flutter's debug-mode extractor keeps its copy of the
+Dart code while the package's `lastUpdateTime` is unchanged. a4l reported 0 for it and ran
+the old code; it now reports the APK's modification time.

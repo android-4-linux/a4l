@@ -2059,6 +2059,16 @@ public final class HostBootstrap {
             pi.applicationInfo = getApplicationInfo(pkg, 0);
             pi.versionName = "1.0";
             try { pi.setLongVersionCode(1L); } catch (Throwable ignored) { pi.versionCode = 1; }
+            // When the APK was last written, as the time it was installed and last updated. An
+            // app that unpacks something from its APK keys the copy on this: Flutter's debug-mode
+            // ResourceExtractor keeps its extracted Dart code while version code and
+            // lastUpdateTime are unchanged, so with 0 here a rebuilt app ran its old code.
+            try {
+                String src = pi.applicationInfo != null ? pi.applicationInfo.sourceDir : null;
+                long written = src != null ? new java.io.File(src).lastModified() : 0L;
+                pi.firstInstallTime = written;
+                pi.lastUpdateTime = written;
+            } catch (Throwable ignored) { }
             // The app's <uses-permission> names, with every one marked granted. Granting at
             // checkSelfPermission() is NOT enough: permission libraries first verify the permission
             // is DECLARED, by reading getPackageInfo(GET_PERMISSIONS).requestedPermissions. A null

@@ -92,9 +92,12 @@ struct CodecCtx {
   std::unique_ptr<media::AudioCodec> audio;
   std::map<int, std::vector<std::uint8_t>> csd_parts;  // csd-N, by N
   int sample_rate = 0, channels = 0;                   // the format's hints
-  // Async audio: flush() stops callbacks until start() is called again, as
+  // Async: flush() stops callbacks until start() is called again, as
   // MediaCodec specifies; a client discards what arrives in between.
   std::atomic<bool> await_start{false};
+  // Held by whoever is using `dec`: the async driver for a pass, and flush()
+  // from the app's thread, which must not run into the middle of one.
+  std::mutex dmu;
   gfx::BufferQueue* out_queue =
       nullptr;  // the configured Surface's ImageReader BufferQueue (or null)
   bool started = false;
@@ -111,6 +114,11 @@ struct CodecCtx {
         nullptr;  // an imported decoded frame, awaiting releaseOutputBuffer
     bool used = false;
     std::int64_t pts = 0;
+    // A frame for the video plane (a SurfaceView's video): kept as it came
+    // from the decoder, with its hold on the decoder's surface, and shown
+    // when the app releases it. `ahb` is then null.
+    bool plane = false;
+    gfx::DmabufFrame frame{};
   };
   std::vector<OutSlot> outslots;
   bool format_signaled = false;  // dequeueOutputBuffer returns
@@ -154,17 +162,26 @@ struct CodecCtx {
              0.0;  // ACL_MC_DIAG: per-30 receive_frame / ahb_import time
   std::chrono::steady_clock::time_point
       t0_recv{};  // ACL_MC_DIAG: decode-rate window start
-  // HW-plane pacing: present decoded frames at their own presentation timestamp
-  // (1x), decoupled from ExoPlayer's render/drop cadence (which gates decode to
-  // ~2fps here). Baseline (re)set on the first frame and on any seek / large
-  // pts discontinuity. HW-plane INPUT pacing: feed the decoder each packet only
-  // once its presentation time has elapsed in wall-clock, so the (VAAPI)
-  // decoder runs at ~1x and neither drops (surface-pool overflow) nor fast-
-  // forwards. Baseline anchors on the first packet / a backward seek.
-  bool pace_init = false;
-  std::int64_t pace_first_pts = 0;
-  std::chrono::steady_clock::time_point pace_first_wall{};
 };
+
+// Input packets the async driver holds before it stops offering buffers. A
+// client fills every buffer it is offered; without a bound a player hands
+// over everything it has read ahead.
+constexpr std::size_t kMaxPendingPackets = 16;
+
+// Whether this codec's frames go to the video plane: a video decoder while a
+// View-tree window is up, which is where a SurfaceView's video is shown.
+wm::IPresenter* video_plane_for(const CodecCtx* ctx) {
+  return ctx->mime.rfind("video/", 0) == 0 ? wm::active_video_presenter()
+                                           : nullptr;
+}
+
+// Give up whatever an output slot holds.
+void drop_slot(CodecCtx::OutSlot& s) {
+  if (s.ahb != nullptr)
+    gfx::ahb_release(s.ahb);
+  s = {};
+}
 
 bool is_audio(const CodecCtx* ctx) {
   return ctx->mime.rfind("audio/", 0) == 0;
@@ -291,48 +308,38 @@ void async_driver(CodecCtx* ctx) {
       env->DeleteLocalRef(fmt);
   }
   std::string err;
-  bool paced_pending =
-      false;  // set when the input pacer is holding packets not yet due
+  bool paced_pending = false;  // a packet the decoder had no room for
   while (!ctx->stop.load(std::memory_order_acquire)) {
+    if (ctx->await_start.load(std::memory_order_acquire)) {
+      // Flushed: nothing is offered or delivered until start().
+      std::unique_lock<std::mutex> lk(ctx->amu);
+      ctx->acv.wait_for(lk, std::chrono::milliseconds(20));
+      continue;
+    }
+    // One pass with the decoder. flush() takes this lock, so it finds the
+    // decoder between passes and what it clears is not refilled under it.
+    std::unique_lock<std::mutex> pass(ctx->dmu);
+    if (ctx->await_start.load(std::memory_order_acquire))
+      continue;
     const auto now = std::chrono::steady_clock::now();
-    // The HW-plane video path PACES INPUT to the source's own timeline: feed
-    // the decoder a packet only once its presentation time has elapsed in
-    // wall-clock. This makes the (VAAPI) decoder run at 1x, so it never decodes
-    // far ahead and drops frames from surface-pool overflow, and never fast-
-    // forwards — decoded frames come out at ~1x and are presented as they
-    // arrive. Non-plane codecs feed as fast as ExoPlayer queues (real
-    // MediaCodec behavior).
-    const bool plane_in = (ctx->mime.rfind("video/", 0) == 0) &&
-                          wm::active_video_presenter() != nullptr;
     std::vector<int> offer;
     std::vector<CodecCtx::Packet> send;
     paced_pending = false;
     {
       std::unique_lock<std::mutex> lk(ctx->amu);
-      for (std::size_t i = 0; i < ctx->inbufs.size(); ++i)
+      // Buffers are offered while the queue is short. Frames are not paced
+      // here: a player shows each when it releases it, and the fixed output
+      // pool below holds the decoder back to the rate the player takes them.
+      for (std::size_t i = 0;
+           i < ctx->inbufs.size() &&
+           ctx->pending.size() + offer.size() < kMaxPendingPackets;
+           ++i)
         if (ctx->inbufs[i].free) {
           ctx->inbufs[i].free = false;
           offer.push_back(static_cast<int>(i));
         }
       while (!ctx->pending.empty()) {
-        auto& p = ctx->pending.front();
-        if (plane_in && !p.eos) {
-          if (!ctx->pace_init ||
-              p.pts < ctx->pace_first_pts) {  // first packet / backward seek:
-                                              // anchor
-            ctx->pace_init = true;
-            ctx->pace_first_pts = p.pts;
-            ctx->pace_first_wall = now;
-          }
-          const auto due =
-              ctx->pace_first_wall +
-              std::chrono::microseconds(p.pts - ctx->pace_first_pts);
-          if (now < due) {
-            paced_pending = true;
-            break;
-          }  // not due yet — feed it on a later tick
-        }
-        send.push_back(std::move(p));
+        send.push_back(std::move(ctx->pending.front()));
         ctx->pending.pop_front();
       }
     }
@@ -384,22 +391,13 @@ void async_driver(CodecCtx* ctx) {
     for (;;) {  // drain ready frames, with backpressure
       // BACKPRESSURE: a real MediaCodec has a FIXED output-buffer pool; when
       // the app holds them all it stops emitting frames (the decoder stalls)
-      // until releaseOutputBuffer frees one. Without this the driver floods
-      // ExoPlayer with hundreds of undrained output buffers and its render
-      // pacing breaks (only the first frame ever renders). Find a free slot in
-      // the fixed pool BEFORE decoding; if none, stop until a release frees
-      // one. The HW-plane path (a video codec with an active wl_subsurface
-      // presenter) presents decoded frames DIRECTLY to the plane and hands
-      // ExoPlayer phantom output buffers (no AHB). It does NOT gate decode on
-      // ExoPlayer's release cadence (the slot is allocated after decode,
-      // recycling the oldest phantom if full). Timing comes from INPUT pacing
-      // above, so the decoder produces at ~1x and we present each frame as it
-      // arrives — draining the decoder fully so it never drops.
-      wm::IPresenter* vpr = (ctx->mime.rfind("video/", 0) == 0)
-                                ? wm::active_video_presenter()
-                                : nullptr;
+      // until releaseOutputBuffer frees one. Find a free slot in the fixed
+      // pool BEFORE decoding; if none, stop until a release frees one. This
+      // is also what paces a paused player: it stops releasing, the pool
+      // fills, and the decoder waits.
+      wm::IPresenter* vpr = video_plane_for(ctx);
       int slot = -1;
-      if (vpr == nullptr) {
+      {
         std::lock_guard<std::mutex> lk(ctx->amu);
         for (std::size_t i = 0; i < ctx->outslots.size(); ++i)
           if (!ctx->outslots[i].used) {
@@ -447,32 +445,16 @@ void async_driver(CodecCtx* ctx) {
         ctx->ahb_ms_sum = 0.0;
       }
       if (vpr != nullptr) {
-        // HW-plane path: present this frame NOW (input pacing above already
-        // spread frames at ~1x), and hand ExoPlayer a phantom output buffer (no
-        // AHB) so its pipeline runs without gating decode. Keep draining the
-        // decoder fully so its surface pool never overflows.
-        vpr->present_video(f, 0, 0, static_cast<int>(f.width),
-                           static_cast<int>(f.height));
+        // The video plane: the frame waits in its slot, holding its decoder
+        // surface, and goes to the plane when the app releases it, at the
+        // time the app gives (MC_releaseOutputBuffer).
         {
           std::lock_guard<std::mutex> lk(ctx->amu);
-          for (std::size_t i = 0; i < ctx->outslots.size(); ++i)
-            if (!ctx->outslots[i].used) {
-              slot = static_cast<int>(i);
-              break;
-            }
-          if (slot <
-              0) {  // pool full — recycle the oldest phantom (nothing to free)
-            std::size_t oldest = 0;
-            for (std::size_t i = 1; i < ctx->outslots.size(); ++i)
-              if (ctx->outslots[i].pts < ctx->outslots[oldest].pts)
-                oldest = i;
-            if (ctx->outslots[oldest].ahb != nullptr)
-              gfx::ahb_release(ctx->outslots[oldest].ahb);
-            slot = static_cast<int>(oldest);
-          }
-          ctx->outslots[slot] = {
-              nullptr, true,
-              pts};  // phantom: presented on the plane, no AHB held
+          CodecCtx::OutSlot& s = ctx->outslots[slot];
+          s.used = true;
+          s.pts = pts;
+          s.plane = true;
+          s.frame = f;
         }
         jobject info = env->NewObject(g_bufinfo_cls, g_bufinfo_ctor);
         env->CallVoidMethod(info, g_bufinfo_set, 0, 0, static_cast<jlong>(pts),
@@ -481,7 +463,7 @@ void async_driver(CodecCtx* ctx) {
         post(CB_OUTPUT_AVAILABLE, slot, info);
         if (info)
           env->DeleteLocalRef(info);
-        continue;  // drain the decoder fully; input pacing controls the rate
+        continue;
       }
       const auto t_ahb = std::chrono::steady_clock::now();
       ::AHardwareBuffer* ahb = gfx::ahb_import(f);
@@ -493,7 +475,10 @@ void async_driver(CodecCtx* ctx) {
         continue;
       {
         std::lock_guard<std::mutex> lk(ctx->amu);
-        ctx->outslots[slot] = {ahb, true, pts};
+        CodecCtx::OutSlot& s = ctx->outslots[slot];
+        s.ahb = ahb;
+        s.used = true;
+        s.pts = pts;
       }
       jobject info = env->NewObject(g_bufinfo_cls, g_bufinfo_ctor);
       env->CallVoidMethod(info, g_bufinfo_set, 0, 0, static_cast<jlong>(pts),
@@ -503,12 +488,13 @@ void async_driver(CodecCtx* ctx) {
       if (info)
         env->DeleteLocalRef(info);
     }
+    pass.unlock();
     std::unique_lock<std::mutex> lk(ctx->amu);
     if (!ctx->stop.load(std::memory_order_acquire)) {
       if (paced_pending)
-        ctx->acv.wait_for(
-            lk, std::chrono::milliseconds(
-                    5));  // input pacer holding packets — re-check soon
+        ctx->acv.wait_for(lk,
+                          std::chrono::milliseconds(
+                              5));  // the decoder had no room — re-check soon
       else if (ctx->pending.empty())
         ctx->acv.wait_for(lk, std::chrono::milliseconds(4));
     }
@@ -702,8 +688,12 @@ void JNICALL MC_native_start(JNIEnv* env, jobject thiz) {
     return;
   if (ctx->started) {
     // start() after flush() resumes an asynchronous codec.
-    if (ctx->audio && ctx->await_start.exchange(false))
-      ctx->audio->wake();
+    if (ctx->await_start.exchange(false)) {
+      if (ctx->audio)
+        ctx->audio->wake();
+      else
+        ctx->acv.notify_all();
+    }
     return;
   }
   std::string err;
@@ -949,9 +939,11 @@ jint JNICALL MC_native_dequeueOutputBuffer(JNIEnv* env,
                                   // try-again (logged)
   // Import the decoded frame zero-copy NOW (dup the fd) so the decoder may
   // reuse its surface; hold it in an output slot until releaseOutputBuffer
-  // decides render (queue_imported) or drop (release).
-  ::AHardwareBuffer* ahb = gfx::ahb_import(f);
-  if (ahb == nullptr) {
+  // decides render (queue_imported) or drop (release). A frame for the video
+  // plane is kept as it is instead.
+  const bool plane = video_plane_for(ctx) != nullptr;
+  ::AHardwareBuffer* ahb = plane ? nullptr : gfx::ahb_import(f);
+  if (!plane && ahb == nullptr) {
     log::w(kTag, "dequeueOutputBuffer: ahb_import failed");
     return INFO_TRY_AGAIN_LATER;
   }
@@ -963,7 +955,15 @@ jint JNICALL MC_native_dequeueOutputBuffer(JNIEnv* env,
     }
   if (slot == ctx->outslots.size())
     ctx->outslots.push_back({});
-  ctx->outslots[slot] = {ahb, true, pts};
+  {
+    CodecCtx::OutSlot& s = ctx->outslots[slot];
+    s.ahb = ahb;
+    s.used = true;
+    s.pts = pts;
+    s.plane = plane;
+    if (plane)
+      s.frame = f;
+  }
   if (g_bufinfo_set != nullptr)
     env->CallVoidMethod(info, g_bufinfo_set, 0, 0, static_cast<jlong>(pts),
                         0);  // Surface mode: size 0
@@ -985,6 +985,8 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env,
   }
   ::AHardwareBuffer* ahb = nullptr;
   std::int64_t rel_pts = 0;
+  bool plane = false;
+  gfx::DmabufFrame plane_frame{};
   {
     std::lock_guard<std::mutex> lk(
         ctx->amu);  // outslots shared with the async driver thread
@@ -993,17 +995,11 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env,
     auto& s = ctx->outslots[index];
     if (!s.used)
       return;
-    // Phantom (HW-plane) buffer: already presented on the plane, no AHB. Free
-    // the slot so the pool drains; nothing to render/queue. (The driver may
-    // have already recycled this index — harmless.)
-    if (s.ahb == nullptr) {
-      rel_pts = s.pts;
-      s = {};
-      ctx->acv.notify_one();
-      return;
-    }
     ahb = s.ahb;
     rel_pts = s.pts;
+    plane = s.plane;
+    if (plane)
+      plane_frame = s.frame;
     s = {};
   }
   ctx->acv.notify_one();  // a pool slot freed — resume the backpressured driver
@@ -1023,7 +1019,22 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env,
                          std::chrono::steady_clock::now().time_since_epoch())
                          .count()) /
                1000);
-  if (render == JNI_TRUE && ctx->out_queue != nullptr) {
+  if (plane) {
+    // The video plane, at the time the app asked for, like the queue below.
+    // The frame carries its hold on the decoder's surface until it has been
+    // shown or dropped. A frame not rendered just lets go of it.
+    if (render == JNI_TRUE) {
+      static const bool now = std::getenv("ACL_VIDEO_RELEASE_NOW") != nullptr;
+      ctx->present.at(now ? 0 : timeNs, [plane_frame](bool due) {
+        if (!due)
+          return;
+        if (wm::IPresenter* p = wm::active_video_presenter())
+          p->present_video(plane_frame, 0, 0,
+                           static_cast<int>(plane_frame.width),
+                           static_cast<int>(plane_frame.height));
+      });
+    }
+  } else if (render == JNI_TRUE && ctx->out_queue != nullptr) {
     // Zero-copy: hand the frame to the ImageReader consumer, at the time the
     // app asked for. A player releases a frame ahead of its display time
     // (media3: up to 50 ms) and leaves the wait to the platform; shown at
@@ -1058,8 +1069,7 @@ void teardown(CodecCtx* ctx) {
   ctx->stop.store(false,
                   std::memory_order_release);  // a codec may be started again
   for (auto& s : ctx->outslots)
-    if (s.used && s.ahb != nullptr)
-      gfx::ahb_release(s.ahb);
+    drop_slot(s);
   ctx->outslots.clear();
   ctx->dec.reset();
   ctx->started = false;
@@ -1081,12 +1091,29 @@ void JNICALL MC_native_flush(JNIEnv* env, jobject thiz) {
     ctx->audio->flush();
     return;
   }
-  ctx->present.cancel_all();  // a seek: what was to be shown is stale
-  for (auto& s : ctx->outslots)
-    if (s.used && s.ahb != nullptr) {
-      gfx::ahb_release(s.ahb);
-      s = {};
-    }
+  if (ctx->dec == nullptr)
+    return;
+  // A seek. Everything the client held is void (MediaCodec.flush has already
+  // forgotten its buffer indices), so every input buffer is free again and
+  // every output slot empty; what was queued, decoding or waiting for its
+  // time is stale. Asynchronous: nothing is offered until start().
+  std::lock_guard<std::mutex> pass(ctx->dmu);  // between the driver's passes
+  ctx->present.cancel_all();
+  {
+    std::lock_guard<std::mutex> lk(ctx->amu);
+    if (ctx->async)
+      ctx->await_start = true;
+    ctx->pending.clear();
+    for (auto& b : ctx->inbufs)
+      b.free = true;
+    for (auto& s : ctx->outslots)
+      drop_slot(s);
+    // The decoder keeps its parameter sets across a flush, but they cost
+    // nothing to send again with the key frame that follows.
+    ctx->first_input = true;
+  }
+  ctx->dec->flush();
+  ctx->acv.notify_all();
 }
 void JNICALL MC_native_reset(JNIEnv* env, jobject thiz) {
   teardown(ctx_of(env, thiz));
@@ -1253,6 +1280,13 @@ void register_media_codec_natives(JNIEnv* env) {
       {const_cast<char*>("native_setSurface"),
        const_cast<char*>("(Landroid/view/Surface;)V"),
        reinterpret_cast<void*>(&MC_native_setSurface)},
+      // Hints a running codec may be given: a player sets the operating rate
+      // when the playback speed changes. None changes what a4l's decoders
+      // do, so they are taken and ignored.
+      {const_cast<char*>("setParameters"),
+       const_cast<char*>("([Ljava/lang/String;[Ljava/lang/Object;)V"),
+       reinterpret_cast<void*>(
+           +[](JNIEnv*, jobject, jobjectArray, jobjectArray) {})},
       // ExoPlayer sets the scaling mode after configure; acl scales via the
       // compositor, so no-op it (unbound, it kills the ExoPlayer:Playback
       // thread).

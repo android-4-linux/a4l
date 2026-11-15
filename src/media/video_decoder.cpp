@@ -63,6 +63,7 @@ struct Ff {
   FF_FN(avcodec_get_hw_config);
   FF_FN(avcodec_send_packet);
   FF_FN(avcodec_receive_frame);
+  FF_FN(avcodec_flush_buffers);
   FF_FN(av_hwdevice_ctx_create);
   FF_FN(av_hwframe_map);
   FF_FN(av_hwdevice_find_type_by_name);
@@ -135,6 +136,7 @@ bool load_ffmpeg() {
   FF_BIND(avcodec_get_hw_config);
   FF_BIND(avcodec_send_packet);
   FF_BIND(avcodec_receive_frame);
+  FF_BIND(avcodec_flush_buffers);
   FF_BIND(av_hwdevice_ctx_create);
   FF_BIND(av_hwframe_map);
   FF_BIND(av_hwdevice_find_type_by_name);
@@ -671,6 +673,13 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
   log::i(kTag, "MediaCodec decoder configured {} {}x{} ({})", mime, d->width,
          d->height, codec->name);
   return dec;
+}
+
+void CodecDecoder::flush() {
+  CImpl* d = d_.get();
+  g_ff.av_frame_unref(d->drm_frame);
+  g_ff.av_frame_unref(d->hw_frame);
+  g_ff.avcodec_flush_buffers(d->codec);
 }
 
 int CodecDecoder::send_packet(const std::uint8_t* data,

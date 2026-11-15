@@ -45,6 +45,58 @@ public class Main extends Activity {
         h.postDelayed(this, 500);
       }
     }, 500);
+    if (scripted()) script(h);
+  }
+
+  // The script runs with SVP_SCRIPT=1 in the environment, or where the APK has an asset named
+  // "script": a confined --split app process does not get a4l's environment.
+  private boolean scripted() {
+    if ("1".equals(System.getenv("SVP_SCRIPT"))) return true;
+    try {
+      getAssets().open("script").close();
+      return true;
+    } catch (java.io.IOException e) {
+      return false;
+    }
+  }
+
+  // Pause, seek and change speed during the clip, so that picture and sound
+  // can be measured after each. The clip's events are at 3.0 s and 5.5 s.
+  //   at 1.0 s   pause for 1.5 s, then play          -> events at 3.0 and 5.5
+  //   at 6.5 s   seek to 2.0 s                       -> events at 3.0 and 5.5 again
+  //   at 6.5 s   seek to 2.0 s at twice the speed    -> the same two, 1.25 s apart
+  private void script(final Handler h) {
+    final int[] step = {0};
+    h.post(new Runnable() {
+      @Override public void run() {
+        long pos = player.getCurrentPosition();
+        if (step[0] == 0 && pos >= 1000) {
+          step[0] = 1;
+          player.pause();
+          Log.i("SVP", "script: paused at " + pos);
+          h.postDelayed(new Runnable() {
+            @Override public void run() {
+              Log.i("SVP", "script: play from " + player.getCurrentPosition());
+              player.play();
+              step[0] = 2;
+            }
+          }, 1500);
+        } else if (step[0] == 2 && pos >= 6500) {
+          step[0] = 3;
+          Log.i("SVP", "script: seek from " + pos + " to 2000");
+          player.seekTo(2000);
+        } else if (step[0] == 3 && pos >= 6500) {
+          step[0] = 4;
+          Log.i("SVP", "script: seek from " + pos + " to 2000 at speed 2");
+          player.setPlaybackSpeed(2f);
+          player.seekTo(2000);
+        } else if (step[0] == 4 && player.getPlaybackState() == Player.STATE_ENDED) {
+          step[0] = 5;
+          Log.i("SVP", "script: done");
+        }
+        if (step[0] < 5) h.postDelayed(this, 20);
+      }
+    });
   }
 
   @Override
