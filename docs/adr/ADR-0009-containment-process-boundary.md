@@ -538,12 +538,53 @@ Not covered:
 - **The capture's resolution.** The screen is sampled every 16 ms, and a frame is on screen
   for 33. Differences under about 15 ms are not resolved.
 - **Real outputs.** A null sink and a headless compositor have no latency of their own. A
-  real display adds a frame or two and a real audio device its buffer, and a4l does not yet
-  tell the player the device's latency: `AudioTrack`'s position counts what PipeWire holds in
-  a4l's queue, not what it holds further on.
+  real display adds a frame or two, which is not measured. A real audio device adds its
+  buffer; see "Device latency" below.
 - **The video plane.** These frames go through a GL texture. A `SurfaceView` player's frames
   are shown as they are decoded, paced by their input; they were not measured against sound.
 - **Seeking, pausing, speed.**
+
+**Device latency (2026-11-15).** `AudioTrack`'s position counted what PipeWire held in a4l's
+queue and nothing further on, so a device with a delay of its own put the sound late by that
+delay. Measured with a sink that delays 200 ms and says so (a `pw-loopback --delay 0.2` into
+the null sink, with `ProcessLatency` set to match), same clip, same capture. Audio minus
+video, ms:
+
+| | ms |
+|---|---|
+| mpv, null sink | +4 |
+| mpv, delayed sink that does not declare its delay | +202 |
+| mpv, delayed sink that declares it | -8 |
+| a4l before, delayed sink: two runs single process, two `--split` | +221, +224; +215, +232 |
+| a4l, delayed sink, single process, five runs | +13, +12, +12, +20, +20 |
+| a4l, delayed sink, `--split`, five runs | +16, +34, +53, +18, +36 |
+| a4l, null sink: two runs single process, two `--split` | +29, +25; +4, +18 |
+
+Each a4l figure is the mean of a run's two events. So the delay is taken out: a4l is within
+about 30 ms of the reference single-process and 60 under `--split`, where it was 220 late.
+
+- **The sink says how late its device is.** `audio::Sink::latency_ns()`. The PipeWire sink
+  reads `pw_stream_get_time_n` in its process callback: the graph's delay to the device plus
+  what the stream's resampler holds.
+- **`AudioTrack.getTimestamp` counts it.** The frame given is the position less the latency.
+  The position itself does not count it, as on Android, and `getLatency` (not public API, but
+  players call it) reports the buffer plus the device.
+- **Under `--split` the broker tells the child.** The child cannot see the device. The broker
+  sends `AudioLatency` (stream, microseconds, at most 2 s) once the device has a figure, and
+  again when it moves by 2 ms: at most one message per write the child made, none for a
+  steady device. Protocol version 6.
+- **Two rules the first attempt was missing.** In two `--split` runs of three the delay was
+  not taken out at all. The player had taken its first timestamp before the latency was
+  known; when the figure arrived the timestamp's frame count stepped back by 200 ms, which a
+  player reads as a counter that wrapped, and it stopped using timestamps. So: no timestamp
+  is given until the device has said its latency, for at most 250 ms (a child whose main
+  thread is busy never hears the broker, and goes on without the figure); and a timestamp's
+  frame never goes back, so when the latency grows the frame stands still until playback has
+  passed it.
+
+Not covered: a real device (the delayed sink is a loopback, not Bluetooth or HDMI); a device
+that changes during playback, which is covered by a unit test and was not measured; the
+display's own latency; `SoundPool`, which has no timestamps to correct.
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 

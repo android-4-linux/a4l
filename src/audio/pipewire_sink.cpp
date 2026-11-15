@@ -9,6 +9,7 @@
 // present (ACL_HAVE_PIPEWIRE); make_sink() selects it via ACL_AUDIO=pipewire.
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <ctime>
 #include <deque>
@@ -166,13 +167,38 @@ class PipeWireSink final : public Sink {
     return fifo_.size() /
            static_cast<std::size_t>(fmt_.channels > 0 ? fmt_.channels : 1);
   }
+  std::int64_t latency_ns() const override {
+    return latency_ns_.load(std::memory_order_relaxed);
+  }
 
  private:
   static void on_process(void* data) {
     static_cast<PipeWireSink*>(data)->process();
   }
 
+  // What the graph says lies between this stream and the device: `delay`
+  // in ticks of `rate`, and frames the stream's resampler holds. Read in the
+  // process callback, where it describes the buffer about to be filled.
+  void note_latency() {
+    pw_time t{};
+    if (pw_stream_get_time_n(stream_, &t, sizeof(t)) < 0 || t.rate.denom == 0)
+      return;
+    // In floating point: the figures are the graph's, and delay times a
+    // billion need not fit 64 bits.
+    double ns = 0.0;
+    if (t.delay > 0)
+      ns = static_cast<double>(t.delay) * 1e9 *
+           static_cast<double>(t.rate.num) / static_cast<double>(t.rate.denom);
+    if (fmt_.sample_rate > 0)
+      ns += static_cast<double>(t.buffered) * 1e9 / fmt_.sample_rate;
+    const std::int64_t bounded = ns >= static_cast<double>(kMaxLatencyNs)
+                                     ? kMaxLatencyNs
+                                     : static_cast<std::int64_t>(ns);
+    latency_ns_.store(bounded, std::memory_order_relaxed);
+  }
+
   void process() {
+    note_latency();
     pw_buffer* b = pw_stream_dequeue_buffer(stream_);
     if (b == nullptr)
       return;
@@ -215,6 +241,9 @@ class PipeWireSink final : public Sink {
   mutable std::mutex mu_;
   std::deque<std::int16_t> fifo_;
   std::uint64_t frames_ = 0;
+  // A graph that reports more than this is reporting a fault.
+  static constexpr std::int64_t kMaxLatencyNs = 2'000'000'000;
+  std::atomic<std::int64_t> latency_ns_{-1};  // -1: not yet read
   bool inited_ = false;
   bool closed_ = false;
 };

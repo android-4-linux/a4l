@@ -38,6 +38,7 @@ struct Heard {
   int bad_writes = 0;  // not a whole number of frames
   audio::Format format;
   bool open_fails = false;
+  std::atomic<std::int64_t> latency_ns{0};  // what the device says of itself
 };
 
 class RecordingSink final : public audio::Sink {
@@ -64,6 +65,7 @@ class RecordingSink final : public audio::Sink {
     ++heard_.closes;
   }
   std::uint64_t frames_written() const override { return 0; }
+  std::int64_t latency_ns() const override { return heard_.latency_ns.load(); }
 
  private:
   Heard& heard_;
@@ -418,4 +420,95 @@ TEST_CASE("track: a timestamp exists once something has played",
   CHECK(later >= frames);
   CHECK(later <= 1600);
   CHECK(later_ns > ns);
+}
+
+TEST_CASE("track: a timestamp is behind the position by the device's latency",
+          "[audio][track]") {
+  Heard heard;
+  heard.latency_ns = 100'000'000;  // 800 frames at 8 kHz
+  auto t = make(heard, config(8000, 1, 8000));
+  CHECK(t->device_latency_ns() == 100'000'000);
+  const std::vector<std::int16_t> pcm = ramp(8000);
+  t->play();
+  CHECK(t->write(pcm.data(), 8000, false) == 8000);
+  std::uint64_t frames = 0;
+  std::int64_t ns = 0;
+  // Nothing has come out of the device for the first 100 ms.
+  REQUIRE(eventually(1000, [&] { return t->position() > 0; }));
+  if (t->position() < 800)
+    CHECK_FALSE(t->timestamp(&frames, &ns));
+  REQUIRE(eventually(2000, [&] { return t->timestamp(&frames, &ns); }));
+  // Read the position after: it has only moved on, so the gap is at least
+  // the latency, and no more than that plus what played between the two.
+  const std::uint64_t pos = t->position();
+  CHECK(pos >= frames + 800);
+  CHECK(pos <= frames + 800 + 400);
+}
+
+TEST_CASE("track: no timestamp while the device has not said how late it is",
+          "[audio][track]") {
+  Heard heard;
+  heard.latency_ns = -1;
+  auto t = make(heard, config(8000, 1, 4000));
+  CHECK(t->device_latency_ns() == 0);  // unknown reads as none
+  const std::vector<std::int16_t> pcm = ramp(4000);
+  t->play();
+  CHECK(t->write(pcm.data(), 4000, false) == 4000);
+  REQUIRE(eventually(1000, [&] { return t->position() > 400; }));
+  std::uint64_t frames = 0;
+  std::int64_t ns = 0;
+  CHECK_FALSE(t->timestamp(&frames, &ns));
+  heard.latency_ns = 0;
+  CHECK(t->timestamp(&frames, &ns));
+  CHECK(frames > 400);
+}
+
+TEST_CASE(
+    "track: a device that never says its latency does not hold "
+    "timestamps back for good",
+    "[audio][track]") {
+  Heard heard;
+  heard.latency_ns = -1;
+  auto t = make(heard, config(8000, 1, 8000));
+  const std::vector<std::int16_t> pcm = ramp(8000);
+  t->play();
+  CHECK(t->write(pcm.data(), 8000, false) == 8000);
+  std::uint64_t frames = 0;
+  std::int64_t ns = 0;
+  REQUIRE(eventually(1000, [&] { return t->timestamp(&frames, &ns); }));
+  // Not before the wait was up: a quarter of a second, 2000 frames.
+  CHECK(frames >= 1500);
+}
+
+TEST_CASE("track: a timestamp does not go back when the latency grows",
+          "[audio][track]") {
+  Heard heard;
+  auto t = make(heard, config(8000, 1, 8000));
+  const std::vector<std::int16_t> pcm = ramp(8000);
+  t->play();
+  CHECK(t->write(pcm.data(), 8000, false) == 8000);
+  std::uint64_t first = 0;
+  std::int64_t ns = 0;
+  REQUIRE(eventually(1000,
+                     [&] { return t->timestamp(&first, &ns) && first > 800; }));
+  // Another device, 200 ms later than the first: the frame sounding now is
+  // 1600 earlier, which is before the one already given.
+  heard.latency_ns = 200'000'000;
+  std::uint64_t held = 0;
+  REQUIRE(t->timestamp(&held, &ns));
+  CHECK(held == first);
+  // It moves again once playback has passed it.
+  std::uint64_t later = 0;
+  REQUIRE(eventually(
+      2000, [&] { return t->timestamp(&later, &ns) && later > first; }));
+  // A latency past any device is bounded, not multiplied out.
+  heard.latency_ns = INT64_MAX;
+  CHECK(t->device_latency_ns() == 2'000'000'000);
+  CHECK(t->timestamp(&held, &ns));
+  CHECK(held >= later);
+  // After a stop the count starts again from nothing.
+  t->pause();
+  t->flush();
+  heard.latency_ns = 0;
+  CHECK_FALSE(t->timestamp(&held, &ns));
 }

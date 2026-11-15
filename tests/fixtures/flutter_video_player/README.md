@@ -88,3 +88,35 @@ Measured 2026-11-15, audio minus video, positive when the sound is late:
 
 So a4l is within about 10 ms of the reference single-process and 25 ms under `--split`. The
 screen is sampled every 16 ms, which is the resolution of each number.
+
+### A device with latency
+
+A null sink sounds what it is given at once. To check that a device's own delay is taken out,
+put a delay in front of it that declares itself, and play to that:
+
+```sh
+pw-loopback -n a4l-delay -d 0.2 \
+    --capture-props='media.class=Audio/Sink node.name=a4l-delay' \
+    --playback-props='target.object=a4l-test node.dont-fallback=true node.dont-reconnect=true' &
+pw-cli s <id of a4l-delay> ProcessLatency '{ ns = 200000000 }'
+```
+
+`pw-loopback` delays and does not report it; the `ProcessLatency` line is what makes the
+graph report 200 ms (check a port's `Latency` param with `pw-dump`). `node.dont-fallback`
+keeps the delayed sound off the default output if `a4l-test` is missing. Run with
+`PIPEWIRE_NODE=a4l-delay` and measure at `a4l-test` as before.
+
+Measured 2026-11-15, audio minus video, each a4l figure the mean of a run's two events:
+
+| | ms |
+|---|---|
+| mpv, null sink | +4 |
+| mpv, delayed sink before `ProcessLatency` is set | +202 |
+| mpv, delayed sink | -8 |
+| a4l before, delayed sink: two runs single process, two `--split` | +221, +224; +215, +232 |
+| a4l, delayed sink, single process, five runs | +13, +12, +12, +20, +20 |
+| a4l, delayed sink, `--split`, five runs | +16, +34, +53, +18, +36 |
+
+The reference figures on the null sink differ from the table above (+4 here, +16 to +18
+there): they were taken in another session of the audio daemon, and only differences within
+one session mean anything.

@@ -487,8 +487,16 @@ jint JNICALL AT_native_get_timestamp(JNIEnv* env,
     return kErrorInvalidOperation;
   std::uint64_t frames = 0;
   std::int64_t ns = 0;
-  if (!c->track->timestamp(&frames, &ns))
-    return kErrorInvalidOperation;  // nothing has played yet
+  const bool have = c->track->timestamp(&frames, &ns);
+  if (diag()) {
+    static std::atomic<int> n{0};
+    if (n.fetch_add(1) % 20 == 0)
+      log::i(kTag, "diag: timestamp {} frame {} at {} ns, device latency {} us",
+             have ? "ok" : "none", frames, ns,
+             c->track->device_latency_ns() / 1000);
+  }
+  if (!have)
+    return kErrorInvalidOperation;  // nothing has come out of the device yet
   const jlong v[2] = {static_cast<jlong>(frames), static_cast<jlong>(ns)};
   env->SetLongArrayRegion(out, 0, 2, v);
   return kSuccess;
@@ -497,9 +505,15 @@ jint JNICALL AT_native_get_latency(JNIEnv* env, jobject thiz) {
   auto c = ctx_of(env, thiz);
   if (!c)
     return 0;
+  // The buffer and the device after it. A player that calls this (it is not
+  // public API) takes the buffer back off to get the device's share.
   const audio::Track::Config& cfg = c->track->config();
+  if (diag())
+    log::i(kTag, "diag: getLatency, device latency {} us",
+           c->track->device_latency_ns() / 1000);
   return static_cast<jint>(static_cast<std::int64_t>(cfg.capacity_frames) *
-                           1000 / cfg.sample_rate);
+                               1000 / cfg.sample_rate +
+                           c->track->device_latency_ns() / 1'000'000);
 }
 jint JNICALL AT_native_get_underrun_count(JNIEnv* env, jobject thiz) {
   auto c = ctx_of(env, thiz);

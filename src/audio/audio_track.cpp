@@ -32,6 +32,9 @@ constexpr int kLeadMs = 30;
 // A sink that reports what it holds unplayed (PipeWire) is kept this full
 // and no fuller, so the track follows the device's clock and not its own.
 constexpr int kSinkTargetMs = 60;
+constexpr std::int64_t kMaxDeviceLatencyNs = 2'000'000'000;
+// How long timestamp() waits for a device to say its latency.
+constexpr std::chrono::milliseconds kLatencyWait{250};
 
 constexpr int kMinRate = 4000;
 constexpr int kMaxRate = 192000;
@@ -175,6 +178,7 @@ void Track::stop() {
       state_ = State::Stopped;
       draining_ = false;
       position_ = 0;
+      last_ts_frames_ = 0;
       if (config_.static_mode)
         static_pos_ = 0;
     }
@@ -193,6 +197,7 @@ void Track::flush() {
     head_ = 0;
     fill_ = 0;
     position_ = 0;
+    last_ts_frames_ = 0;
     if (draining_) {
       draining_ = false;
       state_ = State::Stopped;
@@ -209,6 +214,7 @@ bool Track::reload_static() {
     return false;
   static_pos_ = 0;
   position_ = 0;
+  last_ts_frames_ = 0;
   return true;
 }
 
@@ -254,14 +260,53 @@ std::uint64_t Track::position() const {
 }
 
 bool Track::timestamp(std::uint64_t* frames, std::int64_t* time_ns) const {
+  Clock::time_point first;
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (!played_any_ || position_ == 0)
       return false;
+    first = first_played_;
   }
-  *frames = position();
+  // A device that has not yet said how late it is: no timestamp, so that a
+  // player does not start from one that is wrong by that much. A device
+  // says within a period or two. One that has not by kLatencyWait is not
+  // going to (in a --split child, the thread that would hear the broker is
+  // busy), and the track goes on without the figure rather than without
+  // timestamps.
+  std::int64_t latency = ok_ ? sink_->latency_ns() : 0;
+  if (latency < 0) {
+    if (Clock::now() - first < kLatencyWait)
+      return false;
+    latency = 0;
+  }
+  // position() counts a frame as played when the sink has let go of it.
+  // The device sounds it later by its own latency, so the frame sounding
+  // now is that much earlier in the stream.
+  const std::uint64_t pos = position();
+  const std::uint64_t behind =
+      static_cast<std::uint64_t>(std::min(latency, kMaxDeviceLatencyNs)) *
+      static_cast<std::uint64_t>(config_.sample_rate) / 1'000'000'000;
+  std::lock_guard<std::mutex> lock(mu_);
+  if (position_ == 0)
+    return false;  // stopped or flushed meanwhile
+  // A timestamp does not go back: a player reads a smaller frame count as
+  // the counter having wrapped. When the latency grows (another device) the
+  // frame stands still until playback has caught up with it.
+  const std::uint64_t now_frames =
+      std::max(pos > behind ? pos - behind : 0, last_ts_frames_);
+  if (now_frames == 0)
+    return false;
+  last_ts_frames_ = now_frames;
+  *frames = now_frames;
   *time_ns = monotonic_ns();
-  return *frames > 0;
+  return true;
+}
+
+std::int64_t Track::device_latency_ns() const {
+  // Bounded here as well as in the sinks: this multiplies a sample rate.
+  return ok_ ? std::clamp<std::int64_t>(sink_->latency_ns(), 0,
+                                        kMaxDeviceLatencyNs)
+             : 0;
 }
 
 int Track::underruns() const {
@@ -400,8 +445,10 @@ void Track::pump() {
         // The end of what stop() asked to be played out, or of the sound.
         state_ = State::Stopped;
         draining_ = false;
-        if (!config_.static_mode)
+        if (!config_.static_mode) {
           position_ = 0;
+          last_ts_frames_ = 0;
+        }
       } else if (!starved_ && played_any_) {
         starved_ = true;
         ++underruns_;
@@ -415,6 +462,8 @@ void Track::pump() {
       if (!stopped_now || config_.static_mode)
         position_ += static_cast<std::uint64_t>(got);
       to_sink_ += static_cast<std::uint64_t>(got);
+      if (!played_any_)
+        first_played_ = Clock::now();
       played_any_ = true;
       lock.unlock();
       room_.notify_all();

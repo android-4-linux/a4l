@@ -46,6 +46,9 @@ enum class MsgType : std::uint32_t {
   VideoHide,    // child -> acl: take the picture off the video plane
   VideoReset,   // child -> acl: the screen changed; drop the plane and its hole
   AudioClose,   // child -> acl: a PCM stream ends (u32 = stream id)
+  // Appended so that a player in the child can time its picture against
+  // sound it cannot see leave the device.
+  AudioLatency,  // acl -> child: how far behind the broker a stream sounds
 };
 
 // Sent in Hello. Bump when Message changes size or a payload changes layout:
@@ -53,7 +56,8 @@ enum class MsgType : std::uint32_t {
 // refused as truncated. 2: PresentFrame planes, Input keysym, PresentState.
 // 3: PresentState.frames_seen. 4: the Video* messages. 5: audio as samples
 // in the datagram (AudioOpen and AudioWrite changed, AudioClose added).
-inline constexpr std::uint32_t kProtocolVersion = 5;
+// 6: AudioLatency.
+inline constexpr std::uint32_t kProtocolVersion = 6;
 
 // Bounds both ends enforce on what the other sends.
 inline constexpr std::uint32_t kMaxSurfaceDim = 16384;
@@ -69,6 +73,9 @@ inline constexpr std::uint32_t kMaxAudioStreams = 8;
 inline constexpr std::uint32_t kMaxAudioChannels = 8;
 inline constexpr std::uint32_t kMinAudioRate = 4000;
 inline constexpr std::uint32_t kMaxAudioRate = 192000;
+// The most latency a stream is said to have. A Bluetooth sink is a few
+// hundred milliseconds; more than this is a fault, not a device.
+inline constexpr std::uint32_t kMaxAudioLatencyUs = 2'000'000;
 
 struct SurfaceInfo {  // Create/Resize payload
   std::uint32_t surface_id;
@@ -172,6 +179,13 @@ struct AudioWrite {
   // extra = the samples, little-endian, a whole number of frames.
 };
 
+// The time between the broker handing a stream's samples to its device and
+// their sounding. Sent once the device has a figure and when it changes.
+struct AudioLatency {
+  std::uint32_t stream;
+  std::uint32_t latency_us;  // at most kMaxAudioLatencyUs
+};
+
 // One datagram = a fixed header + optional trailing bytes (in `extra`) + up to
 // two ancillary fds. The union keeps the header POD and copyable; `extra_len`
 // tells the receiver how much trailer followed the header inside the same
@@ -191,6 +205,7 @@ struct Message {
     Lifecycle lifecycle;
     AudioOpen audio_open;
     AudioWrite audio_write;
+    AudioLatency audio_latency;
     std::uint32_t u32;  // Hello version, etc.
   };
   // Zeroed in full: the union is larger than most payloads, and whatever is

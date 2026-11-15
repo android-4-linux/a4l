@@ -257,6 +257,13 @@ class Sink final : public audio::Sink {
   }
   std::uint64_t frames_written() const override { return 0; }
   std::uint64_t frames_pending() const override { return pending_; }
+  // Any figure at all, the unknown and the absurd included, from what was
+  // written: the broker bounds it before it tells the child.
+  std::int64_t latency_ns() const override {
+    static constexpr std::int64_t kFigures[] = {
+        -1, 0, 21'000'000, 250'000'000, INT64_MAX, INT64_MIN};
+    return kFigures[pending_ % 6];
+  }
 
  private:
   audio::Format fmt_;

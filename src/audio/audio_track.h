@@ -80,9 +80,14 @@ class Track {
   State state() const;
   // Frames played since the position was last reset.
   std::uint64_t position() const;
-  // The position together with the time it was read at (CLOCK_MONOTONIC).
-  // False until something has played.
+  // A frame and the time it sounded at (CLOCK_MONOTONIC): the position less
+  // what the device is still holding, read now. Never below the last one
+  // given. False until a frame has come out of the device, and for a short
+  // while at the start if the device has not yet said how late it is.
   bool timestamp(std::uint64_t* frames, std::int64_t* time_ns) const;
+  // The device's delay, which position() does not count and timestamp()
+  // does. 0 where the sink cannot say.
+  std::int64_t device_latency_ns() const;
   // Times playback ran out of data while playing.
   int underruns() const;
   // Frames buffered and not yet played.
@@ -126,6 +131,9 @@ class Track {
   bool starved_ = false;  // in an underrun now
   int underruns_ = 0;
   bool played_any_ = false;
+  std::chrono::steady_clock::time_point first_played_{};
+  // The last frame timestamp() gave, which the next is not below.
+  mutable std::uint64_t last_ts_frames_ = 0;
   float gain_l_ = 1.0f, gain_r_ = 1.0f;
   // The clock the stream plays by: `since_anchor_` frames have gone to the
   // sink since `anchor_`. The pump runs a little ahead of it (the lead), and
