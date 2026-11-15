@@ -5,6 +5,7 @@
 package org.acl.internal;
 
 import android.graphics.Canvas;
+import android.os.Handler;
 import android.os.Looper;
 import android.os.MessageQueue;
 import android.view.Choreographer;
@@ -68,7 +69,9 @@ public final class PresentDriver {
     private static native boolean nDispatch(long s);      // drain wl events; false once closed
     private static native void nDispatchRepeat(long s);   // service one key-repeat tick
     private static native void nSetVsyncDelivered(long s);// switch vsync to compositor-clocked
-    private static native void nMaybeDeliverVsync(long s);// if ready + a frame was requested, clock a vsync
+    // If ready + a frame was requested, clock a vsync. Returns 0, or the nanoseconds after which
+    // to ask again when the rate cap held the vsync back (see clockVsync).
+    private static native long nMaybeDeliverVsync(long s);
     private static native void nTraverse(long s);         // beginFrame -> measure/layout/draw -> submit
     private static native void nClose(long s);            // tear down presenter + release refs
 
@@ -156,13 +159,22 @@ public final class PresentDriver {
             }
         };
 
+        // Retry for a vsync the rate cap held back (clockVsync).
+        final Handler handler = new Handler(looper);
+        final Runnable[] vsyncRetry = new Runnable[1];
+        vsyncRetry[0] = new Runnable() {
+            @Override public void run() {
+                if (sSession == s) clockVsync(s, handler, this);
+            }
+        };
+
         // The Wayland fd on the Looper: drain events, then clock a vsync if the compositor is
         // ready and a frame was requested (by Compose's clock or the traversal re-post).
         final MessageQueue.OnFileDescriptorEventListener wlListener =
             new MessageQueue.OnFileDescriptorEventListener() {
                 @Override public int onFileDescriptorEvents(FileDescriptor fd, int events) {
                     if (!nDispatch(s)) { quitLooper(looper, s); return 0; }
-                    nMaybeDeliverVsync(s);
+                    clockVsync(s, handler, vsyncRetry[0]);
                     return EVENT_INPUT;
                 }
             };
@@ -175,7 +187,7 @@ public final class PresentDriver {
                 new MessageQueue.OnFileDescriptorEventListener() {
                     @Override public int onFileDescriptorEvents(FileDescriptor fd, int events) {
                         nDispatchRepeat(s);
-                        nMaybeDeliverVsync(s);
+                        clockVsync(s, handler, vsyncRetry[0]);
                         return EVENT_INPUT;
                     }
                 });
@@ -217,7 +229,7 @@ public final class PresentDriver {
         // Kick: schedule frame 0 (which requests a vsync) and deliver the first vsync so
         // doFrame — and thus the first composition + traversal — starts.
         postTraversal(choreo, postCallback, traversal[0]);
-        nMaybeDeliverVsync(s);
+        clockVsync(s, handler, vsyncRetry[0]);
 
         try {
             Looper.loop();
@@ -329,6 +341,18 @@ public final class PresentDriver {
     // The main looper cannot be quit (it throws); in that case tear down and exit the process,
     // mirroring the old present loop returning and ending the run. A quittable looper unblocks
     // Looper.loop() so the caller's finally runs nClose.
+    /**
+     * Clock a vsync if one is due. The rate cap may hold it back for part of a refresh period;
+     * the compositor has by then sent its frame callback and will send nothing more, so the wait
+     * is a timed retry on this looper. At most one retry is queued.
+     */
+    private static void clockVsync(long s, Handler handler, Runnable retry) {
+        final long waitNs = nMaybeDeliverVsync(s);
+        if (waitNs <= 0L) return;
+        handler.removeCallbacks(retry);
+        handler.postDelayed(retry, (waitNs + 999_999L) / 1_000_000L);
+    }
+
     private static void quitLooper(Looper looper, long s) {
         try {
             looper.quitSafely();
