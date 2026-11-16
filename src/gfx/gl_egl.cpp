@@ -579,9 +579,16 @@ class GbmGlWindow final : public GlWindow {
                         const std::vector<std::uint64_t>& modifiers) {
     const std::uint32_t flags = GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT;
     if (!modifiers.empty()) {
+#if ACL_HAVE_GBM_SURFACE_MODIFIERS2
       surf_ = gbm_surface_create_with_modifiers2(
           gbm_, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h),
           kGbmFormat, modifiers.data(), modifiers.size(), flags);
+#else  // gbm before Mesa 21.3: the same call, the usage left to the driver
+      surf_ = gbm_surface_create_with_modifiers(
+          gbm_, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h),
+          kGbmFormat, modifiers.data(),
+          static_cast<unsigned int>(modifiers.size()));
+#endif
     }
     if (surf_ ==
         nullptr) {  // no modifiers given, or none supported by the driver

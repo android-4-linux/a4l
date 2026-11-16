@@ -333,6 +333,11 @@ conf.set10('ACL_HAVE_WCS', have_wcs)
 conf.set10('ACL_HAVE_SKIA', have_skia)
 conf.set10('ACL_HAVE_VULKAN', have_vulkan)
 conf.set10('ACL_HAVE_GL', have_gl)
+# gbm_surface_create_with_modifiers2 (modifiers and usage flags together) is Mesa 21.3. An
+# older gbm has the call without flags, which is used in its place.
+conf.set10('ACL_HAVE_GBM_SURFACE_MODIFIERS2',
+           have_gl and cxx.has_function('gbm_surface_create_with_modifiers2',
+                                        prefix : '#include <gbm.h>', dependencies : gbm_dep))
 conf.set10('ACL_HAVE_SDBUS', have_sdbus)
 # The GLSurfaceView present path (jvm_vm.cpp, media_codec_jni.cpp) calls wm::present_gl_loop,
 # wm::active_video_presenter and create_gl_session_core, which exist only with the wcs
