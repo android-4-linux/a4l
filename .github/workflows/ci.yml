@@ -314,6 +314,8 @@ jobs:
         # GN args build Skia's bundled png/jpeg/webp/zlib/icu/harfbuzz but leave
         # skia_use_system_freetype2 and skia_use_fontconfig at their defaults, and acl's own
         # skia_dep then links both through pkg-config.
+        # clang and its runtime are for the fuzz steps at the end of the job: libFuzzer and
+        # the sanitizers live in libclang-rt, which the image's clang does not promise.
         timeout-minutes: 20
         run: |
           apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
@@ -325,7 +327,8 @@ jobs:
                  meson ninja-build g++ pkg-config libfmt-dev zlib1g-dev libssl-dev python3 \
                  libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev \
                  libvulkan-dev libdrm-dev libgbm-dev libegl-dev libgles-dev \
-                 libfreetype-dev libfontconfig-dev libpugixml-dev bubblewrap; then
+                 libfreetype-dev libfontconfig-dev libpugixml-dev bubblewrap \
+                 clang libclang-rt-18-dev; then
               exit 0
             fi
             echo "apt attempt ${attempt} failed or timed out; retrying"
@@ -407,3 +410,49 @@ jobs:
         env:
           ACL_TEST_REQUIRE_CONFINE: "1"   # split-confine fails, not skips, if it cannot sandbox
         run: meson test -C build-present --print-errorlogs
+
+      # The --split broker reads what a confined app process sends it, so its input is the
+      # attack surface ADR-0009 C5 is about. The harness (tests/fuzz/broker_fuzz.cpp) feeds
+      # the broker byte strings as that child would, under ASan and UBSan. It runs in this
+      # job because the broker is only built with the Vulkan present path and wcs, and this is
+      # the job that has the Skia prefix they need.
+      #
+      # What a green run means: the seeds and two minutes of mutation from them did not crash
+      # the broker at this commit. It starts from the seeds every time -- no corpus is kept
+      # between runs -- so it is a regression check on the message handling, not a campaign.
+      - name: Configure the fuzz build (clang, ASan + UBSan)
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          set -o pipefail
+          meson setup build-fuzz -Dfuzzers=true -Dskia_prefix="$HOME/skia-prefix" \
+            -Db_sanitize=address,undefined -Db_lundef=false \
+            -Dcpp_args=-fsanitize=fuzzer-no-link 2>&1 | tee setup-fuzz.log
+          # tests/fuzz/meson.build only warns when the broker cannot be built, and the compile
+          # step below would then fail on a missing target with no reason given.
+          if grep -qF 'broker_fuzz not built' setup-fuzz.log; then
+            echo "the fuzz configuration has no Vulkan present path or no wcs" >&2
+            exit 1
+          fi
+      - name: Compile the broker fuzz harness
+        run: meson compile -C build-fuzz broker_fuzz
+      - name: Fuzz the broker (seeds, then 120 s)
+        # A crash leaves crash-<sha1> beside the corpus. It is printed as base64 because the
+        # input is the whole reproduction and the runner is gone when the job ends:
+        #   base64 -d > crash.bin && build-fuzz/tests/fuzz/broker_fuzz crash.bin
+        timeout-minutes: 10
+        run: |
+          mkdir -p fuzz-corpus fuzz-out
+          python3 tests/fuzz/make_broker_seeds.py fuzz-corpus
+          echo "$(ls fuzz-corpus | wc -l) seed(s)"
+          rc=0
+          ./build-fuzz/tests/fuzz/broker_fuzz -max_len=4096 -max_total_time=120 \
+            -print_final_stats=1 -artifact_prefix=fuzz-out/ fuzz-corpus || rc=$?
+          for f in fuzz-out/*; do
+            [ -f "$f" ] || continue
+            echo "::group::$f (base64)"
+            base64 -w 76 "$f"
+            echo "::endgroup::"
+          done
+          exit $rc

@@ -2,6 +2,7 @@
 # Provenance: original a4l build glue (docs/adr/ADR-0009 C5). No GPL-3.0 sources.
 #
 # libFuzzer harnesses. Off by default: they need clang and are not part of the test suite.
+# CI builds and runs broker_fuzz for 120 s in the `present` job (.github/workflows/ci.yml).
 #
 #   CC=clang CXX=clang++ meson setup build-fuzz -Dfuzzers=true \
 #       -Db_sanitize=address,undefined -Db_lundef=false \
