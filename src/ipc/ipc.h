@@ -49,6 +49,8 @@ enum class MsgType : std::uint32_t {
   // Appended so that a player in the child can time its picture against
   // sound it cannot see leave the device.
   AudioLatency,  // acl -> child: how far behind the broker a stream sounds
+  // Appended so that the child can send video the compositor takes.
+  VideoRefused,  // acl -> child: no video of this format is shown (u32 fourcc)
 };
 
 // Sent in Hello. Bump when Message changes size or a payload changes layout:
@@ -56,8 +58,8 @@ enum class MsgType : std::uint32_t {
 // refused as truncated. 2: PresentFrame planes, Input keysym, PresentState.
 // 3: PresentState.frames_seen. 4: the Video* messages. 5: audio as samples
 // in the datagram (AudioOpen and AudioWrite changed, AudioClose added).
-// 6: AudioLatency.
-inline constexpr std::uint32_t kProtocolVersion = 6;
+// 6: AudioLatency. 7: VideoRefused.
+inline constexpr std::uint32_t kProtocolVersion = 7;
 
 // Bounds both ends enforce on what the other sends.
 inline constexpr std::uint32_t kMaxSurfaceDim = 16384;

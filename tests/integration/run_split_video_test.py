@@ -22,7 +22,7 @@
 # ACL_TEST_VIDEO_KEEP=<dir> keeps the APKs and the runs' logs there.
 # ACL_TEST_VIDEO_ARGS="..." replaces the a4l arguments (default: --split --present) and
 #   leaves out the hole check.
-# ACL_TEST_VIDEO_VARIANT=launch|late runs one form.
+# ACL_TEST_VIDEO_VARIANT=launch|late|converted runs one form.
 import glob
 import os
 import re
@@ -149,8 +149,12 @@ def main() -> int:
             run([zipalign, "-f", "4", unaligned, apk])
             return apk
 
-        variants = [("launch", build_apk("com.acl.videoplane.Main", "launch")),
-                    ("late", build_apk("com.acl.videoplane.MainLate", "late"))]
+        # A third run converts every frame to XBGR8888 (gfx::VideoConverter), as a4l does
+        # for a compositor that does not take the decoder's NV12.
+        at_launch = build_apk("com.acl.videoplane.Main", "launch")
+        variants = [("launch", at_launch, {}),
+                    ("late", build_apk("com.acl.videoplane.MainLate", "late"), {}),
+                    ("converted", at_launch, {"ACL_VIDEO_CONVERT": "1"})]
         only = os.environ.get("ACL_TEST_VIDEO_VARIANT", "")
         if only:
             variants = [v for v in variants if v[0] == only]
@@ -170,8 +174,8 @@ def main() -> int:
         check_hole = "ACL_TEST_VIDEO_ARGS" not in os.environ
         notes = []
 
-        for tag, apk in variants:
-            env = dict(os.environ, WAYLAND_DISPLAY=display, ACL_RUN_TIMEOUT="90",
+        for tag, apk, vary in variants:
+            env = dict(os.environ, **vary, WAYLAND_DISPLAY=display, ACL_RUN_TIMEOUT="90",
                        ACL_BIN=acl, ACL_PRESENT_GPU="1",
                        XDG_CACHE_HOME=os.path.join(work, f"cache-{tag}"),
                        XDG_DATA_HOME=os.path.join(work, f"data-{tag}"))
@@ -286,11 +290,13 @@ def main() -> int:
                 return fail(f"the broker showed {video} of {total} video frames", out)
             if ui < 1:
                 return fail("the window itself never presented", out)
+            if vary and "frames are converted to XBGR8888 on the GPU" not in out:
+                return fail("the frames were not converted", out)
             notes.append(f"{tag}: {video} of {total} frames at the broker's video plane, "
                          f"{ui} window frame(s), 0 rejected")
 
-        hole = (f"; a {want_hole}-pixel hole at the SurfaceView and the rest opaque, in both"
-                if check_hole and len(variants) == 2 else "")
+        hole = (f"; a {want_hole}-pixel hole at the SurfaceView and the rest opaque, in each"
+                if check_hole and len(variants) == 3 else "")
         sys.stdout.write("OK: " + "; ".join(notes) + hole + "\n")
         return 0
     except subprocess.CalledProcessError as e:

@@ -427,6 +427,10 @@ class SplitPresenter final : public IPresenter {
       video_hold_next_ = (video_hold_next_ + 1) % kVideoHolds;
     }
   }
+  bool video_refused(std::uint32_t drm_format) const noexcept override {
+    return drm_format != 0 &&
+           video_refused_format_.load(std::memory_order_relaxed) == drm_format;
+  }
   void hide_video() noexcept override {
     ipc::Message m;
     m.type = ipc::MsgType::VideoHide;
@@ -521,6 +525,9 @@ class SplitPresenter final : public IPresenter {
       case ipc::MsgType::AudioLatency:
         split_audio_note_latency(r.msg.audio_latency);
         break;
+      case ipc::MsgType::VideoRefused:
+        video_refused_format_.store(r.msg.u32, std::memory_order_relaxed);
+        break;
       case ipc::MsgType::SurfaceResize: {
         const ipc::SurfaceInfo& si = r.msg.surface;
         if (si.w != 0 && si.h != 0 && si.w <= ipc::kMaxSurfaceDim &&
@@ -586,6 +593,8 @@ class SplitPresenter final : public IPresenter {
   std::atomic<std::uint32_t> refresh_ns_{0};
   std::atomic<std::uint32_t> feedback_flags_{0};
   std::atomic<std::uint64_t> resize_{0};  // w << 32 | h; 0: none waiting
+  // The video format the broker last said the compositor does not take.
+  std::atomic<std::uint32_t> video_refused_format_{0};
   // Frame numbering, under state_mu_: submit() runs on the render thread and
   // PresentState is handled on the looper thread.
   std::mutex state_mu_;
@@ -1039,6 +1048,20 @@ class Broker {
                verdict_name(verdict), v.w, v.h, v.drm_format, v.modifier,
                v.plane_count, v.stride[0], v.stride[1], facts.size);
       ++stats_.rejected;
+      // A format the compositor does not take is not the child's doing: say
+      // so, once per format, and the child can send one it does take.
+      if ((verdict == FrameVerdict::BadFormat ||
+           verdict == FrameVerdict::BadModifier) &&
+          video_format_accepted(v.drm_format) &&
+          video_refused_told_ != v.drm_format) {
+        ipc::Message m;
+        m.type = ipc::MsgType::VideoRefused;
+        m.u32 = v.drm_format;
+        if (channel_.send(m)) {
+          ++stats_.to_child;
+          video_refused_told_ = v.drm_format;
+        }
+      }
       return;
     }
     gfx::DmabufFrame fr{};
@@ -1330,6 +1353,7 @@ class Broker {
   std::vector<std::int16_t> audio_scratch_;
   // What the compositor advertised for the video format last seen.
   std::uint32_t video_mods_format_ = 0;
+  std::uint32_t video_refused_told_ = 0;  // VideoRefused sent for it
   std::vector<std::uint64_t> video_mods_;
   std::unique_ptr<IPresenter> presenter_;
   BrokerStats stats_;

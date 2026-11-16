@@ -77,7 +77,8 @@ struct VideoLimits {
 };
 
 // True for the formats a video frame may have: what a hardware decoder
-// exports. NV12 (8-bit 4:2:0) and P010 (10-bit 4:2:0).
+// exports, NV12 (8-bit 4:2:0) and P010 (10-bit 4:2:0), and what the child
+// converts those to for a compositor that takes neither, XBGR8888.
 bool video_format_accepted(std::uint32_t drm_format) noexcept;
 
 // A video frame as the compositor would be asked to import it. Stricter on

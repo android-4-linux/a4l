@@ -774,6 +774,37 @@ TEST_CASE("split: video frames cross to the broker's video plane", "[split]") {
   CHECK(w.video_violations == 0);
 }
 
+TEST_CASE("split: the child is told of a video format the compositor refuses",
+          "[split]") {
+  Rig rig;
+  auto p =
+      wm::split_presenter_open_on(rig.child, 1280, 800, "t", "a", {}, false);
+  REQUIRE(p != nullptr);
+  constexpr std::uint32_t kNv12 = 0x3231564e, kP010 = 0x30313050;
+  CHECK_FALSE(p->video_refused(kNv12));
+  CHECK_FALSE(p->video_refused(kP010));
+  CHECK_FALSE(p->video_refused(0));
+
+  // The fake compositor lists NV12 and no P010.
+  const int fd = buffer_fd('p');
+  gfx::DmabufFrame deep = video_of(fd);
+  deep.drm_format = kP010;
+  p->present_video(deep, 0, 0, 640, 360);
+  REQUIRE(pump(*p, [&] { return p->video_refused(kP010); }));
+  CHECK_FALSE(p->video_refused(kNv12));
+
+  // A format it takes is not reported, and a refusal is said once.
+  p->present_video(video_of(fd), 0, 0, 640, 360);
+  p->present_video(deep, 0, 0, 640, 360);
+  ::close(fd);
+  REQUIRE(settle(rig.world, [&] { return rig.world.video.size() == 1; }));
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.video_frames == 1);
+  CHECK(stats.rejected == 2);
+  CHECK(p->video_refused(kP010));
+  CHECK_FALSE(p->video_refused(kNv12));
+}
+
 TEST_CASE("split: the broker drops video that fails validation", "[split]") {
   Rig rig;
   const int fd = buffer_fd('v');

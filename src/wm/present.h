@@ -324,6 +324,13 @@ class IPresenter {
     return {};
   }
 
+  // True once a video frame of `drm_format` has been turned away because the
+  // compositor does not advertise it (or the frame's modifier for it). The
+  // producer then sends another format: see gfx::VideoConverter. Any thread.
+  virtual bool video_refused(std::uint32_t /*drm_format*/) const noexcept {
+    return false;
+  }
+
   // Video HW-plane path: present a decoded video frame (a distinct dma-buf per
   // frame) DIRECTLY on a wl_subsurface under the app's surface at the given
   // on-screen rect — the compositor scans it out on a DRM overlay plane

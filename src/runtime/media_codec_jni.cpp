@@ -37,6 +37,7 @@
 
 #include "gfx/ahardware_buffer.h"
 #include "gfx/buffer_queue.h"
+#include "gfx/video_convert.h"
 #include "log/log.h"
 #include "media/audio_codec.h"
 #include "media/timed_release.h"
@@ -174,6 +175,56 @@ constexpr std::size_t kMaxPendingPackets = 16;
 wm::IPresenter* video_plane_for(const CodecCtx* ctx) {
   return ctx->mime.rfind("video/", 0) == 0 ? wm::active_video_presenter()
                                            : nullptr;
+}
+
+// Put a decoded frame on the video plane. A compositor that has turned the
+// decoder's format away (it lists no NV12, or not with the decoder's
+// modifier) gets the picture converted to one it does list; the frames sent
+// before the refusal was known are lost. Timed-release thread.
+void show_on_plane(wm::IPresenter* p, const gfx::DmabufFrame& frame) {
+  const int w = static_cast<int>(frame.width);
+  const int h = static_cast<int>(frame.height);
+  // Once turned away, a format stays converted: the presenter remembers only
+  // the last format it refused, and that may become the converted one.
+  static std::atomic<std::uint32_t> converting{0};
+  if (converting.load(std::memory_order_relaxed) != frame.drm_format) {
+    // ACL_VIDEO_CONVERT: convert whatever the compositor takes, to try the
+    // converter on one that takes the decoder's format.
+    static const bool force = std::getenv("ACL_VIDEO_CONVERT") != nullptr;
+    if (!force && !p->video_refused(frame.drm_format)) {
+      p->present_video(frame, 0, 0, w, h);
+      return;
+    }
+    converting.store(frame.drm_format, std::memory_order_relaxed);
+  }
+  // One converter for the process, kept: frames on screen hold its buffers.
+  static std::mutex mu;
+  static std::unique_ptr<gfx::VideoConverter> converter;
+  static bool tried = false, said = false;
+  std::lock_guard<std::mutex> lk(mu);
+  std::string err;
+  if (!tried) {
+    tried = true;
+    converter = gfx::VideoConverter::Create(&err);
+    if (converter)
+      log::i(kTag,
+             "video: the compositor does not take format 0x{:x}; frames are "
+             "converted to XBGR8888 on the GPU",
+             frame.drm_format);
+    else
+      log::w(kTag, "video: no converter ({}); no picture", err);
+  }
+  if (!converter)
+    return;
+  gfx::DmabufFrame rgb{};
+  if (!converter->convert(frame, &rgb, &err)) {
+    if (!said) {
+      said = true;
+      log::w(kTag, "video: a frame was not converted ({}); dropped", err);
+    }
+    return;
+  }
+  p->present_video(rgb, 0, 0, w, h);
 }
 
 // Give up whatever an output slot holds.
@@ -1029,9 +1080,7 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env,
         if (!due)
           return;
         if (wm::IPresenter* p = wm::active_video_presenter())
-          p->present_video(plane_frame, 0, 0,
-                           static_cast<int>(plane_frame.width),
-                           static_cast<int>(plane_frame.height));
+          show_on_plane(p, plane_frame);
       });
     }
   } else if (render == JNI_TRUE && ctx->out_queue != nullptr) {

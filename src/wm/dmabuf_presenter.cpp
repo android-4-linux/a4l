@@ -898,6 +898,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       std::uint32_t drm_format) const noexcept override {
     return feedback_.Current().ModifiersFor(drm_format);
   }
+  bool video_refused(std::uint32_t drm_format) const noexcept override {
+    return drm_format != 0 &&
+           video_refused_format_.load(std::memory_order_relaxed) == drm_format;
+  }
   int video_wake_fd() const noexcept override { return video_wake_fd_; }
   // Present-thread: drain the wake eventfd, commit the pending video frame,
   // flush the display. Driven by the present loop's epoll on video_wake_fd() so
@@ -1019,12 +1023,13 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     {
       const std::vector<std::uint64_t> mods = modifiers_for(frame.drm_format);
       if (std::find(mods.begin(), mods.end(), frame.modifier) == mods.end()) {
-        if (video_refused_format_ != frame.drm_format) {
-          video_refused_format_ = frame.drm_format;
+        if (video_refused_format_.exchange(frame.drm_format,
+                                           std::memory_order_relaxed) !=
+            frame.drm_format) {
           log::w(kTag,
                  "video HW-plane: the compositor does not advertise format "
                  "0x{:x} modifier 0x{:x} ({} modifier(s) for the format); "
-                 "video frames are dropped",
+                 "frames of it are dropped",
                  frame.drm_format, frame.modifier, mods.size());
         }
         if (frame.fd >= 0)
@@ -2057,7 +2062,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   wl::WlPtr<ToplevelH> xdg_toplevel_;
   static constexpr std::int32_t kMaxToplevelDim = 16384;
   std::int32_t asked_w_ = 0, asked_h_ = 0;  // the compositor's latest
-  std::uint32_t video_refused_format_ = 0;  // warned about once
+  // The last video format turned away; read from the decode side.
+  std::atomic<std::uint32_t> video_refused_format_{0};
   // The size take_resize last reported; before that, the size opened at.
   std::int32_t taken_w_ = 0, taken_h_ = 0;
   // Alternate shells (ACL_WL_SHELL): only the selected one is bound. wl_output
