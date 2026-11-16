@@ -31,8 +31,10 @@ def message(tag, payload=b"", extra=b""):
     return head.ljust(MESSAGE_SIZE, b"\0") + extra
 
 
-def record(datagram, fds=0, kind=BIG):
-    return bytes([(kind << 2) | fds]) + struct.pack("<H", len(datagram)) + datagram
+def record(datagram, fds=0, kind=BIG, attached=False):
+    # attached: on an input's first record, the child stays connected (broker_fuzz.cpp).
+    sel = (kind << 2) | fds | (0x80 if attached else 0)
+    return bytes([sel]) + struct.pack("<H", len(datagram)) + datagram
 
 
 def surface(w, h, title=b"Clock", app_id=b"org.example.clock"):
@@ -121,6 +123,11 @@ def seeds():
                             record(video(640, 360, dest=(0, 0, 0, 0)), 1) +
                             record(bounds(0, 0, -1, 0x7FFFFFFF)))
     # Audio: two streams played and closed, with a window or without.
+    # The harness's compositor asks for half the size after the first frame: the new size,
+    # the size left behind (refused from then on), the new size again.
+    yield "resize", (record(surface(64, 64), attached=True) + record(frame(64, 64), 1) +
+                     record(frame(32, 32, 1), 1) + record(frame(64, 64, 2), 1) +
+                     record(frame(32, 32, 0), 1))
     yield "audio", (record(audio_open(0)) + record(audio_write(0)) +
                     record(audio_open(1, 48000, 1)) +
                     record(audio_write(1, 100, 1)) + record(audio_write(0, 512)) +

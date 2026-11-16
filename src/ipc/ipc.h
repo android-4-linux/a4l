@@ -23,7 +23,7 @@ enum class MsgType : std::uint32_t {
   Bye,        // orderly shutdown
   Log,        // art-host stdout/stderr forwarded to acl (extra = UTF-8 text)
   SurfaceCreate,  // art-host -> acl
-  SurfaceResize,  // art-host -> acl
+  SurfaceResize,  // acl -> child: the compositor asked for another size
   PresentFrame,   // art-host -> acl (carries a dma-buf fd + optional
                   // acquire-fence fd)
   FrameReleased,  // acl -> art-host (buffer returned; release-fence fd)
@@ -77,7 +77,7 @@ inline constexpr std::uint32_t kMaxAudioRate = 192000;
 // hundred milliseconds; more than this is a fault, not a device.
 inline constexpr std::uint32_t kMaxAudioLatencyUs = 2'000'000;
 
-struct SurfaceInfo {  // Create/Resize payload
+struct SurfaceInfo {  // Create/Resize payload (Resize: w and h only)
   std::uint32_t surface_id;
   std::uint32_t w, h;
   std::uint32_t want_ime;  // Create: bind the compositor's text input

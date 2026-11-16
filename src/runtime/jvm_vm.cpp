@@ -2469,17 +2469,19 @@ jint JNICALL PresentDriver_nRepeatFd(JNIEnv*, jclass, jlong sp) {
 // allocates at it from the next swap), the SurfaceView's holder reports it
 // (a GLSurfaceView's renderer gets onSurfaceChanged; Flutter's engine resizes
 // its onscreen surface), and the decor is laid out at it (hit-testing, and
-// Flutter's viewport metrics). Main thread. Single process only: a --split
-// child's window is a gbm surface the broker checks frames against, and it
-// keeps its size.
+// Flutter's viewport metrics). Main thread.
+//
+// A --split child's window is a gbm surface, which cannot change size in
+// place, and the app's render thread has it current. It is left as it is:
+// the holder's surfaceChanged makes the app build a new window surface
+// (GLSurfaceView and Flutter both do), and that one is made at the new size.
+// Until then the app's frames are the old size, which the broker still takes.
 void gl_session_resize(JNIEnv* env, PresentSession* s, int w, int h) {
   {
     std::lock_guard<std::mutex> lk(g_gl_session.mtx);
-    if (g_gl_session.split)
-      return;
     g_gl_session.w = w;
     g_gl_session.h = h;
-    if (g_gl_session.window)
+    if (g_gl_session.window && !g_gl_session.split)
       g_gl_session.window->resize(w, h, nullptr);
   }
   s->w = w;

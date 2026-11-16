@@ -37,7 +37,9 @@ BufferFacts inspect_buffer(int fd) noexcept;
 // What a frame is checked against.
 struct FrameLimits {
   bool have_surface = false;
-  std::uint32_t surface_w = 0;  // what SurfaceCreate asked for and got
+  // What SurfaceCreate asked for and got, or a size the broker told the
+  // child to take since.
+  std::uint32_t surface_w = 0;
   std::uint32_t surface_h = 0;
   // The modifiers the compositor advertised for the surface's format.
   std::span<const std::uint64_t> modifiers;

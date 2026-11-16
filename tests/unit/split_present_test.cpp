@@ -57,6 +57,9 @@ struct World {
   wm::InputCallback input;
 
   // Presenter state.
+  int asked_w = 0, asked_h = 0;  // a size the compositor asks for; 0: none
+  int taken_w = 0, taken_h = 0;  // the last one the broker took up
+  std::vector<std::pair<int, int>> asked;  // every size it has asked for
   bool need_frame = true;
   std::uint32_t free_mask = 0b111;
   bool closed = false;
@@ -164,8 +167,14 @@ class FakePresenter final : public wm::IPresenter {
         frame.planes[0].offset +
         static_cast<std::uint64_t>(frame.planes[0].stride) * frame.height;
     std::lock_guard<std::mutex> lock(world_.mu);
-    if (!file || static_cast<int>(frame.width) != world_.w ||
-        static_cast<int>(frame.height) != world_.h ||
+    // The size the window opened at, or one the compositor has asked for
+    // since. Which of those is checked by the test that resizes.
+    const std::pair<int, int> size{static_cast<int>(frame.width),
+                                   static_cast<int>(frame.height)};
+    const bool sized = size == std::pair<int, int>{world_.w, world_.h} ||
+                       std::find(world_.asked.begin(), world_.asked.end(),
+                                 size) != world_.asked.end();
+    if (!file || !sized ||
         (frame.drm_format != 0x34325241u && frame.drm_format != 0x34325258u) ||
         frame.planes[0].stride < frame.width * 4ull ||
         end > static_cast<std::uint64_t>(st.st_size) || frame.plane_count < 1 ||
@@ -191,6 +200,16 @@ class FakePresenter final : public wm::IPresenter {
   bool closed() const noexcept override {
     std::lock_guard<std::mutex> lock(world_.mu);
     return world_.closed;
+  }
+  bool take_resize(int* width, int* height) noexcept override {
+    std::lock_guard<std::mutex> lock(world_.mu);
+    if (world_.asked_w == 0)
+      return false;
+    *width = world_.taken_w = world_.asked_w;
+    *height = world_.taken_h = world_.asked_h;
+    world_.asked.emplace_back(world_.asked_w, world_.asked_h);
+    world_.asked_w = world_.asked_h = 0;
+    return true;
   }
   std::vector<std::uint64_t> modifiers_for(
       std::uint32_t drm_format) const noexcept override {
@@ -493,6 +512,103 @@ TEST_CASE("split: a frame crosses with its fd, and the slot ring is mirrored",
   CHECK(f.modifier == 0x0200000000401b03ull);
   CHECK(f.slot == 0);
   CHECK(f.byte == 'Q');  // the received fd is the sender's buffer
+}
+
+TEST_CASE("split: a resize is the compositor's, one size at a time",
+          "[split]") {
+  Rig rig;
+  auto p =
+      wm::split_presenter_open_on(rig.child, 640, 480, "t", "a", {}, false);
+  REQUIRE(p != nullptr);
+  REQUIRE(pump(*p, [&] { return p->ready(); }));
+  int w = 0, h = 0;
+  CHECK_FALSE(p->take_resize(&w, &h));  // nothing asked for yet
+
+  const auto ask = [&](int aw, int ah) {
+    rig.world.post([&rig, aw, ah] {
+      std::lock_guard<std::mutex> lock(rig.world.mu);
+      rig.world.asked_w = aw;
+      rig.world.asked_h = ah;
+    });
+  };
+  // Send a frame of the given size.
+  const auto send = [&](std::uint32_t fw, std::uint32_t fh, char byte) {
+    REQUIRE(pump(*p, [&] { return p->ready(); }));
+    const int fd = buffer_fd(byte);
+    gfx::DmabufFrame f = frame_of(fd);
+    f.width = fw;
+    f.height = fh;
+    f.planes[0].stride = fw * 4;
+    REQUIRE(p->submit(f, 0));
+    ::close(fd);
+  };
+  // The compositor's frame callback and release, once the broker has dealt
+  // with the frame: they cannot precede its commit.
+  const auto release = [&] {
+    rig.world.post([&rig] {
+      std::lock_guard<std::mutex> lock(rig.world.mu);
+      rig.world.need_frame = true;
+      rig.world.free_mask = 0b111;
+    });
+  };
+  const auto shown = [&] {
+    std::lock_guard<std::mutex> lock(rig.world.mu);
+    return rig.world.frames.size();
+  };
+  const auto took = [&] { return p->take_resize(&w, &h); };
+
+  ask(800, 600);
+  REQUIRE(pump(*p, took));
+  CHECK(w == 800);
+  CHECK(h == 600);
+  CHECK_FALSE(p->take_resize(&w, &h));  // told once
+
+  // Until the child follows, its old size is still the window's, and a size
+  // nobody asked for is not.
+  send(640, 480, 'a');
+  REQUIRE(settle(rig.world, [&] { return rig.world.frames.size() == 1; }));
+  release();
+  send(700, 500, 'b');
+  REQUIRE(settle(rig.world, [&] { return rig.world.keepalives == 1; }));
+  release();
+  CHECK(shown() == 1);
+
+  // The compositor moves on before the child has followed: the child is not
+  // told the next size until a frame of the first has arrived.
+  ask(720, 540);
+  REQUIRE(settle(rig.world, [&] { return rig.world.taken_w == 720; }));
+  CHECK_FALSE(pump(*p, took));
+
+  send(800, 600, 'c');
+  REQUIRE(settle(rig.world, [&] { return rig.world.frames.size() == 2; }));
+  release();
+  REQUIRE(pump(*p, took));
+  CHECK(w == 720);
+  CHECK(h == 540);
+
+  // The size left behind is no longer the window's.
+  send(640, 480, 'd');
+  REQUIRE(settle(rig.world, [&] { return rig.world.keepalives == 2; }));
+  release();
+  send(720, 540, 'e');
+  REQUIRE(settle(rig.world, [&] { return rig.world.frames.size() == 3; }));
+  release();
+
+  // Back to the size the child already has: nothing to tell it.
+  ask(720, 540);
+  REQUIRE(settle(rig.world, [&] { return rig.world.taken_w == 720; }));
+  CHECK_FALSE(pump(*p, took));
+
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.frames == 3);
+  CHECK(stats.resizes == 2);
+  CHECK(stats.rejected == 2);
+  CHECK(stats.frame_verdicts[static_cast<std::size_t>(
+            wm::FrameVerdict::BadSize)] == 2);
+  CHECK(rig.world.violations == 0);
+  REQUIRE(rig.world.frames.size() == 3);
+  CHECK(rig.world.frames[1].w == 800);
+  CHECK(rig.world.frames[2].w == 720);
 }
 
 TEST_CASE("split: input reaches the proxy's callback unchanged", "[split]") {

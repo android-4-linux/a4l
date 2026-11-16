@@ -77,7 +77,7 @@ as `SCM_RIGHTS` ancillary data. Messages (small, fixed structs — no general se
 | Direction | Message | Payload |
 |---|---|---|
 | art-host → a4l | `SurfaceCreate` | surface id, initial w×h |
-| art-host → a4l | `SurfaceResize` | surface id, w×h |
+| a4l → art-host | `SurfaceResize` | w×h the compositor asked for; one at a time (ADR-0009, "Window size under `--split`") |
 | art-host → a4l | `PresentFrame` | surface id, dma-buf **fd**, w×h, drm_format, modifier, stride, offset, damage rect, acquire-fence fd |
 | a4l → art-host | `FrameReleased` | surface id, buffer id (release-fence fd) |
 | a4l → art-host | `Input` | type (pointer/key), coords/keycode, action, timestamp |
