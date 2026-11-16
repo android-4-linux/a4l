@@ -315,8 +315,29 @@ def main() -> int:
                 return fail(f"{mode}: the activity was not told of the tile's size", p.stdout)
             if "rejected" in p.stdout and not re.search(r" 0 message\(s\) rejected", p.stdout):
                 return fail(f"{mode}: the broker rejected a message", p.stdout)
+
+        # 4. A compositor that lists LINEAR alone, as an embedded shell may. The frames
+        # must be LINEAR, and under --split the broker must take them.
+        lin = dict(env, ACL_PRESENT_LINEAR_ONLY="1")
+        linear = "LINEAR-only frames taken in both"
+        for args, mode in ((["--present"], "single process"),
+                           (["--split", "--present"], "--split")):
+            p = subprocess.run(runner + args, env=lin, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, errors="replace",
+                               timeout=120)
+            if "ACL_PRESENT_LINEAR_ONLY, LINEAR alone" not in p.stdout:
+                linear = "LINEAR-only not run (the compositor does not list LINEAR)"
+                break
+            if not re.search(r"dmabuf present\(A\): \d+x\d+ linear modifier=0x0 ", p.stdout):
+                return fail(f"{mode}: the frames were not LINEAR for a compositor that "
+                            "lists LINEAR alone", p.stdout)
+            if "refused a frame" in p.stdout:
+                return fail(f"{mode}: the broker refused a LINEAR frame", p.stdout)
+            if "VR: size" not in p.stdout:
+                return fail(f"{mode}: the app's view never got a size with LINEAR frames",
+                            p.stdout)
         sys.stdout.write(f"OK: single process: {single}; --split: {split}; "
-                         "a 1200x720 tile taken as the first size in both\n")
+                         f"a 1200x720 tile taken as the first size in both; {linear}\n")
         return 0
     except subprocess.CalledProcessError as e:
         sys.stderr.write(f"FAIL: build step: {e.cmd}\n{e.stderr}\n")

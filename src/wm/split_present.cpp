@@ -375,6 +375,12 @@ class SplitPresenter final : public IPresenter {
     return true;
   }
 
+  // A size the broker sent ahead of its answer to SurfaceCreate.
+  void seed_resize(std::uint64_t wh) noexcept {
+    if (wh != 0)
+      resize_.store(wh, std::memory_order_relaxed);
+  }
+
   // The state changes on the looper thread, in handle(); a render thread
   // waits here for it.
   bool wait_ready(int timeout_ms) noexcept override {
@@ -633,9 +639,11 @@ std::unique_ptr<IPresenter> split_presenter_open_on(ipc::Channel& channel,
     return nullptr;
   }
 
-  // The broker answers once the toplevel is configured. Nothing else is
-  // expected before that; anything that does arrive is dropped.
+  // The broker answers once the toplevel is configured. Before the answer
+  // it may send the size the compositor first gave, when that is not the
+  // one asked for here. Anything else that arrives is dropped.
   ipc::Received r;
+  std::uint64_t first_size = 0;
   for (;;) {
     if (!channel.recv(r)) {
       log::w(kTag, "split: broker closed before the surface was ready");
@@ -644,6 +652,11 @@ std::unique_ptr<IPresenter> split_presenter_open_on(ipc::Channel& channel,
     close_fds(r);
     if (r.msg.type == ipc::MsgType::SurfaceReady)
       break;
+    if (r.msg.type == ipc::MsgType::SurfaceResize && r.msg.surface.w != 0 &&
+        r.msg.surface.h != 0 && r.msg.surface.w <= ipc::kMaxSurfaceDim &&
+        r.msg.surface.h <= ipc::kMaxSurfaceDim)
+      first_size =
+          (static_cast<std::uint64_t>(r.msg.surface.w) << 32) | r.msg.surface.h;
   }
   if (r.msg.surface_ready.ok == 0) {
     log::w(kTag, "split: the broker could not create the surface");
@@ -655,8 +668,10 @@ std::unique_ptr<IPresenter> split_presenter_open_on(ipc::Channel& channel,
                 mods.size() * sizeof(std::uint64_t));
   log::i(kTag, "split: surface {}x{} via the broker, {} modifier(s)", width,
          height, mods.size());
-  return std::make_unique<SplitPresenter>(channel, std::move(input),
-                                          std::move(mods));
+  auto presenter = std::make_unique<SplitPresenter>(channel, std::move(input),
+                                                    std::move(mods));
+  presenter->seed_resize(first_size);
+  return presenter;
 }
 
 // ── Broker ──────────────────────────────────────────────────────────────
@@ -913,6 +928,9 @@ class Broker {
       limits_.have_surface = true;
       limits_.surface_w = si.w;
       limits_.surface_h = si.h;
+      // The toplevel is configured. A first size other than the child's goes
+      // ahead of the answer, so the child has it before it draws.
+      offer_resize();
     }
     reply_surface(presenter_ != nullptr);
   }
