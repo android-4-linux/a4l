@@ -77,6 +77,12 @@ public class Main extends Activity {
         final Configuration rc = getResources().getConfiguration();
         Log.i(TAG, "VR: created resources " + rc.screenWidthDp + "x" + rc.screenHeightDp + " metrics "
                 + dm.widthPixels + "x" + dm.heightPixels);
+        try {  // the fixture's manifest states 42 / "1.2.3"
+            android.content.pm.PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            Log.i(TAG, "VR: package version " + pi.versionCode + " / " + pi.versionName);
+        } catch (Exception e) {
+            Log.i(TAG, "VR: package version unknown: " + e);
+        }
         handler.postDelayed(new Runnable() {
             public void run() { finishRun("no configuration change"); }
         }, 12000);
