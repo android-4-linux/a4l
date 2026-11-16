@@ -843,8 +843,18 @@ stand-in is not in this repository. The server advertised one modifier for ARGB8
     Radeon (radeonsi), `glFinish` included.
   - `split-video` has a third run with every frame converted (`ACL_VIDEO_CONVERT`): 154 of
     155 frames at the broker's video plane under Weston, 0 rejected.
+  - Picture against sound (2026-11-16, headless sway, null sink, the media3 `PlayerView` app,
+    audio minus video in ms, each figure the mean of a run's two events, three runs each
+    taken in turn; mpv on the same capture +22 and +25): single process +34, +50, +28 as
+    decoded and +42, +33, +40 converted; `--split` +54, +61, +55 as decoded and +41, +55, +43
+    converted. Conversion moves the picture by less than the 20 ms the runs differ among
+    themselves.
+  - The fuzz harness's stand-in compositor now takes XBGR8888 LINEAR on the video plane, and
+    two seeds send converted frames, good and malformed. With the validator's stride check
+    removed the harness fails on a seed. 6.3 million runs in seven minutes from the 21 seeds,
+    no crash.
   - Not done: 10-bit is converted to 8; the YUV matrix and range are the GL driver's defaults,
-    with no hint from the stream; A/V sync with conversion was not measured; a compositor that
+    with no hint from the stream; a compositor that
     lists neither the decoder's format nor XBGR8888 LINEAR still gets no picture; the texture
     path (Flutter) does not go through the video plane and never needed this.
 - Input: a pointer tap at (300,200) in the view reached a View below the 64-pixel title bar as

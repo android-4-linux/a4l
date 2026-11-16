@@ -53,6 +53,9 @@ using namespace acl;
 
 namespace {
 
+constexpr std::uint32_t kNv12 = 0x3231564eu;      // 'NV12'
+constexpr std::uint32_t kXbgr8888 = 0x34324258u;  // 'XB24'
+
 const std::vector<std::uint64_t> kModifiers = {0x11, 0x0200000000401b03ull};
 
 [[noreturn]] void fail(const char* what) {
@@ -171,11 +174,14 @@ class Presenter final : public wm::IPresenter {
     *height = half.h;
     return true;
   }
-  // The video plane: NV12 is advertised with two modifiers, P010 is not.
+  // The video plane: NV12 is advertised with two modifiers, XBGR8888 (what
+  // the child converts to) LINEAR only, P010 not at all.
   std::vector<std::uint64_t> modifiers_for(
       std::uint32_t drm_format) const noexcept override {
-    if (drm_format == 0x3231564eu)
+    if (drm_format == kNv12)
       return {0, 0x0200000000401b03ull};
+    if (drm_format == kXbgr8888)
+      return {0};
     return {};
   }
   void present_video(const gfx::DmabufFrame& f,
@@ -190,22 +196,34 @@ class Presenter final : public wm::IPresenter {
     if (f.width == 0 || f.height == 0 || f.width > ipc::kMaxSurfaceDim ||
         f.height > ipc::kMaxSurfaceDim)
       fail("a video frame has a size out of range");
-    if (f.drm_format != 0x3231564eu)
+    if (f.drm_format != kNv12 && f.drm_format != kXbgr8888)
       fail("a video frame has a format that was not advertised");
-    if (f.modifier != 0 && f.modifier != 0x0200000000401b03ull)
-      fail("a video frame has a modifier that was not advertised");
-    if (f.plane_count < 2 || f.plane_count > 4)
-      fail("a video frame has a bad plane count");
-    if (f.planes[0].stride < f.width ||
-        f.planes[0].offset +
-                static_cast<std::uint64_t>(f.planes[0].stride) * f.height >
-            size)
-      fail("a video frame's luma does not fit its buffer");
-    if (f.planes[1].stride < (f.width + 1) / 2 * 2 ||
-        f.planes[1].offset + static_cast<std::uint64_t>(f.planes[1].stride) *
-                                 ((f.height + 1) / 2) >
-            size)
-      fail("a video frame's chroma does not fit its buffer");
+    if (f.drm_format == kXbgr8888) {
+      if (f.modifier != 0)
+        fail("a converted frame has a modifier that was not advertised");
+      if (f.plane_count < 1 || f.plane_count > 4)
+        fail("a converted frame has a bad plane count");
+      if (f.planes[0].stride < static_cast<std::uint64_t>(f.width) * 4 ||
+          f.planes[0].offset +
+                  static_cast<std::uint64_t>(f.planes[0].stride) * f.height >
+              size)
+        fail("a converted frame's pixels do not fit its buffer");
+    } else {
+      if (f.modifier != 0 && f.modifier != 0x0200000000401b03ull)
+        fail("a video frame has a modifier that was not advertised");
+      if (f.plane_count < 2 || f.plane_count > 4)
+        fail("a video frame has a bad plane count");
+      if (f.planes[0].stride < f.width ||
+          f.planes[0].offset +
+                  static_cast<std::uint64_t>(f.planes[0].stride) * f.height >
+              size)
+        fail("a video frame's luma does not fit its buffer");
+      if (f.planes[1].stride < (f.width + 1) / 2 * 2 ||
+          f.planes[1].offset + static_cast<std::uint64_t>(f.planes[1].stride) *
+                                   ((f.height + 1) / 2) >
+              size)
+        fail("a video frame's chroma does not fit its buffer");
+    }
     check_rect(x, y, w, h);
     // What the real presenter does with the rectangle next.
     const wm::VideoPlacement p =
