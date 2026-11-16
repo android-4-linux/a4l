@@ -220,6 +220,17 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 300,
       is_parallel : false,
     )
+    # A View-tree app whose window the compositor resizes, single-process and under --split:
+    # a4l takes the size up and tells the app with a configuration change. Starts a headless
+    # sway for itself. Needs host ART and sway; SKIPs otherwise, which includes CI.
+    test(
+      'view-window-resize',
+      py3,
+      args : [files('run_view_resize_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+      is_parallel : false,
+    )
     # An audio decoder in MediaCodec, end to end: a fixture app decodes AAC through MediaCodec
     # (dequeue calls and a Callback) into an AudioTrack, single-process and under --split.
     # Counting sink: no sound. Needs host ART and FFmpeg; SKIPs otherwise, which includes CI.

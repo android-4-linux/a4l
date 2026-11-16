@@ -22,6 +22,7 @@
 
 #include <sys/stat.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstdint>
@@ -323,6 +324,7 @@ class SubsurfacePlane {
     surface_.Get()->DamageBuffer(0, 0, static_cast<std::int32_t>(frame.width),
                                  static_cast<std::int32_t>(frame.height));
     surface_.Get()->Commit();
+    shown_ = true;
     inflight_.push_back(std::move(slot));
     if (diag_ && (++presented_ % 30 == 1))
       log::i("acl.wm.dmabuf",
@@ -338,6 +340,15 @@ class SubsurfacePlane {
       return;
     surface_.Get()->Attach(nullptr, 0, 0);
     surface_.Get()->Commit();
+    shown_ = false;
+  }
+  // A frame is on the plane.
+  bool shown() const noexcept { return shown_; }
+  // Apply a changed viewport to the frame already on the plane: a commit with
+  // no new buffer.
+  void commit_geometry() noexcept {
+    if (surface_.Get() != nullptr && shown_)
+      surface_.Get()->Commit();
   }
 
  private:
@@ -367,6 +378,7 @@ class SubsurfacePlane {
   int x_ = 0, y_ = 0;
   bool created_ = false;
   bool pos_dirty_ = false;
+  bool shown_ = false;  // a buffer is attached
 };
 
 // xdg_toplevel handler. xdg_toplevel.configure carries a `states` array; the
@@ -948,6 +960,21 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
              w_, h_, hx, hy, hw, hh);
   }
 
+  // Say what the window is: the toplevel's own rectangle. Left unsaid, the
+  // geometry is the bounding box of the surface and its subsurfaces, and the
+  // video plane is one: a video laid out past the window's edge, or still at
+  // its place from before a resize, made the window look larger, and a
+  // compositor that sizes a floating window by its geometry (sway) then
+  // configured it to that. Takes effect with the next commit.
+  void fit_window_geometry() noexcept {
+    if (xdg_surface_.Get() == nullptr || w_ <= 0 || h_ <= 0 ||
+        (w_ == geom_w_ && h_ == geom_h_))
+      return;
+    xdg_surface_.Get()->SetWindowGeometry(0, 0, w_, h_);
+    geom_w_ = w_;
+    geom_h_ = h_;
+  }
+
   // The surface changed size: the opaque region was built for the old one.
   // Applied with the next commit, like any other change to it.
   void refit_opaque_region() noexcept {
@@ -981,8 +1008,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     }
     if (hide && video_plane_.created())
       video_plane_.hide();
-    if (!has)
+    if (!has) {
+      replace_video(x, y, w, h);
       return;
+    }
     // From here the frame's descriptor is ours to close on every way out.
     if (subcomp_.Get() == nullptr || comp_.Get() == nullptr ||
         surface_.Get() == nullptr) {
@@ -1025,6 +1054,9 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     }
     const int vx = place.x, vy = place.y, vw = place.w, vh = place.h;
     const double sx = place.sx, sy = place.sy, sw = place.sw, sh = place.sh;
+    placed_ = {x, y, w, h, w_, h_};
+    placed_buf_w_ = frame.width;
+    placed_buf_h_ = frame.height;
     if (video_diag_) {
       static std::uint64_t gdbg = 0;
       if (gdbg++ % 60 == 0)
@@ -1050,6 +1082,32 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     (void)oq_dirty_;
     oq_dirty_ = false;
     surface_.Get()->Commit();
+    (void)video_plane_.take_pos_dirty();
+  }
+
+  // The app moved or resized its video View, or the window changed size,
+  // and no new frame is coming to carry the change: a paused video, or one
+  // that has ended. Place the frame that is on the plane again. Before this
+  // the picture stayed where its last frame had put it.
+  void replace_video(int x, int y, int w, int h) noexcept {
+    if (!video_plane_.created() || !video_plane_.shown() || placed_buf_w_ == 0)
+      return;
+    const std::array<int, 6> want{x, y, w, h, w_, h_};
+    if (want == placed_)
+      return;
+    placed_ = want;
+    const VideoPlacement place =
+        place_video(x, y, w, h, w_ > 0 ? w_ : w, h_ > 0 ? h_ : h, placed_buf_w_,
+                    placed_buf_h_);
+    if (!place.visible)
+      return;
+    video_plane_.set_position(place.x, place.y);
+    video_plane_.set_source_dest(place.sx, place.sy, place.sw, place.sh,
+                                 place.w, place.h);
+    set_toplevel_opaque_hole(place.x, place.y, place.w, place.h);
+    video_plane_.commit_geometry();
+    oq_dirty_ = false;
+    surface_.Get()->Commit();  // position and opaque region are the parent's
     (void)video_plane_.take_pos_dirty();
   }
 
@@ -1083,6 +1141,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     // by the frame.
     w_ = static_cast<int>(frame.width);
     h_ = static_cast<int>(frame.height);
+    fit_window_geometry();
     // The toplevel is ARGB (for the video hole-punch). Mark it fully OPAQUE by
     // default so a normal app isn't accidentally alpha-blended (the compositor
     // treats it opaque, as with the old XRGB). The video path later overrides
@@ -1159,6 +1218,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     w_ = asked_w_;
     h_ = asked_h_;
     refit_opaque_region();
+    // GL mode (Mesa attaches the buffers; submit() is never called): the
+    // geometry goes with the size taken. Otherwise it goes by the frame.
+    if (frame_index_ == 0)
+      fit_window_geometry();
     *width = asked_w_;
     *height = asked_h_;
     return true;
@@ -1999,9 +2062,14 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       vb_h_ = 0;  // video View on-screen bounds (set_video_bounds)
   bool vb_set_ = false;
   int oq_hx_ = -1, oq_hy_ = -1, oq_hw_ = -1,
-      oq_hh_ = -1;           // last toplevel opaque-region hole (dedup)
-  int oq_w_ = 0, oq_h_ = 0;  // the surface size that region was built for
-  bool oq_dirty_ = false;    // opaque region set, awaiting a toplevel commit
+      oq_hh_ = -1;               // last toplevel opaque-region hole (dedup)
+  int oq_w_ = 0, oq_h_ = 0;      // the surface size that region was built for
+  int geom_w_ = 0, geom_h_ = 0;  // the window geometry last set; 0: never
+  // What the frame on the video plane was placed by: the app's rectangle and
+  // the window's size, and the frame's own size.
+  std::array<int, 6> placed_{};
+  std::uint32_t placed_buf_w_ = 0, placed_buf_h_ = 0;
+  bool oq_dirty_ = false;  // opaque region set, awaiting a toplevel commit
   int video_wake_fd_ = ::eventfd(
       0,
       EFD_NONBLOCK | EFD_CLOEXEC);  // decode thread -> present loop wake

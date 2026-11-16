@@ -23,6 +23,7 @@
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include <dlfcn.h>
+#include <unistd.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -387,11 +388,43 @@ bool make_target(Target& t, int w, int h) {
   return true;
 }
 
+// The window changed size: a new render target, and new dma-bufs the next
+// time each is rendered into. Runs on the thread that owns the GrContext,
+// between frames. The compositor may still be showing an old dma-buf; it
+// holds its own reference, so destroying ours here takes nothing from it.
+bool resize_targets(int w, int h) {
+  if (w <= 0 || h <= 0)
+    return false;
+  g.gr->flushAndSubmit(/*syncCpu=*/true);
+  sk_sp<SkSurface> opt = SkSurface::MakeRenderTarget(
+      g.gr.get(), SkBudgeted::kYes,
+      SkImageInfo::Make(w, h, kBGRA_8888_SkColorType, kPremul_SkAlphaType), 0,
+      kTopLeft_GrSurfaceOrigin, nullptr);
+  if (!opt) {
+    std::fprintf(stderr, "acl-gpu: MakeRenderTarget %dx%d fail\n", w, h);
+    return false;  // the old size stays usable
+  }
+  g.direct.reset();
+  g.opt = std::move(opt);
+  for (Target& t : g.targets) {
+    if (t.image != VK_NULL_HANDLE)
+      VKD.vkDestroyImage(g.device, t.image, nullptr);
+    if (t.memory != VK_NULL_HANDLE)
+      VKD.vkFreeMemory(g.device, t.memory, nullptr);
+    if (t.fd >= 0)
+      ::close(t.fd);
+    t = Target{};
+  }
+  g.w = w;
+  g.h = h;
+  return true;
+}
+
 bool ensure_ready(int w, int h) {
   if (g.ready && g.w == w && g.h == h)
     return true;
   if (g.ready)
-    return false;
+    return resize_targets(w, h);
   if (!init_device())
     return false;
 

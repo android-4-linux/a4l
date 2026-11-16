@@ -308,9 +308,9 @@ class IPresenter {
   }  // pump until first configure
   // A size the compositor has asked the toplevel to take since the last
   // call, other than the one it first gave: true once per change, with the
-  // size in surface units. A caller that renders the toplevel itself (the GL
-  // path) resizes to it; one that does not ask keeps its own size, which is
-  // what every presenter did before. Present thread.
+  // size in surface units. The caller resizes to it: the GL path its window,
+  // the View-tree path its frames, with a configuration change for the app.
+  // One that does not ask keeps its own size. Present thread.
   virtual bool take_resize(int* /*width*/, int* /*height*/) noexcept {
     return false;
   }

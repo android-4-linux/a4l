@@ -2513,6 +2513,35 @@ void gl_session_resize(JNIEnv* env, PresentSession* s, int w, int h) {
   log::i(kTag, "GL session: resized to {}x{}", w, h);
 }
 
+// The compositor resized a View-tree app's window. The session takes the size
+// (the measure specs, the picture's bounds, and through the RenderThread's next
+// job the GPU render target and its dma-bufs), and the app is told the way
+// Android tells it: a configuration change (HostBootstrap.resizeWindow). Main
+// thread. Deferred present only: the immediate path's Canvas wraps the one
+// SkCanvas the render target had when the session opened.
+void view_session_resize(JNIEnv* env, PresentSession* s, int w, int h) {
+  if (!s->deferred || (w == s->w && h == s->h))
+    return;
+  s->w = w;
+  s->h = h;
+  const jint ms_exactly = 1 << 30;  // MeasureSpec.EXACTLY
+  const jint ms_mask = 0x3 << 30;
+  s->wspec = (w & ~ms_mask) | ms_exactly;
+  s->hspec = (h & ~ms_mask) | ms_exactly;
+  if (s->hostbootstrap_cls != nullptr) {
+    if (jmethodID m = env->GetStaticMethodID(
+            s->hostbootstrap_cls, "resizeWindow", "(Landroid/view/View;II)V"))
+      env->CallStaticVoidMethod(s->hostbootstrap_cls, m, s->view, w, h);
+    if (env->ExceptionCheck() == JNI_TRUE)
+      env->ExceptionClear();
+  }
+  // Draw the next frames whatever the idle gate thinks: nothing the app drew
+  // may have changed, and the window has.
+  if (g_force_record_pulse.load(std::memory_order_relaxed) < 3)
+    g_force_record_pulse.store(3, std::memory_order_relaxed);
+  log::i(kTag, "View session: resized to {}x{}", w, h);
+}
+
 jboolean JNICALL PresentDriver_nDispatch(JNIEnv* env, jclass, jlong sp) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
   if (s == nullptr || !s->presenter)
@@ -2520,10 +2549,14 @@ jboolean JNICALL PresentDriver_nDispatch(JNIEnv* env, jclass, jlong sp) {
   const bool ok =
       s->presenter->dispatch();  // runs input callbacks; wp_presentation
                                  // OnPresented lands here
-  if (s->is_gl && s->view != nullptr) {
+  if (s->view != nullptr && (s->is_gl || s->deferred)) {
     int rw = 0, rh = 0;
-    if (s->presenter->take_resize(&rw, &rh))
-      gl_session_resize(env, s, rw, rh);
+    if (s->presenter->take_resize(&rw, &rh)) {
+      if (s->is_gl)
+        gl_session_resize(env, s, rw, rh);
+      else
+        view_session_resize(env, s, rw, rh);
+    }
   }
   // Sample the latest real presentation feedback (present thread == OnPresented
   // thread) for the RenderThread to forward to Chromium's WebView compositor
