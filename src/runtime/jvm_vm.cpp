@@ -2149,6 +2149,8 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
   }
 }
 
+void take_first_size(JNIEnv* env, PresentSession* s);
+
 jlong JNICALL PresentDriver_nOpen(JNIEnv* env,
                                   jclass,
                                   jobject view,
@@ -2393,6 +2395,7 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env,
   g_gl_session.cv.notify_all();
   log::i(kTag, "PresentDriver.nOpen: {}x{} presenter ready (looper-driven)", w,
          h);
+  take_first_size(env, s);
   return reinterpret_cast<jlong>(s);
 }
 
@@ -2550,6 +2553,22 @@ void view_session_resize(JNIEnv* env, PresentSession* s, int w, int h) {
   if (g_force_record_pulse.load(std::memory_order_relaxed) < 3)
     g_force_record_pulse.store(3, std::memory_order_relaxed);
   log::i(kTag, "View session: resized to {}x{}", w, h);
+}
+
+// The compositor's first configure has arrived by the time a session is open.
+// When it names a size other than the one opened at (a tile, an embedded
+// shell's view), take it now, before the app draws: left to the first
+// dispatch, a frame or two at the old size reach the compositor first.
+void take_first_size(JNIEnv* env, PresentSession* s) {
+  if (s->view == nullptr || !(s->is_gl || s->deferred))
+    return;
+  int rw = 0, rh = 0;
+  if (!s->presenter->take_resize(&rw, &rh))
+    return;
+  if (s->is_gl)
+    gl_session_resize(env, s, rw, rh);
+  else
+    view_session_resize(env, s, rw, rh);
 }
 
 jboolean JNICALL PresentDriver_nDispatch(JNIEnv* env, jclass, jlong sp) {
@@ -3620,6 +3639,7 @@ jlong JNICALL PresentDriver_nGlOpen(JNIEnv* env,
            "engine's GL init)");
     PresentSession* s = pending;
     attach_view_to_gl_session(env, s, view, w, h);
+    take_first_size(env, s);
     return reinterpret_cast<jlong>(s);
   }
   // No pre-created session (e.g. an app whose GL init did not call get_display
@@ -3643,6 +3663,7 @@ jlong JNICALL PresentDriver_nGlOpen(JNIEnv* env,
     return 0;
   }
   attach_view_to_gl_session(env, s, view, w, h);
+  take_first_size(env, s);
   return reinterpret_cast<jlong>(s);
 #else
   (void)env;

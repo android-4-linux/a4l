@@ -514,6 +514,40 @@ TEST_CASE("split: a frame crosses with its fd, and the slot ring is mirrored",
   CHECK(f.byte == 'Q');  // the received fd is the sender's buffer
 }
 
+TEST_CASE("split: the first size is the child's before it draws", "[split]") {
+  Rig rig;
+  {
+    // The compositor's first configure names a size other than the one the
+    // child opens at (a tile, an embedded shell's view).
+    std::lock_guard<std::mutex> lock(rig.world.mu);
+    rig.world.asked_w = 800;
+    rig.world.asked_h = 600;
+  }
+  auto p =
+      wm::split_presenter_open_on(rig.child, 640, 480, "t", "a", {}, false);
+  REQUIRE(p != nullptr);
+  // It came ahead of the broker's answer: no dispatch is needed to have it.
+  int w = 0, h = 0;
+  REQUIRE(p->take_resize(&w, &h));
+  CHECK(w == 800);
+  CHECK(h == 600);
+  CHECK_FALSE(p->take_resize(&w, &h));
+
+  // The first frame is that size, and the broker takes it.
+  REQUIRE(pump(*p, [&] { return p->ready(); }));
+  const int fd = buffer_fd('a');
+  gfx::DmabufFrame f = frame_of(fd);
+  f.width = 800;
+  f.height = 600;
+  f.planes[0].stride = 800 * 4;
+  REQUIRE(p->submit(f, 0));
+  ::close(fd);
+  REQUIRE(settle(rig.world, [&] { return rig.world.frames.size() == 1; }));
+  std::lock_guard<std::mutex> lock(rig.world.mu);
+  CHECK(rig.world.frames.back().w == 800);
+  CHECK(rig.world.frames.back().h == 600);
+}
+
 TEST_CASE("split: a resize is the compositor's, one size at a time",
           "[split]") {
   Rig rig;

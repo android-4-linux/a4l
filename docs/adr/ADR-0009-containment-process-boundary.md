@@ -814,10 +814,24 @@ stand-in is not in this repository. The server advertised one modifier for ARGB8
   last size after 180 resizes in 4.4 s (33 ms apart, then 16 ms apart). Single-process took all
   180; `--split` took 131 (forkyz) and 105 (video), since the broker passes on one size at a
   time. No message rejected.
-- Single-process, the first frame or two are still at the output's size (1920x1080 here) and
-  the shell scales them into the view. Under `--split` the first frame was already the view's.
-- Not run on it: the GL fixture, the media3 `PlayerView` app, input, a real shell on a display.
-  A LINEAR-only compositor is not in the test suite.
+- The first frame or two were at the output's size (1920x1080 here), scaled into the view by
+  the shell: single-process for every app, and under `--split` for the Flutter app, which
+  draws before the broker's resize arrives. The first size is now taken when the session
+  opens, before the app draws. Under `--split` the broker sends it ahead of its answer to
+  `SurfaceCreate`, and the child has it when its presenter opens. First frame at the view's
+  1024x600 in 3 of 3 runs each: forkyz, the GL fixture and the Flutter app, both modes.
+- The media3 `PlayerView` app ended at its first video frame, single-process. The frame is
+  NV12, the server advertised no NV12, and sending it is a protocol error that closes the
+  connection. A video frame whose format or modifier the compositor does not advertise is now
+  dropped, with one warning. The app plays to its end with sound and no picture, in both modes
+  (under `--split` the broker already refused the frame). a4l does not convert the frame to a
+  format the compositor takes; that is the gap.
+- Input: a pointer tap at (300,200) in the view reached a View below the 64-pixel title bar as
+  ACTION_DOWN and ACTION_UP at (300,136), both modes.
+- `ACL_PRESENT_LINEAR_ONLY` makes a4l act as if the compositor listed LINEAR alone. The
+  `view-window-resize` test runs with it in both modes under sway and fails on the graphics
+  library from before the modifier change.
+- Not run on it: a real shell on a display, touch (as opposed to pointer) input, keys.
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 

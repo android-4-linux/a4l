@@ -1012,6 +1012,26 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
         ::close(frame.fd);
       return;
     }
+    // A format or modifier the compositor does not advertise is a protocol
+    // error that ends the connection, and the app with it. The frame is
+    // dropped instead: the app plays on with no picture, as it does under
+    // --split, where the broker refuses the same frame.
+    {
+      const std::vector<std::uint64_t> mods = modifiers_for(frame.drm_format);
+      if (std::find(mods.begin(), mods.end(), frame.modifier) == mods.end()) {
+        if (video_refused_format_ != frame.drm_format) {
+          video_refused_format_ = frame.drm_format;
+          log::w(kTag,
+                 "video HW-plane: the compositor does not advertise format "
+                 "0x{:x} modifier 0x{:x} ({} modifier(s) for the format); "
+                 "video frames are dropped",
+                 frame.drm_format, frame.modifier, mods.size());
+        }
+        if (frame.fd >= 0)
+          ::close(frame.fd);
+        return;
+      }
+    }
     if (!video_plane_.created()) {
       std::string err;
       if (!video_plane_.create(
@@ -1426,6 +1446,15 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       feedback_.CommitLegacy();
 
     mods_ = feedback_.Current().ModifiersFor(kDrmFormatArgb8888);
+    // ACL_PRESENT_LINEAR_ONLY: act as if the compositor listed LINEAR alone,
+    // as an embedded shell may. For testing that case on a compositor that
+    // lists more; without LINEAR in the list it changes nothing.
+    if (std::getenv("ACL_PRESENT_LINEAR_ONLY") != nullptr &&
+        std::find(mods_.begin(), mods_.end(), std::uint64_t{0}) !=
+            mods_.end()) {
+      mods_.assign(1, std::uint64_t{0});
+      log::i(kTag, "dmabuf present: ACL_PRESENT_LINEAR_ONLY, LINEAR alone");
+    }
     log::i(kTag,
            "dmabuf present: compositor advertises {} modifier(s) for ARGB8888",
            mods_.size());
@@ -2028,6 +2057,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   wl::WlPtr<ToplevelH> xdg_toplevel_;
   static constexpr std::int32_t kMaxToplevelDim = 16384;
   std::int32_t asked_w_ = 0, asked_h_ = 0;  // the compositor's latest
+  std::uint32_t video_refused_format_ = 0;  // warned about once
   // The size take_resize last reported; before that, the size opened at.
   std::int32_t taken_w_ = 0, taken_h_ = 0;
   // Alternate shells (ACL_WL_SHELL): only the selected one is bound. wl_output
