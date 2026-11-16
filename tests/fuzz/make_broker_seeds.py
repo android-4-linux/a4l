@@ -22,6 +22,7 @@ VIDEO_FRAME, VIDEO_BOUNDS, VIDEO_HIDE, VIDEO_RESET = 18, 19, 20, 21
 AUDIO_OPEN, AUDIO_WRITE, AUDIO_CLOSE = 11, 12, 22
 AR24 = 0x34325241
 NV12 = 0x3231564E
+XB24 = 0x34324258
 TILED = 0x0200000000401B03
 BIG, SMALL, NULL = 0, 1, 2  # descriptor kinds, in the harness's order
 
@@ -58,6 +59,17 @@ def video(w, h, fmt=NV12, modifier=0, planes=2, dest=None, stride=None,
     dest = (0, 0, w, h) if dest is None else dest
     body = struct.pack("<IIIIQ4I4I4i", w, h, fmt, planes, modifier,
                        stride, stride, 0, 0, 0, chroma_offset, 0, 0, *dest)
+    return message(VIDEO_FRAME, body)
+
+
+def converted(w, h, modifier=0, planes=1, stride=None, offset=0, aux=(0, 0),
+              dest=None):
+    # A picture the child converted to XBGR8888: one plane of 32-bit pixels. aux is the
+    # stride and offset of a second, auxiliary plane.
+    stride = w * 4 if stride is None else stride
+    dest = (0, 0, w, h) if dest is None else dest
+    body = struct.pack("<IIIIQ4I4I4i", w, h, XB24, planes, modifier,
+                       stride, aux[0], 0, 0, offset, aux[1], 0, 0, *dest)
     return message(VIDEO_FRAME, body)
 
 
@@ -122,6 +134,29 @@ def seeds():
                             record(video(640, 360), 1, NULL) +
                             record(video(640, 360, dest=(0, 0, 0, 0)), 1) +
                             record(bounds(0, 0, -1, 0x7FFFFFFF)))
+    # Converted video: the compositor takes XBGR8888 LINEAR on the video plane. A clip
+    # played, with an auxiliary plane, after a decoder frame, then every way to get the
+    # one-plane layout wrong.
+    yield "video-converted", (record(surface(1280, 800)) +
+                              record(bounds(120, 164, 640, 360)) +
+                              b"".join(record(converted(640, 360), 1) for _ in range(3)) +
+                              record(converted(640, 360, planes=2, aux=(64, 4096)), 1) +
+                              record(video(640, 360), 1) +
+                              record(converted(640, 360, stride=2592, offset=4096), 1) +
+                              record(message(VIDEO_HIDE)))
+    yield "video-converted-refused", (
+        record(surface(640, 480)) +
+        record(converted(640, 360, modifier=TILED), 1) +
+        record(converted(640, 360, stride=640), 1) +
+        record(converted(640, 360, offset=4 << 20), 1) +
+        record(converted(640, 360, planes=0), 1) +
+        record(converted(640, 360, planes=5), 1) +
+        record(converted(640, 360, planes=2, aux=(0, 0)), 1) +
+        record(converted(640, 360, planes=2, aux=(64, 4 << 20)), 1) +
+        record(converted(640, 360), 1, SMALL) +
+        record(converted(8192, 8192), 1) +
+        record(converted(640, 360, dest=(0, 0, 0, 0)), 1) +
+        record(converted(640, 360), 1))
     # Audio: two streams played and closed, with a window or without.
     # The harness's compositor asks for half the size after the first frame: the new size,
     # the size left behind (refused from then on), the new size again.

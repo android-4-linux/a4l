@@ -88,6 +88,21 @@ clock, whatever the player released, and `MediaCodec.flush()` left the codec wai
 input buffers the player no longer held. `docs/adr/ADR-0009-containment-process-boundary.md`,
 "Pause, seek, speed", has the causes.
 
+## On a compositor without the decoder's format
+
+`ACL_VIDEO_CONVERT=1` makes a4l convert every frame to XBGR8888 on the GPU, as it does by
+itself once a compositor has turned NV12 away. Measured 2026-11-16 with
+`tools/measure-av-sync.py`, audio minus video in ms, the mean of a run's two events, three
+runs each taken in turn; mpv gave +22 and +25:
+
+| | as decoded | converted |
+|---|---|---|
+| single process | +34, +50, +28 | +42, +33, +40 |
+| `--split` | +54, +61, +55 | +41, +55, +43 |
+
+Conversion makes no difference that these runs can show: they differ by 20 ms among
+themselves. One GPU (AMD, radeonsi), one clip (320x240).
+
 Not covered: a `PlayerView` inside a Compose screen; a
 `GLSurfaceView` that is laid out again, which takes the same mark in a4l's GL path and was not
 changed here; seeking forward into data not yet read, or while paused; speeds other than 2.
