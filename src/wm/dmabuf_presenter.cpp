@@ -405,17 +405,10 @@ class ToplevelH : public CXdgToplevel<ToplevelH> {
   // its own size unless the caller takes this up (IPresenter::take_resize).
   std::int32_t* asked_w = nullptr;
   std::int32_t* asked_h = nullptr;
-  // -> the first size asked for, which is not a resize.
-  std::int32_t* first_w = nullptr;
-  std::int32_t* first_h = nullptr;
   void OnConfigure(std::int32_t w, std::int32_t h, wl_array* states) override {
     if (w > 0 && h > 0 && asked_w != nullptr && asked_h != nullptr) {
       *asked_w = w;
       *asked_h = h;
-      if (first_w != nullptr && first_h != nullptr && *first_w == 0) {
-        *first_w = w;
-        *first_h = h;
-      }
     }
     bool sus = false;
     if (states != nullptr && states->data != nullptr) {
@@ -1204,9 +1197,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
 
   // ── GL mode: acl owns the Looper + vsync clock; Mesa owns the surface's
   // buffers/commit ──
-  // The first size the compositor gives is not taken up: a4l opens at its
-  // own size and a tiling compositor answers with the tile's. Changes after
-  // that are a resize.
+  // a4l opens at its own size. A compositor that wants another one says so
+  // in a configure, the first included (a tiling compositor's tile).
   bool take_resize(int* width, int* height) noexcept override {
     if (asked_w_ <= 0 || asked_h_ <= 0 || asked_w_ > kMaxToplevelDim ||
         asked_h_ > kMaxToplevelDim)
@@ -1510,8 +1502,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     xdg_toplevel_.Get()->closed = &closed_;
     xdg_toplevel_.Get()->asked_w = &asked_w_;
     xdg_toplevel_.Get()->asked_h = &asked_h_;
-    xdg_toplevel_.Get()->first_w = &taken_w_;
-    xdg_toplevel_.Get()->first_h = &taken_h_;
+    // The size a4l opens at counts as taken, so a first configure that names
+    // another one (a tile) is a resize like any later one.
+    taken_w_ = w_;
+    taken_h_ = h_;
     xdg_toplevel_.Get()->SetTitle(title_.c_str());
     xdg_toplevel_.Get()->SetAppId(app_id_.c_str());
     return true;
@@ -2034,9 +2028,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   wl::WlPtr<ToplevelH> xdg_toplevel_;
   static constexpr std::int32_t kMaxToplevelDim = 16384;
   std::int32_t asked_w_ = 0, asked_h_ = 0;  // the compositor's latest
-  // The size take_resize last reported; before that, the first one asked
-  // for (set as it arrives, so that a resize that comes before the first
-  // call is still one).
+  // The size take_resize last reported; before that, the size opened at.
   std::int32_t taken_w_ = 0, taken_h_ = 0;
   // Alternate shells (ACL_WL_SHELL): only the selected one is bound. wl_output
   // targets the agl background/panel and the fullscreen present.
