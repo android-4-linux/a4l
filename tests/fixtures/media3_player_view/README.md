@@ -77,6 +77,11 @@ through gave +14 +20 and +14 +22:
 | `PlayerView`, single process, four runs | +30 +43, +40 +35, +44 +46, +53 +44 | +71 +68, +73 +70, +60 +57, +58 +55 | +48 +62, +64 +62, +44 +49, +62 +68 |
 | `PlayerView`, `--split`, three runs | +51 +47, +41 +36, +41 +36 | +80 +73, +80 +76, +84 +79 | +61 +59, +70 +68, +67 +64 |
 
+The figures after a seek are about 25 ms higher than after the pause. That is AAC's decoder
+delay of one frame, which media3 trims at the start of a stream and not after a seek: the
+same clip with FLAC audio (`ffmpeg -i test.mp4 -c:v copy -c:a flac -strict -2 flac.mp4`)
+shows no such step. The ADR has the numbers.
+
 Before: after the pause the sound came 1.5 s after the picture (+1525 for both events), and
 after the seek the player stayed in buffering. a4l showed a `SurfaceView`'s frames on its own
 clock, whatever the player released, and `MediaCodec.flush()` left the codec waiting on

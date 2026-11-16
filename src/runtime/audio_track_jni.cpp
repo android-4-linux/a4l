@@ -489,11 +489,14 @@ jint JNICALL AT_native_get_timestamp(JNIEnv* env,
   std::int64_t ns = 0;
   const bool have = c->track->timestamp(&frames, &ns);
   if (diag()) {
-    static std::atomic<int> n{0};
-    if (n.fetch_add(1) % 20 == 0)
-      log::i(kTag, "diag: timestamp {} frame {} at {} ns, device latency {} us",
-             have ? "ok" : "none", frames, ns,
-             c->track->device_latency_ns() / 1000);
+    // Every call: a player asks rarely once it has a timestamp it trusts,
+    // and each answer is what it then runs on. The position beside it is
+    // the estimate a timestamp would otherwise be made from.
+    log::i(kTag,
+           "diag: timestamp {} frame {} at {} ns, position {}, device "
+           "latency {} us",
+           have ? "ok" : "none", frames, ns, c->track->position(),
+           c->track->device_latency_ns() / 1000);
   }
   if (!have)
     return kErrorInvalidOperation;  // nothing has come out of the device yet

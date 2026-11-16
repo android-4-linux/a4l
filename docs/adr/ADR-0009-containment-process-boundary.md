@@ -646,8 +646,32 @@ At twice the speed the flashes are 96 ms long and 1.25 s apart, as they should b
   `firstInstallTime` are now the APK's modification time.
 
 After a seek the sound is about 30 ms later against the picture than before it, in both
-apps and both modes; the cause is not found. Not covered: seeking forward into data not yet
-read, seeking while paused, speeds other than 2, a real display.
+apps and both modes. That is AAC, not a4l's timing. An AAC decoder's output for a packet
+is the sound of one frame earlier (1024 samples, 21.3 ms at 48 kHz); the file says so as an
+encoder delay, and media3 trims that frame at the start of the stream and not after a seek,
+where it takes the first buffer's timestamp as it comes. The same clip with FLAC audio, which
+has no such delay, shows no shift. `PlayerView`, single process, mean of the two events
+after the pause and after the seek, ms:
+
+| audio | after the pause | after the seek | difference |
+|---|---|---|---|
+| AAC, three runs | +40 | +65 | +26 |
+| FLAC, four runs | +50 | +40 | -11 |
+| FLAC, `--split`, three runs | +60 | +67 | +7 |
+
+Run to run a figure moves by about 15 ms, so -11 and +7 are no shift and +26 is one. a4l's
+decoders label a buffer with its packet's timestamp, as `MediaCodec` does, and that is left
+as it is: shifting the label would break the trim at the start. Whether a device's own AAC
+decoder gives the same 21 ms after a seek was not measured; nothing in how media3 handles
+the buffers suggests otherwise.
+
+Ruled out on the way: the audio clock. The PipeWire sink's pulls are regular from a
+stream's first one (21.33 ms apart, no burst at the start), and anchoring `AudioTrack`'s
+timestamps on those pulls instead of on the track's own count changed nothing measurable, so
+that change was not kept.
+
+Not covered: seeking forward into data not yet read, seeking while paused, speeds other than
+2, a real display.
 
 **Window size (2026-11-15).** An a4l window opens at a4l's size and, until now, kept it:
 `xdg_toplevel.configure`'s width and height were ignored on every path. A GL app in a single
