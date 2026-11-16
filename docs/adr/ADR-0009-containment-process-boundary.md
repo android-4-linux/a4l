@@ -786,10 +786,17 @@ Three faults found on the way, each fixed:
   resize or a layout change left the picture where its last frame had put it. The frame on
   the plane is now placed again when the rectangle or the window changes.
 
-Still fixed-size:
-
-- **The first size.** A tiling compositor's first configure is its tile, not a4l's size; a4l
-  still opens at its own. Only a change after that is taken up.
+**The first size (2026-11-16).** a4l opens at the output's size, and a tiling compositor's
+first configure names the tile. That first size was recorded as already taken, so only a later
+change was a resize, and an app in a tile smaller than the output was drawn at the output's
+size and clipped. The size a4l opens at is now the one recorded, so a first configure that
+differs goes down the same path as any other resize, single-process and under `--split`. The
+app still starts at the output's size and is told the tile's on its first dispatch; it is not
+created at the tile's size. Checked under headless sway (1280x800 output): a 1200x720 tile
+(40-pixel gap) for forkyz, the GL fixture and the Flutter `video_player` app in both modes, and
+two 640x800 tiles side by side (forkyz single-process, foss4g under `--split`), with no message
+rejected. The `view-window-resize` test runs the gapped tile in both modes. A lone tile with no
+gap is the output's size and was never affected.
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 

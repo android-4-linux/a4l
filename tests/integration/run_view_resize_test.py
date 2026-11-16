@@ -293,7 +293,28 @@ def main() -> int:
         if not s or s.group(1) != "exited" or int(s.group(2)) != 0:
             return fail("--split: the app process did not exit cleanly, or the broker "
                         "rejected a message", out)
-        sys.stdout.write(f"OK: single process: {single}; --split: {split}\n")
+
+        # 3. The first size. With a gap around it the tile is not the output's
+        # 1280x800 that a4l opens at, and nothing resizes the window afterward.
+        subprocess.run(msg + ["gaps", "outer", "all", "set", "40"], capture_output=True)
+        for args, mode in ((["--present"], "single process"),
+                           (["--split", "--present"], "--split")):
+            p = subprocess.run(runner + args, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, errors="replace",
+                               timeout=120)
+            if keep:
+                with open(os.path.join(keep, f"run-tile-{mode.strip('-').split()[0]}.log"),
+                          "w") as fh:
+                    fh.write(p.stdout)
+            if "View session: resized to 1200x720" not in p.stdout:
+                return fail(f"{mode}: a4l did not take up the 1200x720 tile it was "
+                            "first given", p.stdout)
+            if "VR: activity onConfigurationChanged 1200x720 resources 1200x720" not in p.stdout:
+                return fail(f"{mode}: the activity was not told of the tile's size", p.stdout)
+            if "rejected" in p.stdout and not re.search(r" 0 message\(s\) rejected", p.stdout):
+                return fail(f"{mode}: the broker rejected a message", p.stdout)
+        sys.stdout.write(f"OK: single process: {single}; --split: {split}; "
+                         "a 1200x720 tile taken as the first size in both\n")
         return 0
     except subprocess.CalledProcessError as e:
         sys.stderr.write(f"FAIL: build step: {e.cmd}\n{e.stderr}\n")
