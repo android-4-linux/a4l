@@ -232,6 +232,8 @@ def main() -> int:
                 return "the app's view never got a size", None
             if "UnsatisfiedLinkError" in out:
                 return "a framework native is missing", None
+            if "VR: package version 42 / 1.2.3" not in out:
+                return "PackageInfo did not carry the manifest's version (42 / 1.2.3)", None
             if "View session: resized to 800x600" not in out:
                 return "a4l did not take up the compositor's 800x600", None
             # The view is the window less the decor's title bar, which keeps its height.

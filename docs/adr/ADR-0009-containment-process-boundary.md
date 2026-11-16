@@ -798,6 +798,27 @@ two 640x800 tiles side by side (forkyz single-process, foss4g under `--split`), 
 rejected. The `view-window-resize` test runs the gapped tile in both modes. A lone tile with no
 gap is the output's size and was never affected.
 
+**On an embedded shell (2026-11-16).** Run against `ihs_wl_server` (ivi-homescreen's embedded
+Wayland server, release 0.2.0) under a stand-in shell that hosts one view and resizes it; the
+stand-in is not in this repository. The server advertised one modifier for ARGB8888, LINEAR.
+
+- A View-tree app under `--split` showed nothing: 0 frames in 24 s. The render targets took the
+  GPU's first tiled modifier without asking what the compositor advertises, and the broker
+  refused every frame ("modifier not advertised"). Single-process sent the same unadvertised
+  modifier and this server accepted it; a strict compositor need not. The targets now take a
+  modifier from the compositor's list: tiled if one is listed, else LINEAR. With none of the
+  GPU's listed they keep the old choice and say so. sway still gets the tiled modifier (6
+  listed).
+- After the change: forkyz and the Flutter `video_player` app, both modes, bound to a 1024x600
+  view, took 800x480 and 1280x720 within 30 to 50 ms of the view's resize, and settled on the
+  last size after 180 resizes in 4.4 s (33 ms apart, then 16 ms apart). Single-process took all
+  180; `--split` took 131 (forkyz) and 105 (video), since the broker passes on one size at a
+  time. No message rejected.
+- Single-process, the first frame or two are still at the output's size (1920x1080 here) and
+  the shell scales them into the view. Under `--split` the first frame was already the view's.
+- Not run on it: the GL fixture, the media3 `PlayerView` app, input, a real shell on a display.
+  A LINEAR-only compositor is not in the test suite.
+
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 
 - **A frame.** The broker asks the kernel, not the child, what the descriptor is: `fstatfs` must

@@ -2061,8 +2061,12 @@ public final class HostBootstrap {
             android.content.pm.PackageInfo pi = new android.content.pm.PackageInfo();
             pi.packageName = pkg;
             pi.applicationInfo = getApplicationInfo(pkg, 0);
-            pi.versionName = "1.0";
-            try { pi.setLongVersionCode(1L); } catch (Throwable ignored) { pi.versionCode = 1; }
+            // The manifest's own version. An app shows it, sends it in a user agent, and keys
+            // migrations and caches on it; a manifest that states none reads as 1 / "1.0".
+            requestedPermissions();
+            pi.versionName = sVersionName != null ? sVersionName : "1.0";
+            long code = sVersionCode > 0 ? sVersionCode : 1L;
+            try { pi.setLongVersionCode(code); } catch (Throwable ignored) { pi.versionCode = (int) code; }
             // When the APK was last written, as the time it was installed and last updated. An
             // app that unpacks something from its APK keys the copy on this: Flutter's debug-mode
             // ResourceExtractor keeps its extracted Dart code while version code and
@@ -2095,6 +2099,9 @@ public final class HostBootstrap {
         // Parsed once from AndroidManifest.xml; acl grants every permission (checkSelfPermission
         // returns GRANTED), so this only has to report what the app asked for.
         private static String[] sPerms;
+        // The <manifest> tag's version, read in the same pass: 0 and null when it states none.
+        private static long sVersionCode;
+        private static String sVersionName;
         private static synchronized String[] requestedPermissions() {
             if (sPerms != null) return sPerms;
             android.content.Context base = sAppContext;
@@ -2113,6 +2120,18 @@ public final class HostBootstrap {
                 for (int ev = xml.getEventType();
                      ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
                     if (ev == android.content.res.XmlResourceParser.START_TAG
+                            && "manifest".equals(xml.getName())) {
+                        long lo = xml.getAttributeIntValue(NS, "versionCode", 0) & 0xffffffffL;
+                        long hi = xml.getAttributeIntValue(NS, "versionCodeMajor", 0) & 0xffffffffL;
+                        sVersionCode = (hi << 32) | lo;
+                        // A literal, or a reference to a string resource.
+                        int ref = xml.getAttributeResourceValue(NS, "versionName", 0);
+                        String name = ref != 0 ? base.getResources().getString(ref)
+                                : xml.getAttributeValue(NS, "versionName");
+                        if (name != null && !name.isEmpty()) sVersionName = name;
+                        continue;
+                    }
+                    if (ev == android.content.res.XmlResourceParser.START_TAG
                             && ("uses-permission".equals(xml.getName())
                                 || "uses-permission-sdk-23".equals(xml.getName()))) {
                         String name = xml.getAttributeValue(NS, "name");
@@ -2127,7 +2146,8 @@ public final class HostBootstrap {
             }
             sPerms = out.toArray(new String[0]);
             android.util.Log.i("acl", "requestedPermissions: " + sPerms.length
-                    + " declared in the app manifest (all reported granted)");
+                    + " declared in the app manifest (all reported granted); version "
+                    + sVersionCode + " / " + sVersionName);
             return sPerms;
         }
         // A non-null ProviderInfo carrying the provider's <meta-data> (installContentProviders parsed

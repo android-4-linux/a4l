@@ -25,10 +25,12 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <dlfcn.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <unordered_set>
 #include <vector>
 
@@ -246,8 +248,22 @@ extern "C" bool acl_gpu_vk_handles(void** inst,
   return true;
 }
 
-// Prefer a single-plane tiled modifier the GPU can render+sample; fall back to
-// LINEAR.
+// The modifiers the compositor advertises for the format (empty: not told).
+// Set once, before the first target is made.
+std::mutex g_allowed_mu;
+std::vector<uint64_t> g_allowed;
+bool g_allowed_warned = false;
+
+bool modifier_allowed(uint64_t m) {
+  std::lock_guard<std::mutex> lk(g_allowed_mu);
+  return g_allowed.empty() ||
+         std::find(g_allowed.begin(), g_allowed.end(), m) != g_allowed.end();
+}
+
+// Prefer a single-plane tiled modifier the GPU can render+sample and the
+// compositor advertises; fall back to LINEAR on the same terms. A compositor
+// whose list has none of the GPU's gets the GPU's own choice, as before the
+// list was consulted: some take it, and the rest show nothing either way.
 uint64_t choose_modifier(uint32_t* plane_count) {
   VkDrmFormatModifierPropertiesListEXT list{
       VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT};
@@ -260,27 +276,47 @@ uint64_t choose_modifier(uint32_t* plane_count) {
   constexpr VkFormatFeatureFlags need = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
                                         VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
   uint64_t tiled1 = DRM_FORMAT_MOD_INVALID, linear = DRM_FORMAT_MOD_INVALID;
+  uint64_t any_tiled1 = DRM_FORMAT_MOD_INVALID,
+           any_linear = DRM_FORMAT_MOD_INVALID;
   for (const auto& m : mods) {
     if ((m.drmFormatModifierTilingFeatures & need) != need)
       continue;
     if (m.drmFormatModifierPlaneCount != 1)
       continue;
+    const bool ok = modifier_allowed(m.drmFormatModifier);
     if (m.drmFormatModifier == DRM_FORMAT_MOD_LINEAR) {
-      linear = m.drmFormatModifier;
+      any_linear = m.drmFormatModifier;
+      if (ok)
+        linear = m.drmFormatModifier;
       continue;
     }
-    if (tiled1 == DRM_FORMAT_MOD_INVALID)
+    if (any_tiled1 == DRM_FORMAT_MOD_INVALID)
+      any_tiled1 = m.drmFormatModifier;
+    if (ok && tiled1 == DRM_FORMAT_MOD_INVALID)
       tiled1 = m.drmFormatModifier;
   }
-  if (tiled1 != DRM_FORMAT_MOD_INVALID) {
-    *plane_count = 1;
+  *plane_count = 1;
+  if (tiled1 != DRM_FORMAT_MOD_INVALID)
     return tiled1;
-  }
-  if (linear != DRM_FORMAT_MOD_INVALID) {
-    *plane_count = 1;
+  if (linear != DRM_FORMAT_MOD_INVALID)
     return linear;
+  const uint64_t own =
+      any_tiled1 != DRM_FORMAT_MOD_INVALID ? any_tiled1 : any_linear;
+  if (own != DRM_FORMAT_MOD_INVALID && !g_allowed_warned) {
+    g_allowed_warned = true;
+    std::fprintf(stderr,
+                 "acl-gpu: the compositor advertises no modifier this GPU "
+                 "renders to; using 0x%llx\n",
+                 static_cast<unsigned long long>(own));
   }
-  return DRM_FORMAT_MOD_INVALID;
+  return own;
+}
+
+// The compositor's modifiers for the present format, from the presenter.
+// Called before the first frame; targets already made keep theirs.
+extern "C" void acl_graphics_gpu_set_modifiers(const uint64_t* mods, size_t n) {
+  std::lock_guard<std::mutex> lk(g_allowed_mu);
+  g_allowed.assign(mods, mods + (mods != nullptr ? n : 0));
 }
 
 // Create one modifier-tiled, dma-buf-exported VkImage + memory + fd into `t` (a
