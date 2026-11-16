@@ -86,6 +86,12 @@
 #include "hosts/media/media_bridge.h"  // Gate G1.5a: headless media bridge (automotive)
 #endif
 
+// wm/present.h declares the presenter only with the GPU present path built;
+// GlWaylandSession below keeps a pointer to one in every configuration.
+namespace acl::wm {
+class IPresenter;
+}  // namespace acl::wm
+
 namespace acl::runtime {
 namespace {
 

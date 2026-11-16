@@ -118,6 +118,22 @@ art-host; `present_dmabuf_loop` + input stay in a4l.
   (`libicu_jni`/`libjavacore`/`libopenjdk`/`libandroidio` + closure, `linux_bionic_arm64`) are not in
   `libart`'s NEEDED set — added to `lib64`; and the i18n/conscrypt boot jars must sit under
   `apex/<name>/javalib/` (both fixes folded into `tools/assemble-arm64-art.sh`).
+  **Repeated 2026-11-16 on an SA8155P board with an older userland** (glibc 2.31, GCC 10's
+  libstdc++, Mesa-20-era gbm headers), with the tree as it is now: a static-`main` APK prints
+  from ART on aarch64 through `--vm=art-split`, the handshake at protocol 7. Nothing was built
+  on the board. What it took:
+  - a4l cross-built with clang against a Debian bullseye arm64 sysroot, libc++ 18 linked in
+    statically (the sysroot's libstdc++ has no C++23), fmt header-only, no Skia, and the
+    build host's Wayland XML (the sysroot's 1.18 `wayland.xml` has no `wl_pointer` version 8,
+    which wcs's pointer handler overrides). The binary needs glibc 2.30.
+  - three fixes for that configuration, which had not been compiled since July: the bionic
+    runtime's non-x86 stubs, a gbm without `gbm_surface_create_with_modifiers2`, and a
+    presenter type named with the GPU present path off.
+  - `acl-art-host` rebuilt from the current `src/ipc`; the July binary speaks an older
+    protocol.
+  - Not done there: any window. With no Skia the build has no GPU present path, and S2 is
+    still open. `tests/fixtures/make_hello_apk.py`'s hand-made DEX is refused by this ART
+    ("Offset(781) should be aligned by 4 for map"); the run used a `d8`-built class.
 - **S2 — one frame across the boundary. (in progress)** art-host renders a solid-color (then a real
   View) dma-buf and sends `PresentFrame` (fd via `SCM_RIGHTS`); a4l imports it and puts it on screen.
   First pixels on the Pi from a real app under host ART. **Present seam wired** (`wm/present_sink.h`):

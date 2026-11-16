@@ -2054,6 +2054,12 @@ bool BionicRuntime_bootstrap(const BionicConfig&,
                              void**) {
   return false;
 }
+// No bionic thread exists to pair, and nothing reads the hooks: the
+// trampolines below are only ever reached from a loaded bionic library.
+std::uintptr_t ensure_paired_glibc_fs() {
+  return 0;
+}
+NativeGlHooks g_native_gl_hooks;
 
 #endif
 
