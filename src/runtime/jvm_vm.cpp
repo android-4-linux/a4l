@@ -2283,6 +2283,16 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env,
   // SkCanvas here — begin_frame clears it each tick, same handle — and the
   // present-root RecordingCanvas draws straight onto it). ACL_PRESENT_RT is
   // still honored for back-compat (it now just re-selects the default).
+  // The render targets take a modifier the compositor advertises. One that
+  // lists only LINEAR (an embedded shell) refuses the GPU's tiled choice, and
+  // so does the --split broker on its behalf. An older graphics library has
+  // no such entry point and keeps its own choice.
+  if (auto set_mods =
+          reinterpret_cast<void (*)(const std::uint64_t*, std::size_t)>(
+              ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_set_modifiers"))) {
+    const std::vector<std::uint64_t>& mods = s->presenter->modifiers();
+    set_mods(mods.data(), mods.size());
+  }
   s->deferred = std::getenv("ACL_PRESENT_IMMEDIATE") == nullptr;
   const jlong ch =
       s->deferred
