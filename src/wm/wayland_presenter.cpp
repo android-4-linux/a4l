@@ -19,6 +19,7 @@
 // members of the non-movable Presenter, so their addresses never change.
 
 #include "wm/present.h"
+#include "wm/shell_env.h"
 #include "wm/split_present.h"
 
 #include <algorithm>
@@ -37,6 +38,7 @@
 // framework headers that extend them (interface tables, xdg + presentation
 // helpers).
 #include "fractional_scale_v1_client.hpp"
+#include "ivi_application_client.hpp"  // ACL_WL_SHELL=ivi (ivi-shell)
 #include "presentation_time_client.hpp"
 #include "text_input_v3_client.hpp"  // WL_IME_BACKEND_TEXT_INPUT_V3
 #include "viewporter_client.hpp"
@@ -67,6 +69,7 @@ using namespace wayland::client;
 using namespace xdg_shell::client;
 namespace fs = fractional_scale_v1::client;
 namespace vp = viewporter::client;
+namespace ivi = ivi_application::client;
 
 constexpr const char* kTag = "acl.wm";
 
@@ -80,6 +83,15 @@ std::uint64_t now_ns(clockid_t clk) noexcept {
 // Event-less interfaces (wl_compositor, wl_shm_pool) have no generated
 // _Dispatch, so they use WlPtr::Attach; interfaces with events use _SetProxy.
 class CompositorH : public CWlCompositor<CompositorH> {};
+// ivi-shell: ivi_application has no events; ivi_surface has one, the size the
+// compositor's controller gives the surface.
+class IviAppH : public ivi::CIviApplication<IviAppH> {};
+class Presenter;
+class IviSurfaceH : public ivi::CIviSurface<IviSurfaceH> {
+ public:
+  Presenter* app_ = nullptr;
+  void OnConfigure(std::int32_t width, std::int32_t height) override;
+};
 class ShmPoolH : public CWlShmPool<ShmPoolH> {};
 class ShmH : public CWlShm<ShmH> {
  public:
@@ -286,6 +298,9 @@ class Presenter : public wl::ime::TextInputListener {
       } else if (iface == xdg_wm_base_traits::interface_name) {
         xdg_name_ = name;
         xdg_ver_ = ver;
+      } else if (iface == ivi::ivi_application_traits::interface_name) {
+        ivi_name_ = name;
+        ivi_ver_ = ver;
       } else if (iface == presentation_time::client::wp_presentation_traits::
                               interface_name)
         presentation_.Record(name, ver);
@@ -313,7 +328,17 @@ class Presenter : public wl::ime::TextInputListener {
       log::w(kTag, "present: registry roundtrip failed");
       return false;
     }
-    if (comp_name_ == 0 || shm_name_ == 0 || xdg_name_ == 0) {
+    // ACL_WL_SHELL=ivi: the role is an ivi_surface under a given id, and
+    // xdg_wm_base is not needed (an ivi-shell compositor may not have one).
+    const bool want_ivi = ivi_shell_selected();
+    const std::uint32_t ivi_id = ivi_surface_id_from_env();
+    if (want_ivi && (ivi_name_ == 0 || ivi_id == 0)) {
+      log::w(kTag, "present: ivi-shell needs {}",
+             ivi_name_ == 0 ? "a compositor with ivi_application"
+                            : "a surface id (--ivi-surface-id)");
+      return false;
+    }
+    if (comp_name_ == 0 || shm_name_ == 0 || (!want_ivi && xdg_name_ == 0)) {
       log::w(kTag,
              "present: compositor missing wl_compositor/wl_shm/xdg_wm_base");
       return false;
@@ -326,9 +351,16 @@ class Presenter : public wl::ime::TextInputListener {
       return false;
     if (!wl::BindHandler<wl_shm_traits>(registry_, shm_, shm_name_, shm_ver_))
       return false;
-    if (!wl::BindHandler<xdg_wm_base_traits>(registry_, xdg_wm_base_, xdg_name_,
-                                             xdg_ver_))
+    if (want_ivi) {
+      wl_proxy* raw = registry_.Bind<ivi::ivi_application_traits>(
+          ivi_name_, std::min(ivi_ver_, ivi::ivi_application_traits::version));
+      if (raw == nullptr)
+        return false;
+      ivi_app_.Attach(raw);
+    } else if (!wl::BindHandler<xdg_wm_base_traits>(registry_, xdg_wm_base_,
+                                                    xdg_name_, xdg_ver_)) {
       return false;
+    }
     if (!presentation_.Bind(registry_, this))
       return false;  // wp_presentation (optional)
     if (seat_name_ != 0 && wl::BindHandler<wl_seat_traits>(
@@ -384,22 +416,38 @@ class Presenter : public wl::ime::TextInputListener {
                                     wl_compositor_traits::Op::CreateSurface>(
                           *comp_.Get())))
       return false;
-    if (!wl::SetupHandler(xdg_surface_,
-                          wl::construct<xdg_surface_traits,
-                                        xdg_wm_base_traits::Op::GetXdgSurface>(
-                              *xdg_wm_base_.Get(), surface_.Get()->GetProxy())))
-      return false;
-    xdg_surface_.Get()->app_ = this;
-    if (!wl::SetupHandler(xdg_toplevel_,
-                          wl::construct<xdg_toplevel_traits,
-                                        xdg_surface_traits::Op::GetToplevel>(
-                              *xdg_surface_.Get())))
-      return false;
-    xdg_toplevel_.Get()->app_ = this;
     title_.assign(title);
     app_id_.assign(app_id);
-    xdg_toplevel_.Get()->SetTitle(title_.c_str());
-    xdg_toplevel_.Get()->SetAppId(app_id_.c_str());
+    if (want_ivi) {
+      // surface_create(ivi_id, surface, new_id): the new object is the last
+      // argument, so construct_at_end. An ivi_surface has no title and no
+      // app id; the id is how the compositor's controller knows it.
+      if (!wl::SetupHandler(
+              ivi_surface_,
+              wl::construct_at_end<
+                  ivi::ivi_surface_traits,
+                  ivi::ivi_application_traits::Op::SurfaceCreate>(
+                  *ivi_app_.Get(), ivi_id, surface_.Get()->GetProxy())))
+        return false;
+      ivi_surface_.Get()->app_ = this;
+      log::i(kTag, "present: ivi_surface id={}", ivi_id);
+    } else {
+      if (!wl::SetupHandler(
+              xdg_surface_,
+              wl::construct<xdg_surface_traits,
+                            xdg_wm_base_traits::Op::GetXdgSurface>(
+                  *xdg_wm_base_.Get(), surface_.Get()->GetProxy())))
+        return false;
+      xdg_surface_.Get()->app_ = this;
+      if (!wl::SetupHandler(xdg_toplevel_,
+                            wl::construct<xdg_toplevel_traits,
+                                          xdg_surface_traits::Op::GetToplevel>(
+                                *xdg_surface_.Get())))
+        return false;
+      xdg_toplevel_.Get()->app_ = this;
+      xdg_toplevel_.Get()->SetTitle(title_.c_str());
+      xdg_toplevel_.Get()->SetAppId(app_id_.c_str());
+    }
 
     if (ime_bound_) {  // enable text input on this surface's seat
       ti_.SetContentType(wl::ime::ContentHint::kNone,
@@ -434,6 +482,12 @@ class Presenter : public wl::ime::TextInputListener {
     // the viewport.
     surface_.Get()->Commit();
     (void)wl::RoundtripWithTimeout(display_.Get());
+    // ivi-shell has no configure to wait for: its controller learns of the
+    // surface from the first buffer and sizes it then, if at all.
+    if (!configured_ && !ivi_surface_.IsNull()) {
+      configured_ = true;
+      need_frame_ = true;
+    }
     apply_scale();
     if (gl_hooks_ != nullptr)
       return RunGlLoop();  // externally-rendered (Mesa GL) present
@@ -857,6 +911,9 @@ class Presenter : public wl::ime::TextInputListener {
   wl::WlPtr<SurfaceH> surface_;
   wl::WlPtr<wl::XdgSurfaceHandler<Presenter>> xdg_surface_;
   wl::WlPtr<wl::XdgToplevelHandler<Presenter>> xdg_toplevel_;
+  wl::WlPtr<IviAppH> ivi_app_;  // ACL_WL_SHELL=ivi
+  wl::WlPtr<IviSurfaceH> ivi_surface_;
+  std::uint32_t ivi_name_ = 0, ivi_ver_ = 0;
   wl::PresentationManager<Presenter> presentation_;
   wl::ime::SelectedTextInput ti_;  // text-input-v3 (IME)
   wl::WlPtr<FracScaleMgrH> frac_mgr_;
@@ -902,6 +959,13 @@ class Presenter : public wl::ime::TextInputListener {
   std::uint64_t last_present_ns_ = 0, refresh_ns_ = 0;
   bool configured_ = false, need_frame_ = false, closed_ = false;
 };
+
+void IviSurfaceH::OnConfigure(std::int32_t width, std::int32_t height) {
+  if (app_ == nullptr)
+    return;
+  app_->OnToplevelConfigure(width, height);
+  app_->OnXdgSurfaceConfigure(0);
+}
 
 }  // namespace
 
