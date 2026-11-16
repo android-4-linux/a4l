@@ -615,6 +615,10 @@ public final class HostBootstrap {
         android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
         dm.setToDefaults();
         dm.widthPixels = DISPLAY_W;   dm.heightPixels = DISPLAY_H;
+        // ResourcesImpl.updateConfiguration runs CompatibilityInfo.applyToDisplayMetrics over
+        // these, which for an app that supports its screen copies the noncompat sizes onto the
+        // plain ones. Left at 0 they made getResources().getDisplayMetrics() say 0x0.
+        dm.noncompatWidthPixels = DISPLAY_W;  dm.noncompatHeightPixels = DISPLAY_H;
         dm.densityDpi = DISPLAY_DPI;  dm.density = DISPLAY_DPI / 160f;
         dm.scaledDensity = dm.density;
         dm.xdpi = DISPLAY_DPI;        dm.ydpi = DISPLAY_DPI;
@@ -4534,6 +4538,98 @@ public final class HostBootstrap {
         } catch (Throwable t) {
             android.util.Log.w("acl", "resizeGlSurface failed: " + t);
         }
+    }
+
+    // The compositor resized a View-tree app's window (nDispatch -> view_session_resize). On
+    // Android a window that changes size is a configuration change: the resources take the new
+    // screen size, the application and each activity get onConfigurationChanged, and the view
+    // tree is told and laid out again. a4l's window is its display (DISPLAY_W/H), so that moves
+    // too. Every activity is treated as if it declared screenSize|smallestScreenSize|
+    // screenLayout|orientation in configChanges: none is destroyed and created again, which a4l
+    // cannot do. An app that needs a relaunch to pick up, say, a layout-sw600dp resource keeps
+    // the layout it inflated. Main thread.
+    public static void resizeWindow(android.view.View decor, int w, int h) {
+        if (w <= 0 || h <= 0) return;
+        try {
+            DISPLAY_W = w;
+            DISPLAY_H = h;
+            final android.content.res.Configuration cfg = appConfiguration();
+            final android.util.DisplayMetrics dm = appMetrics();
+            // Every Resources an app can reach, once each. They may share one implementation.
+            java.util.Set<Resources> seen =
+                    java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Resources, Boolean>());
+            if (sAppContext != null) seen.add(sAppContext.getResources());
+            if (sApplication != null) seen.add(sApplication.getResources());
+            for (ActivityRecord r : sTask) seen.add(r.activity.getResources());
+            seen.add(Resources.getSystem());
+            seen.remove(null);
+            for (Resources r : seen) {
+                // Keep what the Resources has that a4l does not set (locale, font scale, an
+                // activity's own override), and change only what the size decides.
+                android.content.res.Configuration c = new android.content.res.Configuration(r.getConfiguration());
+                c.screenWidthDp = cfg.screenWidthDp;
+                c.screenHeightDp = cfg.screenHeightDp;
+                c.smallestScreenWidthDp = cfg.smallestScreenWidthDp;
+                c.orientation = cfg.orientation;
+                c.screenLayout = cfg.screenLayout;
+                android.util.DisplayMetrics m = new android.util.DisplayMetrics();
+                m.setTo(r.getDisplayMetrics());
+                m.widthPixels = m.noncompatWidthPixels = dm.widthPixels;
+                m.heightPixels = m.noncompatHeightPixels = dm.heightPixels;
+                r.updateConfiguration(c, m);
+            }
+            // The frames a hollow ViewRootImpl answers getWindowVisibleDisplayFrame from.
+            java.util.List<android.view.View> decors = new java.util.ArrayList<android.view.View>();
+            if (decor != null) decors.add(decor);
+            for (ActivityRecord r : sTask) {
+                android.view.Window win = r.activity.getWindow();
+                android.view.View d = win != null ? win.peekDecorView() : null;
+                if (d != null && !decors.contains(d)) decors.add(d);
+            }
+            for (android.view.View d : decors) resizeViewRootFrames(d, w, h);
+            if (sApplication != null) sApplication.onConfigurationChanged(cfg);
+            // Bottom of the task first, as each would have seen it had it been on top.
+            java.util.Iterator<ActivityRecord> it = sTask.descendingIterator();
+            while (it.hasNext()) {
+                android.app.Activity a = it.next().activity;
+                try {
+                    android.content.res.Configuration ac = a.getResources().getConfiguration();
+                    try { setField(android.app.Activity.class, a, "mCurrentConfig",
+                            new android.content.res.Configuration(ac)); } catch (Throwable ignored) {}
+                    a.onConfigurationChanged(new android.content.res.Configuration(ac));
+                } catch (Throwable t) {
+                    android.util.Log.w("acl", "resizeWindow: " + a.getClass().getName()
+                            + ".onConfigurationChanged threw: " + t);
+                }
+            }
+            for (android.view.View d : decors) {
+                d.dispatchConfigurationChanged(d.getResources().getConfiguration());
+                d.requestLayout();
+            }
+            android.util.Log.i("acl", "resizeWindow: " + w + "x" + h + " (" + cfg.screenWidthDp + "x"
+                    + cfg.screenHeightDp + " dp), " + sTask.size() + " activity(ies) told");
+        } catch (Throwable t) {
+            android.util.Log.w("acl", "resizeWindow failed: " + t);
+        }
+    }
+
+    private static void resizeViewRootFrames(android.view.View decor, int w, int h) {
+        try {
+            Object vri = android.view.View.class.getMethod("getViewRootImpl").invoke(decor);
+            if (vri == null) return;
+            Class<?> vriCls = Class.forName("android.view.ViewRootImpl");
+            Object frames = getField(vriCls, vri, "mTmpFrames");
+            if (frames != null) {
+                for (String fld : new String[]{"frame", "displayFrame", "parentFrame"}) {
+                    try {
+                        Object r = frames.getClass().getField(fld).get(frames);
+                        if (r instanceof android.graphics.Rect) ((android.graphics.Rect) r).set(0, 0, w, h);
+                    } catch (Throwable ignored) {}
+                }
+            }
+            Object win = getField(vriCls, vri, "mWinFrame");
+            if (win instanceof android.graphics.Rect) ((android.graphics.Rect) win).set(0, 0, w, h);
+        } catch (Throwable ignored) {}
     }
 
     // A video SurfaceView we have already backed with a real Surface (so we fire surfaceCreated once).

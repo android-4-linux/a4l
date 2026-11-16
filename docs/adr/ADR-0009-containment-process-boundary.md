@@ -741,11 +741,53 @@ when it is made, so the true margin is smaller than the table reads. The same un
 under 40 busy loops reported 0x0 in only 1 of 20 runs, so a count of failures says little
 about this race in either direction; the main-thread time is the measurement to go by.
 
+**Window size for View-tree apps (2026-11-16).** An app drawn through the View tree (Views,
+Compose) follows a resize as well, in a single process and under `--split`. On Android a
+window that changes size is a configuration change, and that is how the app is told
+(`HostBootstrap.resizeWindow`): every `Resources` the app can reach takes the new screen
+size, the application's callbacks and each activity get `onConfigurationChanged`, the view
+tree is told and laid out again. Underneath, the session takes the size, and the render
+thread's next frame makes a render target and dma-bufs of it (`resize_targets` in
+`tools/aosp/graphics_jni/gpu_dmabuf.cpp`). Under `--split` nothing new crosses the boundary:
+the child is told by the same `SurfaceResize`, and its frames are checked by the same rule.
+
+Checked under headless sway, window floated and set to 800x600, 1000x700 and 640x480:
+
+| App | Single process | `--split` |
+|---|---|---|
+| `view_resize` fixture (`view-window-resize`), 800x600 only | application, activity and view told 800x600; picture is 800x600 | the same; a frame of that size at the broker, 0 rejected |
+| forkyz (Compose) | laid out again at each size, picture fills the window | screenshots identical to single process |
+| foss4g schedule (Views, AppCompat) | laid out again at each size | identical but for 100 pixels |
+| octalsuntime (custom View) | picture fills the window at each size | not run |
+| media3 `PlayerView` app | video rectangle 800x600, 933x700, 640x480 | the same |
+
+What this is not:
+
+- **No relaunch.** Android destroys and creates an activity again on a size change unless
+  its manifest says it handles one. a4l cannot relaunch an activity, so every activity is
+  treated as if it had said so. An app that relies on the relaunch to pick up a
+  size-qualified resource (a `layout-sw600dp`) keeps the layout it inflated.
+- **The window is the display.** a4l advertises one size for both, so `Display` and
+  `DisplayMetrics` follow the window. On Android a freeform window's display stays put.
+- **Deferred present only.** With `ACL_PRESENT_IMMEDIATE` the app's `Canvas` wraps the
+  render target's first `SkCanvas`, and the size is not taken up.
+
+Three faults found on the way, each fixed:
+
+- `getResources().getDisplayMetrics()` said 0x0 from the start, resize or not. The framework
+  copies `noncompatWidthPixels` over `widthPixels` for an app that supports its screen, and
+  a4l left the former at 0.
+- a4l never set its window geometry, so it was the bounding box of the window and its
+  subsurfaces. A video laid out past the window, or still at its place from before the
+  resize, made the window larger than its buffer, and sway configured it to that: one resize
+  to 800x600 came back as 800x600, 1173x800, 800x600. The geometry is now the toplevel's
+  rectangle.
+- The video plane was placed only when a frame arrived. With the video paused or ended, a
+  resize or a layout change left the picture where its last frame had put it. The frame on
+  the plane is now placed again when the rectangle or the window changes.
+
 Still fixed-size:
 
-- **The View-tree present path.** Its buffers, the decor's layout and the app's
-  `Configuration` all carry the opening size. On Android a resize is a configuration change.
-  Under `--split` such a child is told the size and does not take it.
 - **The first size.** A tiling compositor's first configure is its tile, not a4l's size; a4l
   still opens at its own. Only a change after that is taken up.
 
