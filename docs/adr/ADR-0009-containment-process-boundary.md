@@ -877,8 +877,11 @@ Not covered:
   nothing else. Importing asynchronously (`create` and its `failed` event) would turn that into
   a dropped frame.
 - **Auxiliary planes** are checked for position only; their layout is the driver's.
-- **The fuzzing is a run, not a service.** It is not in CI and has no continuous corpus. The
-  presenter behind it is a stand-in, so libwayland and the compositor are outside it.
+- **The fuzzing in CI is a regression check, not a campaign.** Since 2026-11-16 the `present`
+  job builds the harness with clang under ASan and UBSan and runs it for 120 s from the seeds on
+  every push and pull request. No corpus is kept between runs, so each starts where the last
+  one did. The presenter behind it is a stand-in, so libwayland and the compositor are outside
+  it.
 - **arm64.** `runtime/split_vm.cpp` receives frames from `acl-art-host` with none of this.
 - **The clipboard.** The child may set it, up to 60 KiB, as any Wayland client with input focus
   may. It cannot read it.
