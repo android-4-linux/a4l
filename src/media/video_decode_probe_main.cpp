@@ -14,6 +14,8 @@
 
 #include "acl_config.h"
 
+#include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -28,6 +30,8 @@ int main() {
 }
 #else
 
+#include <sys/mman.h>
+
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -35,6 +39,7 @@ int main() {
 
 #include "gfx/ahardware_buffer.h"
 #include "gfx/gl_egl.h"
+#include "gfx/video_convert.h"
 #include "media/video_decoder.h"
 
 using acl::gfx::GlDevice;
@@ -59,16 +64,22 @@ GLuint compile(GLenum type, const char* src) {
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr,
-                 "usage: acl-video-decode-probe <clip> [r,g,b] [--packet]\n");
+                 "usage: acl-video-decode-probe <clip> [r,g,b] [--packet] "
+                 "[--convert]\n");
     return 2;
   }
   const char* clip = nullptr;
   int er = -1, eg = -1, eb = -1;
   bool packet_mode = false;  // --packet: exercise Demuxer -> CodecDecoder
                              // (MediaExtractor -> MediaCodec)
+  // --convert: run the frame through gfx::VideoConverter (what a compositor
+  // without NV12 is sent) and print the four quadrants' center pixels.
+  bool convert_mode = false;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--packet") == 0)
       packet_mode = true;
+    else if (std::strcmp(argv[i], "--convert") == 0)
+      convert_mode = true;
     else if (argv[i][0] == '-')
       continue;
     else if (clip == nullptr)
@@ -78,7 +89,8 @@ int main(int argc, char** argv) {
   }
   if (clip == nullptr) {
     std::fprintf(stderr,
-                 "usage: acl-video-decode-probe <clip> [r,g,b] [--packet]\n");
+                 "usage: acl-video-decode-probe <clip> [r,g,b] [--packet] "
+                 "[--convert]\n");
     return 2;
   }
 
@@ -258,6 +270,57 @@ int main(int argc, char** argv) {
       "video-decode-probe: decoded %dx%d fourcc=%#x planes=%u mod=%#lx fd=%d\n",
       f.width, f.height, f.drm_format, f.plane_count,
       static_cast<unsigned long>(f.modifier), f.fd);
+
+  if (convert_mode) {
+    auto conv = acl::gfx::VideoConverter::Create(&err);
+    acl::gfx::DmabufFrame rgb{};
+    if (!conv || !conv->convert(f, &rgb, &err)) {
+      std::fprintf(stderr, "video-decode-probe: convert failed (%s)\n",
+                   err.c_str());
+      return 1;
+    }
+    // What a frame costs once the pool exists: the same frame again, into
+    // other buffers, each held as a frame on screen would be.
+    {
+      acl::gfx::DmabufFrame more[4];
+      const auto t0 = std::chrono::steady_clock::now();
+      int done = 0;
+      for (auto& m : more)
+        done += conv->convert(f, &m, &err) ? 1 : 0;
+      const double ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+      std::printf("video-decode-probe: %d more conversion(s), %.2f ms each\n",
+                  done, done > 0 ? ms / done : 0.0);
+    }
+    const std::size_t len =
+        rgb.offset() + static_cast<std::size_t>(rgb.stride()) * rgb.height;
+    void* map = ::mmap(nullptr, len, PROT_READ, MAP_SHARED, rgb.fd, 0);
+    if (map == MAP_FAILED) {
+      std::fprintf(stderr,
+                   "video-decode-probe: cannot map the converted "
+                   "buffer (%s)\n",
+                   std::strerror(errno));
+      return 2;
+    }
+    std::printf(
+        "video-decode-probe: converted %ux%u fourcc=%#x mod=%#lx "
+        "stride=%u\n",
+        rgb.width, rgb.height, rgb.drm_format,
+        static_cast<unsigned long>(rgb.modifier), rgb.stride());
+    const auto* base = static_cast<const std::uint8_t*>(map) + rgb.offset();
+    const char* names[4] = {"tl", "tr", "bl", "br"};
+    for (int q = 0; q < 4; ++q) {
+      const std::uint32_t x = rgb.width / 4 + (q % 2) * (rgb.width / 2);
+      const std::uint32_t y = rgb.height / 4 + (q / 2) * (rgb.height / 2);
+      const std::uint8_t* px =
+          base + static_cast<std::size_t>(y) * rgb.stride() + x * 4u;
+      std::printf("video-decode-probe: quadrant %s = %d,%d,%d\n", names[q],
+                  px[0], px[1], px[2]);  // XBGR8888: bytes are R, G, B, X
+    }
+    ::munmap(map, len);
+    return 0;
+  }
 
   AHardwareBuffer* ahb = acl::gfx::ahb_import(
       f);  // zero-copy: dup the decoder's fd + record layout

@@ -242,11 +242,14 @@ already binds), and four messages carry the rest to the broker.
 What the broker checks (C5) before a video frame reaches the compositor:
 
 - **The buffer.** The kernel must report the descriptor as a dma-buf, as for a window frame.
-- **Format and modifier.** The format is NV12 or P010, and the pair of format and modifier is
-  one the compositor advertised. This is stricter than for a window frame: linear is not
-  assumed, because a compositor need not take YUV at all.
-- **Layout.** Two to four planes. Each luma row and each chroma row fits its stride, and the
-  last row of each plane ends inside the buffer, computed in 64 bits.
+- **Format and modifier.** The format is NV12 or P010, or XBGR8888 for a picture the child
+  converted (below), and the pair of format and modifier is one the compositor advertised.
+  This is stricter than for a window frame: linear is not assumed, because a compositor need
+  not take YUV at all.
+- **Layout.** NV12 and P010: two to four planes. Each luma row and each chroma row fits its
+  stride, and the last row of each plane ends inside the buffer, computed in 64 bits.
+  XBGR8888: one to four planes, each row of four-byte pixels fits the stride, and the last row
+  ends inside the buffer.
 - **Size.** The picture is 1 to 16384 pixels each way. It is the decoder's size, not the
   window's.
 - **Rectangles.** A rectangle has an area and lies within 65536 of the window's origin.
@@ -823,9 +826,27 @@ stand-in is not in this repository. The server advertised one modifier for ARGB8
 - The media3 `PlayerView` app ended at its first video frame, single-process. The frame is
   NV12, the server advertised no NV12, and sending it is a protocol error that closes the
   connection. A video frame whose format or modifier the compositor does not advertise is now
-  dropped, with one warning. The app plays to its end with sound and no picture, in both modes
-  (under `--split` the broker already refused the frame). a4l does not convert the frame to a
-  format the compositor takes; that is the gap.
+  dropped, with one warning (under `--split` the broker already refused the frame).
+- **Video for a compositor without the decoder's format (2026-11-16).** Once a format has been
+  turned away, each frame of it is drawn on the GPU into an XBGR8888 LINEAR dma-buf
+  (`gfx::VideoConverter`: the frame as an external texture, one pass into one of 12 pooled
+  buffers) and that goes to the video plane. The presenter says a format was refused; under
+  `--split` the broker tells the child with a new message, `VideoRefused` (protocol version 7),
+  once per format. The frames sent before the refusal is known are lost: one single-process,
+  those in flight under `--split`.
+  - On `ihs_wl_server`: the media3 `PlayerView` app's video is a second layer under the
+    window at 800x600, 640x480 and 960x720 as the view is resized, both modes. That server
+    does not draw, so the picture itself was not seen there.
+  - The picture: a four-color clip (one color a quadrant) converted through the decode probe
+    comes out with each quadrant within 1 of its source color and the right way up.
+  - Cost: 0.18 ms a frame at 320x240 and 0.56 ms at 1920x1080 on a Ryzen 9 9950X's integrated
+    Radeon (radeonsi), `glFinish` included.
+  - `split-video` has a third run with every frame converted (`ACL_VIDEO_CONVERT`): 154 of
+    155 frames at the broker's video plane under Weston, 0 rejected.
+  - Not done: 10-bit is converted to 8; the YUV matrix and range are the GL driver's defaults,
+    with no hint from the stream; A/V sync with conversion was not measured; a compositor that
+    lists neither the decoder's format nor XBGR8888 LINEAR still gets no picture; the texture
+    path (Flutter) does not go through the video plane and never needed this.
 - Input: a pointer tap at (300,200) in the view reached a View below the 64-pixel title bar as
   ACTION_DOWN and ACTION_UP at (300,136), both modes.
 - `ACL_PRESENT_LINEAR_ONLY` makes a4l act as if the compositor listed LINEAR alone. The

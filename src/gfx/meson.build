@@ -8,6 +8,9 @@
 # compiled in and linked against it; otherwise gfx is the self-contained software
 # rasterizer only.
 gfx_sources = [files('gfx.cpp')]
+# NV12/P010 -> XBGR8888 for a compositor that does not take the decoder's format. Built
+# everywhere: without GL it is a converter that cannot be created.
+gfx_sources += files('video_convert.cpp')
 gfx_deps = []
 if have_skia
   gfx_sources += files('gfx_skia.cpp')

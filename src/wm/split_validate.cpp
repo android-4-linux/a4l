@@ -24,9 +24,10 @@ constexpr std::uint32_t kArgb8888 = 0x34325241u;  // 'AR24'
 constexpr std::uint32_t kXrgb8888 = 0x34325258u;  // 'XR24'
 constexpr std::uint64_t kModLinear = 0;
 constexpr std::uint64_t kModInvalid = 0x00ffffffffffffffull;
-constexpr std::uint32_t kBytesPerPixel = 4;   // both formats above
-constexpr std::uint32_t kNv12 = 0x3231564eu;  // 'NV12'
-constexpr std::uint32_t kP010 = 0x30313050u;  // 'P010'
+constexpr std::uint32_t kBytesPerPixel = 4;       // both formats above
+constexpr std::uint32_t kNv12 = 0x3231564eu;      // 'NV12'
+constexpr std::uint32_t kP010 = 0x30313050u;      // 'P010'
+constexpr std::uint32_t kXbgr8888 = 0x34324258u;  // 'XB24'
 
 }  // namespace
 
@@ -131,7 +132,7 @@ FrameVerdict check_frame(const ipc::PresentFrame& p,
 }
 
 bool video_format_accepted(std::uint32_t drm_format) noexcept {
-  return drm_format == kNv12 || drm_format == kP010;
+  return drm_format == kNv12 || drm_format == kP010 || drm_format == kXbgr8888;
 }
 
 FrameVerdict check_video_frame(const ipc::VideoFrame& v,
@@ -156,8 +157,25 @@ FrameVerdict check_video_frame(const ipc::VideoFrame& v,
       limits.modifiers.end())
     return FrameVerdict::BadModifier;
 
-  // Both formats are two planes: luma, then interleaved chroma at half
-  // resolution each way. More are a driver's auxiliary planes.
+  // A picture the child converted: one plane of 32-bit pixels, laid out as
+  // an app frame is. More planes are a driver's auxiliary ones.
+  if (v.drm_format == kXbgr8888) {
+    if (v.plane_count < 1 || v.plane_count > ipc::kMaxPlanes)
+      return FrameVerdict::BadPlanes;
+    const std::uint64_t row = static_cast<std::uint64_t>(v.w) * kBytesPerPixel;
+    if (v.stride[0] < row ||
+        v.offset[0] + static_cast<std::uint64_t>(v.stride[0]) * v.h >
+            facts.size)
+      return FrameVerdict::BadLayout;
+    for (std::uint32_t i = 1; i < v.plane_count; ++i) {
+      if (v.stride[i] == 0 || v.offset[i] >= facts.size)
+        return FrameVerdict::BadPlanes;
+    }
+    return FrameVerdict::Ok;
+  }
+
+  // The decoder's formats are two planes: luma, then interleaved chroma at
+  // half resolution each way. More are a driver's auxiliary planes.
   if (v.plane_count < 2 || v.plane_count > ipc::kMaxPlanes)
     return FrameVerdict::BadPlanes;
 

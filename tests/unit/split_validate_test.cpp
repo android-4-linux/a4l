@@ -379,6 +379,51 @@ TEST_CASE("validate: a well-formed video frame passes", "[split][validate]") {
   CHECK_FALSE(wm::video_format_accepted(0));
 }
 
+TEST_CASE("validate: a converted video frame is one plane of pixels",
+          "[split][validate]") {
+  // What the child sends a compositor that takes no NV12: XBGR8888, linear.
+  constexpr std::uint32_t kXb24 = 0x34324258u;
+  ipc::VideoFrame v{};
+  v.w = 320;
+  v.h = 240;
+  v.drm_format = kXb24;
+  v.plane_count = 1;
+  v.modifier = 0;
+  v.stride[0] = 1280;
+  v.dest = {0, 0, 640, 480};
+  const wm::BufferFacts buffer{true, 1280ull * 240};
+  wm::VideoLimits l;
+  l.have_surface = true;
+  l.modifiers = kVideoAdvertised;
+  CHECK(wm::video_format_accepted(kXb24));
+  CHECK(wm::check_video_frame(v, true, buffer, l) == FrameVerdict::Ok);
+
+  ipc::VideoFrame narrow = v;
+  narrow.stride[0] = 1279;  // a row does not fit
+  CHECK(wm::check_video_frame(narrow, true, buffer, l) ==
+        FrameVerdict::BadLayout);
+  ipc::VideoFrame tall = v;
+  tall.h = 241;  // the last row ends past the buffer
+  CHECK(wm::check_video_frame(tall, true, buffer, l) ==
+        FrameVerdict::BadLayout);
+  ipc::VideoFrame late = v;
+  late.offset[0] = 4;
+  CHECK(wm::check_video_frame(late, true, buffer, l) ==
+        FrameVerdict::BadLayout);
+  ipc::VideoFrame none = v;
+  none.plane_count = 0;
+  CHECK(wm::check_video_frame(none, true, buffer, l) ==
+        FrameVerdict::BadPlanes);
+  ipc::VideoFrame unlisted = v;
+  unlisted.modifier = 0x33;
+  CHECK(wm::check_video_frame(unlisted, true, buffer, l) ==
+        FrameVerdict::BadModifier);
+  wm::VideoLimits nothing = l;
+  nothing.modifiers = {};
+  CHECK(wm::check_video_frame(v, true, buffer, nothing) ==
+        FrameVerdict::BadFormat);
+}
+
 TEST_CASE("validate: each way a video frame is refused", "[split][validate]") {
   using V = FrameVerdict;
   const auto with = [](auto spoil) {

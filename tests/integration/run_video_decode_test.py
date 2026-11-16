@@ -8,6 +8,7 @@
 # EGLImage (Mesa does YUV->RGB in the sampler). Recovering the clip's color proves decode->texture is
 # copy-free. SKIPs (exit 77) without ffmpeg, a VAAPI device, or a GL render node.
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -55,6 +56,44 @@ def main() -> int:
                 return SKIP
             if p.returncode != 0:
                 sys.stderr.write(f"FAIL: video-decode probe ({label})\n" + out)
+                return 1
+
+        # The converter (gfx::VideoConverter): what a compositor that does not take the
+        # decoder's NV12 is sent. Four colors, one per quadrant, so that a flipped or
+        # mirrored picture and a wrong color matrix both show.
+        quad = os.path.join(work, "quad.mp4")
+        colors = {"tl": (0xC0, 0x20, 0x20), "tr": (0x20, 0x20, 0xC0),
+                  "bl": (0x20, 0xC0, 0x20), "br": (0xE0, 0xE0, 0xE0)}
+        inputs = []
+        for name in ("tl", "tr", "bl", "br"):
+            cr, cg, cb = colors[name]
+            inputs += ["-f", "lavfi", "-i", f"color=c=0x{cr:02X}{cg:02X}{cb:02X}:s=160x120:d=1:r=10"]
+        gen = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"] + inputs +
+            ["-filter_complex", "[0][1]hstack[t];[2][3]hstack[b];[t][b]vstack",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "main", quad],
+            capture_output=True, text=True)
+        if gen.returncode != 0 or not os.path.isfile(quad):
+            sys.stdout.write(f"SKIP: ffmpeg could not encode the quadrant clip "
+                             f"({gen.stderr.strip()[:200]})\n")
+            return SKIP
+        p = subprocess.run([probe, quad, "--convert"], capture_output=True, text=True,
+                           timeout=120)
+        out += "--- convert ---\n" + p.stdout + p.stderr
+        if p.returncode == 2:
+            sys.stdout.write("SKIP: the converted buffer cannot be read back here\n" + out)
+            return SKIP
+        if p.returncode != 0:
+            sys.stderr.write("FAIL: video-decode probe (convert)\n" + out)
+            return 1
+        if "fourcc=0x34324258 mod=0 " not in p.stdout:
+            sys.stderr.write("FAIL: the converted frame is not XBGR8888 LINEAR\n" + out)
+            return 1
+        for name, want in colors.items():
+            m = re.search(rf"quadrant {name} = (\d+),(\d+),(\d+)", p.stdout)
+            got = tuple(int(v) for v in m.groups()) if m else None
+            if got is None or any(abs(a - b) > 12 for a, b in zip(got, want)):
+                sys.stderr.write(f"FAIL: converted quadrant {name} is {got}, want {want}\n" + out)
                 return 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
