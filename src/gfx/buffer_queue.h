@@ -84,6 +84,8 @@ class BufferQueue {
 
  private:
   BufferQueue() = default;
+  // One buffer of the queue's size, format and usage. Null on failure.
+  AHardwareBuffer* allocate() const;
 
   enum class State { Free, Ready, Acquired };
   struct Slot {
@@ -94,6 +96,7 @@ class BufferQueue {
                             // dropped (not pooled) after use
   };
 
+  std::uint64_t usage_ = 0;  // what a buffer allocated later is made with
   std::mutex mtx_;
   std::vector<Slot> slots_;
   std::uint64_t next_seq_ = 1;

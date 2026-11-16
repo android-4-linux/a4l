@@ -701,11 +701,45 @@ Checked under headless sway, window floated and set to 800x600, 1000x700 and 640
 | `GLSurfaceView` fixture, `--split` | `onSurfaceChanged` at 800x600, a frame of that size at the broker, 0 messages rejected (`gl-surface-relayout`) |
 | Flutter `video_player` app, `--split` | a frame of each of the three sizes at the broker; each screenshot is filled to the window's size |
 
-Found on the way and not fixed: in most `--split` runs of the Flutter app the player reports
-its video as 0x0 when it initializes, and the app then lays the video out square (700x700 in
-the 1000x700 window, where a single process shows 933x700). It is not the resize: of the
-runs logged on 2026-11-15, 15 of 23 under `--split` report 0x0, 14 of them from before this
-change, and 0 of 26 in a single process do. The cause was not looked for.
+Found on the way: in most `--split` runs of the Flutter app the player reported its video
+as 0x0 when it initialized, and the app then laid the video out square (700x700 in the
+1000x700 window, where a single process shows 933x700). Of the runs logged on 2026-11-15,
+15 of 23 under `--split` reported 0x0 and 0 of 26 in a single process did. It was not the
+resize and not the boundary; see "A player that starts without its surface" below.
+
+**A player that starts without its surface (2026-11-16).** `video_player` calls
+`prepare()` and then `setVideoSurface()`, in that order, on the app's main thread. If
+ExoPlayer's playback thread gets to its video codec before the surface arrives, it starts
+on a placeholder surface, counts as ready without showing a frame, and reports a video size
+of 0x0, which the plugin passes on once and never corrects. In the logs the two go together
+without exception: all 16 runs that reported 0x0 made the placeholder, and none of the 37
+others did. One single-process run did it too, once the timing was disturbed.
+
+The plugin gets away with this on a device, presumably because an `ImageReader` and its
+surface cost the main thread little there (not measured). In a4l they cost it 28 ms (median of 5 runs, from the end of the player's
+constructor to the surface being handed over), against 36 ms for the playback thread to
+reach its codec. Two things took the time, both on the main thread:
+
+- Loading `media_jni` registered a4l's natives and, in the same call, asked FFmpeg which
+  audio decoders it has, which loads FFmpeg: 8 ms. The list is now built when it is first
+  asked for, which is on the playback thread.
+- A new `ImageReader` allocated all its buffers at once, seven dma-bufs for a player's 1x1
+  reader that are never drawn into: 12 ms. The queue now allocates the first and makes the
+  rest when a producer asks.
+
+| | Surface handed over, ms | Codec's surface decided, ms | 0x0 |
+|---|---|---|---|
+| Before, machine under other load, 5 runs | 28.2 (25.5 to 70.8) | 36.1 | 3 |
+| After, `--split`, 20 runs | 8.5 (7.8 to 9.4) | 34.0 | 0 |
+| After, single process, 10 runs | 8.8 (8.4 to 9.6) | 33.9 | 0 |
+| After, `--split`, 40 busy loops running, 20 runs | 30.9 (14.7 to 44.2) | 117.7 (least 101.3) | 0 |
+
+Times are from the end of the player's constructor; median, with the range in brackets. The
+race is the plugin's and is still there. What changed is the margin: about 25 ms now, where
+there were 8 and that was not enough. The decision time is when the choice shows in the log, which is later than
+when it is made, so the true margin is smaller than the table reads. The same unfixed build
+under 40 busy loops reported 0x0 in only 1 of 20 runs, so a count of failures says little
+about this race in either direction; the main-thread time is the measurement to go by.
 
 Still fixed-size:
 

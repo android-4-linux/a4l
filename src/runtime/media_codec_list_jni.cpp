@@ -89,13 +89,23 @@ const CodecEntry kAudioCodecs[] = {
 
 // The list, built once: the video decoders, then the audio decoders that are
 // available.
+// Built on the first question about the list, not when the natives are
+// registered: finding out which audio decoders FFmpeg has loads FFmpeg (8 ms
+// measured), and registration runs inside the first loadLibrary("media_jni"),
+// which for a player is ImageReader's class initializer on the app's main
+// thread, between its prepare() and its setVideoSurface().
 const std::vector<CodecEntry>& codecs() {
   static const std::vector<CodecEntry> list = [] {
     std::vector<CodecEntry> v(std::begin(kVideoCodecs), std::end(kVideoCodecs));
+    std::string names;
     for (const CodecEntry& e : kAudioCodecs) {
-      if (media::AudioDecoder::available(e.mime))
+      if (media::AudioDecoder::available(e.mime)) {
         v.push_back(e);
+        names += std::string(names.empty() ? "" : ", ") + e.mime;
+      }
     }
+    log::i(kTag, "MediaCodecList: audio decoders for {}",
+           names.empty() ? "nothing (no FFmpeg decoder found)" : names);
     return v;
   }();
   return list;
@@ -315,13 +325,6 @@ void register_media_codec_list_natives(JNIEnv* env) {
   log::write(ok ? log::Level::Info : log::Level::Warn, kTag,
              ok ? "MediaCodecList natives bound (advertising acl.h264.decoder)"
                 : "MediaCodecList native bind incomplete");
-  std::string names;
-  for (const CodecEntry& e : codecs()) {
-    if (e.audio)
-      names += std::string(names.empty() ? "" : ", ") + e.mime;
-  }
-  log::i(kTag, "MediaCodecList: audio decoders for {}",
-         names.empty() ? "nothing (no FFmpeg decoder found)" : names);
 }
 
 }  // namespace acl::runtime
