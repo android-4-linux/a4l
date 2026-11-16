@@ -13,9 +13,10 @@
 # A video SurfaceView failed all three before a4l stopped marking it as having a frame
 # (tests/fixtures/video_plane covers that); this holds the GL path to the same.
 #
-# Where sway is installed it also resizes the window, single process: a headless sway is
+# Where sway is installed it also resizes the window, in both modes: a headless sway is
 # started, the app's window is floated and set to 800x600 once the renderer is up, and the
-# renderer must be told (onSurfaceChanged 800x600) and go on drawing. Weston's headless
+# renderer must be told (onSurfaceChanged 800x600) and go on drawing. Across the boundary
+# the broker must also get a frame of that size and refuse none. Weston's headless
 # backend has no way to resize a client's window, so this part needs sway; without it the
 # test says so and passes on the rest.
 #
@@ -233,52 +234,74 @@ def main() -> int:
             return fail(f"the app process {s.group(1)}", out)
         if int(s.group(2)) != 0:
             return fail(f"the broker rejected {s.group(2)} message(s)", out)
-        # 5. A resize, single process, under sway.
+        # 5. A resize under sway, in both modes.
         sway, sway_display, ipc = start_sway(runtime_dir, work)
         if sway is None:
             sys.stdout.write(f"OK: {single}; {split}; resize not checked ({sway_display})\n")
             return 0
         renv = dict(env, WAYLAND_DISPLAY=sway_display)
-        p = subprocess.Popen(runner + ["--present"], env=renv, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, text=True, errors="replace")
-        lines, asked = [], False
-        deadline = time.time() + 120
-        for line in p.stdout:
-            lines.append(line)
-            if not asked and "GLV: onSurfaceChanged" in line:
-                asked = True
 
-                def resize():
-                    # The renderer is up before the window's first commit maps it, and
-                    # sway floats only a window it has: ask until it says it did.
-                    msg = [shutil.which("swaymsg"), "-s", ipc]
-                    for _ in range(40):
-                        r = subprocess.run(msg + ["floating", "enable"], capture_output=True,
-                                           text=True)
-                        if '"success": true' in r.stdout:
-                            break
-                        time.sleep(0.05)
-                    subprocess.run(msg + ["resize", "set", "800", "600"], capture_output=True)
+        def resize_run(args, tag):
+            """Run the fixture and set its window to 800x600 once the renderer is up.
+            Returns (error, summary, output)."""
+            p = subprocess.Popen(runner + args, env=renv, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, errors="replace")
+            lines, asked = [], False
+            deadline = time.time() + 120
+            for line in p.stdout:
+                lines.append(line)
+                if not asked and "GLV: onSurfaceChanged" in line:
+                    asked = True
 
-                threading.Thread(target=resize, daemon=True).start()
-            if time.time() > deadline:
-                p.kill()
-                break
-        p.wait(timeout=30)
-        out = "".join(lines)
-        if keep:
-            with open(os.path.join(keep, "run-resize.log"), "w") as fh:
-                fh.write(out)
-        if not asked:
-            return fail("resize: the renderer never came up under sway", out)
-        err, resized = check("resize", out)
+                    def resize():
+                        # The renderer is up before the window's first commit maps it,
+                        # and sway floats only a window it has: ask until it says it did.
+                        msg = [shutil.which("swaymsg"), "-s", ipc]
+                        for _ in range(40):
+                            r = subprocess.run(msg + ["floating", "enable"],
+                                               capture_output=True, text=True)
+                            if '"success": true' in r.stdout:
+                                break
+                            time.sleep(0.05)
+                        subprocess.run(msg + ["resize", "set", "800", "600"],
+                                       capture_output=True)
+
+                    threading.Thread(target=resize, daemon=True).start()
+                if time.time() > deadline:
+                    p.kill()
+                    break
+            p.wait(timeout=30)
+            out = "".join(lines)
+            if keep:
+                with open(os.path.join(keep, f"run-{tag}.log"), "w") as fh:
+                    fh.write(out)
+            if not asked:
+                return "the renderer never came up under sway", None, out
+            err, summary = check(tag, out)
+            if err:
+                return err, None, out
+            if "GL session: resized to 800x600" not in out:
+                return "a4l did not take up the compositor's 800x600", None, out
+            if "GLV: onSurfaceChanged 800x600" not in out:
+                return "the renderer was not told its surface is 800x600", None, out
+            return None, summary, out
+
+        err, resized, out = resize_run(["--present"], "resize")
         if err:
             return fail(f"resize: {err}", out)
-        if "GL session: resized to 800x600" not in out:
-            return fail("resize: a4l did not take up the compositor's 800x600", out)
-        if "GLV: onSurfaceChanged 800x600" not in out:
-            return fail("resize: the renderer was not told its surface is 800x600", out)
-        sys.stdout.write(f"OK: {single}; {split}; {resized}, renderer told 800x600\n")
+        # Across the boundary the broker must also have had a frame of the new size from
+        # the app process, and refused none on the way.
+        err, resized_split, out = resize_run(["--split", "--present"], "resize --split")
+        if err:
+            return fail(f"resize --split: {err}", out)
+        if "broker: the child took the resize to 800x600" not in out:
+            return fail("resize --split: no 800x600 frame reached the broker", out)
+        s = re.search(r"split: app process ended \((\w+)\); .*?(\d+) message\(s\) rejected", out)
+        if not s or s.group(1) != "exited" or int(s.group(2)) != 0:
+            return fail("resize --split: the app process did not exit cleanly, or the "
+                        "broker rejected a message", out)
+        sys.stdout.write(f"OK: {single}; {split}; {resized}; {resized_split}; "
+                         "renderer told 800x600 in both\n")
         return 0
     except subprocess.CalledProcessError as e:
         sys.stderr.write(f"FAIL: build step: {e.cmd}\n{e.stderr}\n")

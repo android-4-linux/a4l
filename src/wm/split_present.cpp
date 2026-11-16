@@ -364,6 +364,17 @@ class SplitPresenter final : public IPresenter {
     return closed_.load(std::memory_order_relaxed);
   }
 
+  // The size the broker last said the compositor asked for. The broker
+  // sends one at a time and waits for a frame of that size before the next.
+  bool take_resize(int* width, int* height) noexcept override {
+    const std::uint64_t wh = resize_.exchange(0, std::memory_order_relaxed);
+    if (wh == 0)
+      return false;
+    *width = static_cast<int>(wh >> 32);
+    *height = static_cast<int>(wh & 0xffffffffu);
+    return true;
+  }
+
   // The state changes on the looper thread, in handle(); a render thread
   // waits here for it.
   bool wait_ready(int timeout_ms) noexcept override {
@@ -504,6 +515,14 @@ class SplitPresenter final : public IPresenter {
       case ipc::MsgType::AudioLatency:
         split_audio_note_latency(r.msg.audio_latency);
         break;
+      case ipc::MsgType::SurfaceResize: {
+        const ipc::SurfaceInfo& si = r.msg.surface;
+        if (si.w != 0 && si.h != 0 && si.w <= ipc::kMaxSurfaceDim &&
+            si.h <= ipc::kMaxSurfaceDim)
+          resize_.store((static_cast<std::uint64_t>(si.w) << 32) | si.h,
+                        std::memory_order_relaxed);
+        break;
+      }
       case ipc::MsgType::Bye: {
         {
           std::lock_guard<std::mutex> lock(state_mu_);
@@ -560,6 +579,7 @@ class SplitPresenter final : public IPresenter {
   std::atomic<std::uint64_t> present_ns_{0};
   std::atomic<std::uint32_t> refresh_ns_{0};
   std::atomic<std::uint32_t> feedback_flags_{0};
+  std::atomic<std::uint64_t> resize_{0};  // w << 32 | h; 0: none waiting
   // Frame numbering, under state_mu_: submit() runs on the render thread and
   // PresentState is handled on the looper thread.
   std::mutex state_mu_;
@@ -711,6 +731,7 @@ class Broker {
         return stats_;  // the child disconnected or said Bye
 
       sync_state();
+      offer_resize();
       if (presenter_ && presenter_->closed() && !stats_.window_closed) {
         stats_.window_closed = true;
         close_deadline = Clock::now() + std::chrono::milliseconds(linger_ms);
@@ -878,6 +899,7 @@ class Broker {
     child_ready_ = false;
     sent_closed_ = false;
     limits_ = FrameLimits{};
+    want_w_ = want_h_ = told_w_ = told_h_ = 0;
     video_mods_format_ = 0;
     video_mods_.clear();
     presenter_ = open_(
@@ -908,7 +930,22 @@ class Broker {
     const BufferFacts facts = r.fd0 >= 0 && limits.have_surface
                                   ? options_.inspect(r.fd0)
                                   : BufferFacts{};
+    // A frame is the surface's size, or the one size the child has been told
+    // to take. The first frame of that size makes it the surface's.
+    const bool resized = told_w_ != 0 && p.w == told_w_ && p.h == told_h_;
+    if (resized) {
+      limits.surface_w = told_w_;
+      limits.surface_h = told_h_;
+    }
     const FrameVerdict verdict = check_frame(p, r.fd0 >= 0, facts, limits);
+    if (verdict == FrameVerdict::Ok && resized) {
+      log::i(kTag, "broker: the child took the resize to {}x{}", told_w_,
+             told_h_);
+      limits_.surface_w = told_w_;
+      limits_.surface_h = told_h_;
+      told_w_ = told_h_ = 0;
+      ++stats_.resizes;
+    }
     if (verdict != FrameVerdict::Ok) {
       const auto v = static_cast<std::size_t>(verdict);
       if (stats_.frame_verdicts[v]++ == 0)
@@ -1210,10 +1247,48 @@ class Broker {
     }
   }
 
+  // Pass a size the compositor asked for on to the child. One at a time: the
+  // next is not sent until a frame of the last has been accepted, so a frame
+  // is only ever one of two sizes, and both are the compositor's. A child
+  // that does not follow keeps the size it has; the compositor shows a
+  // window of another size than it asked for, as it does single-process for
+  // an app that cannot resize.
+  void offer_resize() noexcept {
+    if (!presenter_ || !limits_.have_surface)
+      return;
+    int w = 0, h = 0;
+    if (presenter_->take_resize(&w, &h) && w > 0 && h > 0 &&
+        static_cast<std::uint32_t>(w) <= ipc::kMaxSurfaceDim &&
+        static_cast<std::uint32_t>(h) <= ipc::kMaxSurfaceDim) {
+      want_w_ = static_cast<std::uint32_t>(w);
+      want_h_ = static_cast<std::uint32_t>(h);
+    }
+    if (want_w_ == 0 || told_w_ != 0)
+      return;
+    if (want_w_ == limits_.surface_w && want_h_ == limits_.surface_h) {
+      want_w_ = want_h_ = 0;  // back at the size the child already has
+      return;
+    }
+    ipc::Message m;
+    m.type = ipc::MsgType::SurfaceResize;
+    m.surface.w = want_w_;
+    m.surface.h = want_h_;
+    if (channel_.send(m)) {  // else: the socket is full; again next pass
+      ++stats_.to_child;
+      told_w_ = want_w_;
+      told_h_ = want_h_;
+      want_w_ = want_h_ = 0;
+    }
+  }
+
   ipc::Channel& channel_;
   const PresenterFactory& open_;
   const BrokerOptions& options_;
   FrameLimits limits_;
+  // The compositor's latest size not yet passed on, and the size the child
+  // has been told to take and has not yet sent a frame of. 0: none.
+  std::uint32_t want_w_ = 0, want_h_ = 0;
+  std::uint32_t told_w_ = 0, told_h_ = 0;
   int surfaces_created_ = 0;
   std::uint32_t frames_seen_ = 0;  // PresentFrame messages handled
   struct AudioStream {

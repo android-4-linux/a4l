@@ -12,7 +12,12 @@
 // stopped.
 //
 // Record format, repeated to the end of the input:
-//   u8  descriptors: bits 0-1 how many (0-3), bits 2-7 which kinds
+//   u8  descriptors: bits 0-1 how many (0-3), bits 2-3 which kinds
+//       Bit 7 of the input's first byte: the child stays connected while the
+//       broker serves, and the broker returns to the compositor after every
+//       message. What the broker sends then arrives, so a resize it passes
+//       on takes effect. Without it the child has gone before the broker
+//       starts, which is the other half of what a child can do.
 //   u16 length, little-endian, capped at 2048
 //   that many bytes: the datagram
 //
@@ -26,6 +31,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -114,6 +120,13 @@ class Presenter final : public wm::IPresenter {
     struct stat st{};
     if (::fstat(f.fd, &st) != 0 || !S_ISREG(st.st_mode))
       fail("a frame's descriptor is not a buffer");
+    // The first frame of the size the compositor asked for makes it the
+    // surface's; the size left behind is then no longer one.
+    if (asked_.w != 0 && static_cast<int>(f.width) == asked_.w &&
+        static_cast<int>(f.height) == asked_.h) {
+      surface_ = asked_;
+      asked_ = {};
+    }
     if (static_cast<int>(f.width) != surface_.w ||
         static_cast<int>(f.height) != surface_.h)
       fail("a frame is not the surface's size");
@@ -145,6 +158,19 @@ class Presenter final : public wm::IPresenter {
     return true;
   }
   bool closed() const noexcept override { return false; }
+  // The compositor asks for half the size, once, after the first frame.
+  bool take_resize(int* width, int* height) noexcept override {
+    if (resized_ || calls_ == 0)
+      return false;
+    resized_ = true;
+    const Surface half{std::max(1, surface_.w / 2),
+                       std::max(1, surface_.h / 2)};
+    if (half.w != surface_.w || half.h != surface_.h)
+      asked_ = half;
+    *width = half.w;
+    *height = half.h;
+    return true;
+  }
   // The video plane: NV12 is advertised with two modifiers, P010 is not.
   std::vector<std::uint64_t> modifiers_for(
       std::uint32_t drm_format) const noexcept override {
@@ -208,6 +234,8 @@ class Presenter final : public wm::IPresenter {
       fail("a video rectangle is out of range");
   }
   Surface surface_;
+  Surface asked_;  // a size asked for and not yet seen in a frame
+  bool resized_ = false;
   unsigned calls_ = 0;
 };
 
@@ -351,7 +379,18 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         break;  // the queue is full: serve what is there
       ++queued;
     }
-    child.close();  // the broker reads to the end and returns
+    // Connected: end the script with a Bye, which is what makes the broker
+    // return. If it does not fit, fall back to the disconnect.
+    bool attached = size > 0 && (data[0] & 0x80) != 0;
+    if (attached) {
+      ipc::Message bye;
+      bye.type = ipc::MsgType::Bye;
+      child.set_send_nonblocking(true);
+      attached = child.send(bye);
+      queued += attached ? 1 : 0;
+    }
+    if (!attached)
+      child.close();  // the broker reads to the end and returns
 
     Surface current;
     const wm::PresenterFactory open =
@@ -372,8 +411,20 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     options.audio_sink = []() -> std::unique_ptr<audio::Sink> {
       return std::make_unique<Sink>();
     };
+    if (attached)
+      options.drain_budget = 1;
     const wm::BrokerStats stats =
         wm::serve_split_child(broker_end, open, options, /*linger_ms=*/0);
+    // For whoever writes a seed: what the broker made of it.
+    static const bool print_stats = std::getenv("A4L_FUZZ_STATS") != nullptr;
+    if (print_stats)
+      std::fprintf(stderr,
+                   "broker_fuzz: %llu datagram(s), %llu frame(s), %llu "
+                   "rejected, %llu resize(s)\n",
+                   static_cast<unsigned long long>(stats.from_child),
+                   static_cast<unsigned long long>(stats.frames),
+                   static_cast<unsigned long long>(stats.rejected),
+                   static_cast<unsigned long long>(stats.resizes));
     if (stats.from_child > static_cast<std::uint64_t>(queued))
       fail("more datagrams counted than were sent");
     if (stats.frames + stats.rejected > stats.from_child)

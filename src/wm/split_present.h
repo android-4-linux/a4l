@@ -104,6 +104,7 @@ struct BrokerStats {
   std::uint64_t rejected = 0;  // messages refused by validation
   // Of those, refused frames by reason, indexed by FrameVerdict.
   std::uint64_t frame_verdicts[kFrameVerdictCount] = {};
+  std::uint64_t resizes = 0;        // sizes told to the child that it took
   std::uint64_t video_frames = 0;   // VideoFrame messages given to the plane
   std::uint64_t audio_frames = 0;   // PCM frames given to a sink
   std::uint64_t audio_dropped = 0;  // PCM frames dropped: the sink was full

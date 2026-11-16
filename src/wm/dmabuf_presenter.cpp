@@ -920,7 +920,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     if (comp_.Get() == nullptr || surface_.Get() == nullptr || w_ <= 0 ||
         h_ <= 0)
       return;
-    if (hx == oq_hx_ && hy == oq_hy_ && hw == oq_hw_ && hh == oq_hh_)
+    if (hx == oq_hx_ && hy == oq_hy_ && hw == oq_hw_ && hh == oq_hh_ &&
+        w_ == oq_w_ && h_ == oq_h_)
       return;  // unchanged
     wl_proxy* rraw =
         wl::construct<wl_region_traits, wl_compositor_traits::Op::CreateRegion>(
@@ -937,12 +938,21 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     oq_hy_ = hy;
     oq_hw_ = hw;
     oq_hh_ = hh;
+    oq_w_ = w_;
+    oq_h_ = h_;
     oq_dirty_ = true;  // needs a toplevel commit to take effect
     if (video_diag_)
       log::i(kTag,
              "toplevel opaque region set: full {}x{} minus hole ({},{},{}x{}) "
              "— awaiting commit",
              w_, h_, hx, hy, hw, hh);
+  }
+
+  // The surface changed size: the opaque region was built for the old one.
+  // Applied with the next commit, like any other change to it.
+  void refit_opaque_region() noexcept {
+    if (oq_hx_ >= 0 && (w_ != oq_w_ || h_ != oq_h_))
+      set_toplevel_opaque_hole(oq_hx_, oq_hy_, oq_hw_, oq_hh_);
   }
 
   // Wayland-thread: lazily create the plane and present the pending video
@@ -1067,12 +1077,20 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     if (!slots_[s].built && !build_slot(s, frame))
       return false;
     slots_[s].identity = identity;
+    // The surface is the size of what is on it. take_resize() may have set
+    // the compositor's size for a producer that then kept its own (a --split
+    // child that does not follow a resize); damage and the opaque region go
+    // by the frame.
+    w_ = static_cast<int>(frame.width);
+    h_ = static_cast<int>(frame.height);
     // The toplevel is ARGB (for the video hole-punch). Mark it fully OPAQUE by
     // default so a normal app isn't accidentally alpha-blended (the compositor
     // treats it opaque, as with the old XRGB). The video path later overrides
     // this with full-minus-hole. Runs once (oq_hx_ starts at -1).
     if (oq_hx_ < 0 && w_ > 0 && h_ > 0)
       set_toplevel_opaque_hole(0, 0, 0, 0);
+    else
+      refit_opaque_region();  // a frame of another size (a --split resize)
     if (frame_index_ == 0)
       log::i(
           kTag,
@@ -1140,6 +1158,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     taken_h_ = asked_h_;
     w_ = asked_w_;
     h_ = asked_h_;
+    refit_opaque_region();
     *width = asked_w_;
     *height = asked_h_;
     return true;
@@ -1980,8 +1999,9 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       vb_h_ = 0;  // video View on-screen bounds (set_video_bounds)
   bool vb_set_ = false;
   int oq_hx_ = -1, oq_hy_ = -1, oq_hw_ = -1,
-      oq_hh_ = -1;         // last toplevel opaque-region hole (dedup)
-  bool oq_dirty_ = false;  // opaque region set, awaiting a toplevel commit
+      oq_hh_ = -1;           // last toplevel opaque-region hole (dedup)
+  int oq_w_ = 0, oq_h_ = 0;  // the surface size that region was built for
+  bool oq_dirty_ = false;    // opaque region set, awaiting a toplevel commit
   int video_wake_fd_ = ::eventfd(
       0,
       EFD_NONBLOCK | EFD_CLOEXEC);  // decode thread -> present loop wake

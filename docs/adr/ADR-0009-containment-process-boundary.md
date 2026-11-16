@@ -682,13 +682,36 @@ Checked under headless sway with the window floated and set to 800x600, 1000x700
 640x480: a `GLSurfaceView`'s renderer gets `onSurfaceChanged` at each and its picture fills
 the window; a Flutter app does the same and re-centers its content.
 
+**Window size under `--split` (2026-11-15).** A GL app in the confined child follows a
+resize too. The broker holds the window, so the size is the broker's to pass on: it sends the
+child `SurfaceResize`, the child's holder reports `surfaceChanged`, and the app builds a new
+window surface, which a4l makes at the new size. A gbm surface cannot change size in place,
+so the old one is left alone until the app replaces it; `GLSurfaceView` and Flutter both do.
+
+The broker passes on one size at a time. The next is not sent until a frame of the last has
+been accepted, so a frame is only ever one of two sizes: the surface's, or the one the child
+has been told to take. Both are the compositor's. The first frame of the new size makes it
+the surface's, and the size left behind is refused from then on. A child that does not
+follow keeps its size, and the compositor shows a window of another size than it asked for.
+
+Checked under headless sway, window floated and set to 800x600, 1000x700 and 640x480:
+
+| App | Result |
+|---|---|
+| `GLSurfaceView` fixture, `--split` | `onSurfaceChanged` at 800x600, a frame of that size at the broker, 0 messages rejected (`gl-surface-relayout`) |
+| Flutter `video_player` app, `--split` | a frame of each of the three sizes at the broker; each screenshot is filled to the window's size |
+
+Found on the way and not fixed: in most `--split` runs of the Flutter app the player reports
+its video as 0x0 when it initializes, and the app then lays the video out square (700x700 in
+the 1000x700 window, where a single process shows 933x700). It is not the resize: of the
+runs logged on 2026-11-15, 15 of 23 under `--split` report 0x0, 14 of them from before this
+change, and 0 of 26 in a single process do. The cause was not looked for.
+
 Still fixed-size:
 
-- **`--split`.** The child renders into a gbm surface whose size the broker checks every
-  frame against. Following a resize needs the broker to tell the child (`SurfaceResize`
-  exists in the protocol and is not sent) and both to change together.
 - **The View-tree present path.** Its buffers, the decor's layout and the app's
   `Configuration` all carry the opening size. On Android a resize is a configuration change.
+  Under `--split` such a child is told the size and does not take it.
 - **The first size.** A tiling compositor's first configure is its tile, not a4l's size; a4l
   still opens at its own. Only a change after that is taken up.
 
@@ -696,7 +719,8 @@ Still fixed-size:
 
 - **A frame.** The broker asks the kernel, not the child, what the descriptor is: `fstatfs` must
   report the dma-buf filesystem and `lseek` gives the size. The frame is then refused unless its
-  width and height are the surface's, its format is ARGB8888 or XRGB8888, its modifier is
+  width and height are the surface's (or the one size the broker has told the child to take;
+  see "Window size under `--split`"), its format is ARGB8888 or XRGB8888, its modifier is
   linear or one the compositor advertised, it has at most four planes, plane 0's stride holds a
   row and its last row ends inside the buffer (computed in 64 bits), each auxiliary plane has a
   stride and starts inside the buffer, and the slot is in range. A refused frame is counted by
