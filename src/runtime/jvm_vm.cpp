@@ -630,6 +630,14 @@ jstring JNICALL ndk_native_load(JNIEnv* env,
   // success — exactly what the real lib's JNI_OnLoad would do, before <clinit>
   // calls nativeClassInit.
   if (path.find("libmedia_jni.so") != std::string::npos) {
+    // Every caller registers all three. ImageReader, MediaCodec and
+    // MediaCodecList each load the library from their class initializer, on
+    // whichever thread first touches them, and registering a class's natives
+    // waits for that class to initialize: doing it once behind a lock has
+    // one thread hold the lock and wait for a class whose initializer is
+    // waiting for the lock. Registering again is harmless and takes well
+    // under a millisecond, as long as nothing slow hides in it (see codecs()
+    // in media_codec_list_jni.cpp).
     register_image_reader_natives(env);
     register_media_codec_natives(
         env);  // MediaCodec sync decode -> Surface over CodecDecoder (M5)

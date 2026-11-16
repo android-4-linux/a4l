@@ -29,24 +29,31 @@ std::unique_ptr<BufferQueue> BufferQueue::create(std::uint32_t width,
   q->width_ = width;
   q->height_ = height;
   q->format_ = format;
-  q->slots_.reserve(static_cast<std::size_t>(count));
-  for (int i = 0; i < count; ++i) {
-    ::AHardwareBuffer_Desc d{};
-    d.width = width;
-    d.height = height;
-    d.layers = 1;
-    d.format = format;
-    d.usage = usage;
-    AHardwareBuffer* b = ahb_allocate(d);
-    if (b == nullptr) {
-      if (error)
-        *error = "BufferQueue: ahb_allocate failed";
-      return nullptr;  // q's destructor releases what was allocated
-    }
-    q->slots_.push_back(Slot{b, State::Free, 0, false});
+  q->usage_ = usage;
+  // The first buffer now, so that a size or format that cannot be allocated
+  // fails here; the rest when a producer first asks for them. An app makes
+  // its ImageReader on its main thread, and a player's is 1x1 with seven
+  // buffers it never draws into: allocating them all held that thread for
+  // 12 ms (measured), with the player's setVideoSurface() waiting behind it.
+  q->slots_.resize(static_cast<std::size_t>(count));
+  q->slots_[0].buf = q->allocate();
+  if (q->slots_[0].buf == nullptr) {
+    if (error)
+      *error = "BufferQueue: ahb_allocate failed";
+    return nullptr;
   }
   log::d(kTag, "create {}x{} format={} count={}", width, height, format, count);
   return q;
+}
+
+AHardwareBuffer* BufferQueue::allocate() const {
+  ::AHardwareBuffer_Desc d{};
+  d.width = width_;
+  d.height = height_;
+  d.layers = 1;
+  d.format = format_;
+  d.usage = usage_;
+  return ahb_allocate(d);
 }
 
 BufferQueue::~BufferQueue() {
@@ -57,18 +64,31 @@ BufferQueue::~BufferQueue() {
 
 AHardwareBuffer* BufferQueue::dequeue() {
   std::lock_guard<std::mutex> lk(mtx_);
+  // A free buffer that exists, else a free slot that has none yet.
+  Slot* pick = nullptr;
   for (auto& s : slots_) {
-    if (s.state == State::Free) {
-      s.state = State::Acquired;  // "owned by producer" — distinct from
-                                  // FREE/READY; released by queue()
-      s.seq = 0;
-      return s.buf;
+    if (s.state != State::Free)
+      continue;
+    if (s.buf != nullptr) {
+      pick = &s;
+      break;
     }
+    if (pick == nullptr)
+      pick = &s;
   }
-  return nullptr;  // all in flight
+  if (pick == nullptr)
+    return nullptr;  // all in flight
+  if (pick->buf == nullptr && (pick->buf = allocate()) == nullptr)
+    return nullptr;  // could not allocate; the slot stays free for a retry
+  pick->state = State::Acquired;  // "owned by producer" — distinct from
+                                  // FREE/READY; released by queue()
+  pick->seq = 0;
+  return pick->buf;
 }
 
 void BufferQueue::queue(AHardwareBuffer* buffer) {
+  if (buffer == nullptr)
+    return;  // would match a slot that has no buffer yet
   std::function<void()> cb;
   {
     std::lock_guard<std::mutex> lk(mtx_);
@@ -124,12 +144,18 @@ AHardwareBuffer* BufferQueue::acquire_latest() {
     }
   }
   slots_.erase(std::remove_if(slots_.begin(), slots_.end(),
-                              [](const Slot& s) { return s.buf == nullptr; }),
+                              [](const Slot& s) {
+                                // An emptied imported slot, not a pooled one
+                                // whose buffer is not allocated yet.
+                                return s.imported && s.buf == nullptr;
+                              }),
                slots_.end());
   return result;
 }
 
 void BufferQueue::release(AHardwareBuffer* buffer) {
+  if (buffer == nullptr)
+    return;
   std::lock_guard<std::mutex> lk(mtx_);
   for (auto it = slots_.begin(); it != slots_.end(); ++it) {
     if (it->buf == buffer && it->state == State::Acquired) {
