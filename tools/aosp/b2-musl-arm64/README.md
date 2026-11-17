@@ -3,6 +3,9 @@
 
 # B2: a musl-arm64 host ART toolchain for Soong
 
+> **2026-11-16:** `tools/aosp/glibc-arm64` reaches a single-libc arm64 host ART through glibc, and
+> that one builds and runs. This directory is kept as the record of the musl attempt.
+
 ## Why
 
 a4l runs the app's DEX on a real AOSP **host** ART, loaded in-process (`dlopen`) alongside the

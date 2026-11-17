@@ -1,0 +1,29 @@
+diff --git a/libcutils/include/cutils/threads.h b/libcutils/include/cutils/threads.h
+index 0082c6c63..18861840e 100644
+--- a/libcutils/include/cutils/threads.h
++++ b/libcutils/include/cutils/threads.h
+@@ -31,7 +31,7 @@ extern "C" {
+ //
+ // Deprecated: use android::base::GetThreadId instead, which doesn't truncate on Mac/Windows.
+ //
+-#if !defined(__GLIBC__) || __GLIBC__ >= 2 && __GLIBC_MINOR__ < 32
++#if !defined(__GLIBC__) || __GLIBC__ >= 2 && __GLIBC_MINOR__ < 30
+ extern pid_t gettid();
+ #endif
+ 
+diff --git a/libcutils/threads.cpp b/libcutils/threads.cpp
+index 6ece7a3af..263872084 100644
+--- a/libcutils/threads.cpp
++++ b/libcutils/threads.cpp
+@@ -25,9 +25,9 @@
+ #include <windows.h>
+ #endif
+ 
+-#if defined(__BIONIC__) || defined(__GLIBC__) && __GLIBC_MINOR__ >= 32
++#if defined(__BIONIC__) || defined(__GLIBC__) && __GLIBC_MINOR__ >= 30
+ // No definition needed for Android because we'll just pick up bionic's copy.
+-// No definition needed for Glibc >= 2.32 because it exposes its own copy.
++// No definition needed for Glibc >= 2.30 because it exposes its own copy.
+ #else
+ pid_t gettid() {
+ #if defined(__APPLE__)

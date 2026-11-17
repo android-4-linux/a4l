@@ -11,7 +11,12 @@
 #   DEST_DIR   default /tmp/acl-art-arm64
 #   AOSP_ROOT  default $ACL_AOSP_ROOT or /mnt/dev/aosp
 # Env: ACL_ART_STRIP=1 strips the libs (much smaller; loses crash symbols).
+#      ACL_ART_LIBC=bionic|glibc  which host-cross variant to collect (default bionic). glibc is the
+#      linux_glibc_arm64 target added by tools/aosp/glibc-arm64; that tree loads into the a4l process.
 set -u
+LIBC="${ACL_ART_LIBC:-bionic}"
+case "$LIBC" in bionic|glibc) ;; *) echo "ACL_ART_LIBC must be bionic or glibc" >&2; exit 2 ;; esac
+V="linux_${LIBC}_arm64"
 R="${2:-${ACL_AOSP_ROOT:-/mnt/dev/aosp}}"
 INT="$R/out/soong/.intermediates"
 DEST="${1:-/tmp/acl-art-arm64}"
@@ -19,8 +24,8 @@ STRIP="${ACL_ART_STRIP:-}"; STRIP_TOOL="${CROSS_STRIP:-aarch64-linux-gnu-strip}"
 rm -rf "$DEST"; mkdir -p "$DEST/lib64" "$DEST/bin" "$DEST/apex/com.android.art/javalib"
 
 IDX=$(mktemp)
-find "$INT" -path '*linux_bionic_arm64_shared/*.so' -type f 2>/dev/null > "$IDX"
-echo "indexed $(wc -l < "$IDX") linux_bionic_arm64 shared libs"
+find "$INT" -path "*${V}_shared/*.so" -type f 2>/dev/null > "$IDX"
+echo "indexed $(wc -l < "$IDX") $V shared libs"
 
 declare -A seen
 resolve() {  # transitive NEEDED closure into lib64/
@@ -31,19 +36,30 @@ resolve() {  # transitive NEEDED closure into lib64/
   for dep in $(readelf -d "$so" 2>/dev/null | awk '/NEEDED/{gsub(/[][]/,"",$5);print $5}'); do
     [ -n "${seen[$dep]:-}" ] && continue
     p=$(grep -m1 "/${dep}\$" "$IDX")
-    [ -n "$p" ] && resolve "$p" || echo "  UNRESOLVED: $dep"
+    if [ -n "$p" ]; then resolve "$p"
+    else
+      case "$dep" in
+        ld-linux-*|libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|libgcc_s.so.*) seen[$dep]=1 ;;  # the system's
+        *) echo "  UNRESOLVED: $dep" ;;
+      esac
+    fi
   done
 }
-resolve "$INT/art/runtime/libart/linux_bionic_arm64_shared/libart.so"
-resolve "$INT/frameworks/base/core/jni/libandroid_runtime/linux_bionic_arm64_shared/libandroid_runtime.so"
+resolve "$INT/art/runtime/libart/${V}_shared/libart.so"
+[ -f "$INT/frameworks/base/core/jni/libandroid_runtime/${V}_shared/libandroid_runtime.so" ] &&
+  resolve "$INT/frameworks/base/core/jni/libandroid_runtime/${V}_shared/libandroid_runtime.so"
 # ART loads these core native libs at runtime via System.loadLibrary in Runtime::InitNativeMethods()
 # — NOT part of libart's NEEDED closure, so seed them explicitly (their own NEEDED is resolved too).
-# Build first: HOST_CROSS_OS=linux_bionic HOST_CROSS_ARCH=arm64 m <their linux_bionic_arm64 outputs>.
-for nl in libicu_jni libjavacore libopenjdk libandroidio libnativehelper; do
-  p=$(grep -m1 "/${nl}.so\$" "$IDX"); [ -n "$p" ] && resolve "$p" || echo "  NOTE: $nl.so not built (m it for linux_bionic_arm64)"
+# Build first: HOST_CROSS_OS=linux_bionic HOST_CROSS_ARCH=arm64 m <their host-cross outputs>.
+for nl in libicu_jni libjavacore libopenjdk libandroidio libnativehelper libopenjdkjvm; do
+  p=$(grep -m1 "/${nl}.so\$" "$IDX"); [ -n "$p" ] && resolve "$p" || echo "  NOTE: $nl.so not built (m it for $V)"
 done
-cp -u "$INT/bionic/linker/ld-android/linux_bionic_arm64_shared/ld-android.so" "$DEST/lib64/" 2>/dev/null
-cp -u "$INT/art/dex2oat/dex2oats/linux_bionic_arm64/dex2oats" "$DEST/bin/" 2>/dev/null
+if [ "$LIBC" = bionic ]; then
+  cp -u "$INT/bionic/linker/ld-android/linux_bionic_arm64_shared/ld-android.so" "$DEST/lib64/" 2>/dev/null
+  cp -u "$INT/art/dex2oat/dex2oats/linux_bionic_arm64/dex2oats" "$DEST/bin/" 2>/dev/null
+else
+  cp -u "$INT/art/dalvikvm/dalvikvm/linux_glibc_arm64/dalvikvm64" "$DEST/bin/" 2>/dev/null
+fi
 
 # Boot jars are DEX (arch-independent) — reuse the already-built x86 host apex jars. ArtVm/art-host
 # expect them ALL under apex/<apex-name>/javalib/ (matching kBcp), so the i18n/conscrypt jars go under

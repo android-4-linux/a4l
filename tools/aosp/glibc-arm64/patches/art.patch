@@ -1,0 +1,143 @@
+diff --git a/build/art.go b/build/art.go
+index 79149503c5..c43384ba70 100644
+--- a/build/art.go
++++ b/build/art.go
+@@ -305,7 +305,7 @@ func testcasesContent(config android.Config) map[string]string {
+ // The 'key' is the file in testcases and 'value' is the path to copy it from.
+ // The actual copy will be done in make since soong does not do installations.
+ func addTestcasesFile(ctx android.InstallHookContext) {
+-	if ctx.Os() != ctx.Config().BuildOS || ctx.Module().IsSkipInstall() {
++	if ctx.Os() != ctx.Config().BuildOS || ctx.Target().HostCross || ctx.Module().IsSkipInstall() {
+ 		return
+ 	}
+ 
+diff --git a/libartbase/base/safe_copy.cc b/libartbase/base/safe_copy.cc
+index ad75aa7b28..1db8e5dd13 100644
+--- a/libartbase/base/safe_copy.cc
++++ b/libartbase/base/safe_copy.cc
+@@ -27,6 +27,7 @@
+ #include <android-base/macros.h>
+ 
+ #include "bit_utils.h"
++#include "globals.h"
+ 
+ namespace art {
+ 
+@@ -56,10 +57,10 @@ ssize_t SafeCopy(void *dst, const void *src, size_t len) {
+     }
+ 
+     src_iovs[iovecs_used].iov_base = const_cast<char*>(cur);
+-    if (!IsAlignedParam(cur, PAGE_SIZE)) {
+-      src_iovs[iovecs_used].iov_len = AlignUp(cur, PAGE_SIZE) - cur;
++    if (!IsAlignedParam(cur, kPageSize)) {
++      src_iovs[iovecs_used].iov_len = AlignUp(cur, kPageSize) - cur;
+     } else {
+-      src_iovs[iovecs_used].iov_len = PAGE_SIZE;
++      src_iovs[iovecs_used].iov_len = kPageSize;
+     }
+ 
+     src_iovs[iovecs_used].iov_len = std::min(src_iovs[iovecs_used].iov_len, len);
+diff --git a/runtime/arch/arm64/fault_handler_arm64.cc b/runtime/arch/arm64/fault_handler_arm64.cc
+index a5becf6b8e..b7617eb4a5 100644
+--- a/runtime/arch/arm64/fault_handler_arm64.cc
++++ b/runtime/arch/arm64/fault_handler_arm64.cc
+@@ -16,8 +16,14 @@
+ 
+ #include "fault_handler.h"
+ 
++#include <signal.h>
+ #include <sys/ucontext.h>
+ 
++// Older glibc headers do not carry the MTE fault codes.
++#ifndef SEGV_MTEAERR
++#define SEGV_MTEAERR 8
++#endif
++
+ #include "arch/instruction_set.h"
+ #include "art_method.h"
+ #include "base/enums.h"
+@@ -44,7 +50,7 @@ void FaultManager::GetMethodAndReturnPcAndSp(siginfo_t* siginfo,
+                                              uintptr_t* out_return_pc,
+                                              uintptr_t* out_sp,
+                                              bool* out_is_stack_overflow) {
+-  struct ucontext *uc = reinterpret_cast<struct ucontext *>(context);
++  ucontext_t* uc = reinterpret_cast<ucontext_t*>(context);
+   struct sigcontext *sc = reinterpret_cast<struct sigcontext*>(&uc->uc_mcontext);
+ 
+   // SEGV_MTEAERR (Async MTE fault) is delivered at an arbitrary point after the actual fault.
+@@ -90,7 +96,7 @@ bool NullPointerHandler::Action(int sig ATTRIBUTE_UNUSED, siginfo_t* info, void*
+   // PC at the point of call.  For Null checks we insert a GC map that is immediately after
+   // the load/store instruction that might cause the fault.
+ 
+-  struct ucontext *uc = reinterpret_cast<struct ucontext*>(context);
++  ucontext_t* uc = reinterpret_cast<ucontext_t*>(context);
+   struct sigcontext *sc = reinterpret_cast<struct sigcontext*>(&uc->uc_mcontext);
+ 
+   // Push the gc map location to the stack and pass the fault address in LR.
+@@ -112,7 +118,7 @@ bool SuspensionHandler::Action(int sig ATTRIBUTE_UNUSED, siginfo_t* info ATTRIBU
+   constexpr uint32_t checkinst =
+       0xf9400000 | (kSuspendCheckRegister << 5) | (kSuspendCheckRegister << 0);
+ 
+-  struct ucontext *uc = reinterpret_cast<struct ucontext *>(context);
++  ucontext_t* uc = reinterpret_cast<ucontext_t*>(context);
+   struct sigcontext *sc = reinterpret_cast<struct sigcontext*>(&uc->uc_mcontext);
+   VLOG(signals) << "checking suspend";
+ 
+@@ -141,7 +147,7 @@ bool SuspensionHandler::Action(int sig ATTRIBUTE_UNUSED, siginfo_t* info ATTRIBU
+ 
+ bool StackOverflowHandler::Action(int sig ATTRIBUTE_UNUSED, siginfo_t* info ATTRIBUTE_UNUSED,
+                                   void* context) {
+-  struct ucontext *uc = reinterpret_cast<struct ucontext *>(context);
++  ucontext_t* uc = reinterpret_cast<ucontext_t*>(context);
+   struct sigcontext *sc = reinterpret_cast<struct sigcontext*>(&uc->uc_mcontext);
+   VLOG(signals) << "stack overflow handler with sp at " << std::hex << &uc;
+   VLOG(signals) << "sigcontext: " << std::hex << sc;
+diff --git a/runtime/native_stack_dump.cc b/runtime/native_stack_dump.cc
+index b7c3665530..d88f4f1b08 100644
+--- a/runtime/native_stack_dump.cc
++++ b/runtime/native_stack_dump.cc
+@@ -336,7 +336,7 @@ void DumpNativeStack(std::ostream& os,
+   }
+   std::unique_ptr<Backtrace> backtrace(Backtrace::Create(BACKTRACE_CURRENT_PROCESS, tid, map));
+   backtrace->SetSkipFrames(skip_frames);
+-  if (!backtrace->Unwind(0, reinterpret_cast<ucontext*>(ucontext_ptr))) {
++  if (!backtrace->Unwind(0, reinterpret_cast<ucontext_t*>(ucontext_ptr))) {
+     os << prefix << "(backtrace::Unwind failed for thread " << tid
+        << ": " <<  backtrace->GetErrorString(backtrace->GetError()) << ")" << std::endl;
+     return;
+diff --git a/runtime/runtime_common.h b/runtime/runtime_common.h
+index 925594ef29..c0cb2b4a7c 100644
+--- a/runtime/runtime_common.h
++++ b/runtime/runtime_common.h
+@@ -25,6 +25,7 @@
+ #define _XOPEN_SOURCE
+ #endif
+ 
++#include <signal.h>
+ #include <sys/utsname.h>
+ #include <ucontext.h>
+ 
+diff --git a/runtime/thread_pool.cc b/runtime/thread_pool.cc
+index 57d7f61a0c..3f0c1b09b9 100644
+--- a/runtime/thread_pool.cc
++++ b/runtime/thread_pool.cc
+@@ -17,7 +17,10 @@
+ 
+ #include "thread_pool.h"
+ 
++#include <limits.h>
+ #include <sys/mman.h>
++
++#include <algorithm>
+ #include <sys/resource.h>
+ #include <sys/time.h>
+ 
+@@ -51,6 +54,8 @@ ThreadPoolWorker::ThreadPoolWorker(ThreadPool* thread_pool, const std::string& n
+     : thread_pool_(thread_pool),
+       name_(name) {
+   std::string error_msg;
++  // glibc rejects a stack below PTHREAD_STACK_MIN, which is 128 KB on arm64.
++  stack_size = std::max(stack_size, static_cast<size_t>(PTHREAD_STACK_MIN));
+   // On Bionic, we know pthreads will give us a big-enough stack with
+   // a guard page, so don't do anything special on Bionic libc.
+   if (kUseCustomThreadPoolStack) {

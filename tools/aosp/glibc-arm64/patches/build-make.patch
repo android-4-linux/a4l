@@ -1,0 +1,15 @@
+diff --git a/core/envsetup.mk b/core/envsetup.mk
+index c32d380b0..aab897c10 100644
+--- a/core/envsetup.mk
++++ b/core/envsetup.mk
+@@ -164,6 +164,10 @@ ifeq ($(HOST_OS),linux)
+     ifeq (,$(HOST_CROSS_ARCH))
+       $(error HOST_CROSS_ARCH missing.)
+     endif
++  else ifeq ($(HOST_CROSS_OS),linux_glibc)
++    ifeq (,$(HOST_CROSS_ARCH))
++      $(error HOST_CROSS_ARCH missing.)
++    endif
+   else
+     $(error Unsupported HOST_CROSS_OS $(HOST_CROSS_OS))
+   endif

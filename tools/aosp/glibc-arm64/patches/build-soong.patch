@@ -1,0 +1,80 @@
+diff --git a/android/arch.go b/android/arch.go
+index 3587b469f..78546cfed 100644
+--- a/android/arch.go
++++ b/android/arch.go
+@@ -305,7 +305,7 @@ var (
+ 	// NoOsType is a placeholder for when no OS is needed.
+ 	NoOsType OsType
+ 	// Linux is the OS for the Linux kernel plus the glibc runtime.
+-	Linux = newOsType("linux_glibc", Host, false, X86, X86_64)
++	Linux = newOsType("linux_glibc", Host, false, Arm64, X86, X86_64)
+ 	// LinuxMusl is the OS for the Linux kernel plus the musl runtime.
+ 	LinuxMusl = newOsType("linux_musl", Host, false, X86, X86_64)
+ 	// Darwin is the OS for MacOS/Darwin host machines.
+diff --git a/bazel/configurability.go b/bazel/configurability.go
+index 7355ac7d3..2e3ef5cf5 100644
+--- a/bazel/configurability.go
++++ b/bazel/configurability.go
+@@ -41,6 +41,7 @@ const (
+ 	osArchAndroidX86_64     = "android_x86_64"
+ 	osArchDarwinArm64       = "darwin_arm64"
+ 	osArchDarwinX86_64      = "darwin_x86_64"
++	osArchLinuxArm64        = "linux_glibc_arm64"
+ 	osArchLinuxX86          = "linux_glibc_x86"
+ 	osArchLinuxX86_64       = "linux_glibc_x86_64"
+ 	osArchLinuxMuslX86      = "linux_musl_x86"
+@@ -99,6 +100,7 @@ var (
+ 		osArchAndroidX86_64:        "//build/bazel/platforms/os_arch:android_x86_64",
+ 		osArchDarwinArm64:          "//build/bazel/platforms/os_arch:darwin_arm64",
+ 		osArchDarwinX86_64:         "//build/bazel/platforms/os_arch:darwin_x86_64",
++		osArchLinuxArm64:           "//build/bazel/platforms/os_arch:linux_glibc_arm64",
+ 		osArchLinuxX86:             "//build/bazel/platforms/os_arch:linux_glibc_x86",
+ 		osArchLinuxX86_64:          "//build/bazel/platforms/os_arch:linux_glibc_x86_64",
+ 		osArchLinuxMuslX86:         "//build/bazel/platforms/os_arch:linux_musl_x86",
+@@ -117,7 +119,7 @@ var (
+ 	// in a cyclic dependency.
+ 	osToArchMap = map[string][]string{
+ 		osAndroid:     {archArm, archArm64, archX86, archX86_64},
+-		osLinux:       {archX86, archX86_64},
++		osLinux:       {archArm64, archX86, archX86_64},
+ 		osLinuxMusl:   {archX86, archX86_64},
+ 		osDarwin:      {archArm64, archX86_64},
+ 		osLinuxBionic: {archArm64, archX86_64},
+diff --git a/cc/config/Android.bp b/cc/config/Android.bp
+index 1a21c1361..d80704cab 100644
+--- a/cc/config/Android.bp
++++ b/cc/config/Android.bp
+@@ -30,6 +30,7 @@ bootstrap_go_package {
+         "x86_windows_host.go",
+ 
+         "arm64_linux_host.go",
++        "arm64_linux_glibc_host.go",
+     ],
+     testSrcs: [
+         "tidy_test.go",
+diff --git a/rust/rust.go b/rust/rust.go
+index c4fd14859..fa371f7d3 100644
+--- a/rust/rust.go
++++ b/rust/rust.go
+@@ -728,6 +728,21 @@ func (mod *Module) Init() android.Module {
+ 	android.InitAndroidArchModule(mod, mod.hod, mod.multilib)
+ 	android.InitApexModule(mod)
+ 
++	// a4l: there is no Rust toolchain for the glibc arm64 host, so Rust modules are disabled
++	// there. Host ART does not need them.
++	android.AddLoadHook(mod, func(ctx android.LoadHookContext) {
++		type props struct {
++			Target struct {
++				Linux_glibc_arm64 struct {
++					Enabled *bool
++				}
++			}
++		}
++		p := &props{}
++		p.Target.Linux_glibc_arm64.Enabled = proptools.BoolPtr(false)
++		ctx.AppendProperties(p)
++	})
++
+ 	android.InitDefaultableModule(mod)
+ 	return mod
+ }
