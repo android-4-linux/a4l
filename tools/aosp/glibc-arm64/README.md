@@ -145,8 +145,13 @@ glibc, which is the case this was built for.
   (present interval p50 31.3 ms on a 16.7 ms display): Weston 8 released a replaced buffer
   about 29 ms after the commit that replaced it, so all three were held when the next frame
   needed one. With 4 the interval is p50 16.7 ms, p99 18.8 ms over 360 presents.
-- The presenter took the linear modifier. The compositor also lists a vendor one
-  (`0x0500000000000001`), which was not tried through a4l.
+- The presenter takes the linear modifier by default. The Adreno 640 driver lists the vendor
+  modifier `0x0500000000000001` for `R8G8B8A8` only (LINEAR alone for `B8G8R8A8`), so it
+  needs ABGR8888, which `ACL_PRESENT_ALLOW_ABGR=1` allows. With it a4l presented ABGR8888
+  with that modifier at p50 16.7 ms, p99 24.9 ms over 480 presents, and Weston's screen
+  capture was scrambled in two runs out of two. The driver's buffer is a compressed layout
+  (3,710,976 bytes against 3,686,400 linear at 1280x720). The capture goes through
+  Weston's GL path; the physical screen was not looked at, so a hardware plane may differ.
 - Input was not tried on the board.
 - The cross-built a4l had no libcrypto, so it did not check the APK's signature.
 
