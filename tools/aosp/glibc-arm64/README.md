@@ -161,7 +161,12 @@ glibc, which is the case this was built for.
   p50 16.7 ms, p99 18.4 ms over 960 presents, and 415 of 417 presentation feedbacks
   flagged zero-copy, where the dma-buf path gets every feedback discarded. The four
   buffers the driver made were 3,686,400 bytes each, the linear size, so it did not
-  compress them. The swapchain is MAILBOX where the driver has it (it does here: p50
+  compress them, and nothing found makes it: a probe that created swapchains in
+  `R8G8B8A8` and `B8G8R8A8` with four usage combinations got 3,686,400-byte buffers in
+  all eight, and the driver's only related switch (`DISABLE_UBWC_VK`) turns compression
+  off. The same driver's EGL does compress a window's buffers: a 1280x720 EGL window got
+  3,710,976 bytes, the compressed size. So compressed window buffers on this board need
+  an EGL window, which a4l's Skia path does not present through. The swapchain is MAILBOX where the driver has it (it does here: p50
   16.6 ms, p99 21.6 ms over 360 presents), since a4l paces frames itself. Its composite
   alpha on the board is opaque, so a video hole would not show through; no video was
   run there. On x86-64 (Mesa) a resize, video on a subsurface and WebView all work in
