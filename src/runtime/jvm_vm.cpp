@@ -2308,8 +2308,11 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env,
   // VK_KHR_wayland_surface. The driver's WSI then allocates the window's
   // buffers and commits them, as an EGL window does. That is what a vendor
   // stack needs for buffers it compresses, whose metadata linux-dmabuf does
-  // not carry. Not under --split: the surface belongs to the broker.
+  // not carry. Not under --split: the surface belongs to the broker. Not
+  // with ACL_PRESENT_LINEAR_ONLY either: that asks for a4l's own LINEAR
+  // dma-bufs, and a swapchain's modifier is the driver's to choose.
   if (std::getenv("ACL_PRESENT_SWAPCHAIN") != nullptr &&
+      std::getenv("ACL_PRESENT_LINEAR_ONLY") == nullptr &&
       !wm::split_child_active()) {
     if (auto set_surface = reinterpret_cast<bool (*)(void*, void*)>(
             ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_set_wayland_surface"))) {

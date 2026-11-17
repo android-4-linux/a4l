@@ -786,7 +786,22 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   // Called when the wl fd is readable: read + dispatch queued events, reap
   // timing feedback, flush replies. Returns false once the toplevel closes.
   bool dispatch() noexcept override {
-    if (wl_display_dispatch(display_.Get()) < 0) {
+    // Never wait here. Another thread may read this connection on a queue of
+    // its own (a driver's swapchain, or EGL): the fd then turns readable with
+    // nothing for this queue, and wl_display_dispatch() would wait for an
+    // event that is not coming, with the looper inside it.
+    wl_display* const d = display_.Get();
+    bool ok = true;
+    while (ok && wl_display_prepare_read(d) != 0)
+      ok = wl_display_dispatch_pending(d) >= 0;
+    if (ok) {
+      pollfd pfd{wl_display_get_fd(d), POLLIN, 0};
+      if (::poll(&pfd, 1, 0) > 0)
+        ok = wl_display_read_events(d) >= 0;
+      else
+        wl_display_cancel_read(d);
+    }
+    if (!ok || wl_display_dispatch_pending(d) < 0) {
       closed_ = true;
       return false;
     }

@@ -807,6 +807,26 @@ void destroy_swapchain() {
   g.sc_w = g.sc_h = 0;
 }
 
+// MAILBOX where the surface has it, else FIFO, which every surface has. a4l
+// paces frames itself, one per wl_surface.frame callback, and makes commits of
+// its own on the same surface for that. A FIFO swapchain paces too: Mesa's
+// holds each commit behind a wp_fifo_v1 barrier and a commit time, and with
+// a4l's commits queued on the same surface a headless Weston stopped applying
+// any of them after three frames. MAILBOX only attaches and commits.
+VkPresentModeKHR pick_present_mode() {
+  uint32_t n = 0;
+  VKD.vkGetPhysicalDeviceSurfacePresentModesKHR(g.phys, g.surface, &n, nullptr);
+  std::vector<VkPresentModeKHR> modes(n);
+  VKD.vkGetPhysicalDeviceSurfacePresentModesKHR(g.phys, g.surface, &n,
+                                                modes.data());
+  modes.resize(std::min<size_t>(modes.size(), n));
+  const bool mailbox = std::find(modes.begin(), modes.end(),
+                                 VK_PRESENT_MODE_MAILBOX_KHR) != modes.end();
+  std::fprintf(stderr, "acl-gpu: swapchain present mode %s\n",
+               mailbox ? "MAILBOX" : "FIFO");
+  return mailbox ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
+}
+
 // A swapchain of the window's size, replacing any older one.
 bool make_swapchain(int w, int h) {
   VkSurfaceCapabilitiesKHR caps{};
@@ -843,7 +863,7 @@ bool make_swapchain(int w, int h) {
   ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ci.preTransform = caps.currentTransform;
   ci.compositeAlpha = alpha;
-  ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;  // always available
+  ci.presentMode = pick_present_mode();
   ci.clipped = VK_TRUE;
   ci.oldSwapchain = g.swapchain;
   VkSwapchainKHR sc = VK_NULL_HANDLE;
