@@ -54,11 +54,21 @@ resolve "$INT/art/runtime/libart/${V}_shared/libart.so"
 for nl in libicu_jni libjavacore libopenjdk libandroidio libnativehelper libopenjdkjvm; do
   p=$(grep -m1 "/${nl}.so\$" "$IDX"); [ -n "$p" ] && resolve "$p" || echo "  NOTE: $nl.so not built (m it for $V)"
 done
+# a4l's own JNI libraries for the real framework (tools/aosp/graphics_jni, gles_jni), when built.
+# Their GL and Vulkan NEEDED entries are the target system's and are reported as unresolved.
+for nl in libacl_graphics_jni libacl_gles_jni; do
+  p=$(grep -m1 "/${nl}.so\$" "$IDX"); [ -n "$p" ] && resolve "$p"
+done
 if [ "$LIBC" = bionic ]; then
   cp -u "$INT/bionic/linker/ld-android/linux_bionic_arm64_shared/ld-android.so" "$DEST/lib64/" 2>/dev/null
   cp -u "$INT/art/dex2oat/dex2oats/linux_bionic_arm64/dex2oats" "$DEST/bin/" 2>/dev/null
 else
   cp -u "$INT/art/dalvikvm/dalvikvm/linux_glibc_arm64/dalvikvm64" "$DEST/bin/" 2>/dev/null
+  # Loaded by name at startup and not in any NEEDED list: the JIT, and conscrypt's JNI library
+  # (without it no java.security provider loads, and the framework's system AssetManager fails).
+  for nl in libart-compiler libjavacrypto; do
+    p=$(grep -m1 "/${nl}.so\$" "$IDX"); [ -n "$p" ] && resolve "$p" || echo "  NOTE: $nl.so not built (m it for $V)"
+  done
 fi
 
 # Boot jars are DEX (arch-independent) — reuse the already-built x86 host apex jars. ArtVm/art-host

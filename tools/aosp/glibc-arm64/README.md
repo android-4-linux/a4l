@@ -15,9 +15,11 @@ Result on 2026-11-16, android-13.0.0_r84, on an SA8155P board (glibc 2.31):
 |---|---|
 | `dalvikvm64` on the board, static-main class | prints, exit 0 |
 | `a4l run hello.apk --vm=art`, ART in the a4l process | prints, exit 0 |
-| `libandroid_runtime.so`, `libacl_graphics_jni.so` (with Skia), `libacl_gles_jni.so` | build; not run |
+| A Java-only F-Droid app on the real framework, headless | Activity resumed, decor laid out, exit 0, 1.3 s |
 
-No app with an Activity has been run on this ART yet. `libart.so` needs glibc 2.29 or later.
+The last row loads `libandroid_runtime.so`, `libacl_graphics_jni.so` (with Skia) and
+`libacl_gles_jni.so`: 28 of 28 framework native groups registered. Nothing has been drawn; see
+Limits. `libart.so` needs glibc 2.29 or later.
 
 ## Use
 
@@ -42,13 +44,41 @@ HOST_CROSS_OS=linux_glibc HOST_CROSS_ARCH=arm64 ALLOW_MISSING_DEPENDENCIES=true 
   $I/libnativehelper/libnativehelper/linux_glibc_arm64_shared/libnativehelper.so \
   $I/external/icu/android_icu4j/libcore_bridge/src/native/libicu_jni/linux_glibc_arm64_shared/libicu_jni.so
 
-ACL_ART_LIBC=glibc ACL_ART_STRIP=1 tools/assemble-arm64-art.sh /tmp/art-glibc-arm64
+ACL_ART_LIBC=glibc ACL_ART_STRIP=1 tools/assemble-arm64-art.sh /tmp/a4l-arm64/art
 ```
 
 Copy the tree to the target and run with `ACL_ART_HOME=<tree>` and
 `LD_LIBRARY_PATH=<tree>/lib64`. The boot jars are DEX and come from the x86 host build
 (`m build-art-host`), which has to exist first. The tree is 29 libraries, 25 MB stripped, before
 the framework natives.
+
+### An app on the real framework
+
+Build five more outputs the same way, with the a4l JNI modules in `vendor/acl` as on x86-64
+(`tools/aosp/graphics_jni/README.md`), and assemble again:
+
+```sh
+  $I/frameworks/base/core/jni/libandroid_runtime/linux_glibc_arm64_shared/libandroid_runtime.so \
+  $I/vendor/acl/graphics_jni/libacl_graphics_jni/linux_glibc_arm64_shared/libacl_graphics_jni.so \
+  $I/vendor/acl/gles_jni/libacl_gles_jni/linux_glibc_arm64_shared/libacl_gles_jni.so \
+  $I/art/compiler/libart-compiler/linux_glibc_arm64_shared/libart-compiler.so \
+  $I/external/conscrypt/libjavacrypto/linux_glibc_arm64_shared/libjavacrypto.so
+```
+
+The last two are loaded by name and appear in no `NEEDED` list. Without `libjavacrypto.so` no
+`java.security` provider loads and the framework's system `AssetManager` fails on its first
+digest; without `libart-compiler.so` ART runs interpreted. The tree is then 50 libraries, 54 MB
+stripped.
+
+```sh
+tools/stage-arm64-framework.sh /tmp/a4l-arm64/fw   # boot jars, a4l's dex jars, framework-res.apk
+# copy /tmp/a4l-arm64 and an arm64 a4l to the target as R/{art,fw,a4l}, then there:
+sh R/fw/run.sh R app.apk
+```
+
+`stage-arm64-framework.sh` copies 80 MB of dex and data from the x86-64 build; `run.sh` sets
+what `tools/run-apk.sh` sets on x86-64, without the sandbox, the bionic runtime, the CA store
+or WebView.
 
 Three flags in the build line carry weight:
 
@@ -91,6 +121,12 @@ the whole LLVM runtime set. A musl ART would also not serve a system whose GPU d
 glibc, which is the case this was built for.
 
 ## Limits
+
+- No frame has been presented. The run above is headless; the cross-built a4l has no Skia, so
+  its GPU present path is off, and the default `wl_shm` path cannot show a real app.
+- One app was run, and it has no native libraries. The bionic loader that runs an app's own
+  `.so` files is x86-64 only.
+- The cross-built a4l had no libcrypto, so it did not check the APK's signature.
 
 - One sysroot was used (Debian bullseye, glibc 2.31, GCC 10). The toolchain file names GCC 10.
 - The boot image is not built; ART runs without one and logs that it could not find it.

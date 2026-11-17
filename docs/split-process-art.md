@@ -31,8 +31,10 @@ boundary** the split needs.
 `linux_glibc` x `arm64` host target, and that ART ran a static-main class inside the a4l process
 on an SA8155P board (`a4l run hello.apk --vm=art`, exit 0). It is the B2 end-state reached through
 glibc, not musl, and it took hours, not weeks: `ALLOW_MISSING_DEPENDENCIES` removes the host-graph
-work described above. No Activity has run on either arm64 path yet. If the glibc one carries
-apps, the split's reason to exist on arm64 becomes containment (ADR-0009), as on x86-64.
+work described above. The same day a Java-only F-Droid app reached layout on that board on the
+real framework, headless, in 1.3 s; no frame has been presented, and no app with native
+libraries has run. If the glibc path carries apps, the split's reason to exist on arm64 becomes
+containment (ADR-0009), as on x86-64.
 
 ## The boundary already exists: dma-buf
 
