@@ -62,14 +62,29 @@ namespace {
 
 #define VKD VULKAN_HPP_DEFAULT_DISPATCHER  // the one dispatcher everything uses
 
-constexpr VkFormat kVkFormat = VK_FORMAT_B8G8R8A8_UNORM;
-// ARGB (not XRGB) so the compositor honors the alpha channel: the video
-// SurfaceView hole-punch clears its rect to transparent and the video
-// wl_subsurface below shows through. Same BGRA8888 layout — only the fourcc's
-// X->A differs. Opaque apps render alpha=255 so they look identical; the
-// presenter marks the opaque region (full minus the video hole) so the
-// compositor still skips blending elsewhere.
-constexpr uint32_t kDrmFormat = DRM_FORMAT_ARGB8888;
+// The present format. ARGB (not XRGB) so the compositor honors the alpha
+// channel: the video SurfaceView hole-punch clears its rect to transparent and
+// the video wl_subsurface below shows through. Opaque apps render alpha=255 so
+// they look identical; the presenter marks the opaque region (full minus the
+// video hole) so the compositor still skips blending elsewhere.
+//
+// BGRA is the default. The byte order is a choice because a driver may offer
+// its tiled modifier for one order only: Adreno 640 lists a vendor modifier
+// for R8G8B8A8 and LINEAR alone for B8G8R8A8. choose_format() settles it once,
+// before the first surface is made, and leaves BGRA unless the presenter
+// offered the other order.
+struct PresentFormat {
+  VkFormat vk;
+  uint32_t drm;
+  SkColorType ct;
+};
+constexpr PresentFormat kBgra = {VK_FORMAT_B8G8R8A8_UNORM, DRM_FORMAT_ARGB8888,
+                                 kBGRA_8888_SkColorType};
+constexpr PresentFormat kRgba = {VK_FORMAT_R8G8B8A8_UNORM, DRM_FORMAT_ABGR8888,
+                                 kRGBA_8888_SkColorType};
+PresentFormat g_fmt = kBgra;
+uint64_t g_modifier = DRM_FORMAT_MOD_INVALID;  // chosen with g_fmt
+bool g_fmt_chosen = false;
 
 // One exported, modifier-tiled dma-buf VkImage + its memory/fd/descriptor. The
 // animated present loop ping-pongs two of these so the compositor can hold one
@@ -253,83 +268,130 @@ extern "C" bool acl_gpu_vk_handles(void** inst,
   return true;
 }
 
-// The modifiers the compositor advertises for the format (empty: not told).
-// Set once, before the first target is made.
+// The modifiers the compositor advertises, for the default format and for the
+// other byte order (empty: not told). Set before the first target is made.
 std::mutex g_allowed_mu;
 std::vector<uint64_t> g_allowed;
-bool g_allowed_warned = false;
+std::vector<uint64_t> g_allowed_rgba;
 
-bool modifier_allowed(uint64_t m) {
-  std::lock_guard<std::mutex> lk(g_allowed_mu);
-  return g_allowed.empty() ||
-         std::find(g_allowed.begin(), g_allowed.end(), m) != g_allowed.end();
-}
+// What one format offers: single-plane modifiers the GPU can render and
+// sample, split by whether the compositor's list has them.
+struct ModifierScan {
+  uint64_t tiled = DRM_FORMAT_MOD_INVALID;       // GPU's, and advertised
+  uint64_t linear = DRM_FORMAT_MOD_INVALID;      // LINEAR, and advertised
+  uint64_t any_tiled = DRM_FORMAT_MOD_INVALID;   // GPU's, advertised or not
+  uint64_t any_linear = DRM_FORMAT_MOD_INVALID;  // LINEAR, advertised or not
+};
 
-// Prefer a single-plane tiled modifier the GPU can render+sample and the
-// compositor advertises; fall back to LINEAR on the same terms. A compositor
-// whose list has none of the GPU's gets the GPU's own choice, as before the
-// list was consulted: some take it, and the rest show nothing either way.
-uint64_t choose_modifier(uint32_t* plane_count) {
+// `allowed` empty means the compositor did not say, and everything passes.
+ModifierScan scan_modifiers(VkFormat format,
+                            const std::vector<uint64_t>& allowed) {
   VkDrmFormatModifierPropertiesListEXT list{
       VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT};
   VkFormatProperties2 fp2{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, &list};
-  VKD.vkGetPhysicalDeviceFormatProperties2(g.phys, kVkFormat, &fp2);
+  VKD.vkGetPhysicalDeviceFormatProperties2(g.phys, format, &fp2);
   std::vector<VkDrmFormatModifierPropertiesEXT> mods(
       list.drmFormatModifierCount);
   list.pDrmFormatModifierProperties = mods.data();
-  VKD.vkGetPhysicalDeviceFormatProperties2(g.phys, kVkFormat, &fp2);
+  VKD.vkGetPhysicalDeviceFormatProperties2(g.phys, format, &fp2);
+  mods.resize(std::min<size_t>(mods.size(), list.drmFormatModifierCount));
   constexpr VkFormatFeatureFlags need = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
                                         VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-  uint64_t tiled1 = DRM_FORMAT_MOD_INVALID, linear = DRM_FORMAT_MOD_INVALID;
-  uint64_t any_tiled1 = DRM_FORMAT_MOD_INVALID,
-           any_linear = DRM_FORMAT_MOD_INVALID;
+  ModifierScan r;
   for (const auto& m : mods) {
     if ((m.drmFormatModifierTilingFeatures & need) != need)
       continue;
     if (m.drmFormatModifierPlaneCount != 1)
       continue;
-    const bool ok = modifier_allowed(m.drmFormatModifier);
+    const bool ok =
+        allowed.empty() || std::find(allowed.begin(), allowed.end(),
+                                     m.drmFormatModifier) != allowed.end();
     if (m.drmFormatModifier == DRM_FORMAT_MOD_LINEAR) {
-      any_linear = m.drmFormatModifier;
+      r.any_linear = m.drmFormatModifier;
       if (ok)
-        linear = m.drmFormatModifier;
+        r.linear = m.drmFormatModifier;
       continue;
     }
-    if (any_tiled1 == DRM_FORMAT_MOD_INVALID)
-      any_tiled1 = m.drmFormatModifier;
-    if (ok && tiled1 == DRM_FORMAT_MOD_INVALID)
-      tiled1 = m.drmFormatModifier;
+    if (r.any_tiled == DRM_FORMAT_MOD_INVALID)
+      r.any_tiled = m.drmFormatModifier;
+    if (ok && r.tiled == DRM_FORMAT_MOD_INVALID)
+      r.tiled = m.drmFormatModifier;
   }
-  *plane_count = 1;
-  if (tiled1 != DRM_FORMAT_MOD_INVALID)
-    return tiled1;
-  if (linear != DRM_FORMAT_MOD_INVALID)
-    return linear;
-  const uint64_t own =
-      any_tiled1 != DRM_FORMAT_MOD_INVALID ? any_tiled1 : any_linear;
-  if (own != DRM_FORMAT_MOD_INVALID && !g_allowed_warned) {
-    g_allowed_warned = true;
+  return r;
+}
+
+// Settle the present format and its modifier, once. In order: a tiled modifier
+// the compositor advertises for BGRA; one it advertises for RGBA, which is
+// taken only when the presenter passed a list for that format (a4l does so
+// under ACL_PRESENT_ALLOW_ABGR); LINEAR for BGRA on the same terms. A
+// compositor whose list has none of the GPU's gets the GPU's own choice for
+// BGRA, as before the list was consulted: some take it, and the rest show
+// nothing either way.
+void choose_format() {
+  if (g_fmt_chosen)
+    return;
+  g_fmt_chosen = true;
+  std::vector<uint64_t> allowed, allowed_rgba;
+  {
+    std::lock_guard<std::mutex> lk(g_allowed_mu);
+    allowed = g_allowed;
+    allowed_rgba = g_allowed_rgba;
+  }
+  const ModifierScan bgra = scan_modifiers(kBgra.vk, allowed);
+  g_fmt = kBgra;
+  if (bgra.tiled != DRM_FORMAT_MOD_INVALID) {
+    g_modifier = bgra.tiled;
+    return;
+  }
+  if (!allowed_rgba.empty()) {
+    const ModifierScan rgba = scan_modifiers(kRgba.vk, allowed_rgba);
+    if (rgba.tiled != DRM_FORMAT_MOD_INVALID) {
+      g_fmt = kRgba;
+      g_modifier = rgba.tiled;
+      std::fprintf(stderr,
+                   "acl-gpu: presenting ABGR8888 with modifier 0x%llx (no "
+                   "tiled modifier for ARGB8888)\n",
+                   static_cast<unsigned long long>(g_modifier));
+      return;
+    }
+  }
+  if (bgra.linear != DRM_FORMAT_MOD_INVALID) {
+    g_modifier = bgra.linear;
+    return;
+  }
+  g_modifier = bgra.any_tiled != DRM_FORMAT_MOD_INVALID ? bgra.any_tiled
+                                                        : bgra.any_linear;
+  if (g_modifier != DRM_FORMAT_MOD_INVALID)
     std::fprintf(stderr,
                  "acl-gpu: the compositor advertises no modifier this GPU "
                  "renders to; using 0x%llx\n",
-                 static_cast<unsigned long long>(own));
-  }
-  return own;
+                 static_cast<unsigned long long>(g_modifier));
 }
 
-// The compositor's modifiers for the present format, from the presenter.
-// Called before the first frame; targets already made keep theirs.
+// The compositor's modifiers for ARGB8888, from the presenter. Called before
+// the first frame; a format already chosen stays.
 extern "C" void acl_graphics_gpu_set_modifiers(const uint64_t* mods, size_t n) {
   std::lock_guard<std::mutex> lk(g_allowed_mu);
   g_allowed.assign(mods, mods + (mods != nullptr ? n : 0));
+}
+
+// The same for another format. Only ABGR8888 is used; the rest are ignored.
+extern "C" void acl_graphics_gpu_set_format_modifiers(uint32_t drm_format,
+                                                      const uint64_t* mods,
+                                                      size_t n) {
+  if (drm_format != DRM_FORMAT_ABGR8888)
+    return;
+  std::lock_guard<std::mutex> lk(g_allowed_mu);
+  g_allowed_rgba.assign(mods, mods + (mods != nullptr ? n : 0));
 }
 
 // Create one modifier-tiled, dma-buf-exported VkImage + memory + fd into `t` (a
 // plain VkImage, the vkCmdCopyImage DST — the scene is rendered into g.opt and
 // copied here).
 bool make_target(Target& t, int w, int h) {
-  uint32_t plane_count = 1;
-  const uint64_t modifier = choose_modifier(&plane_count);
+  const uint32_t plane_count = 1;
+  choose_format();
+  const uint64_t modifier = g_modifier;
   if (modifier == DRM_FORMAT_MOD_INVALID) {
     std::fprintf(stderr, "acl-gpu: no modifier\n");
     return false;
@@ -346,7 +408,7 @@ bool make_target(Target& t, int w, int h) {
       VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
   VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &extci};
   ci.imageType = VK_IMAGE_TYPE_2D;
-  ci.format = kVkFormat;
+  ci.format = g_fmt.vk;
   ci.extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
   ci.mipLevels = 1;
   ci.arrayLayers = 1;
@@ -424,7 +486,7 @@ bool make_target(Target& t, int w, int h) {
   out->height = static_cast<uint32_t>(h);
   out->plane_count = plane_count;
   out->modifier = modifier;
-  out->drm_format = kDrmFormat;
+  out->drm_format = g_fmt.drm;
   t.allocated = true;
   return true;
 }
@@ -439,7 +501,7 @@ bool resize_targets(int w, int h) {
   g.gr->flushAndSubmit(/*syncCpu=*/true);
   sk_sp<SkSurface> opt = SkSurface::MakeRenderTarget(
       g.gr.get(), SkBudgeted::kYes,
-      SkImageInfo::Make(w, h, kBGRA_8888_SkColorType, kPremul_SkAlphaType), 0,
+      SkImageInfo::Make(w, h, g_fmt.ct, kPremul_SkAlphaType), 0,
       kTopLeft_GrSurfaceOrigin, nullptr);
   if (!opt) {
     std::fprintf(stderr, "acl-gpu: MakeRenderTarget %dx%d fail\n", w, h);
@@ -493,12 +555,13 @@ bool ensure_ready(int w, int h) {
     return false;
   }
 
+  choose_format();  // the surface below is made in the present format
   // kTopLeft origin: Skia renders top-down so the raw vkCmdCopyImage into the
   // (top-down) dma-buf keeps the right way up. The default (kBottomLeft)
   // renders bottom-up and presents vertically flipped.
   g.opt = SkSurface::MakeRenderTarget(
       g.gr.get(), SkBudgeted::kYes,
-      SkImageInfo::Make(w, h, kBGRA_8888_SkColorType, kPremul_SkAlphaType), 0,
+      SkImageInfo::Make(w, h, g_fmt.ct, kPremul_SkAlphaType), 0,
       kTopLeft_GrSurfaceOrigin, nullptr);
   if (!g.opt) {
     std::fprintf(stderr, "acl-gpu: MakeRenderTarget fail\n");
@@ -603,7 +666,7 @@ bool make_direct_surface() {
   info.fAlloc = alloc;
   info.fImageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
   info.fImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  info.fFormat = kVkFormat;
+  info.fFormat = g_fmt.vk;
   info.fImageUsageFlags = g.usage;
   info.fSampleCount = 1;
   info.fLevelCount = 1;
@@ -611,8 +674,7 @@ bool make_direct_surface() {
   info.fSharingMode = VK_SHARING_MODE_EXCLUSIVE;
   GrBackendTexture bt(g.w, g.h, info);
   g.direct = SkSurface::MakeFromBackendTexture(
-      g.gr.get(), bt, kTopLeft_GrSurfaceOrigin, 1, kBGRA_8888_SkColorType,
-      nullptr, nullptr);
+      g.gr.get(), bt, kTopLeft_GrSurfaceOrigin, 1, g_fmt.ct, nullptr, nullptr);
   if (!g.direct) {
     std::fprintf(stderr,
                  "acl-gpu: MakeFromBackendTexture(direct tiled) fail\n");

@@ -2301,6 +2301,24 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env,
     const std::vector<std::uint64_t>& mods = s->presenter->modifiers();
     set_mods(mods.data(), mods.size());
   }
+  // ACL_PRESENT_ALLOW_ABGR: also offer the other byte order, for a GPU whose
+  // tiled modifier exists only there (Adreno 640: a vendor modifier for
+  // ABGR8888, LINEAR alone for ARGB8888). Opt-in, because advertising such a
+  // modifier does not mean the compositor shows it: on an SA8155P board
+  // Weston 8 took the buffer and its screen capture was scrambled. A
+  // presenter that does not report per-format lists (--split) gives none, and
+  // ACL_PRESENT_LINEAR_ONLY wins over this.
+  if (std::getenv("ACL_PRESENT_ALLOW_ABGR") != nullptr &&
+      std::getenv("ACL_PRESENT_LINEAR_ONLY") == nullptr) {
+    if (auto set_fmt_mods = reinterpret_cast<void (*)(
+            std::uint32_t, const std::uint64_t*, std::size_t)>(
+            ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_set_format_modifiers"))) {
+      constexpr std::uint32_t kDrmFormatAbgr8888 = 0x34324241u;  // 'AB24'
+      const std::vector<std::uint64_t> mods =
+          s->presenter->modifiers_for(kDrmFormatAbgr8888);
+      set_fmt_mods(kDrmFormatAbgr8888, mods.data(), mods.size());
+    }
+  }
   s->deferred = std::getenv("ACL_PRESENT_IMMEDIATE") == nullptr;
   const jlong ch =
       s->deferred
