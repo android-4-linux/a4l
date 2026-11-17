@@ -151,7 +151,11 @@ glibc, which is the case this was built for.
   with that modifier at p50 16.7 ms, p99 18.0 ms over 1680 presents, and the picture was
   scrambled: on Weston's screen capture in two runs out of two, and on the panel itself.
   The driver's buffer is a compressed layout (3,710,976 bytes against 3,686,400 linear at
-  1280x720). Why Weston misreads a modifier it advertises was not found.
+  1280x720). The likely cause: this vendor stack keeps part of a compressed buffer's
+  state in a metadata buffer beside it, which its EGL passes to the compositor over a
+  Wayland protocol of its own (`EGL_WL_bind_wayland_display`) and linux-dmabuf does not
+  carry. Compressed buffers would have to be presented through that EGL, which a4l's
+  Skia path does not do.
 - Input was not tried on the board.
 - The cross-built a4l had no libcrypto, so it did not check the APK's signature.
 
