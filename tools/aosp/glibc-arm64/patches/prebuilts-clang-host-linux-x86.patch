@@ -1,0 +1,38 @@
+diff --git a/soong/clangprebuilts.go b/soong/clangprebuilts.go
+index 989aca9..ee67456 100644
+--- a/soong/clangprebuilts.go
++++ b/soong/clangprebuilts.go
+@@ -153,8 +153,9 @@ func llvmHostPrebuiltLibraryShared(ctx android.LoadHookContext) {
+ }
+ 
+ type archInnerProps struct {
+-	Srcs []string
+-	Stem *string
++	Srcs    []string
++	Stem    *string
++	Enabled *bool
+ }
+ type archProps struct {
+ 	Android_arm         archInnerProps
+@@ -165,6 +166,7 @@ type archProps struct {
+ 	Linux_bionic_x86_64 archInnerProps
+ 	Glibc_x86           archInnerProps
+ 	Glibc_x86_64        archInnerProps
++	Glibc_arm64         archInnerProps
+ 	Linux_musl_x86      archInnerProps
+ 	Linux_musl_x86_64   archInnerProps
+ }
+@@ -307,6 +309,13 @@ func libClangRtPrebuiltLibraryStatic(ctx android.LoadHookContext, libProps *preb
+ 	p.Target.Linux_bionic_x86_64.Srcs = []string{path.Join(libDir, name+"-x86_64-android"+suffix+".a")}
+ 	p.Target.Glibc_x86.Srcs = []string{path.Join(libDir, name+"-i386"+suffix+".a")}
+ 	p.Target.Glibc_x86_64.Srcs = []string{path.Join(libDir, name+"-x86_64"+suffix+".a")}
++	// a4l: the glibc arm64 runtimes are built out of tree; enable only the ones present.
++	glibcArm64 := path.Join(libDir, name+"-aarch64"+suffix+".a")
++	if android.ExistentPathForSource(ctx, ctx.ModuleDir(), glibcArm64).Valid() {
++		p.Target.Glibc_arm64.Srcs = []string{glibcArm64}
++	} else {
++		p.Target.Glibc_arm64.Enabled = proptools.BoolPtr(false)
++	}
+ 	p.Target.Linux_musl_x86.Srcs = []string{path.Join(libDir, "i686-linux-musl/lib/linux", name+"-i386"+suffix+".a")}
+ 	p.Target.Linux_musl_x86_64.Srcs = []string{path.Join(libDir, "x86_64-linux-musl/lib/linux", name+"-x86_64"+suffix+".a")}
+ 	p.System_shared_libs = []string{}

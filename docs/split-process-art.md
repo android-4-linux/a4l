@@ -27,6 +27,13 @@ glibc's loader → SIGTRAP). The two clean fixes were:
 multi-week host-graph port, and — the key structural insight below — a4l **already has the exact
 boundary** the split needs.
 
+**Update 2026-11-16: a glibc arm64 host ART now builds.** `tools/aosp/glibc-arm64` adds a
+`linux_glibc` x `arm64` host target, and that ART ran a static-main class inside the a4l process
+on an SA8155P board (`a4l run hello.apk --vm=art`, exit 0). It is the B2 end-state reached through
+glibc, not musl, and it took hours, not weeks: `ALLOW_MISSING_DEPENDENCIES` removes the host-graph
+work described above. No Activity has run on either arm64 path yet. If the glibc one carries
+apps, the split's reason to exist on arm64 becomes containment (ADR-0009), as on x86-64.
+
 ## The boundary already exists: dma-buf
 
 a4l does **not** marshal fine-grained draw calls. The app's View tree renders via `android.graphics`
