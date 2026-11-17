@@ -28,6 +28,9 @@ endif
 # so this is compiled independently of have_vulkan.
 if have_gl
   gfx_sources += files('gl_egl.cpp')
+  # An EGL window on the toplevel that a rendered dma-buf frame is drawn to: the present
+  # path for a vendor EGL whose window buffers linux-dmabuf cannot describe.
+  gfx_sources += files('egl_blit.cpp')
   # HardwareBuffer: a gbm_bo exported as a dma-buf (gfx::DmabufFrame) — the zero-copy graphics
   # buffer under Flutter's external-texture path and android.hardware.HardwareBuffer.
   gfx_sources += files('hardware_buffer.cpp')

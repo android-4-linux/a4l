@@ -145,6 +145,12 @@ glibc, which is the case this was built for.
   (present interval p50 31.3 ms on a 16.7 ms display): Weston 8 released a replaced buffer
   about 29 ms after the commit that replaced it, so all three were held when the next frame
   needed one. With 4 the interval is p50 16.7 ms, p99 18.8 ms over 360 presents.
+- `ACL_PRESENT_EGL=1` draws each rendered frame to an EGL window on the toplevel and
+  swaps, one more GPU pass per frame. On the board the window's buffers are the
+  compressed size (3,710,976 bytes at 1280x720) and go over the vendor protocol; picture
+  correct, p50 16.7 ms, p99 19.2 ms over 480 presents. What the extra pass costs in GPU
+  time or power was not measured. On x86-64 (Mesa) the suite, a resize and WebView pass
+  in this mode.
 - The presenter takes the linear modifier by default. The Adreno 640 driver lists the vendor
   modifier `0x0500000000000001` for `R8G8B8A8` only (LINEAR alone for `B8G8R8A8`), so it
   needs ABGR8888, which `ACL_PRESENT_ALLOW_ABGR=1` allows. With it a4l presented ABGR8888
@@ -166,7 +172,7 @@ glibc, which is the case this was built for.
   all eight, and the driver's only related switch (`DISABLE_UBWC_VK`) turns compression
   off. The same driver's EGL does compress a window's buffers: a 1280x720 EGL window got
   3,710,976 bytes, the compressed size. So compressed window buffers on this board need
-  an EGL window, which a4l's Skia path does not present through. The swapchain is MAILBOX where the driver has it (it does here: p50
+  an EGL window: see `ACL_PRESENT_EGL` below. The swapchain is MAILBOX where the driver has it (it does here: p50
   16.6 ms, p99 21.6 ms over 360 presents), since a4l paces frames itself. Its composite
   alpha on the board is opaque, so a video hole would not show through; no video was
   run there. On x86-64 (Mesa) a resize, video on a subsurface and WebView all work in

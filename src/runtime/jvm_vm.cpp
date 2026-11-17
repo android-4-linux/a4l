@@ -66,6 +66,7 @@
 #include "gfx/ahardware_buffer.h"  // Flutter external textures: AHardwareBuffer EGLImage translation
 #include "gfx/egl10_jni.h"  // GLSurfaceView: com.google.android.gles_jni.EGLImpl natives
 #include "gfx/egl14_jni.h"  // android.opengl.EGL14 natives (ExoPlayer PlaceholderSurface / video)
+#include "gfx/egl_blit.h"  // ACL_PRESENT_EGL: an EGL window the frame is drawn to
 #include "gfx/gl_egl.h"  // GLSurfaceView: host GL device (EGLImpl get_display)
 #endif
 #include "log/log.h"
@@ -1338,6 +1339,10 @@ struct PresentSession {
       false;  // ACL_PRESENT_RT: record on UI thread, render on rthread
   bool swapchain_asked =
       false;  // ACL_PRESENT_SWAPCHAIN: the graphics library has the toplevel
+  bool egl_window_asked = false;  // ACL_PRESENT_EGL: present through EGL
+#if ACL_HAVE_GL
+  std::unique_ptr<gfx::EglBlit> egl_blit;  // made at the first frame
+#endif
   bool rt_bootstrapped =
       false;  // first deferred frame renders sync to arm the vsync loop
   JavaVM* vm = nullptr;
@@ -2306,11 +2311,12 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env,
   // ACL_PRESENT_SWAPCHAIN: hand the graphics library the toplevel so that it
   // presents through a Vulkan swapchain where the driver has
   // VK_KHR_wayland_surface. The driver's WSI then allocates the window's
-  // buffers and commits them, as an EGL window does. That is what a vendor
-  // stack needs for buffers it compresses, whose metadata linux-dmabuf does
-  // not carry. Not under --split: the surface belongs to the broker. Not
-  // with ACL_PRESENT_LINEAR_ONLY either: that asks for a4l's own LINEAR
-  // dma-bufs, and a swapchain's modifier is the driver's to choose.
+  // buffers and commits them, over whatever protocol the vendor's stack
+  // uses for that. On an SA8155P board the compositor then scans the buffers
+  // out directly; the driver does not compress them (ACL_PRESENT_EGL). Not
+  // under --split: the surface belongs to the broker. Not with
+  // ACL_PRESENT_LINEAR_ONLY either: that asks for a4l's own LINEAR dma-bufs,
+  // and a swapchain's modifier is the driver's to choose.
   if (std::getenv("ACL_PRESENT_SWAPCHAIN") != nullptr &&
       std::getenv("ACL_PRESENT_LINEAR_ONLY") == nullptr &&
       !wm::split_child_active()) {
@@ -2323,6 +2329,22 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env,
       log::i(kTag, "present: swapchain on the toplevel {}",
              s->swapchain_asked ? "requested" : "not available");
     }
+  }
+  // ACL_PRESENT_EGL: present each rendered dma-buf through an EGL window on
+  // the toplevel (gfx/egl_blit.h), for a vendor stack whose EGL gives window
+  // buffers what neither linux-dmabuf nor its Vulkan swapchain does (on an
+  // SA8155P board, hardware compression). One more GPU pass per frame. The
+  // swapchain wins where both are asked for, --split has no surface here, and
+  // ACL_PRESENT_LINEAR_ONLY asks for a4l's own dma-bufs at the compositor.
+  if (std::getenv("ACL_PRESENT_EGL") != nullptr && !s->swapchain_asked &&
+      std::getenv("ACL_PRESENT_LINEAR_ONLY") == nullptr &&
+      !wm::split_child_active()) {
+#if ACL_HAVE_GL
+    s->egl_window_asked = s->presenter->gl_display() != nullptr &&
+                          s->presenter->gl_surface() != nullptr;
+#endif
+    log::i(kTag, "present: EGL window on the toplevel {}",
+           s->egl_window_asked ? "requested" : "not available");
   }
   // ACL_PRESENT_ALLOW_ABGR: also offer the other byte order, for a GPU whose
   // tiled modifier exists only there (Adreno 640: a vendor modifier for
@@ -2796,7 +2818,38 @@ static bool present_submit(PresentSession* s,
     fr.modifier = f.modifier;
     fr.drm_format = f.drm_format;
     fr.modifier_tiled = f.modifier != 0;
-    if (!s->presenter->submit(fr, slot))
+    bool shown = false;
+#if ACL_HAVE_GL
+    // ACL_PRESENT_EGL: draw the frame to an EGL window on the toplevel. The
+    // window is made at the first frame, on this thread, which is the one
+    // that presents every later frame. Where it cannot be made the frames go
+    // to the compositor as dma-bufs, as without the variable.
+    if (s->egl_window_asked && s->egl_blit == nullptr) {
+      std::string err;
+      s->egl_blit = gfx::EglBlit::Create(
+          s->presenter->gl_display(), s->presenter->gl_surface(),
+          static_cast<int>(f.width), static_cast<int>(f.height), &err);
+      if (s->egl_blit == nullptr) {
+        log::w(kTag, "present: no EGL window ({}); presenting dma-bufs", err);
+        s->egl_window_asked = false;
+      }
+    }
+    if (s->egl_blit != nullptr) {
+      std::string err;
+      const int blit_slot = slot >= 0 && slot < gfx::EglBlit::kSlots ? slot : 0;
+      if (!s->egl_blit->present(fr, blit_slot, &err)) {
+        static bool once = false;
+        if (!std::exchange(once, true))
+          log::w(kTag, "present: EGL window frame failed: {}", err);
+        return false;
+      }
+      if (!s->presenter->submit_external(static_cast<int>(f.width),
+                                         static_cast<int>(f.height)))
+        return false;
+      shown = true;
+    }
+#endif
+    if (!shown && !s->presenter->submit(fr, slot))
       return false;
   }
   // ACL_PRESENT_DEFER_DEBUG=1: log EVERY submit with its buffer slot. The
@@ -3468,6 +3521,11 @@ void JNICALL PresentDriver_nClose(JNIEnv* env, jclass, jlong sp) {
     s->rthread->stop();
     s->rthread.reset();
   }  // join the GPU thread before teardown
+#if ACL_HAVE_GL
+  // The EGL window's buffers are objects on the presenter's connection: they
+  // go while it is still open.
+  s->egl_blit.reset();
+#endif
   s->presenter.reset();  // tears down the surface + disconnects
   if (s->view != nullptr)
     env->DeleteGlobalRef(s->view);

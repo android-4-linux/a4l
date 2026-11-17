@@ -1223,7 +1223,9 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     else
       refit_opaque_region();
     if (frame_index_ == 0)
-      log::i(kTag, "dmabuf present(A): {}x{} through the producer's swapchain",
+      log::i(kTag,
+             "dmabuf present(A): {}x{} presented by the producer (swapchain or "
+             "EGL window)",
              width, height);
     external_ = true;
     commit_external(/*feedback=*/true);
