@@ -32,8 +32,8 @@ boundary** the split needs.
 on an SA8155P board (`a4l run hello.apk --vm=art`, exit 0). It is the B2 end-state reached through
 glibc, not musl, and it took hours, not weeks: `ALLOW_MISSING_DEPENDENCIES` removes the host-graph
 work described above. The same day a Java-only F-Droid app reached layout on that board on the
-real framework, headless, in 1.3 s; no frame has been presented, and no app with native
-libraries has run. If the glibc path carries apps, the split's reason to exist on arm64 becomes
+real framework in 1.3 s, and then drew through the GPU present path as an ivi surface on the
+board's screen. No app with native libraries has run there. If the glibc path carries apps, the split's reason to exist on arm64 becomes
 containment (ADR-0009), as on x86-64.
 
 ## The boundary already exists: dma-buf

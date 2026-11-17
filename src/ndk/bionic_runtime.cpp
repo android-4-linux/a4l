@@ -2054,6 +2054,16 @@ bool BionicRuntime_bootstrap(const BionicConfig&,
                              void**) {
   return false;
 }
+// No app native GL runs here, so there is no donor thread pointer to route
+// to: Java GL calls go straight to the host library on the calling thread.
+extern "C" void acl_gl_run_on_donor(void (*fn)(void*), void* arg) {
+  if (fn != nullptr)
+    fn(arg);
+}
+extern "C" void acl_gl_donor_route_set(int) {}
+extern "C" int acl_gl_donor_route_get(void) {
+  return 0;
+}
 // No bionic thread exists to pair, and nothing reads the hooks: the
 // trampolines below are only ever reached from a loaded bionic library.
 std::uintptr_t ensure_paired_glibc_fs() {

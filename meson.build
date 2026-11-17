@@ -210,13 +210,18 @@ if skia_prefix != '' and fs.exists(skia_prefix / 'include' / 'core' / 'SkCanvas.
   _ls = run_command('sh', '-c', 'ls "' + skia_prefix / 'lib' + '"/*.a 2>/dev/null', check : false)
   _archives = _ls.stdout().strip().split('\n')
   if _archives.length() > 0 and _archives[0] != ''
-    _linkargs = ['-Wl,--start-group']
+    # lld resolves archives in any order and rejects a group nested inside the one Meson
+    # puts around static libraries, so it gets the bare list.
+    _group = cxx.get_linker_id() != 'ld.lld'
+    _linkargs = _group ? ['-Wl,--start-group'] : []
     foreach a : _archives
       if a != ''
         _linkargs += a
       endif
     endforeach
-    _linkargs += ['-Wl,--end-group']
+    if _group
+      _linkargs += ['-Wl,--end-group']
+    endif
     _sysdeps = [dependency('threads')]
     foreach s : ['dl', 'freetype2', 'fontconfig']
       _d = (s == 'dl') ? cxx.find_library('dl', required : false) : dependency(s, required : false)
@@ -333,6 +338,11 @@ conf.set10('ACL_HAVE_WCS', have_wcs)
 conf.set10('ACL_HAVE_SKIA', have_skia)
 conf.set10('ACL_HAVE_VULKAN', have_vulkan)
 conf.set10('ACL_HAVE_GL', have_gl)
+# posix_spawn_file_actions_addclosefrom_np is glibc 2.34. The split parent lists and closes the
+# descriptors itself on an older one.
+conf.set10('ACL_HAVE_SPAWN_CLOSEFROM',
+           cxx.has_function('posix_spawn_file_actions_addclosefrom_np',
+                            prefix : '#define _GNU_SOURCE\n#include <spawn.h>'))
 # gbm_surface_create_with_modifiers2 (modifiers and usage flags together) is Mesa 21.3. An
 # older gbm has the call without flags, which is used in its place.
 conf.set10('ACL_HAVE_GBM_SURFACE_MODIFIERS2',
