@@ -1336,6 +1336,8 @@ struct PresentSession {
       rthread;  // owns all GrContext work when deferred (ACL_PRESENT_RT)
   bool deferred =
       false;  // ACL_PRESENT_RT: record on UI thread, render on rthread
+  bool swapchain_asked =
+      false;  // ACL_PRESENT_SWAPCHAIN: the graphics library has the toplevel
   bool rt_bootstrapped =
       false;  // first deferred frame renders sync to arm the vsync loop
   JavaVM* vm = nullptr;
@@ -2301,6 +2303,24 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env,
     const std::vector<std::uint64_t>& mods = s->presenter->modifiers();
     set_mods(mods.data(), mods.size());
   }
+  // ACL_PRESENT_SWAPCHAIN: hand the graphics library the toplevel so that it
+  // presents through a Vulkan swapchain where the driver has
+  // VK_KHR_wayland_surface. The driver's WSI then allocates the window's
+  // buffers and commits them, as an EGL window does. That is what a vendor
+  // stack needs for buffers it compresses, whose metadata linux-dmabuf does
+  // not carry. Not under --split: the surface belongs to the broker.
+  if (std::getenv("ACL_PRESENT_SWAPCHAIN") != nullptr &&
+      !wm::split_child_active()) {
+    if (auto set_surface = reinterpret_cast<bool (*)(void*, void*)>(
+            ::dlsym(RTLD_DEFAULT, "acl_graphics_gpu_set_wayland_surface"))) {
+      void* const dpy = s->presenter->gl_display();
+      void* const surf = s->presenter->gl_surface();
+      s->swapchain_asked =
+          dpy != nullptr && surf != nullptr && set_surface(dpy, surf);
+      log::i(kTag, "present: swapchain on the toplevel {}",
+             s->swapchain_asked ? "requested" : "not available");
+    }
+  }
   // ACL_PRESENT_ALLOW_ABGR: also offer the other byte order, for a GPU whose
   // tiled modifier exists only there (Adreno 640: a vendor modifier for
   // ABGR8888, LINEAR alone for ARGB8888). Opt-in, because advertising such a
@@ -2752,22 +2772,30 @@ void JNICALL PresentDriver_nSetVideoPunchHole(JNIEnv*,
 static bool present_submit(PresentSession* s,
                            const PresentDmabuf& f,
                            int slot) {
-  if (f.fd < 0)
-    return false;
-  gfx::DmabufFrame fr{};
-  fr.fd = f.fd;
-  fr.width = f.width;
-  fr.height = f.height;
-  fr.plane_count = f.plane_count;
-  for (std::uint32_t i = 0; i < f.plane_count && i < 4; ++i) {
-    fr.planes[i].offset = f.offsets[i];
-    fr.planes[i].stride = f.strides[i];
+  // A frame with no dma-buf from a producer that was given the surface is
+  // already on it (acl_graphics_gpu_set_wayland_surface).
+  if (f.fd < 0 && s->swapchain_asked && f.width > 0 && f.height > 0) {
+    if (!s->presenter->submit_external(static_cast<int>(f.width),
+                                       static_cast<int>(f.height)))
+      return false;
+  } else {
+    if (f.fd < 0)
+      return false;
+    gfx::DmabufFrame fr{};
+    fr.fd = f.fd;
+    fr.width = f.width;
+    fr.height = f.height;
+    fr.plane_count = f.plane_count;
+    for (std::uint32_t i = 0; i < f.plane_count && i < 4; ++i) {
+      fr.planes[i].offset = f.offsets[i];
+      fr.planes[i].stride = f.strides[i];
+    }
+    fr.modifier = f.modifier;
+    fr.drm_format = f.drm_format;
+    fr.modifier_tiled = f.modifier != 0;
+    if (!s->presenter->submit(fr, slot))
+      return false;
   }
-  fr.modifier = f.modifier;
-  fr.drm_format = f.drm_format;
-  fr.modifier_tiled = f.modifier != 0;
-  if (!s->presenter->submit(fr, slot))
-    return false;
   // ACL_PRESENT_DEFER_DEBUG=1: log EVERY submit with its buffer slot. The
   // periodic log below only fires on frame 0 and every 60th, which reads as
   // "only frame 0 was presented" for any app that presents slowly -- exactly

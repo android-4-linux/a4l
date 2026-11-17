@@ -134,7 +134,82 @@ struct Gpu {
   VkFence fence = VK_NULL_HANDLE;
   int w = 0, h = 0;
   bool ready = false;
+  // Swapchain present (acl_graphics_gpu_set_wayland_surface): the driver's
+  // WSI owns the window's buffers and commits the wl_surface.
+  PFN_vkGetInstanceProcAddr gipa = nullptr;
+  VkSurfaceKHR surface = VK_NULL_HANDLE;
+  VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+  std::vector<VkImage> sc_images;
+  VkColorSpaceKHR sc_colorspace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+  VkFence sc_fence = VK_NULL_HANDLE;
+  int sc_w = 0, sc_h = 0;
 } g;
+
+// The Wayland surface to present on, set before the device is made. Both
+// null: the dma-buf path.
+void* g_wl_display = nullptr;
+void* g_wl_surface = nullptr;
+bool g_swapchain_mode = false;  // the surface was made and can be presented to
+
+bool has_extension(const std::vector<VkExtensionProperties>& exts,
+                   const char* name) {
+  for (const auto& e : exts)
+    if (std::strcmp(e.extensionName, name) == 0)
+      return true;
+  return false;
+}
+
+// VkWaylandSurfaceCreateInfoKHR, declared here so that the file does not need
+// the Wayland platform headers. The two pointers are a4l's own wl_display and
+// wl_surface.
+struct WaylandSurfaceCreateInfo {
+  VkStructureType sType;
+  const void* pNext;
+  VkFlags flags;
+  void* display;
+  void* surface;
+};
+constexpr VkStructureType kWaylandSurfaceCreateInfoType =
+    static_cast<VkStructureType>(1000006000);
+using CreateWaylandSurfaceFn = VkResult (*)(VkInstance,
+                                            const WaylandSurfaceCreateInfo*,
+                                            const VkAllocationCallbacks*,
+                                            VkSurfaceKHR*);
+
+// A VkSurfaceKHR on a4l's wl_surface that the device and its graphics queue
+// can present to. Needs the instance, the physical device and the queue
+// family. False: the dma-buf path.
+bool make_wl_surface() {
+  auto create = reinterpret_cast<CreateWaylandSurfaceFn>(
+      g.gipa(g.instance, "vkCreateWaylandSurfaceKHR"));
+  if (create == nullptr)
+    return false;
+  uint32_t en = 0;
+  VKD.vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &en, nullptr);
+  std::vector<VkExtensionProperties> exts(en);
+  VKD.vkEnumerateDeviceExtensionProperties(g.phys, nullptr, &en, exts.data());
+  exts.resize(std::min<size_t>(exts.size(), en));
+  if (!has_extension(exts, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+    std::fprintf(stderr, "acl-gpu: no VK_KHR_swapchain; presenting dma-bufs\n");
+    return false;
+  }
+  WaylandSurfaceCreateInfo ci{kWaylandSurfaceCreateInfoType, nullptr, 0,
+                              g_wl_display, g_wl_surface};
+  if (create(g.instance, &ci, nullptr, &g.surface) != VK_SUCCESS) {
+    std::fprintf(stderr, "acl-gpu: createWaylandSurface fail\n");
+    return false;
+  }
+  VkBool32 ok = VK_FALSE;
+  if (VKD.vkGetPhysicalDeviceSurfaceSupportKHR(g.phys, g.qfam, g.surface,
+                                               &ok) != VK_SUCCESS ||
+      ok != VK_TRUE) {
+    std::fprintf(stderr, "acl-gpu: the queue cannot present to the surface\n");
+    VKD.vkDestroySurfaceKHR(g.instance, g.surface, nullptr);
+    g.surface = VK_NULL_HANDLE;
+    return false;
+  }
+  return true;
+}
 
 bool init_device() {
   // This vulkan-headers has no no-arg init(); feed it the loader's
@@ -164,6 +239,26 @@ bool init_device() {
   app.apiVersion = VK_API_VERSION_1_1;
   VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
   ici.pApplicationInfo = &app;
+  g.gipa = gipa;
+  static const char* const kSurfaceExts[] = {"VK_KHR_surface",
+                                             "VK_KHR_wayland_surface"};
+  bool want_surface = g_wl_display != nullptr && g_wl_surface != nullptr;
+  if (want_surface) {
+    uint32_t en = 0;
+    VKD.vkEnumerateInstanceExtensionProperties(nullptr, &en, nullptr);
+    std::vector<VkExtensionProperties> exts(en);
+    VKD.vkEnumerateInstanceExtensionProperties(nullptr, &en, exts.data());
+    exts.resize(std::min<size_t>(exts.size(), en));
+    want_surface = has_extension(exts, kSurfaceExts[0]) &&
+                   has_extension(exts, kSurfaceExts[1]);
+    if (want_surface) {
+      ici.enabledExtensionCount = 2;
+      ici.ppEnabledExtensionNames = kSurfaceExts;
+    } else {
+      std::fprintf(stderr,
+                   "acl-gpu: no VK_KHR_wayland_surface; presenting dma-bufs\n");
+    }
+  }
   if (VKD.vkCreateInstance(&ici, nullptr, &g.instance) != VK_SUCCESS) {
     std::fprintf(stderr, "acl-gpu: createInstance fail\n");
     return false;
@@ -205,20 +300,24 @@ bool init_device() {
   // VK_KHR_external_semaphore_fd + the ycbcr-conversion feature mirror what
   // hwui's VulkanManager enables and what Chromium's per-frame semaphore
   // handshake / AHardwareBuffer sampling need.
+  // VK_KHR_swapchain is last and counted only in swapchain mode.
   static const char* const kDeviceExts[] = {
       VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
       VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
       VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
       VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME,
       VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+      VK_KHR_SWAPCHAIN_EXTENSION_NAME,
   };
+  const bool with_swapchain = want_surface && make_wl_surface();
   static VkPhysicalDeviceSamplerYcbcrConversionFeatures kYcbcr{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES,
       nullptr, VK_TRUE};
   static VkPhysicalDeviceFeatures2 kFeatures2{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &kYcbcr, {}};
   g.device_exts = kDeviceExts;
-  g.device_ext_count = static_cast<uint32_t>(std::size(kDeviceExts));
+  g.device_ext_count =
+      static_cast<uint32_t>(std::size(kDeviceExts)) - (with_swapchain ? 0 : 1);
   g.features2 = &kFeatures2;
 
   const float prio = 1.0f;
@@ -240,6 +339,7 @@ bool init_device() {
   VKD.init(vk::Device(
       g.device));  // load ALL device-level entrypoints (consistent dispatch)
   VKD.vkGetDeviceQueue(g.device, g.qfam, 0, &g.queue);
+  g_swapchain_mode = with_swapchain;
   return true;
 }
 
@@ -331,6 +431,34 @@ void choose_format() {
   if (g_fmt_chosen)
     return;
   g_fmt_chosen = true;
+  if (g_swapchain_mode) {
+    // The byte order is the surface's: BGRA if it offers it, else RGBA. With
+    // neither there is nothing to copy the frame into, and the dma-buf path
+    // takes over.
+    uint32_t n = 0;
+    VKD.vkGetPhysicalDeviceSurfaceFormatsKHR(g.phys, g.surface, &n, nullptr);
+    std::vector<VkSurfaceFormatKHR> fmts(n);
+    VKD.vkGetPhysicalDeviceSurfaceFormatsKHR(g.phys, g.surface, &n,
+                                             fmts.data());
+    fmts.resize(std::min<size_t>(fmts.size(), n));
+    const PresentFormat* pick = nullptr;
+    for (const PresentFormat* want : {&kBgra, &kRgba}) {
+      for (const auto& f : fmts) {
+        if (pick == nullptr && f.format == want->vk) {
+          pick = want;
+          g.sc_colorspace = f.colorSpace;
+        }
+      }
+    }
+    if (pick != nullptr) {
+      g_fmt = *pick;
+      return;
+    }
+    std::fprintf(stderr,
+                 "acl-gpu: the surface offers no 8-bit RGBA format; "
+                 "presenting dma-bufs\n");
+    g_swapchain_mode = false;
+  }
   std::vector<uint64_t> allowed, allowed_rgba;
   {
     std::lock_guard<std::mutex> lk(g_allowed_mu);
@@ -373,6 +501,22 @@ void choose_format() {
 extern "C" void acl_graphics_gpu_set_modifiers(const uint64_t* mods, size_t n) {
   std::lock_guard<std::mutex> lk(g_allowed_mu);
   g_allowed.assign(mods, mods + (mods != nullptr ? n : 0));
+}
+
+// Present through a swapchain on a4l's wl_surface, where the driver has
+// VK_KHR_wayland_surface: its WSI allocates the window's buffers and commits
+// the surface, as an EGL window does. Must be called before the first frame;
+// it has no effect once the device is made. Returns whether the request was
+// taken, not whether the driver can do it: end_frame says that, by returning
+// a frame with no dma-buf (fd -1).
+extern "C" bool acl_graphics_gpu_set_wayland_surface(void* wl_display,
+                                                     void* wl_surface) {
+  if (g.ready || g.device != VK_NULL_HANDLE || wl_display == nullptr ||
+      wl_surface == nullptr)
+    return false;
+  g_wl_display = wl_display;
+  g_wl_surface = wl_surface;
+  return true;
 }
 
 // The same for another format. Only ABGR8888 is used; the rest are ignored.
@@ -592,7 +736,11 @@ bool ensure_ready(int w, int h) {
 
 // Copy the just-rendered optimal Skia image (TRANSFER_SRC_OPTIMAL) into `t`'s
 // dma-buf image.
-bool copy_to_dmabuf(Target& t) {
+// Copy the flushed render target into `dst`, which is left in `final_layout`.
+// The copy is made with `dst` in `copy_layout`. Waits for the GPU.
+bool copy_opt_to(VkImage dst,
+                 VkImageLayout copy_layout,
+                 VkImageLayout final_layout) {
   GrBackendTexture bt =
       g.opt->getBackendTexture(SkSurface::kFlushRead_BackendHandleAccess);
   GrVkImageInfo si{};
@@ -609,10 +757,10 @@ bool copy_to_dmabuf(Target& t) {
   VkImageMemoryBarrier toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
   toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  toDst.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  toDst.newLayout = copy_layout;
   toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  toDst.image = t.image;
+  toDst.image = dst;
   toDst.subresourceRange = color;
   VKD.vkCmdPipelineBarrier(g.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
@@ -622,15 +770,15 @@ bool copy_to_dmabuf(Target& t) {
   region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
   region.extent = {static_cast<uint32_t>(g.w), static_cast<uint32_t>(g.h), 1};
   VKD.vkCmdCopyImage(g.cmd, si.fImage,
-                     static_cast<VkImageLayout>(si.fImageLayout), t.image,
-                     VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+                     static_cast<VkImageLayout>(si.fImageLayout), dst,
+                     copy_layout, 1, &region);
   VkImageMemoryBarrier toExt{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   toExt.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  toExt.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-  toExt.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  toExt.oldLayout = copy_layout;
+  toExt.newLayout = final_layout;
   toExt.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   toExt.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  toExt.image = t.image;
+  toExt.image = dst;
   toExt.subresourceRange = color;
   VKD.vkCmdPipelineBarrier(g.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr,
@@ -645,6 +793,124 @@ bool copy_to_dmabuf(Target& t) {
   VKD.vkWaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
   VKD.vkResetFences(g.device, 1, &g.fence);
   return true;
+}
+
+bool copy_to_dmabuf(Target& t) {
+  return copy_opt_to(t.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+}
+
+void destroy_swapchain() {
+  if (g.swapchain != VK_NULL_HANDLE)
+    VKD.vkDestroySwapchainKHR(g.device, g.swapchain, nullptr);
+  g.swapchain = VK_NULL_HANDLE;
+  g.sc_images.clear();
+  g.sc_w = g.sc_h = 0;
+}
+
+// A swapchain of the window's size, replacing any older one.
+bool make_swapchain(int w, int h) {
+  VkSurfaceCapabilitiesKHR caps{};
+  if (VKD.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g.phys, g.surface, &caps) !=
+      VK_SUCCESS)
+    return false;
+  if ((caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0) {
+    std::fprintf(stderr, "acl-gpu: swapchain images cannot be copied to\n");
+    return false;
+  }
+  uint32_t count = caps.minImageCount + 1;
+  if (caps.maxImageCount != 0)
+    count = std::min(count, caps.maxImageCount);
+  // Premultiplied alpha where offered, as the dma-buf path presents (the
+  // video hole is transparent); else whatever the surface does.
+  VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+  for (VkCompositeAlphaFlagBitsKHR a :
+       {VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+        VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR}) {
+    if ((caps.supportedCompositeAlpha & a) != 0) {
+      alpha = a;
+      break;
+    }
+  }
+  VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+  ci.surface = g.surface;
+  ci.minImageCount = count;
+  ci.imageFormat = g_fmt.vk;
+  ci.imageColorSpace = g.sc_colorspace;
+  ci.imageExtent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
+  ci.imageArrayLayers = 1;
+  ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  ci.preTransform = caps.currentTransform;
+  ci.compositeAlpha = alpha;
+  ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;  // always available
+  ci.clipped = VK_TRUE;
+  ci.oldSwapchain = g.swapchain;
+  VkSwapchainKHR sc = VK_NULL_HANDLE;
+  const VkResult r = VKD.vkCreateSwapchainKHR(g.device, &ci, nullptr, &sc);
+  destroy_swapchain();  // the old one is retired either way
+  if (r != VK_SUCCESS) {
+    std::fprintf(stderr, "acl-gpu: createSwapchain %dx%d fail (%d)\n", w, h,
+                 static_cast<int>(r));
+    return false;
+  }
+  uint32_t n = 0;
+  VKD.vkGetSwapchainImagesKHR(g.device, sc, &n, nullptr);
+  g.sc_images.resize(n);
+  VKD.vkGetSwapchainImagesKHR(g.device, sc, &n, g.sc_images.data());
+  g.sc_images.resize(std::min<size_t>(g.sc_images.size(), n));
+  g.swapchain = sc;
+  g.sc_w = w;
+  g.sc_h = h;
+  if (g.sc_fence == VK_NULL_HANDLE) {
+    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    if (VKD.vkCreateFence(g.device, &fci, nullptr, &g.sc_fence) != VK_SUCCESS)
+      return false;
+  }
+  std::fprintf(
+      stderr, "acl-gpu: swapchain %dx%d, %u images, format %d, alpha 0x%x\n", w,
+      h, n, static_cast<int>(g_fmt.vk), static_cast<unsigned>(alpha));
+  return !g.sc_images.empty();
+}
+
+// Copy the flushed render target into the next swapchain image and present
+// it. The driver attaches the buffer to the wl_surface and commits it. False:
+// the frame was not shown.
+bool present_swapchain() {
+  if ((g.swapchain == VK_NULL_HANDLE || g.sc_w != g.w || g.sc_h != g.h) &&
+      !make_swapchain(g.w, g.h))
+    return false;
+  // Bounded: a compositor that has stopped taking frames must not hold the
+  // render thread forever.
+  constexpr uint64_t kAcquireNs = 1000ull * 1000 * 1000;
+  uint32_t idx = 0;
+  VkResult r = VKD.vkAcquireNextImageKHR(g.device, g.swapchain, kAcquireNs,
+                                         VK_NULL_HANDLE, g.sc_fence, &idx);
+  if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+    if (!make_swapchain(g.w, g.h))
+      return false;
+    r = VKD.vkAcquireNextImageKHR(g.device, g.swapchain, kAcquireNs,
+                                  VK_NULL_HANDLE, g.sc_fence, &idx);
+  }
+  if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR)
+    return false;  // a timeout included; the fence is untouched
+  VKD.vkWaitForFences(g.device, 1, &g.sc_fence, VK_TRUE, UINT64_MAX);
+  VKD.vkResetFences(g.device, 1, &g.sc_fence);
+  if (idx >= g.sc_images.size())
+    return false;
+  if (!copy_opt_to(g.sc_images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   VK_IMAGE_LAYOUT_PRESENT_SRC_KHR))
+    return false;
+  VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+  pi.swapchainCount = 1;
+  pi.pSwapchains = &g.swapchain;
+  pi.pImageIndices = &idx;
+  r = VKD.vkQueuePresentKHR(g.queue, &pi);
+  if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+    destroy_swapchain();  // remade at the next frame
+    return true;
+  }
+  return r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR;
 }
 
 // Direct (zero-copy) path: wrap the modifier-tiled dma-buf VkImage itself as a
@@ -874,6 +1140,23 @@ extern "C" void acl_graphics_present_replay_onto(void* sk_canvas);
 extern "C" bool acl_graphics_gpu_end_frame(int buffer_index, AclDmabuf* out) {
   if (out == nullptr || !g.ready || !g.opt)
     return false;
+  if (g_swapchain_mode) {
+    acl_graphics_present_replay_onto(g.opt->getCanvas());
+    GrBackendSurfaceMutableState toSrc(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                       g.qfam);
+    g.opt->flush(GrFlushInfo{}, &toSrc);
+    g.gr->submit(/*syncCpu=*/true);
+    maybe_dump_frame();
+    if (!present_swapchain())
+      return false;
+    // No dma-buf: the frame is already on the surface.
+    std::memset(out, 0, sizeof(*out));
+    out->fd = -1;
+    out->width = static_cast<uint32_t>(g.w);
+    out->height = static_cast<uint32_t>(g.h);
+    out->drm_format = g_fmt.drm;
+    return true;
+  }
   if (buffer_index < 0 || buffer_index >= kBuffers)
     buffer_index = 0;
   Target& t = g.targets[buffer_index];

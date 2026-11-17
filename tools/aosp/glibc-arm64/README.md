@@ -154,8 +154,14 @@ glibc, which is the case this was built for.
   1280x720). The likely cause: this vendor stack keeps part of a compressed buffer's
   state in a metadata buffer beside it, which its EGL passes to the compositor over a
   Wayland protocol of its own (`EGL_WL_bind_wayland_display`) and linux-dmabuf does not
-  carry. Compressed buffers would have to be presented through that EGL, which a4l's
-  Skia path does not do.
+  carry.
+- `ACL_PRESENT_SWAPCHAIN=1` presents through a Vulkan swapchain on the toplevel
+  (`VK_KHR_wayland_surface`), so the driver allocates the window's buffers and sends them
+  over that vendor protocol, each with its metadata buffer. On the board: picture correct,
+  p50 16.7 ms, p99 18.4 ms over 960 presents, and 415 of 417 presentation feedbacks
+  flagged zero-copy, where the dma-buf path gets every feedback discarded. The four
+  buffers the driver made were 3,686,400 bytes each, the linear size, so it did not
+  compress them. Not tried in this mode: a resize, video, WebView.
 - Input was not tried on the board.
 - The cross-built a4l had no libcrypto, so it did not check the APK's signature.
 
