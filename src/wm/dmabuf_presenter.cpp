@@ -2116,9 +2116,11 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
 
   // Ping-pong buffers for the animated loop. kSlots must match the producer's
   // dma-buf image count (gpu_dmabuf kBuffers). Each BufferH has a stable
-  // address (array member). 3 (triple-buffer): the deferred RenderThread
-  // pipeline needs a third slot in transit or 2 starves.
-  static constexpr int kSlots = 3;
+  // address (array member). The deferred RenderThread pipeline needs a third
+  // slot in transit or 2 starves; the fourth is for a compositor that holds a
+  // replaced buffer for two refreshes (see gpu_dmabuf kBuffers). free_slot()
+  // takes the lowest free one, so the fourth is built only if it is needed.
+  static constexpr int kSlots = 4;
   struct Slot {
     BufferH handler;
     bool busy = false;

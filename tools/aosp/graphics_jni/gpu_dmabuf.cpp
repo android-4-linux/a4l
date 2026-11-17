@@ -84,10 +84,15 @@ struct Target {
   bool allocated = false;
 };
 
-// 3 ping-pong dma-buf targets: the deferred RenderThread pipeline needs one
+// 4 ping-pong dma-buf targets. The deferred RenderThread pipeline needs one
 // displayed by the compositor, one being rendered, and one in transit — 2
-// starves (buffer collisions -> flicker).
-constexpr int kBuffers = 3;
+// starves (buffer collisions -> flicker). The fourth is for a compositor that
+// releases a replaced buffer only when the frame after it has been shown
+// (Weston 8 with the buffer on a hardware plane, about two refreshes): three
+// are then held when the next frame needs one, and the app presents at half
+// rate. A target is allocated on first use and the presenter takes the lowest
+// free slot, so the fourth exists only where three are in fact held.
+constexpr int kBuffers = 4;
 
 struct Gpu {
   VkInstance instance = VK_NULL_HANDLE;
