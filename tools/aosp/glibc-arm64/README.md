@@ -141,9 +141,10 @@ glibc, which is the case this was built for.
 
 - One app was run, and it has no native libraries. The bionic loader that runs an app's own
   `.so` files is x86-64 only.
-- Presentation on the board ran at half the refresh rate: present interval p50 31.3 ms on a
-  16.7 ms display over 240 presents, with "no free buffer" on about one traversal in three. The
-  pool is 3 buffers and Weston 8 returns them late. Not investigated.
+- Presentation on the board needs the 4-buffer pool. With 3 it ran at half the refresh rate
+  (present interval p50 31.3 ms on a 16.7 ms display): Weston 8 released a replaced buffer
+  about 29 ms after the commit that replaced it, so all three were held when the next frame
+  needed one. With 4 the interval is p50 16.7 ms, p99 18.8 ms over 360 presents.
 - The presenter took the linear modifier. The compositor also lists a vendor one
   (`0x0500000000000001`), which was not tried through a4l.
 - Input was not tried on the board.
