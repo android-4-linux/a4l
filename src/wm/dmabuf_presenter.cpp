@@ -1191,6 +1191,44 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     }
     return true;
   }
+  // A frame the producer's swapchain has already attached and committed (see
+  // IPresenter::submit_external). The frame callback and the feedback ride on
+  // a commit of ours that carries no buffer; the one-pixel damage is there
+  // because a commit that changes nothing does not make every compositor
+  // repaint, and without a repaint the callback never comes.
+  bool submit_external(int width, int height) noexcept override {
+    drain_video();
+    if (closed_ || !configured_ || width <= 0 || height <= 0)
+      return false;
+    w_ = width;
+    h_ = height;
+    fit_window_geometry();
+    if (oq_hx_ < 0)
+      set_toplevel_opaque_hole(0, 0, 0, 0);
+    else
+      refit_opaque_region();
+    if (frame_index_ == 0)
+      log::i(kTag, "dmabuf present(A): {}x{} through the producer's swapchain",
+             width, height);
+    external_ = true;
+    commit_external(/*feedback=*/true);
+    ++frame_index_;
+    return true;
+  }
+  void commit_external(bool feedback) noexcept {
+    if (wl_proxy* raw =
+            wl::construct<wl_callback_traits, wl_surface_traits::Op::Frame>(
+                *surface_.Get()))
+      frame_._SetProxy(raw);
+    need_frame_ = false;
+    if (feedback)
+      presentation_.Arm(surface_.Get()->GetProxy(),
+                        static_cast<std::uint32_t>(frame_index_));
+    surface_.Get()->Damage(0, 0, 1, 1);
+    surface_.Get()->Commit();
+    while (wl_display_flush(display_.Get()) < 0 && errno == EAGAIN) {
+    }
+  }
   // Keep the loop alive after a dropped frame (see IPresenter::keepalive).
   // Re-arm the wl_surface.frame callback and re-present the LAST submitted
   // buffer (re-attach + damage + commit) so the compositor schedules another
@@ -1199,8 +1237,14 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   // a single traversal that fails to submit() strands the vsync loop forever.
   // Only meaningful once a real frame has been shown.
   bool keepalive() noexcept override {
-    drain_video();  // video plays at its own cadence, independent of app UI
-                    // frames
+    drain_video();    // video plays at its own cadence, independent of app UI
+                      // frames
+    if (external_) {  // the swapchain owns the buffers: nothing to re-attach
+      if (closed_ || !configured_)
+        return false;
+      commit_external(/*feedback=*/false);
+      return true;
+    }
     if (closed_ || !configured_ || last_slot_ < 0 || !slots_[last_slot_].built)
       return false;
     if (wl_proxy* raw =
@@ -2130,6 +2174,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   Slot slots_[kSlots];
   int last_slot_ =
       -1;  // slot of the last submitted frame (re-attached by keepalive)
+  bool external_ = false;  // frames come from the producer's swapchain
 
   std::string title_, app_id_;
   std::vector<std::uint64_t>

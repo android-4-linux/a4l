@@ -265,6 +265,16 @@ class IPresenter {
   virtual bool submit(const gfx::DmabufFrame& frame,
                       int slot = -1) noexcept = 0;
 
+  // The producer has put a frame on the toplevel itself: a Vulkan swapchain
+  // on gl_surface(), whose driver attaches the buffer and commits. Do what
+  // submit() does around a frame without attaching one: fit the surface to
+  // `width` x `height`, arm the next wl_surface.frame callback and the
+  // presentation feedback, and commit. From then on keepalive() does the same
+  // without a buffer. False where the presenter has no such mode.
+  virtual bool submit_external(int /*width*/, int /*height*/) noexcept {
+    return false;
+  }
+
   // Keep the vsync loop alive when a frame is DROPPED (the traversal threw, or
   // the GPU could not begin/end a frame, so submit() didn't run). Re-arm the
   // next wl_surface.frame callback and re-commit the last buffer without
