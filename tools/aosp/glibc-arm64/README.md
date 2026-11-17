@@ -16,10 +16,13 @@ Result on 2026-11-16, android-13.0.0_r84, on an SA8155P board (glibc 2.31):
 | `dalvikvm64` on the board, static-main class | prints, exit 0 |
 | `a4l run hello.apk --vm=art`, ART in the a4l process | prints, exit 0 |
 | A Java-only F-Droid app on the real framework, headless | Activity resumed, decor laid out, exit 0, 1.3 s |
+| The same app with `--present` and `ACL_PRESENT_GPU=1`, as an ivi surface | on screen, 1280x720, first frame 1.35 s after process start |
 
-The last row loads `libandroid_runtime.so`, `libacl_graphics_jni.so` (with Skia) and
-`libacl_gles_jni.so`: 28 of 28 framework native groups registered. Nothing has been drawn; see
-Limits. `libart.so` needs glibc 2.29 or later.
+The last two rows load `libandroid_runtime.so`, `libacl_graphics_jni.so` (with Skia) and
+`libacl_gles_jni.so`: 28 of 28 framework native groups registered. The frame is a dma-buf
+rendered by Skia on the board's Vulkan driver (Adreno, Vulkan 1.1) and handed to Weston 8 through
+`zwp_linux_dmabuf_v1`; a screen dump showed the app's clock face. `libart.so` needs glibc 2.29 or
+later.
 
 ## Use
 
@@ -76,6 +79,20 @@ tools/stage-arm64-framework.sh /tmp/a4l-arm64/fw   # boot jars, a4l's dex jars, 
 sh R/fw/run.sh R app.apk
 ```
 
+To show a window, a4l itself needs Skia and Vulkan in the cross build:
+
+```sh
+SKIA_SRC=/path/to/skia tools/aosp/glibc-arm64/build-skia.sh /path/to/skia-arm64
+meson setup build-arm64 --cross-file <cross file> -Dskia_prefix=/path/to/skia-arm64
+# on the target, under ivi-shell; a controller has to put the surface on a layer
+ACL_PRESENT_GPU=1 ACL_WL_SHELL=ivi ACL_IVI_SURFACE_ID=9000 sh R/fw/run.sh R app.apk --present
+```
+
+`build-skia.sh` builds the Skia pinned in `third_party/skia/METADATA` with the x86-64 GN
+arguments plus the cross toolchain: 50 s on 32 threads, 20 archives. The cross build needs
+`vulkan.hpp` from the same Vulkan-Headers release as `vulkan_core.h`; the headers are
+architecture-independent, so the build machine's can be put ahead of the sysroot's.
+
 `stage-arm64-framework.sh` copies 80 MB of dex and data from the x86-64 build; `run.sh` sets
 what `tools/run-apk.sh` sets on x86-64, without the sandbox, the bionic runtime, the CA store
 or WebView.
@@ -122,10 +139,14 @@ glibc, which is the case this was built for.
 
 ## Limits
 
-- No frame has been presented. The run above is headless; the cross-built a4l has no Skia, so
-  its GPU present path is off, and the default `wl_shm` path cannot show a real app.
 - One app was run, and it has no native libraries. The bionic loader that runs an app's own
   `.so` files is x86-64 only.
+- Presentation on the board ran at half the refresh rate: present interval p50 31.3 ms on a
+  16.7 ms display over 240 presents, with "no free buffer" on about one traversal in three. The
+  pool is 3 buffers and Weston 8 returns them late. Not investigated.
+- The presenter took the linear modifier. The compositor also lists a vendor one
+  (`0x0500000000000001`), which was not tried through a4l.
+- Input was not tried on the board.
 - The cross-built a4l had no libcrypto, so it did not check the APK's signature.
 
 - One sysroot was used (Debian bullseye, glibc 2.31, GCC 10). The toolchain file names GCC 10.

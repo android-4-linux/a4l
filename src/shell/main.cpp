@@ -392,6 +392,28 @@ struct SplitOptions {
   std::vector<std::string> rw_paths;  // --cache
 };
 
+// Close every descriptor from `first` up in the spawned child. glibc 2.34 has
+// an action for it. Before that the open descriptors are listed here and each
+// gets a close action; one opened without O_CLOEXEC by another thread between
+// the listing and the spawn is inherited. Closing one that is already gone
+// (the listing's own) is not an error to posix_spawn.
+[[maybe_unused]] void spawn_close_from(posix_spawn_file_actions_t* fa,
+                                       int first) {
+#if ACL_HAVE_SPAWN_CLOSEFROM
+  posix_spawn_file_actions_addclosefrom_np(fa, first);
+#else
+  std::error_code ec;
+  for (const auto& e :
+       std::filesystem::directory_iterator("/proc/self/fd", ec)) {
+    const std::string name = e.path().filename().string();
+    char* end = nullptr;
+    const long fd = std::strtol(name.c_str(), &end, 10);
+    if (end != name.c_str() && *end == '\0' && fd >= first)
+      posix_spawn_file_actions_addclose(fa, static_cast<int>(fd));
+  }
+#endif
+}
+
 int run_split(const acl::pkg::Apk& apk,
               const std::string& apk_path,
               const std::vector<std::string>& args,
@@ -551,7 +573,7 @@ int run_split(const acl::pkg::Apk& apk,
   // The child inherits the socket and the standard streams, nothing else
   // this process happens to hold open. A confined child gets no terminal
   // input either.
-  posix_spawn_file_actions_addclosefrom_np(&fa, kChildFd + 1);
+  spawn_close_from(&fa, kChildFd + 1);
   if (opt.confine)
     posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
   pid_t pid = 0;

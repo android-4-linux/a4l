@@ -18,8 +18,8 @@ already runs. On arm64 the only stock host ART is bionic, which a glibc process 
 that path runs ART in its own all-bionic process and keeps the platform in the first
 ([`docs/split-process-art.md`](docs/split-process-art.md)). A patch set that builds host ART for
 arm64 glibc is in [`tools/aosp/glibc-arm64`](tools/aosp/glibc-arm64/README.md); with it a
-Java-only app reaches layout in the a4l process on an SA8155P board, headless. Nothing has been
-drawn there yet.
+Java-only app runs in the a4l process on an SA8155P board and draws on its screen through the
+GPU present path. Apps with native libraries do not run on arm64 that way yet.
 
 a4l is clean-room and **C++23-first**, comparable in function to the GPL-3.0 project that
 preceded it while sharing **none** of its source. Output license is **Apache-2.0**. The
