@@ -101,6 +101,23 @@ meson setup build-phone -Dprofile_automotive=false
 meson setup build-rk3588 --cross-file cross/rk3588.ini
 ```
 
+## On an ivi-shell compositor
+
+An ivi-shell compositor (Weston's `ivi-shell.so` with a layer-manager controller) shows a
+surface only when it has an ivi id that the controller puts on a layer. Give a4l the id:
+
+```sh
+a4l run app.apk --present --ivi-surface-id=9000
+```
+
+a4l then takes its window role from `ivi_application` and not `xdg_wm_base`, and takes the
+size the controller sends as it takes a toplevel's. `ACL_WL_SHELL=ivi` with
+`ACL_IVI_SURFACE_ID` does the same. There is no id to ask the compositor for: pick one the
+platform has set aside. Run 2026-11-16 on Weston 15 with a test controller, View and GL
+apps, single-process and `--split`, and the `wl_shm` presenter on Weston 8 on an SA8155P
+board; `wm-ivi-shell` is the test. Not done: `ivi_wm` (a4l does not place or raise its own
+surface), and input was not tried.
+
 ## Layout
 
 ```

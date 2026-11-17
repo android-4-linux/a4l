@@ -64,7 +64,18 @@ if have_wcs
     command : [wcs_scanner, '--mode=client-header', '--std=c++23',
                '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
   )
+  # ivi-shell's ivi_application (a numeric surface id, and a configure with the size the
+  # compositor's controller gives it). Both presenters take the role with ACL_WL_SHELL=ivi.
+  # No wcs framework wrapper, so --emit-interface-tables. The XML is vendored (MIT).
+  ivi_application_client_hpp = custom_target(
+    'wm-ivi-application-client-header',
+    input : files('../../third_party/wayland-protocols/ivi-application.xml'),
+    output : 'ivi_application_client.hpp',
+    command : [wcs_scanner, '--mode=client-header', '--std=c++23',
+               '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
+  )
   wm_sources += [files('wayland_presenter.cpp'), wayland_client_hpp,
+                 ivi_application_client_hpp,
                  xdg_shell_client_hpp, presentation_time_client_hpp,
                  text_input_v3_client_hpp, fractional_scale_client_hpp,
                  viewporter_client_hpp]
@@ -90,8 +101,7 @@ if have_wcs
     )
     # Multi-shell (ACL_WL_SHELL): besides xdg-shell (desktop), the dmabuf presenter can
     # establish the surface role via AGL's agl_shell (set_background/panel + ready — the
-    # ivi-homescreen automotive pattern), the ivi-shell ivi_application (numeric surface
-    # id + configure), or zwp_fullscreen_shell_v1 (the "simple" present-a-surface path).
+    # ivi-homescreen automotive pattern), ivi-shell (above), or zwp_fullscreen_shell_v1 (the "simple" present-a-surface path).
     # These three have no wcs framework wrapper, so --emit-interface-tables makes each
     # generated header self-contained (like presentation-time / text-input). The protocol
     # XMLs are vendored (MIT) under third_party/wayland-protocols/.
@@ -99,13 +109,6 @@ if have_wcs
       'wm-agl-shell-client-header',
       input : files('../../third_party/wayland-protocols/agl-shell.xml'),
       output : 'agl_shell_client.hpp',
-      command : [wcs_scanner, '--mode=client-header', '--std=c++23',
-                 '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
-    )
-    ivi_application_client_hpp = custom_target(
-      'wm-ivi-application-client-header',
-      input : files('../../third_party/wayland-protocols/ivi-application.xml'),
-      output : 'ivi_application_client.hpp',
       command : [wcs_scanner, '--mode=client-header', '--std=c++23',
                  '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
     )
@@ -117,7 +120,7 @@ if have_wcs
                  '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
     )
     wm_sources += [files('dmabuf_presenter.cpp'), linux_dmabuf_client_hpp,
-                   agl_shell_client_hpp, ivi_application_client_hpp,
+                   agl_shell_client_hpp,
                    fullscreen_shell_client_hpp]
   endif
 else
@@ -184,6 +187,17 @@ if build_tests and have_wcs
       py3_wm,
       args : [files('../../tests/integration/run_present_test.py'), wm_present_probe],
       timeout : 60,
+    )
+    # The window as an ivi surface (ACL_WL_SHELL=ivi), on both presenters: a headless Weston
+    # with ivi-shell and a controller module the test builds. Needs Weston's development
+    # headers and a C compiler; SKIPs otherwise, which includes CI.
+    test(
+      'wm-ivi-shell',
+      py3_wm,
+      args : [files('../../tests/integration/run_ivi_shell_test.py'), wm_present_probe]
+             + (have_vulkan ? [wm_dmabuf_probe] : []),
+      timeout : 120,
+      is_parallel : false,
     )
     # Continuous presentation: the Choreographer-style present_loop animates 30
     # frames, each driven by a wl_surface.frame tick with wp_presentation timing.

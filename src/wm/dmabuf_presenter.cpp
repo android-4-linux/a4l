@@ -15,6 +15,7 @@
 // present (ACL_HAVE_WCS && ACL_HAVE_VULKAN).
 
 #include "wm/present.h"
+#include "wm/shell_env.h"
 #include "wm/split_present.h"
 #include "wm/video_geometry.h"
 
@@ -489,13 +490,6 @@ AglRole agl_role_from_env() noexcept {
     return AglRole::Normal;
   return AglRole::Background;
 }
-std::uint32_t ivi_id_from_env() noexcept {
-  const char* s = std::getenv("ACL_IVI_SURFACE_ID");
-  if (s == nullptr || *s == '\0')
-    return 0;
-  return static_cast<std::uint32_t>(std::strtoul(s, nullptr, 0));
-}
-
 // agl_shell: bound_ok/bound_fail report whether the compositor granted us the
 // shell role (only one client may hold it); app_state/app_on_output drive app
 // activation (unused — acl presents its own surface, it is not the app
@@ -524,10 +518,15 @@ class IviSurfaceH : public ivi::CIviSurface<IviSurfaceH> {
  public:
   bool* configured = nullptr;
   bool* need = nullptr;
-  std::int32_t w = 0, h = 0;
+  // -> the presenter's record of the size last asked for, as ToplevelH. An
+  // ivi_surface has no states and no close; a size is all it is told.
+  std::int32_t* asked_w = nullptr;
+  std::int32_t* asked_h = nullptr;
   void OnConfigure(std::int32_t width, std::int32_t height) override {
-    w = width;
-    h = height;
+    if (width > 0 && height > 0 && asked_w != nullptr && asked_h != nullptr) {
+      *asked_w = width;
+      *asked_h = height;
+    }
     if (configured != nullptr)
       *configured = true;
     if (need != nullptr)
@@ -1273,7 +1272,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     app_id_ = std::string(app_id);
     shell_kind_ = shell_from_env();
     agl_role_ = agl_role_from_env();
-    ivi_id_ = ivi_id_from_env();
+    ivi_id_ = ivi_surface_id_from_env();
     if (shell_kind_ != ShellKind::Xdg)
       log::i(kTag, "dmabuf present: ACL_WL_SHELL selects {} shell",
              shell_global_name());
@@ -1601,17 +1600,25 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       return false;
     if (ivi_id_ == 0) {
       log::w(kTag,
-             "dmabuf present: ivi-shell needs ACL_IVI_SURFACE_ID (nonzero)");
+             "dmabuf present: ivi-shell needs a surface id (--ivi-surface-id)");
       return false;
     }
+    // surface_create(ivi_id, surface, new_id): the new object is the last
+    // argument, so construct_at_end. construct() puts it first and
+    // libwayland then reads the id as an object.
     if (!wl::SetupHandler(
             ivi_surface_,
-            wl::construct<ivi::ivi_surface_traits,
-                          ivi::ivi_application_traits::Op::SurfaceCreate>(
+            wl::construct_at_end<
+                ivi::ivi_surface_traits,
+                ivi::ivi_application_traits::Op::SurfaceCreate>(
                 *ivi_app_.Get(), ivi_id_, surface_.Get()->GetProxy())))
       return false;
     ivi_surface_.Get()->configured = &configured_;
     ivi_surface_.Get()->need = &need_frame_;
+    ivi_surface_.Get()->asked_w = &asked_w_;
+    ivi_surface_.Get()->asked_h = &asked_h_;
+    taken_w_ = w_;  // as create_xdg_role: a first size that differs is a resize
+    taken_h_ = h_;
     log::i(kTag, "dmabuf present: ivi_surface id={}", ivi_id_);
     return true;
   }

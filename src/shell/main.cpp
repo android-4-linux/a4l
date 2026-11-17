@@ -101,6 +101,11 @@ void print_usage() {
       "(colon-\n"
       "                       separated); also read from $ACL_FRAMEWORK\n"
       "  --cache=<dir>        DEX->OAT / dalvik-cache directory\n"
+      "  --ivi-surface-id=<n> on an ivi-shell compositor: take the window "
+      "role as\n"
+      "                       ivi surface <n> (--present; also "
+      "$ACL_WL_SHELL=ivi\n"
+      "                       with $ACL_IVI_SURFACE_ID)\n"
       "  --verify=<mode>      APK signature policy (default: $ACL_APK_VERIFY "
       "or warn)\n"
       "                       warn: refuse a signature that fails, run an "
@@ -775,6 +780,19 @@ int cmd_run(const std::vector<std::string>& args) {
       split_paths(v, extra_classpath);  // colon-separated, appended in order
     } else if (match_opt(a, "--cache", v)) {
       cache_dir = v;
+    } else if (match_opt(a, "--ivi-surface-id", v)) {
+      // ivi-shell: the window is an ivi_surface under this id. The presenter
+      // reads the two variables (wm/shell_env.h); under --split that is the
+      // broker, which is this process.
+      char* end = nullptr;
+      const unsigned long id = std::strtoul(v.c_str(), &end, 0);
+      if (v.empty() || *end != '\0' || id == 0 || id > 0xfffffffful) {
+        std::fprintf(stderr, "run: bad --ivi-surface-id '%s' (1..4294967295)\n",
+                     v.c_str());
+        return kUsage;
+      }
+      ::setenv("ACL_WL_SHELL", "ivi", 1);
+      ::setenv("ACL_IVI_SURFACE_ID", v.c_str(), 1);
     } else if (match_opt(a, "--verify", v)) {
       if (!acl::pkg::parse_verify_mode(v, verify_policy.mode)) {
         std::fprintf(stderr, "run: bad --verify '%s' (off|warn|require)\n",
