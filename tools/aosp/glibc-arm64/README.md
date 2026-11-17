@@ -148,10 +148,14 @@ glibc, which is the case this was built for.
 - The presenter takes the linear modifier by default. The Adreno 640 driver lists the vendor
   modifier `0x0500000000000001` for `R8G8B8A8` only (LINEAR alone for `B8G8R8A8`), so it
   needs ABGR8888, which `ACL_PRESENT_ALLOW_ABGR=1` allows. With it a4l presented ABGR8888
-  with that modifier at p50 16.7 ms, p99 24.9 ms over 480 presents, and Weston's screen
-  capture was scrambled in two runs out of two. The driver's buffer is a compressed layout
-  (3,710,976 bytes against 3,686,400 linear at 1280x720). The capture goes through
-  Weston's GL path; the physical screen was not looked at, so a hardware plane may differ.
+  with that modifier at p50 16.7 ms, p99 18.0 ms over 1680 presents, and the picture was
+  scrambled: on Weston's screen capture in two runs out of two, and on the panel itself.
+  The driver's buffer is a compressed layout (3,710,976 bytes against 3,686,400 linear at
+  1280x720). The likely cause: this vendor stack keeps part of a compressed buffer's
+  state in a metadata buffer beside it, which its EGL passes to the compositor over a
+  Wayland protocol of its own (`EGL_WL_bind_wayland_display`) and linux-dmabuf does not
+  carry. Compressed buffers would have to be presented through that EGL, which a4l's
+  Skia path does not do.
 - Input was not tried on the board.
 - The cross-built a4l had no libcrypto, so it did not check the APK's signature.
 

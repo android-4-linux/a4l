@@ -2305,7 +2305,7 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env,
   // tiled modifier exists only there (Adreno 640: a vendor modifier for
   // ABGR8888, LINEAR alone for ARGB8888). Opt-in, because advertising such a
   // modifier does not mean the compositor shows it: on an SA8155P board
-  // Weston 8 took the buffer and its screen capture was scrambled. A
+  // Weston 8 took the buffer and the panel showed it scrambled. A
   // presenter that does not report per-format lists (--split) gives none, and
   // ACL_PRESENT_LINEAR_ONLY wins over this.
   if (std::getenv("ACL_PRESENT_ALLOW_ABGR") != nullptr &&
