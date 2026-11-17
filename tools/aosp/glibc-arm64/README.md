@@ -161,7 +161,11 @@ glibc, which is the case this was built for.
   p50 16.7 ms, p99 18.4 ms over 960 presents, and 415 of 417 presentation feedbacks
   flagged zero-copy, where the dma-buf path gets every feedback discarded. The four
   buffers the driver made were 3,686,400 bytes each, the linear size, so it did not
-  compress them. Not tried in this mode: a resize, video, WebView.
+  compress them. The swapchain is MAILBOX where the driver has it (it does here: p50
+  16.6 ms, p99 21.6 ms over 360 presents), since a4l paces frames itself. Its composite
+  alpha on the board is opaque, so a video hole would not show through; no video was
+  run there. On x86-64 (Mesa) a resize, video on a subsurface and WebView all work in
+  this mode.
 - Input was not tried on the board.
 - The cross-built a4l had no libcrypto, so it did not check the APK's signature.
 
