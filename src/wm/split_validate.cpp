@@ -28,6 +28,8 @@ constexpr std::uint32_t kBytesPerPixel = 4;       // both formats above
 constexpr std::uint32_t kNv12 = 0x3231564eu;      // 'NV12'
 constexpr std::uint32_t kP010 = 0x30313050u;      // 'P010'
 constexpr std::uint32_t kXbgr8888 = 0x34324258u;  // 'XB24'
+// DRM_FORMAT_MOD_BROADCOM_SAND128 with no column height in it.
+constexpr std::uint64_t kSand128 = 0x0700000000000004ull;
 
 }  // namespace
 
@@ -189,6 +191,29 @@ FrameVerdict check_video_frame(const ipc::VideoFrame& v,
             size_of(0))
       return FrameVerdict::BadLayout;
     for (std::uint32_t i = 1; i < v.plane_count; ++i) {
+      if (v.stride[i] == 0 || v.offset[i] >= size_of(i))
+        return FrameVerdict::BadPlanes;
+    }
+    return FrameVerdict::Ok;
+  }
+
+  // Broadcom's column format: the picture in columns 128 bytes wide, each
+  // plane's rows for a column one after another, and the stride the height
+  // of a column in rows. Each plane's rows fit a column, and its last
+  // column ends inside the buffer.
+  if (v.modifier == kSand128 && v.drm_format == kNv12) {
+    const std::uint64_t columns = (static_cast<std::uint64_t>(v.w) + 127) / 128;
+    for (std::uint32_t i = 0; i < 2; ++i) {
+      const std::uint64_t rows =
+          i == 0 ? v.h : (static_cast<std::uint64_t>(v.h) + 1) / 2;
+      if (v.stride[i] < rows)
+        return FrameVerdict::BadLayout;
+      // 64-bit: at most 2^32 * 128 * 128 before the offset is added.
+      if (v.offset[i] + (columns - 1) * v.stride[i] * 128 + rows * 128 >
+          size_of(i))
+        return FrameVerdict::BadLayout;
+    }
+    for (std::uint32_t i = 2; i < v.plane_count; ++i) {
       if (v.stride[i] == 0 || v.offset[i] >= size_of(i))
         return FrameVerdict::BadPlanes;
     }

@@ -871,8 +871,20 @@ stand-in is not in this repository. The server advertised one modifier for ARGB8
   A frame in three buffers is still not sent.
   - Checked by unit test and by the fuzz harness (a seed with two descriptors; 150 s of
     mutation, about 2 million runs, no finding).
-  - Not seen on a screen: no decoder here that keeps two buffers has a compositor beside it.
-    The Pi 5's HEVC decoder is asked for one buffer since the same date.
+  - Seen on a screen the same day, on a Pi 5 (HEVC, 640x360 test pattern, HDMI): a frame
+    with a buffer per plane crosses and reads the same as single-process, under Weston 14
+    and under cage (wlroots 0.18), 300 frames taken and none refused.
+- **Broadcom's column format (2026-11-18).** A Pi 5's HEVC decoder gives NV12 in columns 128
+  bytes wide (`DRM_FORMAT_MOD_BROADCOM_SAND128`), and a plane's stride is the height of its
+  columns in rows. The broker checked every NV12 frame as rows of `stride` bytes and refused
+  these. For that modifier it now checks that a column holds the plane's rows and that the
+  last column ends inside the buffer the plane names.
+  - The fuzz harness's stand-in compositor lists the modifier and walks every column of a
+    frame that reaches it. With the column term taken out of the check the new seed fails.
+    150 s, 2.4 million runs, no finding.
+  - On the Pi 5 the video fixture (rebuilt with an HEVC clip) plays through `--split=unconfined`
+    with the picture right: 181 units fed, 360 presents, p50 16.7 ms. `--split` itself has no
+    system call list for arm64.
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 
