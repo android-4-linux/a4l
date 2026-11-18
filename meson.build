@@ -92,6 +92,16 @@ gst_full = [
   dependency('gstreamer-allocators-1.0', required : false),
 ]
 have_gst = gst_full[0].found() and gst_full[1].found() and gst_full[2].found() and gst_full[3].found()
+# dmabuf-codec (MIT): hardware decode engines behind one interface, each handing out its
+# frames as dma-bufs. The route to a decoder on a device where FFmpeg has no hardware device:
+# V4L2 stateful and stateless, and OpenMAX IL where the decoder is behind a vendor's core. It
+# links nothing of the device's; the OpenMAX core and libva are loaded at run time. Optional:
+# without it the GStreamer and FFmpeg engines remain.
+dmabuf_codec_dep = dependency('dmabuf-codec',
+  fallback : ['dmabuf-codec', 'dmabuf_codec_dep'],
+  required : false,
+  default_options : ['tests=disabled', 'werror=false'])
+have_dmabuf_codec = dmabuf_codec_dep.found()
 ff_dep = []
 if have_ffmpeg
   foreach d : ff_full
@@ -345,6 +355,7 @@ conf.set10('ACL_HAVE_PIPEWIRE', have_pipewire)
 conf.set10('ACL_HAVE_DRM_CXX', have_drm_cxx)
 conf.set10('ACL_HAVE_FFMPEG', have_ffmpeg)
 conf.set10('ACL_HAVE_GST', have_gst)
+conf.set10('ACL_HAVE_DMABUF_CODEC', have_dmabuf_codec)
 conf.set10('ACL_HAVE_WCS', have_wcs)
 conf.set10('ACL_HAVE_SKIA', have_skia)
 conf.set10('ACL_HAVE_VULKAN', have_vulkan)

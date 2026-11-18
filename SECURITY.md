@@ -81,7 +81,7 @@ actually be fixed:
 | AOSP framework sources, the pinned manifest's projects | [Android](https://source.android.com/docs/security/overview/report-bugs) |
 | Skia | [Skia / Chromium](https://www.chromium.org/Home/chromium-security/reporting-security-bugs/) |
 | `wayland-protocols` XML | [Wayland](https://gitlab.freedesktop.org/wayland/wayland-protocols) |
-| `catch2`, `pugixml`, `drm-cxx`, `wayland-cxx-scanner` | their own repositories |
+| `catch2`, `pugixml`, `drm-cxx`, `dmabuf-codec`, `wayland-cxx-scanner` | their own repositories |
 
 A vulnerability in one of those that a4l's own use makes *worse* — a bad default, a check we skip,
 a privilege we hold that we should not — is in scope here, and worth saying so in the report.

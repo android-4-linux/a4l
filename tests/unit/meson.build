@@ -96,13 +96,20 @@ else
   warning('python3 not found; pkg/ fixture tests will SKIP.')
 endif
 
+# media::DmaCodec against a decoder made for the test; needs dmabuf-codec's interface header.
+unit_test_deps = []
+if have_dmabuf_codec
+  unit_test_sources += files('dma_codec_test.cpp')
+  unit_test_deps += [dmabuf_codec_dep]
+endif
+
 if catch2_dep.found()
   unit_tests = executable(
     'acl_unit_tests',
     unit_test_sources,
     include_directories : [config_inc, core_inc],
     link_with : module_libs,
-    dependencies : [catch2_dep, fmt_dep, jni_dep],
+    dependencies : [catch2_dep, fmt_dep, jni_dep] + unit_test_deps,
   )
   # `depends` ensures the fixture is built before the test runs.
   test('unit', unit_tests, env : test_env, depends : fixture_deps)

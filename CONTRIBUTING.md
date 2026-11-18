@@ -142,4 +142,4 @@ gh api repos/actions/checkout/commits/v7 --jq .sha
 ```
 
 Meson wrap dependencies are not covered — Dependabot has no Meson ecosystem, so `catch2`,
-`pugixml`, `drm-cxx` and `wayland-cxx-scanner` move only when someone moves them.
+`pugixml`, `drm-cxx`, `dmabuf-codec` and `wayland-cxx-scanner` move only when someone moves them.

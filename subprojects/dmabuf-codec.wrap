@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# dmabuf-codec (MIT, Joel Winarske) - hardware video decode engines behind one interface
+# (V4L2 stateful and stateless, OpenMAX IL, VA-API), each handing out its decoded frames as
+# dma-bufs. media/dma_codec.cpp puts it under MediaCodec. Pinned to a commit, never a branch.
+#
+# For local development against a sibling checkout instead of cloning, symlink it in as
+# subprojects/dmabuf-codec.
+[wrap-git]
+directory = dmabuf-codec
+url = https://github.com/jwinarske/dmabuf-codec.git
+revision = aa7474b5573ece8b0f0a19a6405bde927f4ee7ba
+depth = 1
+[provide]
+dmabuf-codec = dmabuf_codec_dep

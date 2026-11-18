@@ -8,7 +8,7 @@
 # decide whether to take it.
 #
 # Not covered, deliberately: subprojects/*.wrap. Dependabot has no Meson ecosystem, so
-# catch2, pugixml, drm-cxx and wayland-cxx-scanner stay manual. wayland-cxx-scanner in
+# catch2, pugixml, drm-cxx, dmabuf-codec and wayland-cxx-scanner stay manual. wayland-cxx-scanner in
 # particular is pinned by revision and cross-checked against the cache key in the present
 # job, so moving it is a build change rather than a dependency bump.
 version: 2
