@@ -61,6 +61,16 @@ class SwFramePool : public std::enable_shared_from_this<SwFramePool> {
              DmabufFrame* out,
              std::string* error);
 
+  // write() for an 8-bit 4:2:0 picture of the pool's size held in system
+  // memory. `nv12` is luma plus one interleaved chroma plane (planes 0, 1);
+  // otherwise three planes, Y, Cb, Cr. Strides are in bytes and must cover
+  // the row. False + *error on a null plane or a short stride.
+  bool write_420(const std::uint8_t* const planes[3],
+                 const int strides[3],
+                 bool nv12,
+                 DmabufFrame* out,
+                 std::string* error);
+
  private:
   SwFramePool() = default;
   struct Buffer;

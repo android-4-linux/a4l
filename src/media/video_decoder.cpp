@@ -30,6 +30,7 @@ extern "C" {
 
 #include "gfx/sw_frame_pool.h"
 #include "log/log.h"
+#include "media/gst_codec.h"
 
 namespace acl::media {
 namespace {
@@ -172,7 +173,10 @@ enum AVPixelFormat get_hw_format(AVCodecContext* ctx,
 // (sw_to_dmabuf). Always returns true.
 bool configure_hw_decode(AVCodecContext* ctx,
                          const AVCodec* codec,
-                         AVBufferRef** hw_dev) {
+                         AVBufferRef** hw_dev,
+                         bool* hw = nullptr) {
+  if (hw != nullptr)
+    *hw = false;
   enum AVPixelFormat hw_pixfmt = AV_PIX_FMT_NONE;
   enum AVHWDeviceType hw_type = AV_HWDEVICE_TYPE_NONE;
   enum AVHWDeviceType prefs[2] = {AV_HWDEVICE_TYPE_VAAPI, AV_HWDEVICE_TYPE_DRM};
@@ -212,6 +216,8 @@ bool configure_hw_decode(AVCodecContext* ctx,
     ctx->opaque =
         reinterpret_cast<void*>(static_cast<std::intptr_t>(hw_pixfmt));
     ctx->get_format = get_hw_format;
+    if (hw != nullptr)
+      *hw = true;
     log::i(kTag, "hw decode via {} ({})",
            g_ff.av_hwdevice_get_type_name(hw_type), codec->name);
   } else {
@@ -317,41 +323,11 @@ bool sw_to_dmabuf(const AVFrame* f,
       return false;
     log::i(kTag, "software frames {}x{}: copied to NV12 dma-bufs", w, h);
   }
-  const std::uint32_t cw = (w + 1) / 2;  // chroma samples per row
-  const std::uint32_t ch = (h + 1) / 2;  // chroma rows
-  if ((planar && (f->linesize[1] < static_cast<int>(cw) ||
-                  f->linesize[2] < static_cast<int>(cw))) ||
-      (!planar && f->linesize[1] < static_cast<int>(2 * cw))) {
-    if (error)
-      *error = "malformed software frame";
-    return false;
-  }
-  return (*pool)->write(
-      [&](const gfx::SwFramePool::Mapped& m) {
-        for (std::uint32_t y = 0; y < h; ++y)
-          std::memcpy(
-              m.y + static_cast<std::size_t>(y) * m.y_stride,
-              f->data[0] + static_cast<std::ptrdiff_t>(y) * f->linesize[0], w);
-        for (std::uint32_t y = 0; y < ch; ++y) {
-          std::uint8_t* dst = m.uv + static_cast<std::size_t>(y) * m.uv_stride;
-          if (!planar) {
-            std::memcpy(
-                dst,
-                f->data[1] + static_cast<std::ptrdiff_t>(y) * f->linesize[1],
-                2 * static_cast<std::size_t>(cw));
-            continue;
-          }
-          const std::uint8_t* u =
-              f->data[1] + static_cast<std::ptrdiff_t>(y) * f->linesize[1];
-          const std::uint8_t* v =
-              f->data[2] + static_cast<std::ptrdiff_t>(y) * f->linesize[2];
-          for (std::uint32_t x = 0; x < cw; ++x) {
-            dst[2 * x] = u[x];
-            dst[2 * x + 1] = v[x];
-          }
-        }
-      },
-      out, error);
+  const std::uint8_t* const planes[3] = {f->data[0], f->data[1],
+                                         planar ? f->data[2] : nullptr};
+  const int strides[3] = {f->linesize[0], f->linesize[1],
+                          planar ? f->linesize[2] : 0};
+  return (*pool)->write_420(planes, strides, !planar, out, error);
 }
 
 // MediaCodec MIME -> AVCodecID (the video codecs acl targets). AV_CODEC_ID_NONE
@@ -671,6 +647,9 @@ struct CodecDecoder::CImpl {
   AVFrame* drm_frame = nullptr;
   std::uint32_t width = 0, height = 0;
   std::shared_ptr<gfx::SwFramePool> sw_pool;  // software frames only
+#if ACL_HAVE_GST
+  std::unique_ptr<GstCodec> gst;  // set: GStreamer decodes, nothing above is
+#endif
   ~CImpl() {
     if (drm_frame)
       g_ff.av_frame_free(&drm_frame);
@@ -700,8 +679,46 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
       *error = m;
     return nullptr;
   };
-  if (!load_ffmpeg())
+  // Which engine decodes. FFmpeg with a hardware device (VAAPI, or a named
+  // decoder) is used where there is one: that path is zero-copy and the one
+  // x86 has run on. Where FFmpeg would decode in software, GStreamer goes
+  // first, since what it has installed may be the device's hardware decoder;
+  // FFmpeg in software is what is left. ACL_VIDEO_BACKEND=gst|ffmpeg picks
+  // one outright, and the FFmpeg knobs (ACL_VIDEO_DECODER, ACL_HWDEC_DEVICE)
+  // mean FFmpeg.
+  const char* be = std::getenv("ACL_VIDEO_BACKEND");
+  const std::string backend = be != nullptr ? be : "";
+  const bool ffmpeg_asked = backend == "ffmpeg" ||
+                            std::getenv("ACL_VIDEO_DECODER") != nullptr ||
+                            std::getenv("ACL_HWDEC_DEVICE") != nullptr;
+  auto dec = std::unique_ptr<CodecDecoder>(new CodecDecoder());
+  CImpl* d = dec->d_.get();
+  d->width = static_cast<std::uint32_t>(width > 0 ? width : 0);
+  d->height = static_cast<std::uint32_t>(height > 0 ? height : 0);
+  auto try_gst = [&](std::string* why) {
+#if ACL_HAVE_GST
+    d->gst = GstCodec::configure(mime, csd, csd_size, why);
+    return d->gst != nullptr;
+#else
+    if (why)
+      *why = "built without GStreamer";
+    return false;
+#endif
+  };
+  if (backend == "gst") {
+    std::string why;
+    if (!try_gst(&why)) {
+      if (error)
+        *error = why;
+      return nullptr;
+    }
+    return dec;
+  }
+  if (!load_ffmpeg()) {
+    if (!ffmpeg_asked && try_gst(nullptr))
+      return dec;
     return fail("FFmpeg unavailable");
+  }
   const enum AVCodecID id = codec_id_for_mime(mime);
   if (id == AV_CODEC_ID_NONE)
     return fail("unsupported MIME");
@@ -710,11 +727,11 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
     if (const AVCodec* nc = g_ff.avcodec_find_decoder_by_name(named))
       codec = nc;
   }
-  if (codec == nullptr)
+  if (codec == nullptr) {
+    if (!ffmpeg_asked && try_gst(nullptr))
+      return dec;
     return fail("no decoder for MIME");
-
-  auto dec = std::unique_ptr<CodecDecoder>(new CodecDecoder());
-  CImpl* d = dec->d_.get();
+  }
   d->codec = g_ff.avcodec_alloc_context3(codec);
   if (d->codec == nullptr)
     return fail("alloc codec context failed");
@@ -733,8 +750,11 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
     d->codec->extradata = ed;
     d->codec->extradata_size = static_cast<int>(csd_size);
   }
-  if (!configure_hw_decode(d->codec, codec, &d->hw_device))
+  bool ff_hw = false;
+  if (!configure_hw_decode(d->codec, codec, &d->hw_device, &ff_hw))
     return fail("av_hwdevice_ctx_create failed");
+  if (!ff_hw && !ffmpeg_asked && try_gst(nullptr))
+    return dec;  // the unopened FFmpeg context is freed with the decoder
   // Enlarge the HW surface pool: decoded VAAPI surfaces are exported zero-copy
   // and held downstream (the compositor keeps each wl_buffer until
   // wl_buffer.release). With only the decoder's tight default pool, those held
@@ -769,6 +789,10 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
 
 void CodecDecoder::flush() {
   CImpl* d = d_.get();
+#if ACL_HAVE_GST
+  if (d->gst != nullptr)
+    return d->gst->flush();
+#endif
   g_ff.av_frame_unref(d->drm_frame);
   g_ff.av_frame_unref(d->hw_frame);
   g_ff.avcodec_flush_buffers(d->codec);
@@ -779,6 +803,10 @@ int CodecDecoder::send_packet(const std::uint8_t* data,
                               std::int64_t pts_us,
                               std::string* error) {
   CImpl* d = d_.get();
+#if ACL_HAVE_GST
+  if (d->gst != nullptr)
+    return d->gst->send_packet(data, size, pts_us, error);
+#endif
   if (data == nullptr || size == 0) {  // end-of-stream: drain
     const int r = g_ff.avcodec_send_packet(d->codec, nullptr);
     if (r < 0 && r != AVERROR_EOF) {
@@ -823,6 +851,10 @@ int CodecDecoder::receive_frame(gfx::DmabufFrame* out,
   if (out == nullptr)
     return err("null out");
   CImpl* d = d_.get();
+#if ACL_HAVE_GST
+  if (d->gst != nullptr)
+    return d->gst->receive_frame(out, pts_us, error);
+#endif
   g_ff.av_frame_unref(d->drm_frame);
   g_ff.av_frame_unref(d->hw_frame);
   const int r = g_ff.avcodec_receive_frame(d->codec, d->hw_frame);

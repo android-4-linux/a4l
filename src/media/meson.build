@@ -17,6 +17,12 @@ if have_gl and have_ffmpeg
   media_sources += files('video_decoder.cpp')
   media_deps += [gl_libdrm_dep]  # drm_fourcc.h (DRM_FORMAT_MOD_*)
 endif
+# GstCodec: the same decoder interface over GStreamer's installed decoders, for a device whose
+# hardware decoder FFmpeg does not reach.
+if have_gl and have_gst
+  media_sources += files('gst_codec.cpp')
+  media_deps += gst_full + [gl_libdrm_dep]
+endif
 media_lib = static_library(
   'acl_media',
   media_sources,

@@ -194,18 +194,22 @@ glibc, which is the case this was built for.
   alpha on the board is opaque, so a video hole does not show through: the video
   fixture's picture area was black in this mode (see the video bullet). On x86-64 (Mesa)
   a resize, video on a subsurface and WebView all work in this mode.
-- Video on the board is decoded in software. The board's FFmpeg is 4.2 (the cross build
-  needs its headers: libavcodec 58.54, libavutil 56.31, libavformat 58.29) and has no
-  decoder that returns a dma-buf, so the `h264` decoder's frames are each copied into an
-  NV12 dma-buf from gbm and go to the video subsurface from there. The video fixture
+- Video on the board is decoded by its hardware decoder, through GStreamer. The board has
+  no VA-API, and its FFmpeg (4.2) reaches the decoder (`msm_vidc`, `/dev/video32`) only
+  through `h264_v4l2m2m`, which fails to configure it. Its GStreamer (1.16) has the
+  vendor's OpenMAX elements, so a4l builds `appsrc ! h264parse ! omxh264dec ! appsink`
+  from the highest-ranked installed parser and decoder and asks for plain NV12. Each frame
+  is copied once into an NV12 dma-buf from gbm: the element hands out its buffers as
+  mapped memory, not as GStreamer dma-buf memory. The video fixture
   (`tests/fixtures/video_plane`, 640x360 H.264 at 30 frames a second) showed a correct
-  picture in the default mode and with `ACL_PRESENT_EGL=1`, 151 frames each, the window
-  at p50 16.7 ms. With `ACL_PRESENT_SWAPCHAIN=1` the video is hidden behind the opaque
-  window. The hardware decoder (`msm_vidc`, `/dev/video32`) was not reached: FFmpeg's
-  `h264_v4l2m2m` finds the device and fails to configure it, and the vendor's route to it
-  is OpenMAX, which a4l has no client for. Two of six runs exited about 15 s late through
-  the fixture's own timeout with every frame shown; the cause was not found. Decode cost
-  and larger pictures were not measured.
+  picture in the default mode and with `ACL_PRESENT_EGL=1`, the window at p50 16.7 ms.
+  With `ACL_PRESENT_SWAPCHAIN=1` the video is hidden behind the opaque window.
+  `ACL_VIDEO_BACKEND=ffmpeg` decodes with FFmpeg's software `h264` instead, with the same
+  picture; three of seven such runs exited about 15 s late through the fixture's own
+  timeout with every frame shown, cause not found, and none of five GStreamer runs did.
+  The cross build needs headers for both: FFmpeg 4.2 (libavcodec 58.54, libavutil 56.31,
+  libavformat 58.29) and GStreamer 1.16 or later with GLib. Decode cost, larger pictures
+  and other codecs were not measured.
 - Input was not tried on the board.
 - The cross-built a4l had no libcrypto, so it did not check the APK's signature.
 
