@@ -148,9 +148,26 @@ glibc, which is the case this was built for.
 - `ACL_PRESENT_EGL=1` draws each rendered frame to an EGL window on the toplevel and
   swaps, one more GPU pass per frame. On the board the window's buffers are the
   compressed size (3,710,976 bytes at 1280x720) and go over the vendor protocol; picture
-  correct, p50 16.7 ms, p99 19.2 ms over 480 presents. What the extra pass costs in GPU
-  time or power was not measured. On x86-64 (Mesa) the suite, a resize and WebView pass
-  in this mode.
+  correct, p50 16.7 ms, p99 19.2 ms over 480 presents. On x86-64 (Mesa) the suite, a
+  resize and WebView pass in this mode.
+- What each present mode costs on the board, octalsuntime at 1280x720 and 60 frames a
+  second, three 30 s runs each, with the board's own home screen running underneath
+  (5.4% GPU, 13% of a core in Weston, by itself):
+
+  | Mode | GPU active | a4l CPU | Weston CPU |
+  |---|---|---|---|
+  | dma-buf (default) | 14.9% | 20.2% | 21.4% |
+  | `ACL_PRESENT_SWAPCHAIN` | 14.9% | 20.8% | 16.8% |
+  | `ACL_PRESENT_EGL` | 17.0% | 23.4% | 16.3% |
+
+  GPU active is the kernel's per-frequency residency (`gpu_clock_stats`), CPU is
+  utime+stime as a share of one core; the three runs of a mode agreed to 0.1 point on
+  the GPU and 1 point on the CPU. The GPU stayed at its lowest frequency (257 MHz) in
+  every run. The EGL window's extra pass is 2.1 points of GPU, about 0.34 ms a frame, and
+  3 points of CPU in a4l. Both producer-presented modes take about 5 points off Weston,
+  which composites the dma-buf path's frames and scans the others out. The board has no
+  power sensor that could be read, so power was not measured, and neither was what
+  compressed buffers save at the display.
 - The presenter takes the linear modifier by default. The Adreno 640 driver lists the vendor
   modifier `0x0500000000000001` for `R8G8B8A8` only (LINEAR alone for `B8G8R8A8`), so it
   needs ABGR8888, which `ACL_PRESENT_ALLOW_ABGR=1` allows. With it a4l presented ABGR8888
