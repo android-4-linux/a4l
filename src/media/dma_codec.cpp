@@ -133,7 +133,9 @@ struct DmaCodec::Impl {
     std::shared_ptr<Shared> shared;
     std::uint64_t generation = 0;
     std::uint32_t index = 0;
-    int fd = -1;
+    // The frame's own descriptors: plane 0's, and those of planes kept in
+    // buffers of their own.
+    gfx::DmabufFrame fds;
     ~Token() {
       if (shared->generation.load() == generation) {
         std::lock_guard<std::mutex> lock(shared->mu);
@@ -142,8 +144,7 @@ struct DmaCodec::Impl {
           --shared->frames_out;
         }
       }
-      if (fd >= 0)
-        ::close(fd);
+      gfx::close_frame(&fds);
     }
   };
   struct Unit {
@@ -417,35 +418,46 @@ int DmaCodec::receive_frame(gfx::DmabufFrame* out,
     d->forget(static_cast<std::int64_t>(f.timestamp));
     d->rebuilds_without_frame = 0;
 
-    // One dma-buf holding every plane is what a DmabufFrame describes.
+    // The planes are in one dma-buf or in one each; either way every plane
+    // names a buffer, and has to fit the one it names.
     bool sane = f.num_planes >= 1 &&
-                f.num_planes <= gfx::DmabufFrame::kMaxPlanes && f.fds[0] >= 0 &&
-                f.width > 0 && f.height > 0 && f.width <= 16384 &&
-                f.height <= 16384;
-    for (std::uint32_t i = 1; sane && i < f.num_planes; ++i)
-      sane = f.fds[i] == f.fds[0];
-    const off_t size = sane ? ::lseek(f.fds[0], 0, SEEK_END) : 0;
-    for (std::uint32_t i = 0; sane && i < f.num_planes; ++i)
-      sane = f.pitches[i] > 0 &&
-             (size <= 0 || f.offsets[i] < static_cast<std::uint64_t>(size));
+                f.num_planes <= gfx::DmabufFrame::kMaxPlanes && f.width > 0 &&
+                f.height > 0 && f.width <= 16384 && f.height <= 16384;
+    std::uint64_t sizes[gfx::DmabufFrame::kMaxPlanes] = {};
+    gfx::DmabufFrame borrowed;
+    for (std::uint32_t i = 0; sane && i < f.num_planes; ++i) {
+      sane = f.fds[i] >= 0 && f.pitches[i] > 0;
+      if (!sane)
+        break;
+      const off_t size = ::lseek(f.fds[i], 0, SEEK_END);
+      sizes[i] = size > 0 ? static_cast<std::uint64_t>(size) : 0;
+      sane = sizes[i] == 0 || f.offsets[i] < sizes[i];
+      if (i == 0)
+        borrowed.fd = f.fds[0];
+      else if (f.fds[i] != f.fds[0])
+        borrowed.planes[i].fd = f.fds[i];
+    }
     // Linear NV12 is checked in full: a compositor that is handed rows its
     // buffer does not hold ends the connection.
     if (sane && f.drm_fourcc == V4L2_PIX_FMT_NV12 && f.modifier == 0) {
       sane = f.num_planes == 2;
       for (std::uint32_t i = 0; sane && i < 2; ++i) {
         const std::uint64_t rows = i == 0 ? f.height : (f.height + 1) / 2;
-        sane = f.pitches[i] >= f.width &&
-               (size <= 0 || f.offsets[i] + f.pitches[i] * rows <=
-                                 static_cast<std::uint64_t>(size));
+        sane =
+            f.pitches[i] >= f.width &&
+            (sizes[i] == 0 || f.offsets[i] + f.pitches[i] * rows <= sizes[i]);
       }
     }
-    const int fd = sane ? ::fcntl(f.fds[0], F_DUPFD_CLOEXEC, 0) : -1;
-    if (fd < 0) {
+    if (!sane) {
       s->dec->Release(f.capture_index);
-      return err(sane ? "out of file descriptors for a decoded frame"
-                      : "a decoded frame is not one dma-buf it fits in");
+      return err("a decoded frame does not fit the buffers it names");
     }
-    frame.fd = fd;
+    borrowed.plane_count = f.num_planes;
+    // The frame's own descriptors, so that it outlives the decoder.
+    if (!gfx::dup_frame(borrowed, &frame)) {
+      s->dec->Release(f.capture_index);
+      return err("out of file descriptors for a decoded frame");
+    }
     // An engine that reports its coded size (640x368 for a 640x360
     // picture) would show the padding. Within one coding block of the
     // configured size, the configured size is the picture.
@@ -463,12 +475,12 @@ int DmaCodec::receive_frame(gfx::DmabufFrame* out,
       frame.planes[i].offset = f.offsets[i];
       frame.planes[i].stride = f.pitches[i];
     }
-    frame.mem_size = size > 0 ? static_cast<std::uint64_t>(size) : 0;
+    frame.mem_size = sizes[0];
     auto token = std::make_shared<Impl::Token>();
     token->shared = d->shared;
     token->generation = s->generation.load();
     token->index = f.capture_index;
-    token->fd = fd;
+    token->fds = frame;  // the descriptors only: frame.hold is not set yet
     ++s->frames_out;
     frame.hold = std::move(token);
     if (pts_us != nullptr)
@@ -477,8 +489,9 @@ int DmaCodec::receive_frame(gfx::DmabufFrame* out,
       d->announced = true;
       log::i(kTag,
              "frames {}x{}: the decoder's own dma-bufs, no copy ({} in "
-             "its pool)",
-             frame.width, frame.height, s->dec->PoolSize());
+             "its pool{})",
+             frame.width, frame.height, s->dec->PoolSize(),
+             frame.one_buffer() ? "" : ", a buffer per plane");
     }
   }
   // Outside the lock: this drops the caller's previous frame, whose buffer

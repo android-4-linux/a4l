@@ -170,11 +170,11 @@ std::unique_ptr<HardwareBuffer> HardwareBuffer::import(const DmabufFrame& src,
       *error = "import: invalid dma-buf fd";
     return nullptr;
   }
-  // Own our own fd so lifetimes are independent of the decoder's (it may
+  // Own our own fds so lifetimes are independent of the decoder's (it may
   // recycle/close its surface). F_DUPFD_CLOEXEC dups the *description* — same
-  // underlying dma-buf memory, no pixel copy.
-  const int dup = ::fcntl(src.fd, F_DUPFD_CLOEXEC, 0);
-  if (dup < 0) {
+  // underlying dma-buf memory, no pixel copy. One per buffer the frame is in.
+  DmabufFrame owned;
+  if (!dup_frame(src, &owned)) {
     if (error)
       *error = "import: F_DUPFD_CLOEXEC failed";
     return nullptr;
@@ -182,24 +182,22 @@ std::unique_ptr<HardwareBuffer> HardwareBuffer::import(const DmabufFrame& src,
 
   auto hb = std::unique_ptr<HardwareBuffer>(new HardwareBuffer());
   hb->bo_ = nullptr;  // imported: no gbm_bo (the fd already IS a dma-buf);
-                      // ~HardwareBuffer just closes the fd
-  hb->frame_ = src;
-  hb->frame_.fd = dup;
+                      // ~HardwareBuffer just closes the fds
+  hb->frame_ = std::move(owned);
   // desc_ carries width/height for describe(); format is best-effort (imported
   // frames may be YUV/NV12, outside HbFormat's RGBA set — the engine's EGLImage
   // import reads frame_.drm_format directly, not this).
   hb->desc_ = HbDesc{src.width, src.height, HbFormat::R8G8B8A8_UNORM, 0};
-  log::d(kTag, "import {}x{} fourcc={:#x} mod={:#x} planes={} fd={} (dup {})",
+  log::d(kTag, "import {}x{} fourcc={:#x} mod={:#x} planes={} fd={} (dup {}){}",
          src.width, src.height, src.drm_format, src.modifier, src.plane_count,
-         src.fd, dup);
+         src.fd, hb->frame_.fd, src.one_buffer() ? "" : ", a buffer per plane");
   return hb;
 }
 
 HardwareBuffer::~HardwareBuffer() {
   if (map_data_ != nullptr)
     unlock();
-  if (frame_.fd >= 0)
-    ::close(frame_.fd);
+  close_frame(&frame_);
   if (bo_ != nullptr)
     gbm_bo_destroy(static_cast<gbm_bo*>(bo_));
 }

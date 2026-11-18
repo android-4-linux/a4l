@@ -173,11 +173,10 @@ void* egl_image_from_ahb(void* dpy,
   // Emit per-plane attribs for EVERY plane, not just plane 0: multi-plane YUV
   // (NV12=2, I420=3 — the hardware-decode output format) must import all planes
   // so Mesa's samplerExternalOES does YUV->RGB with NO CPU convert (zero copy).
-  // Single-plane RGBA is just plane_count==1. All planes share f.fd (one
-  // dma-buf object at distinct offsets — the VAAPI/V4L2-M2M NV12 layout); each
-  // carries its own offset/pitch and the frame's modifier. (Per-plane fds —
-  // some multi-object exporters — would need a DmabufFrame model change;
-  // single-object is the common decoder case.)
+  // Single-plane RGBA is just plane_count==1. The planes usually share f.fd
+  // (one dma-buf object at distinct offsets — the VAAPI/V4L2-M2M NV12 layout);
+  // a decoder that keeps them in separate buffers names each plane's own
+  // (plane_fd). Each carries its own offset/pitch and the frame's modifier.
   struct PlaneEnums {
     EGLint fd, offset, pitch, mod_lo, mod_hi;
   };
@@ -204,7 +203,7 @@ void* egl_image_from_ahb(void* dpy,
                                                      : f.plane_count);
   for (std::uint32_t i = 0; i < np; ++i) {
     attrs.push_back(kPlane[i].fd);
-    attrs.push_back(f.fd);
+    attrs.push_back(f.plane_fd(i));
     attrs.push_back(kPlane[i].offset);
     attrs.push_back(static_cast<EGLint>(f.planes[i].offset));
     attrs.push_back(kPlane[i].pitch);

@@ -66,6 +66,7 @@ class FakeDecoder final : public v4l2wc::IDmaDecoder {
       free_.push_back(i);
     }
     other_ = ::memfd_create("dma-codec-test", MFD_CLOEXEC);
+    REQUIRE(::ftruncate(other_, kW * kH * 3 / 2) == 0);
   }
   ~FakeDecoder() override {
     --w_->alive;
@@ -300,19 +301,34 @@ TEST_CASE("DmaCodec: a change of geometry replaces the decoder",
   CHECK(pts == 5);
 }
 
-TEST_CASE(
-    "DmaCodec: a frame in two buffers is refused, and its buffer "
-    "returned",
-    "[media][dma]") {
+TEST_CASE("DmaCodec: a frame with a buffer per plane keeps both",
+          "[media][dma]") {
   World w;
   w.split_planes = true;
-  auto codec = make(&w);
-  REQUIRE(send(*codec, "u", 1) == 0);
   gfx::DmabufFrame f;
-  std::string error;
-  CHECK(codec->receive_frame(&f, nullptr, &error) == -1);
-  CHECK_FALSE(error.empty());
-  CHECK(w.released == std::vector<std::uint32_t>{0});
+  {
+    auto codec = make(&w);
+    REQUIRE(send(*codec, "u", 1) == 0);
+    REQUIRE(codec->receive_frame(&f, nullptr, nullptr) == 1);
+    CHECK_FALSE(f.one_buffer());
+    CHECK(f.plane_fd(0) == f.fd);
+    CHECK(f.plane_fd(1) != f.fd);
+    // A holder's copy has descriptors of its own for both.
+    gfx::DmabufFrame mine;
+    REQUIRE(gfx::dup_frame(f, &mine));
+    CHECK(mine.fd != f.fd);
+    CHECK(mine.plane_fd(1) != f.plane_fd(1));
+    CHECK(mine.plane_fd(1) != mine.fd);
+    gfx::close_frame(&mine);
+    CHECK(mine.fd == -1);
+  }
+  // Both outlive the decoder, and both go when the frame does.
+  const int luma = f.fd, chroma = f.plane_fd(1);
+  CHECK(::fcntl(luma, F_GETFD) >= 0);
+  CHECK(::fcntl(chroma, F_GETFD) >= 0);
+  f = gfx::DmabufFrame{};
+  CHECK(::fcntl(luma, F_GETFD) == -1);
+  CHECK(::fcntl(chroma, F_GETFD) == -1);
 }
 
 TEST_CASE("DmaCodec: a replacement that is itself replaced loses nothing",

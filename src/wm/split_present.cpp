@@ -305,7 +305,7 @@ class SplitPresenter final : public IPresenter {
   // May run on the render thread: one sendmsg, and atomics for the state.
   bool submit(const gfx::DmabufFrame& frame, int slot) noexcept override {
     if (closed() || frame.fd < 0 || frame.plane_count == 0 ||
-        frame.plane_count > ipc::kMaxPlanes)
+        frame.plane_count > ipc::kMaxPlanes || !frame.one_buffer())
       return false;
     ipc::Message m;
     m.type = ipc::MsgType::PresentFrame;
@@ -403,6 +403,15 @@ class SplitPresenter final : public IPresenter {
     if (closed() || frame.fd < 0 || frame.plane_count == 0 ||
         frame.plane_count > ipc::kMaxPlanes)
       return;
+    // The datagram carries one descriptor and the broker checks one buffer.
+    // A frame with a buffer per plane is not sent as if it had one.
+    if (!frame.one_buffer()) {
+      if (!multi_buffer_told_.exchange(true))
+        log::w(kTag,
+               "video frames with a buffer per plane are not carried to the "
+               "broker; this video is not shown");
+      return;
+    }
     ipc::Message m;
     m.type = ipc::MsgType::VideoFrame;
     ipc::VideoFrame& v = m.video;
@@ -585,6 +594,7 @@ class SplitPresenter final : public IPresenter {
   std::vector<std::uint64_t> modifiers_;
   std::atomic<bool> ready_{false};
   std::atomic<bool> closed_{false};
+  std::atomic<bool> multi_buffer_told_{false};  // said once
   std::atomic<bool> submitted_{false};
   std::atomic<bool> feedback_ok_{false};
   std::atomic<std::uint32_t> free_mask_{0};
