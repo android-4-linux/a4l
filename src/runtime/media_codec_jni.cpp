@@ -395,16 +395,136 @@ void async_driver(CodecCtx* ctx) {
       }
     }
     static const bool diag = std::getenv("ACL_MC_DIAG") != nullptr;
+    // Moves the decoder's ready frames into free output slots. Run after
+    // each packet, so that what is decoded goes to a slot at once and the
+    // pool is known to be full before the next packet is sent.
+    const auto drain = [&] {
+      for (;;) {  // drain ready frames, with backpressure
+        // BACKPRESSURE: a real MediaCodec has a FIXED output-buffer pool; when
+        // the app holds them all it stops emitting frames (the decoder stalls)
+        // until releaseOutputBuffer frees one. Find a free slot in the fixed
+        // pool BEFORE decoding; if none, stop until a release frees one. This
+        // is also what paces a paused player: it stops releasing, the pool
+        // fills, and the decoder waits.
+        wm::IPresenter* vpr = video_plane_for(ctx);
+        int slot = -1;
+        {
+          std::lock_guard<std::mutex> lk(ctx->amu);
+          for (std::size_t i = 0; i < ctx->outslots.size(); ++i)
+            if (!ctx->outslots[i].used) {
+              slot = static_cast<int>(i);
+              break;
+            }
+          if (slot < 0) {
+            ctx->tot_poolfull++;
+            break;
+          }  // pool full — wait for releaseOutputBuffer
+        }
+        gfx::DmabufFrame f{};
+        std::int64_t pts = 0;
+        const auto t_rf = std::chrono::steady_clock::now();
+        const int rr = ctx->dec->receive_frame(&f, &pts, &err);
+        if (diag && rr > 0) {
+          const double ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t_rf)
+                                .count();
+          ctx->recv_ms_sum += ms;
+        }
+        if (diag && ctx->dbg_recv < 6) {
+          log::i(kTag, "async receive_frame={} pts={} {}", rr, pts, err);
+          ctx->dbg_recv++;
+        }
+        if (rr <= 0)
+          break;
+        if (diag && (++ctx->tot_recv % 30 == 1)) {
+          const auto now = std::chrono::steady_clock::now();
+          double fps = 0.0;
+          if (ctx->t0_recv.time_since_epoch().count() != 0)
+            fps = 30.0 /
+                  std::chrono::duration<double>(now - ctx->t0_recv).count();
+          ctx->t0_recv = now;
+          log::i(kTag,
+                 "decode: received {} frames ({:.1f} fps over last 30), "
+                 "queued-to-app {}, "
+                 "released render={}/drop={}, pool-full-breaks={}, avg "
+                 "receive_frame={:.1f}ms "
+                 "avg ahb_import={:.1f}ms",
+                 ctx->tot_recv, fps, ctx->tot_queued, ctx->tot_rel_render,
+                 ctx->tot_rel_drop, ctx->tot_poolfull, ctx->recv_ms_sum / 30.0,
+                 ctx->ahb_ms_sum / 30.0);
+          ctx->recv_ms_sum = 0.0;
+          ctx->ahb_ms_sum = 0.0;
+        }
+        if (vpr != nullptr) {
+          // The video plane: the frame waits in its slot, holding its decoder
+          // surface, and goes to the plane when the app releases it, at the
+          // time the app gives (MC_releaseOutputBuffer).
+          {
+            std::lock_guard<std::mutex> lk(ctx->amu);
+            CodecCtx::OutSlot& s = ctx->outslots[slot];
+            s.used = true;
+            s.pts = pts;
+            s.plane = true;
+            s.frame = f;
+          }
+          jobject info = env->NewObject(g_bufinfo_cls, g_bufinfo_ctor);
+          env->CallVoidMethod(info, g_bufinfo_set, 0, 0,
+                              static_cast<jlong>(pts), 0);
+          ctx->tot_queued++;
+          post(CB_OUTPUT_AVAILABLE, slot, info);
+          if (info)
+            env->DeleteLocalRef(info);
+          continue;
+        }
+        const auto t_ahb = std::chrono::steady_clock::now();
+        ::AHardwareBuffer* ahb = gfx::ahb_import(f);
+        if (diag)
+          ctx->ahb_ms_sum += std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - t_ahb)
+                                 .count();
+        if (ahb == nullptr)
+          continue;
+        {
+          std::lock_guard<std::mutex> lk(ctx->amu);
+          CodecCtx::OutSlot& s = ctx->outslots[slot];
+          s.ahb = ahb;
+          s.used = true;
+          s.pts = pts;
+        }
+        jobject info = env->NewObject(g_bufinfo_cls, g_bufinfo_ctor);
+        env->CallVoidMethod(info, g_bufinfo_set, 0, 0, static_cast<jlong>(pts),
+                            0);
+        ctx->tot_queued++;
+        post(CB_OUTPUT_AVAILABLE, slot, info);
+        if (info)
+          env->DeleteLocalRef(info);
+      }
+    };
+    const auto room = [&] {
+      std::lock_guard<std::mutex> lk(ctx->amu);
+      for (const CodecCtx::OutSlot& s : ctx->outslots)
+        if (!s.used)
+          return true;
+      return false;
+    };
     for (int idx : offer)
       post(CB_INPUT_AVAILABLE, idx,
            nullptr);  // "buffer idx is free — fill + queue it"
     for (std::size_t si = 0; si < send.size(); ++si) {
       auto& p = send[si];
-      int sr;
-      if (p.eos)
-        sr = ctx->dec->send_packet(nullptr, 0, p.pts, &err);
-      else
-        sr = ctx->dec->send_packet(p.data.data(), p.data.size(), p.pts, &err);
+      // No packet goes to the decoder while every output slot is held. A
+      // decoder with a queue of its own (dmabuf-codec's engines hold a pool
+      // of 25 to 28) otherwise decodes that far ahead of the app, and a
+      // flush throws it all away: a seek on a Pi 5 discarded 35 to 41
+      // frames, a second and more of video. Not taken, as when the decoder
+      // has no room.
+      int sr = 1;
+      if (room()) {
+        if (p.eos)
+          sr = ctx->dec->send_packet(nullptr, 0, p.pts, &err);
+        else
+          sr = ctx->dec->send_packet(p.data.data(), p.data.size(), p.pts, &err);
+      }
       if (sr == 1) {
         // AVERROR(EAGAIN): the decoder's output is full — the packet was NOT
         // accepted. Requeue it (and the rest) to the FRONT of pending and stop;
@@ -438,107 +558,9 @@ void async_driver(CodecCtx* ctx) {
                p.data.size(), p.eos, p.pts, sr, err);
         ctx->dbg_sent++;
       }
+      drain();
     }
-    for (;;) {  // drain ready frames, with backpressure
-      // BACKPRESSURE: a real MediaCodec has a FIXED output-buffer pool; when
-      // the app holds them all it stops emitting frames (the decoder stalls)
-      // until releaseOutputBuffer frees one. Find a free slot in the fixed
-      // pool BEFORE decoding; if none, stop until a release frees one. This
-      // is also what paces a paused player: it stops releasing, the pool
-      // fills, and the decoder waits.
-      wm::IPresenter* vpr = video_plane_for(ctx);
-      int slot = -1;
-      {
-        std::lock_guard<std::mutex> lk(ctx->amu);
-        for (std::size_t i = 0; i < ctx->outslots.size(); ++i)
-          if (!ctx->outslots[i].used) {
-            slot = static_cast<int>(i);
-            break;
-          }
-        if (slot < 0) {
-          ctx->tot_poolfull++;
-          break;
-        }  // pool full — wait for releaseOutputBuffer
-      }
-      gfx::DmabufFrame f{};
-      std::int64_t pts = 0;
-      const auto t_rf = std::chrono::steady_clock::now();
-      const int rr = ctx->dec->receive_frame(&f, &pts, &err);
-      if (diag && rr > 0) {
-        const double ms = std::chrono::duration<double, std::milli>(
-                              std::chrono::steady_clock::now() - t_rf)
-                              .count();
-        ctx->recv_ms_sum += ms;
-      }
-      if (diag && ctx->dbg_recv < 6) {
-        log::i(kTag, "async receive_frame={} pts={} {}", rr, pts, err);
-        ctx->dbg_recv++;
-      }
-      if (rr <= 0)
-        break;
-      if (diag && (++ctx->tot_recv % 30 == 1)) {
-        const auto now = std::chrono::steady_clock::now();
-        double fps = 0.0;
-        if (ctx->t0_recv.time_since_epoch().count() != 0)
-          fps =
-              30.0 / std::chrono::duration<double>(now - ctx->t0_recv).count();
-        ctx->t0_recv = now;
-        log::i(kTag,
-               "decode: received {} frames ({:.1f} fps over last 30), "
-               "queued-to-app {}, "
-               "released render={}/drop={}, pool-full-breaks={}, avg "
-               "receive_frame={:.1f}ms "
-               "avg ahb_import={:.1f}ms",
-               ctx->tot_recv, fps, ctx->tot_queued, ctx->tot_rel_render,
-               ctx->tot_rel_drop, ctx->tot_poolfull, ctx->recv_ms_sum / 30.0,
-               ctx->ahb_ms_sum / 30.0);
-        ctx->recv_ms_sum = 0.0;
-        ctx->ahb_ms_sum = 0.0;
-      }
-      if (vpr != nullptr) {
-        // The video plane: the frame waits in its slot, holding its decoder
-        // surface, and goes to the plane when the app releases it, at the
-        // time the app gives (MC_releaseOutputBuffer).
-        {
-          std::lock_guard<std::mutex> lk(ctx->amu);
-          CodecCtx::OutSlot& s = ctx->outslots[slot];
-          s.used = true;
-          s.pts = pts;
-          s.plane = true;
-          s.frame = f;
-        }
-        jobject info = env->NewObject(g_bufinfo_cls, g_bufinfo_ctor);
-        env->CallVoidMethod(info, g_bufinfo_set, 0, 0, static_cast<jlong>(pts),
-                            0);
-        ctx->tot_queued++;
-        post(CB_OUTPUT_AVAILABLE, slot, info);
-        if (info)
-          env->DeleteLocalRef(info);
-        continue;
-      }
-      const auto t_ahb = std::chrono::steady_clock::now();
-      ::AHardwareBuffer* ahb = gfx::ahb_import(f);
-      if (diag)
-        ctx->ahb_ms_sum += std::chrono::duration<double, std::milli>(
-                               std::chrono::steady_clock::now() - t_ahb)
-                               .count();
-      if (ahb == nullptr)
-        continue;
-      {
-        std::lock_guard<std::mutex> lk(ctx->amu);
-        CodecCtx::OutSlot& s = ctx->outslots[slot];
-        s.ahb = ahb;
-        s.used = true;
-        s.pts = pts;
-      }
-      jobject info = env->NewObject(g_bufinfo_cls, g_bufinfo_ctor);
-      env->CallVoidMethod(info, g_bufinfo_set, 0, 0, static_cast<jlong>(pts),
-                          0);
-      ctx->tot_queued++;
-      post(CB_OUTPUT_AVAILABLE, slot, info);
-      if (info)
-        env->DeleteLocalRef(info);
-    }
+    drain();
     pass.unlock();
     std::unique_lock<std::mutex> lk(ctx->amu);
     if (!ctx->stop.load(std::memory_order_acquire)) {
