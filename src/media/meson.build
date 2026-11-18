@@ -51,6 +51,19 @@ if have_gl and have_ffmpeg
   )
 endif
 
+# Dev tool: a hardware-decoded clip on a real compositor's video plane, single process or
+# across the --split boundary, with no app and no VM. Run by hand against a live compositor.
+if have_wcs and have_vulkan and have_dmabuf_codec
+  video_plane_probe = executable(
+    'acl-video-plane-probe',
+    files('video_plane_probe_main.cpp'),
+    include_directories : [config_inc, core_inc],
+    link_with : [media_lib, wm_lib, gfx_lib, acl_log, ipc_lib],
+    dependencies : wm_deps + [fmt_dep, dmabuf_codec_dep],
+    install : false,
+  )
+endif
+
 if have_ffmpeg
   # Decodes an elementary audio stream through media::AudioDecoder as a MediaCodec client
   # would, and reports what came out. Driven by tests/integration/run_audio_decode_test.py.
