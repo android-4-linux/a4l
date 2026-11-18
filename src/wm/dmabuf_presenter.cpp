@@ -294,7 +294,7 @@ class SubsurfacePlane {
     params.Attach(praw);
     for (std::uint32_t i = 0; i < frame.plane_count; ++i) {
       params.Get()->Add(
-          frame.fd, i, frame.planes[i].offset, frame.planes[i].stride,
+          frame.plane_fd(i), i, frame.planes[i].offset, frame.planes[i].stride,
           static_cast<std::uint32_t>(frame.modifier >> 32u),
           static_cast<std::uint32_t>(frame.modifier & 0xffffffffu));
     }
@@ -851,10 +851,14 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
                      int w,
                      int h) noexcept override {
     gfx::DmabufFrame f = frame;
-    f.fd = frame.fd >= 0 ? ::dup(frame.fd) : -1;
+    if (!gfx::dup_frame(frame, &f)) {
+      f.fd = -1;  // as before for a frame with no descriptor: stashed, and
+      for (gfx::DmabufFrame::Plane& p : f.planes)  // dropped when drained
+        p.fd = -1;
+    }
     std::lock_guard<std::mutex> lk(video_mu_);
-    if (video_has_pending_ && video_pending_.fd >= 0)
-      ::close(video_pending_.fd);  // superseded
+    if (video_has_pending_)
+      gfx::close_frame(&video_pending_);  // superseded
     video_pending_ = f;
     video_has_pending_ = true;
     video_x_ = x;
@@ -897,8 +901,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       video_plane_.hide();
     {
       std::lock_guard<std::mutex> lk(video_mu_);
-      if (video_has_pending_ && video_pending_.fd >= 0)
-        ::close(video_pending_.fd);
+      if (video_has_pending_)
+        gfx::close_frame(&video_pending_);
       video_has_pending_ = false;
       vb_set_ = false;
     }
@@ -1026,8 +1030,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     // From here the frame's descriptor is ours to close on every way out.
     if (subcomp_.Get() == nullptr || comp_.Get() == nullptr ||
         surface_.Get() == nullptr) {
-      if (frame.fd >= 0)
-        ::close(frame.fd);
+      gfx::close_frame(&frame);
       return;
     }
     // A format or modifier the compositor does not advertise is a protocol
@@ -1046,8 +1049,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
                  "frames of it are dropped",
                  frame.drm_format, frame.modifier, mods.size());
         }
-        if (frame.fd >= 0)
-          ::close(frame.fd);
+        gfx::close_frame(&frame);
         return;
       }
     }
@@ -1058,8 +1060,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
               [this]() -> wl_proxy* { return feedback_.CreateParams(); },
               &err)) {
         log::w(kTag, "video HW-plane: subsurface create failed: {}", err);
-        if (frame.fd >= 0)
-          ::close(frame.fd);
+        gfx::close_frame(&frame);
         return;
       }
       log::i(kTag, "video HW-plane: wl_subsurface created (viewport={})",
@@ -1080,8 +1081,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
         place_video(x, y, w, h, w_ > 0 ? w_ : w, h_ > 0 ? h_ : h, frame.width,
                     frame.height);
     if (!place.visible) {
-      if (frame.fd >= 0)
-        ::close(frame.fd);
+      gfx::close_frame(&frame);
       return;
     }
     const int vx = place.x, vy = place.y, vw = place.w, vh = place.h;
@@ -1104,9 +1104,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     // it doesn't cull the subsurface below the toplevel and show black through
     // the punch).
     set_toplevel_opaque_hole(vx, vy, vw, vh);
-    video_plane_.present(frame);  // create_immed dups the fd on the wire
-    if (frame.fd >= 0)
-      ::close(frame.fd);  // drop our owned dup
+    video_plane_.present(frame);  // create_immed dups the fds on the wire
+    gfx::close_frame(&frame);     // drop our owned dups
     // wl_subsurface.set_position/stacking + the opaque region are applied on
     // the PARENT commit. Commit the toplevel every video frame
     // (ACL_VIDEO_PARENT_COMMIT) so the below-placement stays applied even when
@@ -1843,11 +1842,11 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       return false;
     }
     params_.Attach(praw);
-    // One dma-buf shared by all planes at distinct offsets; libwayland dups the
-    // fd.
+    // Each plane's dma-buf and its offset in it: one buffer shared by all of
+    // them, or a buffer each. libwayland dups the fds.
     for (std::uint32_t i = 0; i < frame.plane_count; ++i) {
       params_.Get()->Add(
-          frame.fd, i, frame.planes[i].offset, frame.planes[i].stride,
+          frame.plane_fd(i), i, frame.planes[i].offset, frame.planes[i].stride,
           static_cast<std::uint32_t>(frame.modifier >> 32u),
           static_cast<std::uint32_t>(frame.modifier & 0xffffffffu));
     }
@@ -1891,7 +1890,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     params.Attach(praw);
     for (std::uint32_t i = 0; i < frame.plane_count; ++i) {
       params.Get()->Add(
-          frame.fd, i, frame.planes[i].offset, frame.planes[i].stride,
+          frame.plane_fd(i), i, frame.planes[i].offset, frame.planes[i].stride,
           static_cast<std::uint32_t>(frame.modifier >> 32u),
           static_cast<std::uint32_t>(frame.modifier & 0xffffffffu));
     }

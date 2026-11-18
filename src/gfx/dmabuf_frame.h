@@ -9,6 +9,9 @@
 #ifndef ACL_GFX_DMABUF_FRAME_H
 #define ACL_GFX_DMABUF_FRAME_H
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <cstdint>
 #include <memory>
 
@@ -26,8 +29,13 @@ struct DmabufFrame {
   struct Plane {
     std::uint32_t offset = 0;
     std::uint32_t stride = 0;  // row pitch in bytes
+    // This plane's own dma-buf, where the producer keeps planes in separate
+    // buffers (a decoder with luma in one and chroma in another). -1, as
+    // every producer but such a decoder leaves it: the plane is in `fd`.
+    int fd = -1;
   };
-  int fd = -1;  // all planes share this fd at distinct offsets
+  // The dma-buf of plane 0, and of every plane that does not name its own.
+  int fd = -1;
   std::uint32_t width = 0;
   std::uint32_t height = 0;
   std::uint32_t plane_count = 1;
@@ -56,7 +64,60 @@ struct DmabufFrame {
     return planes[0].stride;
   }  // plane-0 convenience
   std::uint32_t offset() const { return planes[0].offset; }
+  // The dma-buf plane `i` is in.
+  int plane_fd(std::uint32_t i) const {
+    return i < kMaxPlanes && planes[i].fd >= 0 ? planes[i].fd : fd;
+  }
+  // True if every plane is in `fd`.
+  bool one_buffer() const {
+    for (std::uint32_t i = 0; i < plane_count && i < kMaxPlanes; ++i) {
+      if (planes[i].fd >= 0 && planes[i].fd != fd)
+        return false;
+    }
+    return true;
+  }
 };
+
+// Closes the frame's descriptors, for a holder that owns them (dup_frame).
+inline void close_frame(DmabufFrame* f) {
+  for (DmabufFrame::Plane& p : f->planes) {
+    if (p.fd >= 0 && p.fd != f->fd)
+      ::close(p.fd);
+    p.fd = -1;
+  }
+  if (f->fd >= 0)
+    ::close(f->fd);
+  f->fd = -1;
+}
+
+// A copy of `src` that owns its descriptors: the same memory, no pixel copy,
+// and a lifetime of its own. False, with nothing left open, if a descriptor
+// is invalid or cannot be duplicated.
+inline bool dup_frame(const DmabufFrame& src, DmabufFrame* out) {
+  DmabufFrame f = src;
+  f.fd = -1;
+  for (DmabufFrame::Plane& p : f.planes)
+    p.fd = -1;
+  bool ok = src.fd >= 0;
+  if (ok) {
+    f.fd = ::fcntl(src.fd, F_DUPFD_CLOEXEC, 0);
+    ok = f.fd >= 0;
+  }
+  for (std::uint32_t i = 0;
+       ok && i < src.plane_count && i < DmabufFrame::kMaxPlanes; ++i) {
+    const int own = src.planes[i].fd;
+    if (own < 0 || own == src.fd)
+      continue;
+    f.planes[i].fd = ::fcntl(own, F_DUPFD_CLOEXEC, 0);
+    ok = f.planes[i].fd >= 0;
+  }
+  if (!ok) {
+    close_frame(&f);
+    return false;
+  }
+  *out = std::move(f);
+  return true;
+}
 
 }  // namespace acl::gfx
 

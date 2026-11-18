@@ -8,6 +8,13 @@
 // dmabuf-codec's engines (V4L2 stateful and stateless, OpenMAX IL, VA-API),
 // whichever the device has. Frames are the decoder's own buffers, as dma-bufs,
 // with no copy.
+//
+// A decoder may keep a frame's planes in one buffer or in a buffer each; the
+// frame says which (gfx::DmabufFrame::plane_fd). One caution, measured on a
+// Pi 5: its HEVC decoder's default is a buffer each in Broadcom's column
+// format, and Mesa's V3D samples that with the luma's column height for both
+// planes, so chroma is wrong past the first 128-pixel column. The one-buffer
+// form of that format samples correctly.
 
 #ifndef ACL_MEDIA_DMA_CODEC_H
 #define ACL_MEDIA_DMA_CODEC_H
