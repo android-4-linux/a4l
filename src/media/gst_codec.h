@@ -21,11 +21,11 @@
 #include <memory>
 #include <string>
 
-#include "gfx/dmabuf_frame.h"
+#include "media/codec_engine.h"
 
 namespace acl::media {
 
-class GstCodec {
+class GstCodec final : public CodecEngine {
  public:
   // An appsrc ! [parser] ! decoder ! appsink pipeline for `mime`, playing.
   // `csd` is the codec-specific data, sent ahead of the first access unit.
@@ -36,19 +36,18 @@ class GstCodec {
                                              const std::uint8_t* csd,
                                              std::size_t csd_size,
                                              std::string* error);
-  ~GstCodec();
+  ~GstCodec() override;
   GstCodec(const GstCodec&) = delete;
   GstCodec& operator=(const GstCodec&) = delete;
 
-  // Same contracts as CodecDecoder's.
   int send_packet(const std::uint8_t* data,
                   std::size_t size,
                   std::int64_t pts_us,
-                  std::string* error);
+                  std::string* error) override;
   int receive_frame(gfx::DmabufFrame* out,
                     std::int64_t* pts_us,
-                    std::string* error);
-  void flush();
+                    std::string* error) override;
+  void flush() override;
 
  private:
   GstCodec();

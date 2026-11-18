@@ -23,6 +23,12 @@ if have_gl and have_gst
   media_sources += files('gst_codec.cpp')
   media_deps += gst_full + [gl_libdrm_dep]
 endif
+# DmaCodec: the same interface over dmabuf-codec's engines, which drive a hardware decoder
+# with no media framework in between.
+if have_dmabuf_codec
+  media_sources += files('dma_codec.cpp')
+  media_deps += [dmabuf_codec_dep]
+endif
 media_lib = static_library(
   'acl_media',
   media_sources,

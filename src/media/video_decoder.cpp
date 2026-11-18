@@ -30,6 +30,8 @@ extern "C" {
 
 #include "gfx/sw_frame_pool.h"
 #include "log/log.h"
+#include "media/codec_engine.h"
+#include "media/dma_codec.h"
 #include "media/gst_codec.h"
 
 namespace acl::media {
@@ -647,9 +649,8 @@ struct CodecDecoder::CImpl {
   AVFrame* drm_frame = nullptr;
   std::uint32_t width = 0, height = 0;
   std::shared_ptr<gfx::SwFramePool> sw_pool;  // software frames only
-#if ACL_HAVE_GST
-  std::unique_ptr<GstCodec> gst;  // set: GStreamer decodes, nothing above is
-#endif
+  // Set: this engine decodes, and nothing above is used.
+  std::unique_ptr<CodecEngine> engine;
   ~CImpl() {
     if (drm_frame)
       g_ff.av_frame_free(&drm_frame);
@@ -681,11 +682,12 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
   };
   // Which engine decodes. FFmpeg with a hardware device (VAAPI, or a named
   // decoder) is used where there is one: that path is zero-copy and the one
-  // x86 has run on. Where FFmpeg would decode in software, GStreamer goes
-  // first, since what it has installed may be the device's hardware decoder;
-  // FFmpeg in software is what is left. ACL_VIDEO_BACKEND=gst|ffmpeg picks
-  // one outright, and the FFmpeg knobs (ACL_VIDEO_DECODER, ACL_HWDEC_DEVICE)
-  // mean FFmpeg.
+  // x86 has run on. Where FFmpeg would decode in software, the device's
+  // hardware decoder is tried directly (dmabuf-codec: V4L2, OpenMAX), then
+  // through GStreamer, whose installed decoder may be that same hardware at
+  // the cost of a copy; FFmpeg in software is what is left.
+  // ACL_VIDEO_BACKEND=dma|gst|ffmpeg picks one outright, and the FFmpeg knobs
+  // (ACL_VIDEO_DECODER, ACL_HWDEC_DEVICE) mean FFmpeg.
   const char* be = std::getenv("ACL_VIDEO_BACKEND");
   const std::string backend = be != nullptr ? be : "";
   const bool ffmpeg_asked = backend == "ffmpeg" ||
@@ -695,19 +697,33 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
   CImpl* d = dec->d_.get();
   d->width = static_cast<std::uint32_t>(width > 0 ? width : 0);
   d->height = static_cast<std::uint32_t>(height > 0 ? height : 0);
+  auto try_dma = [&](std::string* why) {
+#if ACL_HAVE_DMABUF_CODEC
+    d->engine = DmaCodec::configure(mime, csd, csd_size, width, height, why);
+    return d->engine != nullptr;
+#else
+    if (why)
+      *why = "built without dmabuf-codec";
+    return false;
+#endif
+  };
   auto try_gst = [&](std::string* why) {
 #if ACL_HAVE_GST
-    d->gst = GstCodec::configure(mime, csd, csd_size, why);
-    return d->gst != nullptr;
+    d->engine = GstCodec::configure(mime, csd, csd_size, why);
+    return d->engine != nullptr;
 #else
     if (why)
       *why = "built without GStreamer";
     return false;
 #endif
   };
-  if (backend == "gst") {
+  // Where FFmpeg has no hardware to offer and was not asked for by name.
+  auto try_others = [&] {
+    return !ffmpeg_asked && (try_dma(nullptr) || try_gst(nullptr));
+  };
+  if (backend == "dma" || backend == "gst") {
     std::string why;
-    if (!try_gst(&why)) {
+    if (!(backend == "dma" ? try_dma(&why) : try_gst(&why))) {
       if (error)
         *error = why;
       return nullptr;
@@ -715,7 +731,7 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
     return dec;
   }
   if (!load_ffmpeg()) {
-    if (!ffmpeg_asked && try_gst(nullptr))
+    if (try_others())
       return dec;
     return fail("FFmpeg unavailable");
   }
@@ -728,7 +744,7 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
       codec = nc;
   }
   if (codec == nullptr) {
-    if (!ffmpeg_asked && try_gst(nullptr))
+    if (try_others())
       return dec;
     return fail("no decoder for MIME");
   }
@@ -753,7 +769,7 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
   bool ff_hw = false;
   if (!configure_hw_decode(d->codec, codec, &d->hw_device, &ff_hw))
     return fail("av_hwdevice_ctx_create failed");
-  if (!ff_hw && !ffmpeg_asked && try_gst(nullptr))
+  if (!ff_hw && try_others())
     return dec;  // the unopened FFmpeg context is freed with the decoder
   // Enlarge the HW surface pool: decoded VAAPI surfaces are exported zero-copy
   // and held downstream (the compositor keeps each wl_buffer until
@@ -789,10 +805,8 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
 
 void CodecDecoder::flush() {
   CImpl* d = d_.get();
-#if ACL_HAVE_GST
-  if (d->gst != nullptr)
-    return d->gst->flush();
-#endif
+  if (d->engine != nullptr)
+    return d->engine->flush();
   g_ff.av_frame_unref(d->drm_frame);
   g_ff.av_frame_unref(d->hw_frame);
   g_ff.avcodec_flush_buffers(d->codec);
@@ -803,10 +817,8 @@ int CodecDecoder::send_packet(const std::uint8_t* data,
                               std::int64_t pts_us,
                               std::string* error) {
   CImpl* d = d_.get();
-#if ACL_HAVE_GST
-  if (d->gst != nullptr)
-    return d->gst->send_packet(data, size, pts_us, error);
-#endif
+  if (d->engine != nullptr)
+    return d->engine->send_packet(data, size, pts_us, error);
   if (data == nullptr || size == 0) {  // end-of-stream: drain
     const int r = g_ff.avcodec_send_packet(d->codec, nullptr);
     if (r < 0 && r != AVERROR_EOF) {
@@ -851,10 +863,8 @@ int CodecDecoder::receive_frame(gfx::DmabufFrame* out,
   if (out == nullptr)
     return err("null out");
   CImpl* d = d_.get();
-#if ACL_HAVE_GST
-  if (d->gst != nullptr)
-    return d->gst->receive_frame(out, pts_us, error);
-#endif
+  if (d->engine != nullptr)
+    return d->engine->receive_frame(out, pts_us, error);
   g_ff.av_frame_unref(d->drm_frame);
   g_ff.av_frame_unref(d->hw_frame);
   const int r = g_ff.avcodec_receive_frame(d->codec, d->hw_frame);

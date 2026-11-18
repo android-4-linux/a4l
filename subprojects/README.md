@@ -36,6 +36,11 @@ sectionless stub fails configuration. The single-pinned-Skia rule (A02.2) is rec
   `dependency('drm-cxx', fallback : ...)`, `required : false`. Normally a local sibling
   checkout symlinked in as `subprojects/drm-cxx` (gitignored); the wrap points at the git
   remote for a clean checkout.
+- **dmabuf-codec** (`dmabuf-codec.wrap`, hardware video decode engines, MIT) — resolved via
+  `dependency('dmabuf-codec', fallback : ...)`, `required : false`. Pinned `wrap-git` at a
+  commit. It links nothing of the device's: the OpenMAX core and libva are loaded at run
+  time, and V4L2 is the kernel's API. Without it video decodes through GStreamer or FFmpeg.
+  For local development symlink a sibling checkout in as `subprojects/dmabuf-codec`.
 - **Skia** — not a Meson subproject; consumed as a prebuilt (A02.2). `-Dskia_prefix=`, else
   `$ACL_SKIA_PREFIX` and the conventional install locations are searched. Build one with
   wcs's `scripts/build-skia.sh` at the shared pin. See `third_party/skia/METADATA`.

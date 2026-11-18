@@ -194,22 +194,28 @@ glibc, which is the case this was built for.
   alpha on the board is opaque, so a video hole does not show through: the video
   fixture's picture area was black in this mode (see the video bullet). On x86-64 (Mesa)
   a resize, video on a subsurface and WebView all work in this mode.
-- Video on the board is decoded by its hardware decoder, through GStreamer. The board has
+- Video on the board is decoded by its hardware decoder, with no copy. The board has
   no VA-API, and its FFmpeg (4.2) reaches the decoder (`msm_vidc`, `/dev/video32`) only
-  through `h264_v4l2m2m`, which fails to configure it. Its GStreamer (1.16) has the
-  vendor's OpenMAX elements, so a4l builds `appsrc ! h264parse ! omxh264dec ! appsink`
-  from the highest-ranked installed parser and decoder and asks for plain NV12. Each frame
-  is copied once into an NV12 dma-buf from gbm: the element hands out its buffers as
-  mapped memory, not as GStreamer dma-buf memory. The video fixture
-  (`tests/fixtures/video_plane`, 640x360 H.264 at 30 frames a second) showed a correct
-  picture in the default mode and with `ACL_PRESENT_EGL=1`, the window at p50 16.7 ms.
-  With `ACL_PRESENT_SWAPCHAIN=1` the video is hidden behind the opaque window.
+  through `h264_v4l2m2m`, which fails to configure it: the node is not a V4L2
+  memory-to-memory device. The decoder is behind the vendor's OpenMAX core, which
+  dmabuf-codec's OpenMAX engine loads at run time and drives directly. Its output buffers
+  are dma-bufs and go to the compositor as they are (linear NV12, 25 in the pool at
+  640x360). The video fixture (`tests/fixtures/video_plane`, 640x360 H.264 at 30 frames a
+  second) showed a correct picture in the default mode and with `ACL_PRESENT_EGL=1`, the
+  window at p50 16.7 ms, every frame received in five runs. With
+  `ACL_PRESENT_SWAPCHAIN=1` the video is hidden behind the opaque window.
+  `ACL_VIDEO_BACKEND=gst` decodes through GStreamer instead: its 1.16 has the vendor's
+  OpenMAX elements, so a4l builds `appsrc ! h264parse ! omxh264dec ! appsink` from the
+  highest-ranked installed parser and decoder and asks for plain NV12. That costs one
+  copy a frame into an NV12 dma-buf from gbm, since the element hands out its buffers as
+  mapped memory, not as GStreamer dma-buf memory. Same picture.
   `ACL_VIDEO_BACKEND=ffmpeg` decodes with FFmpeg's software `h264` instead, with the same
   picture; three of seven such runs exited about 15 s late through the fixture's own
   timeout with every frame shown, cause not found, and none of five GStreamer runs did.
-  The cross build needs headers for both: FFmpeg 4.2 (libavcodec 58.54, libavutil 56.31,
-  libavformat 58.29) and GStreamer 1.16 or later with GLib. Decode cost, larger pictures
-  and other codecs were not measured.
+  The cross build needs headers for FFmpeg 4.2 (libavcodec 58.54, libavutil 56.31,
+  libavformat 58.29), and for the GStreamer engine GStreamer 1.16 or later with GLib;
+  dmabuf-codec needs none of the device's. Decode cost, larger pictures and other codecs
+  were not measured.
 - Input was not tried on the board.
 - The cross-built a4l had no libcrypto, so it did not check the APK's signature.
 

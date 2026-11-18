@@ -38,10 +38,13 @@ namespace acl::media {
 // (gfx::SwFramePool) and yielded the same way: one copy, 8-bit 4:2:0 only.
 // ACL_HWDEC_DEVICE=none forces that path. The same holds for CodecDecoder.
 //
-// CodecDecoder has a second engine, GStreamer (media/gst_codec.h), which it
-// uses where FFmpeg has no hardware device: the highest-ranked installed
-// decoder for the codec, which on an embedded board is the SoC vendor's.
-// ACL_VIDEO_BACKEND=gst|ffmpeg picks an engine outright.
+// CodecDecoder has two more engines (media/codec_engine.h), which it uses
+// where FFmpeg has no hardware device. dmabuf-codec (media/dma_codec.h)
+// drives the device's decoder directly, over V4L2 or OpenMAX, and its frames
+// are the decoder's own buffers. GStreamer (media/gst_codec.h) is the
+// highest-ranked installed decoder for the codec, which on an embedded board
+// is the SoC vendor's. ACL_VIDEO_BACKEND=dma|gst|ffmpeg picks an engine
+// outright.
 class VideoDecoder {
  public:
   // Open `path` and set up hardware decode of its first video stream. nullptr +
