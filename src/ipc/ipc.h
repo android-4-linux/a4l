@@ -58,12 +58,15 @@ enum class MsgType : std::uint32_t {
 // refused as truncated. 2: PresentFrame planes, Input keysym, PresentState.
 // 3: PresentState.frames_seen. 4: the Video* messages. 5: audio as samples
 // in the datagram (AudioOpen and AudioWrite changed, AudioClose added).
-// 6: AudioLatency. 7: VideoRefused.
-inline constexpr std::uint32_t kProtocolVersion = 7;
+// 6: AudioLatency. 7: VideoRefused. 8: VideoFrame.buffer.
+inline constexpr std::uint32_t kProtocolVersion = 8;
 
 // Bounds both ends enforce on what the other sends.
 inline constexpr std::uint32_t kMaxSurfaceDim = 16384;
 inline constexpr std::uint32_t kMaxPlanes = 4;
+// The dma-bufs a video frame's planes may be spread over: what one datagram
+// carries.
+inline constexpr std::uint32_t kMaxVideoBuffers = 2;
 inline constexpr std::uint32_t kMaxModifiers = 256;
 inline constexpr std::size_t kMaxText = 60 * 1024;  // fits one datagram
 // A video rectangle's origin lies within this of the surface's, and its
@@ -131,8 +134,9 @@ struct VideoRect {
   std::int32_t x, y, w, h;
 };
 
-// One decoded frame for the video plane. Each is its own dma-buf; there are
-// no slots, and the broker keeps at most a few alive.
+// One decoded frame for the video plane. Each is its own dma-buf, or two
+// where the decoder keeps luma and chroma apart; there are no slots, and the
+// broker keeps at most a few alive.
 struct VideoFrame {
   std::uint32_t w, h;        // the decoded picture, not the surface
   std::uint32_t drm_format;  // fourcc: a YUV format the decoder produced
@@ -140,7 +144,10 @@ struct VideoFrame {
   std::uint64_t modifier;
   std::uint32_t stride[4], offset[4];
   VideoRect dest;  // where to show it, unless VideoBounds has said
-  // the dma-buf fd travels as SCM_RIGHTS ancillary data.
+  // Appended. Which of the descriptors sent with the message each plane is
+  // in: 0 the first, 1 the second. Plane 0 is in the first.
+  std::uint32_t buffer[4];
+  // the dma-buf fds travel as SCM_RIGHTS ancillary data.
 };
 
 struct FrameReleased {
@@ -224,7 +231,8 @@ struct Received {
   std::vector<std::byte> extra;  // extra_len bytes
   int fd0 =
       -1;  // first ancillary fd (dma-buf / shm / release-fence), -1 if none
-  int fd1 = -1;  // second ancillary fd (acquire-fence), -1 if none
+  // second ancillary fd (acquire-fence / a video frame's second dma-buf)
+  int fd1 = -1;
 };
 
 // A SEQPACKET endpoint. Owns its fd; move-only. Errors are reported via return

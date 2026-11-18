@@ -136,15 +136,16 @@ bool video_format_accepted(std::uint32_t drm_format) noexcept {
 }
 
 FrameVerdict check_video_frame(const ipc::VideoFrame& v,
-                               bool fd_present,
-                               const BufferFacts& facts,
+                               std::span<const BufferFacts> buffers,
                                const VideoLimits& limits) noexcept {
   if (!limits.have_surface)
     return FrameVerdict::NoSurface;
-  if (!fd_present)
+  if (buffers.empty())
     return FrameVerdict::NoBuffer;
-  if (!facts.is_dmabuf || facts.size == 0)
-    return FrameVerdict::NotDmabuf;
+  for (const BufferFacts& b : buffers) {
+    if (!b.is_dmabuf || b.size == 0)
+      return FrameVerdict::NotDmabuf;
+  }
 
   if (v.w == 0 || v.h == 0 || v.w > ipc::kMaxSurfaceDim ||
       v.h > ipc::kMaxSurfaceDim || !check_video_rect(v.dest))
@@ -157,27 +158,42 @@ FrameVerdict check_video_frame(const ipc::VideoFrame& v,
       limits.modifiers.end())
     return FrameVerdict::BadModifier;
 
-  // A picture the child converted: one plane of 32-bit pixels, laid out as
-  // an app frame is. More planes are a driver's auxiliary ones.
-  if (v.drm_format == kXbgr8888) {
-    if (v.plane_count < 1 || v.plane_count > ipc::kMaxPlanes)
+  // A picture the child converted is one plane of 32-bit pixels, laid out
+  // as an app frame is. The decoder's formats are two: luma, then
+  // interleaved chroma at half resolution each way. More are a driver's
+  // auxiliary planes.
+  const bool converted = v.drm_format == kXbgr8888;
+  if (v.plane_count < (converted ? 1u : 2u) || v.plane_count > ipc::kMaxPlanes)
+    return FrameVerdict::BadPlanes;
+
+  // Each plane is in a descriptor that came, plane 0 in the first, and no
+  // descriptor came that no plane is in.
+  if (buffers.size() > ipc::kMaxVideoBuffers || v.buffer[0] != 0)
+    return FrameVerdict::BadPlanes;
+  std::uint32_t named = 0;
+  for (std::uint32_t i = 0; i < v.plane_count; ++i) {
+    if (v.buffer[i] >= buffers.size())
       return FrameVerdict::BadPlanes;
+    named |= 1u << v.buffer[i];
+  }
+  if (named != (1u << buffers.size()) - 1)
+    return FrameVerdict::BadPlanes;
+  const auto size_of = [&](std::uint32_t plane) {
+    return buffers[v.buffer[plane]].size;
+  };
+
+  if (converted) {
     const std::uint64_t row = static_cast<std::uint64_t>(v.w) * kBytesPerPixel;
     if (v.stride[0] < row ||
         v.offset[0] + static_cast<std::uint64_t>(v.stride[0]) * v.h >
-            facts.size)
+            size_of(0))
       return FrameVerdict::BadLayout;
     for (std::uint32_t i = 1; i < v.plane_count; ++i) {
-      if (v.stride[i] == 0 || v.offset[i] >= facts.size)
+      if (v.stride[i] == 0 || v.offset[i] >= size_of(i))
         return FrameVerdict::BadPlanes;
     }
     return FrameVerdict::Ok;
   }
-
-  // The decoder's formats are two planes: luma, then interleaved chroma at
-  // half resolution each way. More are a driver's auxiliary planes.
-  if (v.plane_count < 2 || v.plane_count > ipc::kMaxPlanes)
-    return FrameVerdict::BadPlanes;
 
   // Every luma row and every chroma row fits its stride, and the last row
   // of each ends inside the buffer. 64-bit: stride is 32 bits and the
@@ -190,12 +206,12 @@ FrameVerdict check_video_frame(const ipc::VideoFrame& v,
   if (v.stride[0] < luma_row || v.stride[1] < chroma_row)
     return FrameVerdict::BadLayout;
   if (v.offset[0] + static_cast<std::uint64_t>(v.stride[0]) * v.h >
-          facts.size ||
+          size_of(0) ||
       v.offset[1] + static_cast<std::uint64_t>(v.stride[1]) * chroma_rows >
-          facts.size)
+          size_of(1))
     return FrameVerdict::BadLayout;
   for (std::uint32_t i = 2; i < v.plane_count; ++i) {
-    if (v.stride[i] == 0 || v.offset[i] >= facts.size)
+    if (v.stride[i] == 0 || v.offset[i] >= size_of(i))
       return FrameVerdict::BadPlanes;
   }
   return FrameVerdict::Ok;

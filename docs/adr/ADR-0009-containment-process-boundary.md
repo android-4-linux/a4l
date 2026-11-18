@@ -863,6 +863,16 @@ stand-in is not in this repository. The server advertised one modifier for ARGB8
   `view-window-resize` test runs with it in both modes under sway and fails on the graphics
   library from before the modifier change.
 - Not run on it: a real shell on a display, touch (as opposed to pointer) input, keys.
+- **A video frame in two dma-bufs (2026-11-18).** A decoder may keep luma in one buffer and
+  chroma in another. `VideoFrame` now says which of the datagram's two descriptors each plane
+  is in (`buffer[]`, protocol version 8); before, the child did not send such a frame. The
+  broker examines both descriptors, holds each plane to the size of the buffer it names, and
+  refuses a frame that names a descriptor that did not come or leaves one that came unnamed.
+  A frame in three buffers is still not sent.
+  - Checked by unit test and by the fuzz harness (a seed with two descriptors; 150 s of
+    mutation, about 2 million runs, no finding).
+  - Not seen on a screen: no decoder here that keeps two buffers has a compositor beside it.
+    The Pi 5's HEVC decoder is asked for one buffer since the same date.
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 

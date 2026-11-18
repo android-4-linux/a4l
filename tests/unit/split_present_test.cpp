@@ -80,6 +80,7 @@ struct World {
     std::uint64_t modifier;
     int x, y, dw, dh;
     char byte;
+    char byte1;  // first byte of the chroma's own buffer, 0 if it has none
   };
   std::vector<Video> video;
   std::vector<std::array<int, 4>> video_bounds;
@@ -235,21 +236,32 @@ class FakePresenter final : public wm::IPresenter {
         frame.planes[1].offset +
         static_cast<std::uint64_t>(frame.planes[1].stride) *
             ((frame.height + 1) / 2);
+    // The chroma's own buffer, where the frame has one.
+    char byte1 = 0;
+    std::uint64_t chroma_size = size;
+    bool file1 = true;
+    if (!frame.one_buffer()) {
+      struct stat st1{};
+      file1 = ::fstat(frame.plane_fd(1), &st1) == 0 && S_ISREG(st1.st_mode);
+      chroma_size = static_cast<std::uint64_t>(st1.st_size);
+      (void)!::pread(frame.plane_fd(1), &byte1, 1, 0);
+    }
     std::lock_guard<std::mutex> lock(world_.mu);
     // What must hold for any video frame that reaches the compositor.
-    if (!file || frame.drm_format != 0x3231564eu || frame.width == 0 ||
-        frame.height == 0 || frame.width > 16384 || frame.height > 16384 ||
-        frame.plane_count < 2 || frame.plane_count > 4 ||
+    if (!file || !file1 || frame.drm_format != 0x3231564eu ||
+        frame.width == 0 || frame.height == 0 || frame.width > 16384 ||
+        frame.height > 16384 || frame.plane_count < 2 ||
+        frame.plane_count > 4 ||
         (frame.modifier != 0 && frame.modifier != 0x0200000000401b03ull) ||
         frame.planes[0].stride < frame.width ||
         frame.planes[1].stride < (frame.width + 1) / 2 * 2 || luma_end > size ||
-        chroma_end > size || w <= 0 || h <= 0 || w > 65536 || h > 65536 ||
-        x < -65536 || x > 65536 || y < -65536 || y > 65536)
+        chroma_end > chroma_size || w <= 0 || h <= 0 || w > 65536 ||
+        h > 65536 || x < -65536 || x > 65536 || y < -65536 || y > 65536)
       ++world_.video_violations;
     world_.video.push_back({frame.width, frame.height, frame.drm_format,
                             frame.plane_count, frame.planes[1].stride,
                             frame.planes[1].offset, frame.modifier, x, y, w, h,
-                            byte});
+                            byte, byte1});
   }
   void hide_video() noexcept override {
     std::lock_guard<std::mutex> lock(world_.mu);
@@ -772,6 +784,101 @@ TEST_CASE("split: video frames cross to the broker's video plane", "[split]") {
   CHECK(w.video_bounds[1] == std::array<int, 4>{-640, 0, 2560, 1440});
   CHECK(w.video_bounds[2] == std::array<int, 4>{-640, 0, 2560, 1440});
   CHECK(w.video_violations == 0);
+}
+
+TEST_CASE("split: a video frame with a buffer per plane crosses with both",
+          "[split]") {
+  Rig rig;
+  auto p =
+      wm::split_presenter_open_on(rig.child, 1280, 800, "t", "a", {}, false);
+  REQUIRE(p != nullptr);
+  const int luma = buffer_fd('Y');
+  const int chroma = buffer_fd('C');
+  gfx::DmabufFrame f = video_of(luma);
+  f.planes[1].offset = 0;
+  f.planes[1].fd = chroma;
+  p->present_video(f, 0, 0, 640, 360);
+  // The same frame with the plane's descriptor a second name for the first
+  // buffer's: one buffer, one descriptor sent.
+  gfx::DmabufFrame same = video_of(luma);
+  same.planes[1].fd = luma;
+  p->present_video(same, 0, 0, 640, 360);
+  // Three buffers are more than a datagram carries: not sent at all.
+  const int third = buffer_fd('3');
+  gfx::DmabufFrame spread = f;
+  spread.plane_count = 3;
+  spread.planes[2].stride = 64;
+  spread.planes[2].fd = third;
+  p->present_video(spread, 0, 0, 640, 360);
+  ::close(luma);
+  ::close(chroma);
+  ::close(third);
+
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.video_frames == 2);
+  CHECK(stats.rejected == 0);
+  World& w = rig.world;
+  REQUIRE(w.video.size() == 2);
+  CHECK(w.video[0].byte == 'Y');
+  CHECK(w.video[0].byte1 == 'C');
+  CHECK(w.video[0].offset1 == 0);
+  CHECK(w.video[1].byte == 'Y');
+  CHECK(w.video[1].byte1 == 0);  // one buffer: no second was looked at
+  CHECK(w.video[1].offset1 == 640 * 360);
+  CHECK(w.video_violations == 0);
+}
+
+TEST_CASE("split: the broker checks each of a video frame's buffers",
+          "[split]") {
+  Rig rig;
+  const int luma = buffer_fd('Y');
+  // A second buffer of one page: room for the chroma of a 64x64 picture.
+  const int small = ::memfd_create("chroma", MFD_CLOEXEC);
+  REQUIRE(small >= 0);
+  REQUIRE(::ftruncate(small, 4096) == 0);
+  const int not_a_buffer = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+  REQUIRE(not_a_buffer >= 0);
+  auto p =
+      wm::split_presenter_open_on(rig.child, 1280, 800, "t", "a", {}, false);
+  REQUIRE(p != nullptr);
+  const auto video = [&](std::uint32_t side,
+                         const std::function<void(ipc::VideoFrame&)>& spoil,
+                         int fd1) {
+    ipc::Message m;
+    m.type = ipc::MsgType::VideoFrame;
+    ipc::VideoFrame& v = m.video;
+    v.w = v.h = side;
+    v.drm_format = 0x3231564e;
+    v.plane_count = 2;
+    v.stride[0] = v.stride[1] = side;
+    v.buffer[1] = 1;
+    v.dest = {0, 0, 640, 360};
+    spoil(v);
+    REQUIRE(rig.child.send(m, {}, luma, fd1));
+  };
+  const auto as_is = [](ipc::VideoFrame&) {};
+  video(64, as_is, small);                                // fits: 2048 of 4096
+  video(128, as_is, small);                               // 1: chroma is 8192
+  video(64, [](auto& v) { v.offset[1] = 2049; }, small);  // 2: a byte past
+  video(64, as_is, not_a_buffer);                         // 3
+  video(64, as_is, -1);                                // 4: names one not sent
+  video(64, [](auto& v) { v.buffer[1] = 0; }, small);  // 5: one not named
+  video(64, [](auto& v) { v.buffer[0] = 1; }, small);  // 6
+  ::close(luma);
+  ::close(small);
+  ::close(not_a_buffer);
+
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.video_frames == 1);
+  CHECK(stats.rejected == 6);
+  using V = wm::FrameVerdict;
+  const auto count = [&](V v) {
+    return stats.frame_verdicts[static_cast<std::size_t>(v)];
+  };
+  CHECK(count(V::BadLayout) == 2);
+  CHECK(count(V::NotDmabuf) == 1);
+  CHECK(count(V::BadPlanes) == 3);
+  CHECK(rig.world.video_violations == 0);
 }
 
 TEST_CASE("split: the child is told of a video format the compositor refuses",

@@ -342,11 +342,20 @@ ipc::VideoFrame good_video() {
 }
 constexpr wm::BufferFacts kVideoBuffer{true, 640ull * 360 * 3 / 2};
 
+// A frame with one descriptor, or none.
+FrameVerdict check_one(const ipc::VideoFrame& v,
+                       bool fd_present,
+                       const wm::BufferFacts& facts,
+                       const wm::VideoLimits& limits) {
+  return wm::check_video_frame(
+      v, std::span<const wm::BufferFacts>(&facts, fd_present ? 1 : 0), limits);
+}
+
 FrameVerdict check_video(const ipc::VideoFrame& v) {
   wm::VideoLimits l;
   l.have_surface = true;
   l.modifiers = kVideoAdvertised;
-  return wm::check_video_frame(v, true, kVideoBuffer, l);
+  return check_one(v, true, kVideoBuffer, l);
 }
 
 }  // namespace
@@ -396,32 +405,103 @@ TEST_CASE("validate: a converted video frame is one plane of pixels",
   l.have_surface = true;
   l.modifiers = kVideoAdvertised;
   CHECK(wm::video_format_accepted(kXb24));
-  CHECK(wm::check_video_frame(v, true, buffer, l) == FrameVerdict::Ok);
+  CHECK(check_one(v, true, buffer, l) == FrameVerdict::Ok);
 
   ipc::VideoFrame narrow = v;
   narrow.stride[0] = 1279;  // a row does not fit
-  CHECK(wm::check_video_frame(narrow, true, buffer, l) ==
-        FrameVerdict::BadLayout);
+  CHECK(check_one(narrow, true, buffer, l) == FrameVerdict::BadLayout);
   ipc::VideoFrame tall = v;
   tall.h = 241;  // the last row ends past the buffer
-  CHECK(wm::check_video_frame(tall, true, buffer, l) ==
-        FrameVerdict::BadLayout);
+  CHECK(check_one(tall, true, buffer, l) == FrameVerdict::BadLayout);
   ipc::VideoFrame late = v;
   late.offset[0] = 4;
-  CHECK(wm::check_video_frame(late, true, buffer, l) ==
-        FrameVerdict::BadLayout);
+  CHECK(check_one(late, true, buffer, l) == FrameVerdict::BadLayout);
   ipc::VideoFrame none = v;
   none.plane_count = 0;
-  CHECK(wm::check_video_frame(none, true, buffer, l) ==
-        FrameVerdict::BadPlanes);
+  CHECK(check_one(none, true, buffer, l) == FrameVerdict::BadPlanes);
   ipc::VideoFrame unlisted = v;
   unlisted.modifier = 0x33;
-  CHECK(wm::check_video_frame(unlisted, true, buffer, l) ==
-        FrameVerdict::BadModifier);
+  CHECK(check_one(unlisted, true, buffer, l) == FrameVerdict::BadModifier);
   wm::VideoLimits nothing = l;
   nothing.modifiers = {};
-  CHECK(wm::check_video_frame(v, true, buffer, nothing) ==
-        FrameVerdict::BadFormat);
+  CHECK(check_one(v, true, buffer, nothing) == FrameVerdict::BadFormat);
+}
+
+TEST_CASE("validate: a video frame's planes may be in two buffers",
+          "[split][validate]") {
+  using V = FrameVerdict;
+  wm::VideoLimits l;
+  l.have_surface = true;
+  l.modifiers = kVideoAdvertised;
+  // Luma in the first buffer, chroma at the start of the second, each
+  // buffer exactly its plane's size.
+  ipc::VideoFrame v = good_video();
+  v.offset[1] = 0;
+  v.buffer[1] = 1;
+  const wm::BufferFacts two[] = {{true, 640ull * 360}, {true, 640ull * 180}};
+  const auto check = [&](const ipc::VideoFrame& f,
+                         std::span<const wm::BufferFacts> b) {
+    return wm::check_video_frame(f, b, l);
+  };
+  CHECK(check(v, two) == V::Ok);
+
+  SECTION("each plane is held to its own buffer") {
+    // The chroma would fit the first buffer's size, were both as large.
+    const wm::BufferFacts short_chroma[] = {{true, 640ull * 360},
+                                            {true, 640ull * 180 - 1}};
+    CHECK(check(v, short_chroma) == V::BadLayout);
+    const wm::BufferFacts short_luma[] = {{true, 640ull * 360 - 1},
+                                          {true, 640ull * 180}};
+    CHECK(check(v, short_luma) == V::BadLayout);
+    // An offset that is right in one buffer is past the end of this one.
+    ipc::VideoFrame late = v;
+    late.offset[1] = 640 * 360;
+    CHECK(check(late, two) == V::BadLayout);
+    // A third plane starts inside the buffer it names.
+    ipc::VideoFrame aux = v;
+    aux.plane_count = 3;
+    aux.stride[2] = 64;
+    aux.offset[2] = 640 * 180;  // inside the first, past the second
+    CHECK(check(aux, two) == V::Ok);
+    aux.buffer[2] = 1;
+    CHECK(check(aux, two) == V::BadPlanes);
+  }
+  SECTION("both are dma-bufs") {
+    const wm::BufferFacts file[] = {{true, 640ull * 360}, {false, 1 << 20}};
+    CHECK(check(v, file) == V::NotDmabuf);
+    const wm::BufferFacts empty[] = {{true, 640ull * 360}, {true, 0}};
+    CHECK(check(v, empty) == V::NotDmabuf);
+  }
+  SECTION("planes name the descriptors that came, and all of them") {
+    // A second buffer named, one sent.
+    CHECK(check(v, std::span(two, 1)) == V::BadPlanes);
+    // Two sent, one used: the other is not passed on unexamined.
+    const wm::BufferFacts roomy[] = {{true, 640ull * 360 * 3 / 2},
+                                     {true, 640ull * 180}};
+    CHECK(check(good_video(), roomy) == V::BadPlanes);
+    ipc::VideoFrame swapped = v;
+    swapped.buffer[0] = 1;
+    swapped.buffer[1] = 0;
+    CHECK(check(swapped, two) == V::BadPlanes);
+    ipc::VideoFrame far = v;
+    far.buffer[1] = 2;
+    CHECK(check(far, two) == V::BadPlanes);
+    far.buffer[1] = 0xffffffffu;
+    CHECK(check(far, two) == V::BadPlanes);
+    // More than a datagram carries.
+    const wm::BufferFacts three[] = {
+        {true, 1 << 20}, {true, 1 << 20}, {true, 1 << 20}};
+    ipc::VideoFrame spread = v;
+    spread.plane_count = 3;
+    spread.stride[2] = 64;
+    spread.buffer[2] = 2;
+    CHECK(check(spread, three) == V::BadPlanes);
+  }
+  SECTION("a plane index beyond the count is not read") {
+    ipc::VideoFrame v2 = v;
+    v2.buffer[3] = 7;
+    CHECK(check(v2, two) == V::Ok);
+  }
 }
 
 TEST_CASE("validate: each way a video frame is refused", "[split][validate]") {
@@ -438,14 +518,10 @@ TEST_CASE("validate: each way a video frame is refused", "[split][validate]") {
   SECTION("no surface, no descriptor, not a dma-buf") {
     wm::VideoLimits none = ok;
     none.have_surface = false;
-    CHECK(wm::check_video_frame(good_video(), true, kVideoBuffer, none) ==
-          V::NoSurface);
-    CHECK(wm::check_video_frame(good_video(), false, kVideoBuffer, ok) ==
-          V::NoBuffer);
-    CHECK(wm::check_video_frame(good_video(), true, {false, 1 << 20}, ok) ==
-          V::NotDmabuf);
-    CHECK(wm::check_video_frame(good_video(), true, {true, 0}, ok) ==
-          V::NotDmabuf);
+    CHECK(check_one(good_video(), true, kVideoBuffer, none) == V::NoSurface);
+    CHECK(check_one(good_video(), false, kVideoBuffer, ok) == V::NoBuffer);
+    CHECK(check_one(good_video(), true, {false, 1 << 20}, ok) == V::NotDmabuf);
+    CHECK(check_one(good_video(), true, {true, 0}, ok) == V::NotDmabuf);
   }
   SECTION("size") {
     CHECK(with([](auto& v) { v.w = 0; }) == V::BadSize);
@@ -470,8 +546,7 @@ TEST_CASE("validate: each way a video frame is refused", "[split][validate]") {
     // linear included.
     wm::VideoLimits nothing = ok;
     nothing.modifiers = {};
-    CHECK(wm::check_video_frame(good_video(), true, kVideoBuffer, nothing) ==
-          V::BadFormat);
+    CHECK(check_one(good_video(), true, kVideoBuffer, nothing) == V::BadFormat);
   }
   SECTION("planes") {
     CHECK(with([](auto& v) { v.plane_count = 0; }) == V::BadPlanes);
