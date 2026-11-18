@@ -193,6 +193,11 @@ class Presenter final : public wm::IPresenter {
     if (::fstat(f.fd, &st) != 0 || !S_ISREG(st.st_mode))
       fail("a video frame's descriptor is not a buffer");
     const auto size = static_cast<std::uint64_t>(st.st_size);
+    // The chroma's buffer: the same one, or its own.
+    struct stat st1{};
+    if (::fstat(f.plane_fd(1), &st1) != 0 || !S_ISREG(st1.st_mode))
+      fail("a video frame's second descriptor is not a buffer");
+    const auto chroma_size = static_cast<std::uint64_t>(st1.st_size);
     if (f.width == 0 || f.height == 0 || f.width > ipc::kMaxSurfaceDim ||
         f.height > ipc::kMaxSurfaceDim)
       fail("a video frame has a size out of range");
@@ -221,7 +226,7 @@ class Presenter final : public wm::IPresenter {
       if (f.planes[1].stride < (f.width + 1) / 2 * 2 ||
           f.planes[1].offset + static_cast<std::uint64_t>(f.planes[1].stride) *
                                    ((f.height + 1) / 2) >
-              size)
+              chroma_size)
         fail("a video frame's chroma does not fit its buffer");
     }
     check_rect(x, y, w, h);

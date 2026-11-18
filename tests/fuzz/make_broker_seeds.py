@@ -53,12 +53,15 @@ def frame(w, h, slot=0, stride=None, offset=0, modifier=TILED, fmt=AR24,
 
 
 def video(w, h, fmt=NV12, modifier=0, planes=2, dest=None, stride=None,
-          chroma_offset=None):
+          chroma_offset=None, chroma_buffer=0):
+    # chroma_buffer 1: the chroma is in the second descriptor sent, at its start.
     stride = w if stride is None else stride
-    chroma_offset = stride * h if chroma_offset is None else chroma_offset
+    if chroma_offset is None:
+        chroma_offset = 0 if chroma_buffer else stride * h
     dest = (0, 0, w, h) if dest is None else dest
-    body = struct.pack("<IIIIQ4I4I4i", w, h, fmt, planes, modifier,
-                       stride, stride, 0, 0, 0, chroma_offset, 0, 0, *dest)
+    body = struct.pack("<IIIIQ4I4I4i4I", w, h, fmt, planes, modifier,
+                       stride, stride, 0, 0, 0, chroma_offset, 0, 0, *dest,
+                       0, chroma_buffer, 0, 0)
     return message(VIDEO_FRAME, body)
 
 
@@ -134,6 +137,20 @@ def seeds():
                             record(video(640, 360), 1, NULL) +
                             record(video(640, 360, dest=(0, 0, 0, 0)), 1) +
                             record(bounds(0, 0, -1, 0x7FFFFFFF)))
+    # A decoder with luma and chroma in a buffer each: two descriptors, the big one and
+    # the 4096-byte one. A 64x64 picture's chroma fits the second; the others do not, or
+    # do not say which plane is where.
+    yield "video-two-buffers", (
+        record(surface(1280, 800)) +
+        record(video(64, 64, chroma_buffer=1), 2) +
+        record(video(128, 128, chroma_buffer=1), 2) +
+        record(video(64, 64, chroma_buffer=1, chroma_offset=2049), 2) +
+        record(video(64, 64, chroma_buffer=1), 1) +
+        record(video(64, 64), 2) +
+        record(video(64, 64, chroma_buffer=2), 2) +
+        record(video(64, 64, chroma_buffer=1), 3) +
+        record(video(64, 64, chroma_buffer=1), 2, SMALL) +
+        record(message(VIDEO_HIDE)))
     # Converted video: the compositor takes XBGR8888 LINEAR on the video plane. A clip
     # played, with an auxiliary plane, after a decoder frame, then every way to get the
     # one-plane layout wrong.

@@ -403,18 +403,28 @@ class SplitPresenter final : public IPresenter {
     if (closed() || frame.fd < 0 || frame.plane_count == 0 ||
         frame.plane_count > ipc::kMaxPlanes)
       return;
-    // The datagram carries one descriptor and the broker checks one buffer.
-    // A frame with a buffer per plane is not sent as if it had one.
-    if (!frame.one_buffer()) {
-      if (!multi_buffer_told_.exchange(true))
-        log::w(kTag,
-               "video frames with a buffer per plane are not carried to the "
-               "broker; this video is not shown");
-      return;
-    }
     ipc::Message m;
     m.type = ipc::MsgType::VideoFrame;
     ipc::VideoFrame& v = m.video;
+    // A decoder may keep luma and chroma in a buffer each. The datagram
+    // carries two descriptors, and each plane says which it is in. A frame
+    // spread over more is not sent.
+    int second = -1;
+    for (std::uint32_t i = 0; i < frame.plane_count; ++i) {
+      const int fd = frame.plane_fd(i);
+      if (fd == frame.fd)
+        continue;
+      if (second >= 0 && fd != second) {
+        if (!multi_buffer_told_.exchange(true))
+          log::w(kTag,
+                 "video frames in more than {} buffers are not carried to "
+                 "the broker; this video is not shown",
+                 ipc::kMaxVideoBuffers);
+        return;
+      }
+      second = fd;
+      v.buffer[i] = 1;
+    }
     v.w = frame.width;
     v.h = frame.height;
     v.drm_format = frame.drm_format;
@@ -425,7 +435,7 @@ class SplitPresenter final : public IPresenter {
       v.offset[i] = frame.planes[i].offset;
     }
     v.dest = {x, y, w, h};
-    channel_.send(m, {}, frame.fd);
+    channel_.send(m, {}, frame.fd, second);
     // The broker and the compositor are told nothing of a decoder's surface
     // pool; the datagram carries only the descriptor. The surface is kept
     // here for as long as the broker may hold the frame on screen: the last
@@ -1042,21 +1052,28 @@ class Broker {
       }
       limits.modifiers = video_mods_;
     }
-    const BufferFacts facts = r.fd0 >= 0 && limits.have_surface
-                                  ? options_.inspect(r.fd0)
-                                  : BufferFacts{};
+    // Every descriptor that came is examined, and checked as the buffer of
+    // the planes said to be in it.
+    BufferFacts facts[ipc::kMaxVideoBuffers];
+    std::size_t buffers = 0;
+    for (const int fd : {r.fd0, r.fd1}) {
+      if (fd >= 0)
+        facts[buffers++] =
+            limits.have_surface ? options_.inspect(fd) : BufferFacts{};
+    }
     const FrameVerdict verdict =
-        check_video_frame(v, r.fd0 >= 0, facts, limits);
+        check_video_frame(v, std::span(facts, buffers), limits);
     if (verdict != FrameVerdict::Ok) {
       const auto i = static_cast<std::size_t>(verdict);
       if (stats_.frame_verdicts[i]++ == 0)
         log::w(kTag,
                "broker: refused a video frame from the app process: {} "
                "({}x{} format 0x{:x} modifier 0x{:x}, {} plane(s), strides "
-               "{}/{}, buffer of {} bytes); further ones of this kind are "
-               "counted, not logged",
+               "{}/{}, {} buffer(s) of {} and {} bytes); further ones of this "
+               "kind are counted, not logged",
                verdict_name(verdict), v.w, v.h, v.drm_format, v.modifier,
-               v.plane_count, v.stride[0], v.stride[1], facts.size);
+               v.plane_count, v.stride[0], v.stride[1], buffers, facts[0].size,
+               facts[1].size);
       ++stats_.rejected;
       // A format the compositor does not take is not the child's doing: say
       // so, once per format, and the child can send one it does take.
@@ -1082,10 +1099,12 @@ class Broker {
     for (std::uint32_t i = 0; i < v.plane_count; ++i) {
       fr.planes[i].stride = v.stride[i];
       fr.planes[i].offset = v.offset[i];
+      if (v.buffer[i] == 1)
+        fr.planes[i].fd = r.fd1;
     }
     fr.modifier = v.modifier;
     fr.drm_format = v.drm_format;
-    fr.mem_size = facts.size;
+    fr.mem_size = facts[0].size;
     fr.modifier_tiled = v.modifier != 0;
     presenter_->present_video(fr, v.dest.x, v.dest.y, v.dest.w, v.dest.h);
     // This is the presenter's own thread: show the frame now. A frame the

@@ -84,10 +84,11 @@ bool video_format_accepted(std::uint32_t drm_format) noexcept;
 // A video frame as the compositor would be asked to import it. Stricter on
 // the modifier than check_frame(): the pair of format and modifier must have
 // been advertised, linear included, because a compositor need not take YUV
-// at all.
+// at all. `buffers` is inspect_buffer() of each descriptor that arrived, in
+// order. Each plane is checked against the buffer the frame says it is in,
+// and a descriptor no plane is in is refused with the frame.
 FrameVerdict check_video_frame(const ipc::VideoFrame& frame,
-                               bool fd_present,
-                               const BufferFacts& facts,
+                               std::span<const BufferFacts> buffers,
                                const VideoLimits& limits) noexcept;
 
 // True if the rectangle has an area and lies within kMaxVideoCoord, so that
