@@ -93,6 +93,12 @@ class HardwareBuffer {
   void* lock(std::uint32_t* stride, std::string* error);
   void unlock();
 
+  // The process's one gbm device (a gbm_device*), for an allocator that needs
+  // a layout HbFormat does not have. *keep holds it open. nullptr + *error
+  // when the render node cannot be opened.
+  static void* shared_gbm_device(std::shared_ptr<void>* keep,
+                                 std::string* error);
+
  private:
   HardwareBuffer() = default;
 

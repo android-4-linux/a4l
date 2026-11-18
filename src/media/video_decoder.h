@@ -30,8 +30,13 @@ namespace acl::media {
 // (av_hwframe_map DIRECT, not a transfer/download). The caller ahb_import()s
 // the frame (which dups the fd) before requesting the next; the fd in `out` is
 // owned by the decoder and valid only until the next next_frame()/destruction.
-// FFmpeg is resolved at runtime; if it or a VAAPI device is unavailable, open()
-// returns nullptr + *error (callers SKIP, not fail).
+// FFmpeg is resolved at runtime; if it is unavailable, open() returns nullptr +
+// *error (callers SKIP, not fail).
+//
+// Where there is no hardware device, or the decoder returns its frames in
+// system memory, each frame is copied into an NV12 dma-buf
+// (gfx::SwFramePool) and yielded the same way: one copy, 8-bit 4:2:0 only.
+// ACL_HWDEC_DEVICE=none forces that path. The same holds for CodecDecoder.
 class VideoDecoder {
  public:
   // Open `path` and set up hardware decode of its first video stream. nullptr +

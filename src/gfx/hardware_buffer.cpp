@@ -81,6 +81,17 @@ std::shared_ptr<HardwareBuffer::Gbm> HardwareBuffer::shared_gbm(
   return g;
 }
 
+void* HardwareBuffer::shared_gbm_device(std::shared_ptr<void>* keep,
+                                        std::string* error) {
+  auto g = shared_gbm(error);
+  if (g == nullptr)
+    return nullptr;
+  gbm_device* dev = g->dev;
+  if (keep != nullptr)
+    *keep = std::move(g);
+  return dev;
+}
+
 std::unique_ptr<HardwareBuffer> HardwareBuffer::allocate(std::uint32_t width,
                                                          std::uint32_t height,
                                                          HbFormat format,
