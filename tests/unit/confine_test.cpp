@@ -441,3 +441,20 @@ TEST_CASE("seccomp: kill mode ends the process on a call off the list",
   CHECK(WTERMSIG(status) == SIGSYS);
 }
 #endif  // __x86_64__
+
+TEST_CASE("confine: only a video decoder's node is passed", "[confine]") {
+  using acl::confine::is_video_decoder;
+  using acl::confine::VideoNodeFacts;
+  // Compressed data in, memory to memory: a decoder.
+  CHECK(is_video_decoder({.m2m = true, .coded_input = true}));
+  // A camera or a tuner is not memory to memory, whatever it produces.
+  CHECK_FALSE(is_video_decoder({.m2m = false, .coded_input = true}));
+  CHECK_FALSE(is_video_decoder({}));
+  // An encoder and a scaler take raw pictures.
+  CHECK_FALSE(is_video_decoder({.m2m = true, .raw_input = true}));
+  // A device that takes both is more than a decoder.
+  CHECK_FALSE(
+      is_video_decoder({.m2m = true, .coded_input = true, .raw_input = true}));
+  // A node that listed no formats said nothing to go on.
+  CHECK_FALSE(is_video_decoder({.m2m = true}));
+}
