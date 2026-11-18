@@ -181,6 +181,20 @@ if py3.found() and have_gl and have_ffmpeg
       depends : [acl_exe],
       timeout : 300,
     )
+    # The same MediaCodec checks with GStreamer's installed decoder as the engine, the route to
+    # a hardware decoder FFmpeg does not reach. is_parallel off: the hardware decode tests
+    # fail one another when the machine is loaded.
+    if have_gst
+      test(
+        'media-codec-decode-gst',
+        py3,
+        args : [files('run_media_codec_test.py'), acl_exe, framework_android_jar],
+        depends : [acl_exe],
+        env : ['ACL_VIDEO_BACKEND=gst'],
+        is_parallel : false,
+        timeout : 300,
+      )
+    endif
     # Video across the --split boundary (ADR-0009 C3): a fixture app decodes an H.264 clip onto
     # a SurfaceView in the confined app process, and the test asserts the decoded frames reach
     # the broker's video plane with none refused. Starts a headless Weston for itself. Needs

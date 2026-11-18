@@ -13,6 +13,8 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstddef>
+#include <cstring>
 
 #include <drm_fourcc.h>
 #include <gbm.h>
@@ -234,6 +236,51 @@ bool SwFramePool::write(const std::function<void(const Mapped&)>& fill,
   *out = f;
   out->hold = std::move(hold);
   return true;
+}
+
+bool SwFramePool::write_420(const std::uint8_t* const planes[3],
+                            const int strides[3],
+                            bool nv12,
+                            DmabufFrame* out,
+                            std::string* error) {
+  const std::uint32_t w = width_;
+  const std::uint32_t h = height_;
+  const std::uint32_t cw = (w + 1) / 2;  // chroma samples per row
+  const std::uint32_t ch = (h + 1) / 2;  // chroma rows
+  const bool ok =
+      planes[0] != nullptr && planes[1] != nullptr &&
+      strides[0] >= static_cast<int>(w) &&
+      (nv12 ? strides[1] >= static_cast<int>(2 * cw)
+            : (planes[2] != nullptr && strides[1] >= static_cast<int>(cw) &&
+               strides[2] >= static_cast<int>(cw)));
+  if (!ok) {
+    if (error)
+      *error = "malformed software frame";
+    return false;
+  }
+  return write(
+      [&](const Mapped& m) {
+        for (std::uint32_t y = 0; y < h; ++y)
+          std::memcpy(m.y + static_cast<std::size_t>(y) * m.y_stride,
+                      planes[0] + static_cast<std::ptrdiff_t>(y) * strides[0],
+                      w);
+        for (std::uint32_t y = 0; y < ch; ++y) {
+          std::uint8_t* dst = m.uv + static_cast<std::size_t>(y) * m.uv_stride;
+          const std::uint8_t* u =
+              planes[1] + static_cast<std::ptrdiff_t>(y) * strides[1];
+          if (nv12) {
+            std::memcpy(dst, u, 2 * static_cast<std::size_t>(cw));
+            continue;
+          }
+          const std::uint8_t* v =
+              planes[2] + static_cast<std::ptrdiff_t>(y) * strides[2];
+          for (std::uint32_t x = 0; x < cw; ++x) {
+            dst[2 * x] = u[x];
+            dst[2 * x + 1] = v[x];
+          }
+        }
+      },
+      out, error);
 }
 
 }  // namespace acl::gfx

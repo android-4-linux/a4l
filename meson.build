@@ -82,6 +82,16 @@ ff_full = [
   dependency('libswresample', required : false),
 ]
 have_ffmpeg = ff_full[0].found() and ff_full[1].found() and ff_full[2].found() and ff_full[3].found()
+# GStreamer (LGPL-2.1-or-later, dynamic link): the video decoder where FFmpeg has no hardware
+# one. The highest-ranked installed decoder for the codec is used, so the SoC vendor's
+# decoder is reached with no vendor code here. Built only when all four libs are present.
+gst_full = [
+  dependency('gstreamer-1.0', version : '>=1.16', required : false),
+  dependency('gstreamer-app-1.0', required : false),
+  dependency('gstreamer-video-1.0', required : false),
+  dependency('gstreamer-allocators-1.0', required : false),
+]
+have_gst = gst_full[0].found() and gst_full[1].found() and gst_full[2].found() and gst_full[3].found()
 ff_dep = []
 if have_ffmpeg
   foreach d : ff_full
@@ -334,6 +344,7 @@ conf.set10('ACL_HAVE_JNI', have_jni)
 conf.set10('ACL_HAVE_PIPEWIRE', have_pipewire)
 conf.set10('ACL_HAVE_DRM_CXX', have_drm_cxx)
 conf.set10('ACL_HAVE_FFMPEG', have_ffmpeg)
+conf.set10('ACL_HAVE_GST', have_gst)
 conf.set10('ACL_HAVE_WCS', have_wcs)
 conf.set10('ACL_HAVE_SKIA', have_skia)
 conf.set10('ACL_HAVE_VULKAN', have_vulkan)
