@@ -42,6 +42,7 @@ constexpr std::size_t kMaxInFlightBytes = std::size_t{16} << 20;
 // A stream that keeps changing geometry before a frame comes out is not one
 // a decoder is going to settle on.
 constexpr int kMaxRebuildsWithoutFrame = 3;
+constexpr std::size_t kMaxSpare = 8;
 
 std::uint32_t fourcc_for_mime(const std::string& mime) {
   if (mime == "video/avc")
@@ -158,6 +159,7 @@ struct DmaCodec::Impl {
   std::vector<std::uint8_t> scratch;    // csd + access unit
   std::deque<Unit> in_flight;           // sent, frame not yet out
   std::size_t in_flight_bytes = 0;
+  std::vector<std::vector<std::uint8_t>> spare;  // buffers of units done
   std::deque<Unit> replay;      // to send to a replacement decoder
   bool change_pending = false;  // the stream outgrew the decoder
   int rebuilds_without_frame = 0;
@@ -171,21 +173,35 @@ struct DmaCodec::Impl {
     shared->dec = factory();
     return shared->dec != nullptr;
   }
+  // A unit's buffer is kept for the next unit: one is remembered for every
+  // frame, and allocating each would be the only allocation per frame here.
+  void recycle(Unit& u) {
+    in_flight_bytes -= u.data.size();
+    if (spare.size() < kMaxSpare)
+      spare.push_back(std::move(u.data));
+  }
   void remember(const std::uint8_t* data, std::size_t size, std::int64_t pts) {
     if (size > kMaxInFlightBytes)
       return;
-    in_flight.push_back(Unit{pts, {data, data + size}});
+    Unit u;
+    u.pts = pts;
+    if (!spare.empty()) {
+      u.data = std::move(spare.back());
+      spare.pop_back();
+    }
+    u.data.assign(data, data + size);
+    in_flight.push_back(std::move(u));
     in_flight_bytes += size;
     while (in_flight.size() > kMaxInFlight ||
            in_flight_bytes > kMaxInFlightBytes) {
-      in_flight_bytes -= in_flight.front().data.size();
+      recycle(in_flight.front());
       in_flight.pop_front();
     }
   }
   void forget(std::int64_t pts) {
     for (auto it = in_flight.begin(); it != in_flight.end(); ++it) {
       if (it->pts == pts) {
-        in_flight_bytes -= it->data.size();
+        recycle(*it);
         in_flight.erase(it);
         return;
       }
@@ -218,11 +234,16 @@ struct DmaCodec::Impl {
     change_pending = false;
     if (++rebuilds_without_frame > kMaxRebuildsWithoutFrame)
       return false;
-    log::i(kTag, "the stream changed geometry: new decoder, {} unit(s) resent",
-           in_flight.size());
-    replay = std::move(in_flight);
+    // In stream order: what the decoder took and did not finish, then what
+    // an earlier replacement was still owed.
+    std::deque<Unit> owed = std::move(in_flight);
+    for (Unit& u : replay)
+      owed.push_back(std::move(u));
+    replay = std::move(owed);
     in_flight.clear();
     in_flight_bytes = 0;
+    log::i(kTag, "the stream changed geometry: new decoder, {} unit(s) resent",
+           replay.size());
     csd_due = false;
     return rebuild();
   }
@@ -407,11 +428,22 @@ int DmaCodec::receive_frame(gfx::DmabufFrame* out,
     for (std::uint32_t i = 0; sane && i < f.num_planes; ++i)
       sane = f.pitches[i] > 0 &&
              (size <= 0 || f.offsets[i] < static_cast<std::uint64_t>(size));
+    // Linear NV12 is checked in full: a compositor that is handed rows its
+    // buffer does not hold ends the connection.
+    if (sane && f.drm_fourcc == V4L2_PIX_FMT_NV12 && f.modifier == 0) {
+      sane = f.num_planes == 2;
+      for (std::uint32_t i = 0; sane && i < 2; ++i) {
+        const std::uint64_t rows = i == 0 ? f.height : (f.height + 1) / 2;
+        sane = f.pitches[i] >= f.width &&
+               (size <= 0 || f.offsets[i] + f.pitches[i] * rows <=
+                                 static_cast<std::uint64_t>(size));
+      }
+    }
     const int fd = sane ? ::fcntl(f.fds[0], F_DUPFD_CLOEXEC, 0) : -1;
     if (fd < 0) {
       s->dec->Release(f.capture_index);
       return err(sane ? "out of file descriptors for a decoded frame"
-                      : "a decoded frame is not one dma-buf");
+                      : "a decoded frame is not one dma-buf it fits in");
     }
     frame.fd = fd;
     // An engine that reports its coded size (640x368 for a 640x360

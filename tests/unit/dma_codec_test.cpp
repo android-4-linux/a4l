@@ -47,6 +47,8 @@ struct World {
   std::vector<std::uint32_t> released;  // buffer indices returned
   bool change_on_next = false;          // the next unit outgrows the decoder
   bool split_planes = false;            // hand out a frame as two buffers
+  bool short_rows = false;              // claim more rows than the buffer has
+  std::string refuse_once;              // a unit one decoder cannot take
 };
 
 // One access unit in, one frame out, from a pool of kPool buffers. A unit is
@@ -76,6 +78,12 @@ class FakeDecoder final : public v4l2wc::IDmaDecoder {
                                        std::uint64_t timestamp) override {
     if (changed_)
       return v4l2wc::SubmitResult::kSourceChange;
+    if (!w_->refuse_once.empty() &&
+        w_->refuse_once == std::string(data, data + size)) {
+      w_->refuse_once.clear();
+      changed_ = true;
+      return v4l2wc::SubmitResult::kSourceChange;
+    }
     if (w_->change_on_next || change_queued_) {
       // As a stateful decoder does: the unit that outgrows it is taken, and
       // so is what follows, and none of it comes out. The change is reported
@@ -106,7 +114,7 @@ class FakeDecoder final : public v4l2wc::IDmaDecoder {
     out->timestamp = ready_.front().second;
     ready_.pop_front();
     out->width = kW;
-    out->height = kH;
+    out->height = w_->short_rows ? kH + 2 : kH;
     out->drm_fourcc = kNv12;
     out->num_planes = 2;
     out->fds[0] = fds_[out->capture_index];
@@ -304,6 +312,38 @@ TEST_CASE(
   std::string error;
   CHECK(codec->receive_frame(&f, nullptr, &error) == -1);
   CHECK_FALSE(error.empty());
+  CHECK(w.released == std::vector<std::uint32_t>{0});
+}
+
+TEST_CASE("DmaCodec: a replacement that is itself replaced loses nothing",
+          "[media][dma]") {
+  World w;
+  auto codec = make(&w);
+  REQUIRE(send(*codec, "a", 1) == 0);
+  w.change_on_next = true;
+  REQUIRE(send(*codec, "K", 2) == 0);
+  REQUIRE(send(*codec, "X", 3) == 0);
+  REQUIRE(send(*codec, "e", 4) == 0);
+  // The second decoder takes K and cannot take X; the third gets X and e.
+  w.refuse_once = "X";
+  gfx::DmabufFrame f;
+  std::int64_t pts = 0;
+  for (std::int64_t want = 1; want <= 4; ++want) {
+    REQUIRE(codec->receive_frame(&f, &pts, nullptr) == 1);
+    CHECK(pts == want);
+  }
+  CHECK(w.made == 3);
+  CHECK(w.alive == 1);
+}
+
+TEST_CASE("DmaCodec: a frame its buffer does not hold is refused",
+          "[media][dma]") {
+  World w;
+  w.short_rows = true;
+  auto codec = make(&w);
+  REQUIRE(send(*codec, "u", 1) == 0);
+  gfx::DmabufFrame f;
+  CHECK(codec->receive_frame(&f, nullptr, nullptr) == -1);
   CHECK(w.released == std::vector<std::uint32_t>{0});
 }
 
