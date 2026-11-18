@@ -10,12 +10,13 @@
 // with no copy.
 //
 // A decoder may keep a frame's planes in one buffer or in a buffer each; the
-// frame says which (gfx::DmabufFrame::plane_fd). One caution, measured on a
-// Pi 5: its HEVC decoder's default is a buffer each in Broadcom's column
-// format, and Mesa's V3D samples that with the luma's column height for both
-// planes, so chroma is wrong past the first 128-pixel column. The one-buffer
-// form of that format samples correctly, so configure() asks for one buffer
-// from a decoder that offers both.
+// frame says which (gfx::DmabufFrame::plane_fd), and both are shown.
+// configure() asks for one buffer from a decoder that offers both: half the
+// descriptors a frame.
+//
+// A Pi 5's HEVC decoder gives Broadcom's column format (SAND128): the
+// modifier with no height in it, and each plane's stride the height of its
+// columns in rows, not a row's bytes.
 
 #ifndef ACL_MEDIA_DMA_CODEC_H
 #define ACL_MEDIA_DMA_CODEC_H

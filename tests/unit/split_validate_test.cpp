@@ -504,6 +504,87 @@ TEST_CASE("validate: a video frame's planes may be in two buffers",
   }
 }
 
+TEST_CASE("validate: a column-format video frame is bounded by its columns",
+          "[split][validate]") {
+  using V = FrameVerdict;
+  // Broadcom SAND128, as a Pi 5's HEVC decoder gives a 640x360 picture: five
+  // columns 128 bytes wide, the stride a column's height in rows.
+  constexpr std::uint64_t kSand128 = 0x0700000000000004ull;
+  const std::vector<std::uint64_t> advertised = {0, kSand128};
+  wm::VideoLimits l;
+  l.have_surface = true;
+  l.modifiers = advertised;
+  const auto check = [&](const ipc::VideoFrame& f,
+                         std::span<const wm::BufferFacts> b) {
+    return wm::check_video_frame(f, b, l);
+  };
+
+  // One buffer: a column is 368 luma rows then 184 of chroma, 552 in all.
+  ipc::VideoFrame one = good_video();
+  one.modifier = kSand128;
+  one.stride[0] = one.stride[1] = 552;
+  one.offset[1] = 368 * 128;
+  const wm::BufferFacts whole[] = {{true, 552ull * 128 * 5}};
+  // 552 is less than the picture's width: read as a row's bytes, as a
+  // linear frame's stride is, it would be refused.
+  CHECK(check(one, whole) == V::Ok);
+  SECTION("one buffer") {
+    // The last column's chroma ends past a buffer four columns long.
+    const wm::BufferFacts four[] = {{true, 552ull * 128 * 4}};
+    CHECK(check(one, four) == V::BadLayout);
+    // The exact end: the last column's chroma rows, and one byte short.
+    const std::uint64_t end = 368 * 128 + 4 * 552ull * 128 + 180 * 128;
+    const wm::BufferFacts exact[] = {{true, end}};
+    CHECK(check(one, exact) == V::Ok);
+    const wm::BufferFacts shy[] = {{true, end - 1}};
+    CHECK(check(one, shy) == V::BadLayout);
+    // A column shorter than the plane's rows cannot hold them.
+    ipc::VideoFrame squat = one;
+    squat.stride[0] = 359;
+    CHECK(check(squat, whole) == V::BadLayout);
+    squat = one;
+    squat.stride[1] = 179;
+    CHECK(check(squat, whole) == V::BadLayout);
+    // A stride that would wrap 32 bits when multiplied out.
+    ipc::VideoFrame huge = one;
+    huge.stride[0] = 0xffffffffu;
+    CHECK(check(huge, whole) == V::BadLayout);
+    ipc::VideoFrame late = one;
+    late.offset[1] = 0xffffff00u;
+    CHECK(check(late, whole) == V::BadLayout);
+    // One column wider and the same buffer is a column short.
+    ipc::VideoFrame wide = one;
+    wide.w = 641;
+    CHECK(check(wide, whole) == V::BadLayout);
+  }
+  SECTION("a buffer per plane") {
+    ipc::VideoFrame two = one;
+    two.stride[0] = 360;
+    two.stride[1] = 180;
+    two.offset[1] = 0;
+    two.buffer[1] = 1;
+    const wm::BufferFacts both[] = {{true, 360ull * 128 * 5},
+                                    {true, 180ull * 128 * 5}};
+    CHECK(check(two, both) == V::Ok);
+    const wm::BufferFacts short_chroma[] = {{true, 360ull * 128 * 5},
+                                            {true, 180ull * 128 * 5 - 1}};
+    CHECK(check(two, short_chroma) == V::BadLayout);
+    const wm::BufferFacts short_luma[] = {{true, 360ull * 128 * 5 - 1},
+                                          {true, 180ull * 128 * 5}};
+    CHECK(check(two, short_luma) == V::BadLayout);
+  }
+  SECTION("only where the compositor lists it") {
+    wm::VideoLimits linear_only = l;
+    const std::vector<std::uint64_t> just_linear = {0};
+    linear_only.modifiers = just_linear;
+    CHECK(wm::check_video_frame(one, whole, linear_only) == V::BadModifier);
+    // The same modifier with a column height in it is another modifier.
+    ipc::VideoFrame param = one;
+    param.modifier = 0x0700000000022804ull;
+    CHECK(check(param, whole) == V::BadModifier);
+  }
+}
+
 TEST_CASE("validate: each way a video frame is refused", "[split][validate]") {
   using V = FrameVerdict;
   const auto with = [](auto spoil) {

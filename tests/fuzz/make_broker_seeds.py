@@ -24,6 +24,7 @@ AR24 = 0x34325241
 NV12 = 0x3231564E
 XB24 = 0x34324258
 TILED = 0x0200000000401B03
+SAND128 = 0x0700000000000004  # Broadcom's column format, no height in the modifier
 BIG, SMALL, NULL = 0, 1, 2  # descriptor kinds, in the harness's order
 
 
@@ -62,6 +63,14 @@ def video(w, h, fmt=NV12, modifier=0, planes=2, dest=None, stride=None,
     body = struct.pack("<IIIIQ4I4I4i4I", w, h, fmt, planes, modifier,
                        stride, stride, 0, 0, 0, chroma_offset, 0, 0, *dest,
                        0, chroma_buffer, 0, 0)
+    return message(VIDEO_FRAME, body)
+
+
+def sand_two(w, h, luma_rows, chroma_rows):
+    # A column-format frame with a buffer per plane, each plane at its buffer's start.
+    body = struct.pack("<IIIIQ4I4I4i4I", w, h, NV12, 2, SAND128,
+                       luma_rows, chroma_rows, 0, 0, 0, 0, 0, 0, 0, 0, w, h,
+                       0, 1, 0, 0)
     return message(VIDEO_FRAME, body)
 
 
@@ -150,6 +159,22 @@ def seeds():
         record(video(64, 64, chroma_buffer=2), 2) +
         record(video(64, 64, chroma_buffer=1), 3) +
         record(video(64, 64, chroma_buffer=1), 2, SMALL) +
+        record(message(VIDEO_HIDE)))
+    # Broadcom's column format, as a Pi 5's HEVC decoder gives it: the stride is a column's
+    # height in rows. 640x360 in one buffer (552-row columns, chroma 368 rows down), a
+    # buffer per plane with the chroma in the 4096-byte descriptor (64x64: one column of 32
+    # rows), then frames whose columns do not fit.
+    yield "video-sand", (
+        record(surface(1280, 800)) +
+        record(video(640, 360, modifier=SAND128, stride=552, chroma_offset=368 * 128), 1) +
+        record(sand_two(64, 64, 64, 32), 2) +
+        record(video(640, 360, modifier=SAND128, stride=359, chroma_offset=368 * 128), 1) +
+        record(video(640, 360, modifier=SAND128, stride=0xFFFFFFFF, chroma_offset=0), 1) +
+        record(video(640, 360, modifier=SAND128, stride=552, chroma_offset=0xFFFFFF00), 1) +
+        record(video(16384, 360, modifier=SAND128, stride=552, chroma_offset=368 * 128), 1) +
+        record(sand_two(128, 128, 128, 64), 2) +
+        record(video(640, 360, modifier=SAND128 | (552 << 8), stride=552,
+                     chroma_offset=368 * 128), 1) +
         record(message(VIDEO_HIDE)))
     # Converted video: the compositor takes XBGR8888 LINEAR on the video plane. A clip
     # played, with an auxiliary plane, after a decoder frame, then every way to get the

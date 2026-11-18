@@ -55,6 +55,7 @@ namespace {
 
 constexpr std::uint32_t kNv12 = 0x3231564eu;      // 'NV12'
 constexpr std::uint32_t kXbgr8888 = 0x34324258u;  // 'XB24'
+constexpr std::uint64_t kSand128 = 0x0700000000000004ull;
 
 const std::vector<std::uint64_t> kModifiers = {0x11, 0x0200000000401b03ull};
 
@@ -174,12 +175,13 @@ class Presenter final : public wm::IPresenter {
     *height = half.h;
     return true;
   }
-  // The video plane: NV12 is advertised with two modifiers, XBGR8888 (what
-  // the child converts to) LINEAR only, P010 not at all.
+  // The video plane: NV12 is advertised linear, with one tiled modifier and
+  // in Broadcom's column format; XBGR8888 (what the child converts to)
+  // LINEAR only, P010 not at all.
   std::vector<std::uint64_t> modifiers_for(
       std::uint32_t drm_format) const noexcept override {
     if (drm_format == kNv12)
-      return {0, 0x0200000000401b03ull};
+      return {0, 0x0200000000401b03ull, kSand128};
     if (drm_format == kXbgr8888)
       return {0};
     return {};
@@ -213,6 +215,24 @@ class Presenter final : public wm::IPresenter {
                   static_cast<std::uint64_t>(f.planes[0].stride) * f.height >
               size)
         fail("a converted frame's pixels do not fit its buffer");
+    } else if (f.modifier == kSand128) {
+      // Columns 128 bytes wide; the stride is a column's height in rows.
+      // Every column of each plane is walked: its rows end in the buffer.
+      if (f.plane_count < 2 || f.plane_count > 4)
+        fail("a column-format frame has a bad plane count");
+      for (std::uint32_t i = 0; i < 2; ++i) {
+        const std::uint64_t rows = i == 0 ? f.height : (f.height + 1) / 2;
+        const std::uint64_t held = i == 0 ? size : chroma_size;
+        if (f.planes[i].stride < rows)
+          fail("a column is shorter than the plane's rows");
+        for (std::uint64_t x = 0; x < f.width; x += 128) {
+          const std::uint64_t column =
+              f.planes[i].offset +
+              (x / 128) * static_cast<std::uint64_t>(f.planes[i].stride) * 128;
+          if (column + rows * 128 > held)
+            fail("a column-format frame's rows do not fit its buffer");
+        }
+      }
     } else {
       if (f.modifier != 0 && f.modifier != 0x0200000000401b03ull)
         fail("a video frame has a modifier that was not advertised");
