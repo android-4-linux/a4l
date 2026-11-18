@@ -316,6 +316,10 @@ std::unique_ptr<DmaCodec> DmaCodec::configure(const std::string& mime,
         config.v4l2_device = m2m.empty() ? nullptr : m2m.c_str();
         config.v4l2_hevc_device =
             stateless.empty() ? nullptr : stateless.c_str();
+        // One buffer where the decoder has the choice: it is the layout
+        // Mesa samples correctly on a Pi 5 (see dma_codec.h), and the one
+        // a split present can carry.
+        config.one_buffer_frames = true;
         return v4l2wc::CreateDmaDecoder(config);
       },
       csd, csd_size, error);
