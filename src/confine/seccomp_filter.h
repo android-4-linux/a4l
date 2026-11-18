@@ -12,7 +12,8 @@
 //   socket  AF_UNIX, AF_INET, AF_INET6 and AF_NETLINK only
 //   ioctl   not TIOCSTI, not TIOCLINUX
 //
-// x86-64 only: the list is per-architecture and has been recorded on one.
+// The list is per-architecture: x86-64 and arm64 each have one, recorded on
+// that architecture (seccomp_allow_*.inc).
 #ifndef ACL_CONFINE_SECCOMP_FILTER_H
 #define ACL_CONFINE_SECCOMP_FILTER_H
 

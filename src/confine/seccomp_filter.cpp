@@ -142,6 +142,10 @@ const std::vector<int>& allowed_syscalls() {
 #define ACL_SYSCALL(name) SYS_##name,
 #include "confine/seccomp_allow_x86_64.inc"
 #undef ACL_SYSCALL
+#elif defined(__aarch64__)
+#define ACL_SYSCALL(name) SYS_##name,
+#include "confine/seccomp_allow_aarch64.inc"
+#undef ACL_SYSCALL
 #endif
     };
     std::sort(v.begin(), v.end());

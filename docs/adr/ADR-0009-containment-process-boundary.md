@@ -165,7 +165,21 @@ Not covered, and what keeps C4 from being the last word:
   input to a terminal (`TIOCSTI` and `TIOCLINUX` are refused, and it has its own session), but
   it can print escape sequences and change terminal settings.
 - **Landlock is not used.** Decision 2 allows either; this is the namespace form.
-- **arm64** has no system call list and no split child that renders.
+- **arm64 (2026-11-18).** Has a system call list of its own, recorded on a Raspberry Pi 5
+  from five APKs (`src/confine/seccomp_allow_aarch64.inc`): 87 calls recorded there, 11 that
+  only x86-64's larger corpus made, 53 added in review. Its corpus is smaller: no app with
+  native code runs on arm64 yet. On the Pi the video fixture plays confined with the filter
+  in `kill` mode, HEVC through the board's hardware decoder, and so do a Java-only app and
+  the GLSurfaceView fixture.
+- **Hardware video decoders (2026-11-18).** A decoder that is its own device (V4L2, on Arm
+  boards) is reached by its node, as the GPU is. The sandbox is given each `/dev/video*` that
+  says it is a decoder and nothing else (memory to memory, compressed input only) and the
+  media controller of the same driver; cameras, encoders and converters in the same directory
+  are not passed. It is one more kernel driver the app process can reach. Without it the Pi's
+  confined app decoded in software.
+- **`/sys/devices/system/cpu`** is visible, read-only (2026-11-18). With it hidden, GStreamer
+  scanning its plugins in the app process (its scanner is a program, and the filter refuses
+  `execve`) loaded a plugin that aborted for want of it.
 
 **C3 as built (x86-64, 2026-11-14): native GL.** Single-process, Mesa's Wayland platform does
 three things inside `eglSwapBuffers`: it hands the finished buffer to the compositor, takes back
