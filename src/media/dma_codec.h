@@ -14,7 +14,8 @@
 // Pi 5: its HEVC decoder's default is a buffer each in Broadcom's column
 // format, and Mesa's V3D samples that with the luma's column height for both
 // planes, so chroma is wrong past the first 128-pixel column. The one-buffer
-// form of that format samples correctly.
+// form of that format samples correctly, so configure() asks for one buffer
+// from a decoder that offers both.
 
 #ifndef ACL_MEDIA_DMA_CODEC_H
 #define ACL_MEDIA_DMA_CODEC_H
