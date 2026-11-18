@@ -607,6 +607,7 @@ bool supplement_media_jni(JNIEnv* env, const std::string& path) {
 #endif
 }
 
+#if ACL_HAVE_GL
 // Runtime.nativeLoad where there is no bionic loader (ACL_BIONIC_LINKER
 // unset, as on arm64): media_jni is supplemented as above and every other
 // library goes to ART's own loader, unchanged.
@@ -626,6 +627,7 @@ jstring JNICALL supplement_native_load(JNIEnv* env,
     return nullptr;
   return g_art_native_load(env, jpath, loader, caller);
 }
+#endif  // ACL_HAVE_GL
 
 // Override of java.lang.Runtime.nativeLoad(String absPath, ClassLoader, Class
 // caller): returns null on success, an error String otherwise (the libcore
