@@ -159,6 +159,16 @@ if py3.found() and have_gl and have_ffmpeg
     depends : [video_decode_probe],
     timeout : 120,
   )
+  # The same checks with no hardware device, so the decoder returns frames in system memory
+  # and each is copied into an NV12 dma-buf (gfx::SwFramePool). Needs a render node for gbm.
+  test(
+    'video-decode-software',
+    py3,
+    args : [files('run_video_decode_test.py'), video_decode_probe],
+    depends : [video_decode_probe],
+    env : ['ACL_HWDEC_DEVICE=none'],
+    timeout : 120,
+  )
   # android.media.MediaCodec native underside end-to-end ([[flutter-texture-bridge]] M5): a real
   # MediaCodec decodes H.264 into an ImageReader Surface via acl's zero-copy CodecDecoder (the path
   # video_player_android drives). Needs the vendored framework (run-apk.sh) + the AOSP toolchain +

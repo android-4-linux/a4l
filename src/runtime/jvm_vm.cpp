@@ -573,6 +573,62 @@ acl::ndk::BionicRuntime* ensure_ndk_rt() {
   return rt;
 }
 
+// acl supplements a framework native lib the host build omits.
+// android.media.ImageReader's <clinit> does loadLibrary("media_jni") then
+// nativeClassInit(); there is no host libmedia_jni.so, so satisfy the load by
+// registering acl's natives and reporting success, which is what the real
+// lib's JNI_OnLoad would do before <clinit> calls nativeClassInit. True when
+// `path` was that library.
+bool supplement_media_jni(JNIEnv* env, const std::string& path) {
+#if ACL_HAVE_GL
+  if (path.find("libmedia_jni.so") == std::string::npos)
+    return false;
+  // Every caller registers all three. ImageReader, MediaCodec and
+  // MediaCodecList each load the library from their class initializer, on
+  // whichever thread first touches them, and registering a class's natives
+  // waits for that class to initialize: doing it once behind a lock has one
+  // thread hold the lock and wait for a class whose initializer is waiting
+  // for the lock. Registering again is harmless and takes well under a
+  // millisecond, as long as nothing slow hides in it (see codecs() in
+  // media_codec_list_jni.cpp).
+  register_image_reader_natives(env);
+  // MediaCodec sync decode -> Surface over CodecDecoder (M5)
+  register_media_codec_natives(env);
+  // MediaCodecList: advertise acl's decoder (ExoPlayer gate)
+  register_media_codec_list_natives(env);
+  log::i(kTag,
+         "loadLibrary(media_jni): registered acl ImageReader + MediaCodec + "
+         "MediaCodecList natives");
+  return true;
+#else
+  (void)env;
+  (void)path;
+  return false;
+#endif
+}
+
+#if ACL_HAVE_GL
+// Runtime.nativeLoad where there is no bionic loader (ACL_BIONIC_LINKER
+// unset, as on arm64): media_jni is supplemented as above and every other
+// library goes to ART's own loader, unchanged.
+using JvmNativeLoadFn = jstring (*)(JNIEnv*, jstring, jobject, jclass);
+JvmNativeLoadFn g_art_native_load = nullptr;
+
+jstring JNICALL supplement_native_load(JNIEnv* env,
+                                       jclass,
+                                       jstring jpath,
+                                       jobject loader,
+                                       jclass caller) {
+  const char* c = jpath ? env->GetStringUTFChars(jpath, nullptr) : nullptr;
+  const std::string path = c ? c : "";
+  if (c)
+    env->ReleaseStringUTFChars(jpath, c);
+  if (supplement_media_jni(env, path))
+    return nullptr;
+  return g_art_native_load(env, jpath, loader, caller);
+}
+#endif  // ACL_HAVE_GL
+
 // Override of java.lang.Runtime.nativeLoad(String absPath, ClassLoader, Class
 // caller): returns null on success, an error String otherwise (the libcore
 // contract). `caller` is the class whose System.loadLibrary triggered the load
@@ -629,33 +685,8 @@ jstring JNICALL ndk_native_load(JNIEnv* env,
              bound);
     return nullptr;
   }
-#if ACL_HAVE_GL
-  // acl supplements framework native libs the host build omits.
-  // android.media.ImageReader's <clinit> does loadLibrary("media_jni") then
-  // nativeClassInit(); there is no host libmedia_jni.so, so satisfy the load by
-  // registering acl's ImageReader natives (over gfx::BufferQueue) and reporting
-  // success — exactly what the real lib's JNI_OnLoad would do, before <clinit>
-  // calls nativeClassInit.
-  if (path.find("libmedia_jni.so") != std::string::npos) {
-    // Every caller registers all three. ImageReader, MediaCodec and
-    // MediaCodecList each load the library from their class initializer, on
-    // whichever thread first touches them, and registering a class's natives
-    // waits for that class to initialize: doing it once behind a lock has
-    // one thread hold the lock and wait for a class whose initializer is
-    // waiting for the lock. Registering again is harmless and takes well
-    // under a millisecond, as long as nothing slow hides in it (see codecs()
-    // in media_codec_list_jni.cpp).
-    register_image_reader_natives(env);
-    register_media_codec_natives(
-        env);  // MediaCodec sync decode -> Surface over CodecDecoder (M5)
-    register_media_codec_list_natives(
-        env);  // MediaCodecList: advertise acl's HW decoder (ExoPlayer gate)
-    log::i(kTag,
-           "loadLibrary(media_jni): registered acl ImageReader + MediaCodec + "
-           "MediaCodecList natives");
+  if (supplement_media_jni(env, path))
     return nullptr;
-  }
-#endif
   // Not a bionic app lib: a glibc/system lib (acl's own soundpool, or an ART
   // system lib like conscrypt's libjavacrypto that a boot class loads). ART
   // resolves a bare library NAME within its own namespaces' search paths; our
@@ -7205,11 +7236,45 @@ class ArtVm final : public JniVm {
   // NDK-loading path if configured (ACL_BIONIC_LINKER set). No-op otherwise, so
   // default runs keep ART's own nativeLoad. See ndk_native_load above +
   // docs/ndk-scope.md.
+  // Without the bionic loader ART keeps its own nativeLoad, except that the
+  // media classes still need the natives acl has in place of libmedia_jni.
+  // JVM_NativeLoad is what ART's nativeLoad calls; with no such symbol
+  // nothing is changed.
+  void register_supplement_native_load(JNIEnv* env) {
+#if ACL_HAVE_JNI && ACL_HAVE_GL
+    void* fn = ::dlsym(RTLD_DEFAULT, "JVM_NativeLoad");
+    if (fn == nullptr) {
+      if (void* h = ::dlopen("libopenjdkjvm.so", RTLD_NOW | RTLD_NOLOAD))
+        fn = ::dlsym(h, "JVM_NativeLoad");
+    }
+    if (fn == nullptr)
+      return;
+    g_art_native_load = reinterpret_cast<JvmNativeLoadFn>(fn);
+    if (jclass c = env->FindClass("java/lang/Runtime")) {
+      JNINativeMethod m[] = {
+          {const_cast<char*>("nativeLoad"),
+           const_cast<char*>("(Ljava/lang/String;Ljava/lang/ClassLoader;Ljava/"
+                             "lang/Class;)Ljava/lang/String;"),
+           reinterpret_cast<void*>(&supplement_native_load)},
+      };
+      if (env->RegisterNatives(c, m, 1) != JNI_OK)
+        env->ExceptionClear();
+      env->DeleteLocalRef(c);
+    } else {
+      env->ExceptionClear();
+    }
+#else
+    (void)env;
+#endif
+  }
+
   void register_ndk_loadlibrary_override(JNIEnv* env) {
 #if ACL_HAVE_JNI
     const char* linker = std::getenv("ACL_BIONIC_LINKER");
-    if (linker == nullptr || *linker == '\0')
+    if (linker == nullptr || *linker == '\0') {
+      register_supplement_native_load(env);
       return;
+    }
     // Validate the config now (report a bad env at boot), but DON'T bootstrap
     // the bionic linker yet — bootstrapping is deferred to the first bionic .so
     // (ensure_ndk_rt), so it happens after load_system_resources rather than

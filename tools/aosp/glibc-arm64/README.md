@@ -191,9 +191,21 @@ glibc, which is the case this was built for.
   3,710,976 bytes, the compressed size. So compressed window buffers on this board need
   an EGL window: see `ACL_PRESENT_EGL` below. The swapchain is MAILBOX where the driver has it (it does here: p50
   16.6 ms, p99 21.6 ms over 360 presents), since a4l paces frames itself. Its composite
-  alpha on the board is opaque, so a video hole would not show through; no video was
-  run there. On x86-64 (Mesa) a resize, video on a subsurface and WebView all work in
-  this mode.
+  alpha on the board is opaque, so a video hole does not show through: the video
+  fixture's picture area was black in this mode (see the video bullet). On x86-64 (Mesa)
+  a resize, video on a subsurface and WebView all work in this mode.
+- Video on the board is decoded in software. The board's FFmpeg is 4.2 (the cross build
+  needs its headers: libavcodec 58.54, libavutil 56.31, libavformat 58.29) and has no
+  decoder that returns a dma-buf, so the `h264` decoder's frames are each copied into an
+  NV12 dma-buf from gbm and go to the video subsurface from there. The video fixture
+  (`tests/fixtures/video_plane`, 640x360 H.264 at 30 frames a second) showed a correct
+  picture in the default mode and with `ACL_PRESENT_EGL=1`, 151 frames each, the window
+  at p50 16.7 ms. With `ACL_PRESENT_SWAPCHAIN=1` the video is hidden behind the opaque
+  window. The hardware decoder (`msm_vidc`, `/dev/video32`) was not reached: FFmpeg's
+  `h264_v4l2m2m` finds the device and fails to configure it, and the vendor's route to it
+  is OpenMAX, which a4l has no client for. Two of six runs exited about 15 s late through
+  the fixture's own timeout with every frame shown; the cause was not found. Decode cost
+  and larger pictures were not measured.
 - Input was not tried on the board.
 - The cross-built a4l had no libcrypto, so it did not check the APK's signature.
 

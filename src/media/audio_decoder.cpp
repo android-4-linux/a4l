@@ -26,6 +26,11 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 }
 
+// AVChannelLayout replaced the channel count fields in libavutil 57.28
+// (FFmpeg 5.1). Older libraries, as on a board with FFmpeg 4, have only the
+// count.
+#define ACL_FF_CH_LAYOUT (LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100))
+
 #include "log/log.h"
 
 namespace acl::media {
@@ -45,7 +50,9 @@ struct Ff {
   FF_FN(av_packet_alloc);
   FF_FN(av_packet_free);
   FF_FN(av_packet_unref);
+#if ACL_FF_CH_LAYOUT
   FF_FN(av_channel_layout_default);
+#endif
   FF_FN(avcodec_find_decoder);
   FF_FN(avcodec_alloc_context3);
   FF_FN(avcodec_open2);
@@ -94,7 +101,9 @@ const Ff& ffmpeg() {
     FF_BIND(av_packet_alloc);
     FF_BIND(av_packet_free);
     FF_BIND(av_packet_unref);
+#if ACL_FF_CH_LAYOUT
     FF_BIND(av_channel_layout_default);
+#endif
     FF_BIND(avcodec_find_decoder);
     FF_BIND(avcodec_alloc_context3);
     FF_BIND(avcodec_open2);
@@ -330,8 +339,13 @@ std::unique_ptr<AudioDecoder> AudioDecoder::configure(const Config& config,
   }
   if (config.sample_rate > 0)
     d.ctx->sample_rate = config.sample_rate;
+#if ACL_FF_CH_LAYOUT
   if (config.channels > 0)
     ff.av_channel_layout_default(&d.ctx->ch_layout, config.channels);
+#else
+  if (config.channels > 0)
+    d.ctx->channels = config.channels;
+#endif
   if (!extra.empty()) {
     // FFmpeg reads past the end by design and wants zeroed padding there.
     auto* mem = static_cast<std::uint8_t*>(
@@ -425,7 +439,11 @@ AudioDecoder::Result AudioDecoder::receive(Frame* out, std::string* error) {
     }
     const AVFrame& f = *d.frame;
     const auto fmt = static_cast<AVSampleFormat>(f.format);
+#if ACL_FF_CH_LAYOUT
     const int channels = f.ch_layout.nb_channels;
+#else
+    const int channels = f.channels;
+#endif
     const int samples = f.nb_samples;
     // What the stream says about itself is checked before it sizes anything.
     if (!convertible(fmt) || channels < 1 ||

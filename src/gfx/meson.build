@@ -34,6 +34,8 @@ if have_gl
   # HardwareBuffer: a gbm_bo exported as a dma-buf (gfx::DmabufFrame) — the zero-copy graphics
   # buffer under Flutter's external-texture path and android.hardware.HardwareBuffer.
   gfx_sources += files('hardware_buffer.cpp')
+  # SwFramePool: NV12 dma-bufs a software video decoder's frames are copied into.
+  gfx_sources += files('sw_frame_pool.cpp')
   # AHardwareBuffer representation + the EGL_NATIVE_BUFFER_ANDROID -> EGL_LINUX_DMA_BUF_EXT
   # translation the engine's texture import needs (M2).
   gfx_sources += files('ahardware_buffer.cpp')

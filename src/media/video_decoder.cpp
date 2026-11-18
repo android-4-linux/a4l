@@ -28,6 +28,7 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 }
 
+#include "gfx/sw_frame_pool.h"
 #include "log/log.h"
 
 namespace acl::media {
@@ -144,7 +145,7 @@ bool load_ffmpeg() {
 #undef FF_BIND
   g_ff.ok = all;
   log::i(kTag, "FFmpeg video decode {}",
-         all ? "ready (VAAPI, RTLD_LOCAL)" : "unavailable");
+         all ? "ready (RTLD_LOCAL)" : "unavailable");
   return all;
 }
 
@@ -166,8 +167,9 @@ enum AVPixelFormat get_hw_format(AVCodecContext* ctx,
 // avcodec_get_hw_config; ACL_HWDEC_DEVICE overrides the device type. On a
 // match, sets ctx->hw_device_ctx + get_format and returns the device in
 // *hw_dev. A named vendor M2M decoder (rkmpp/v4l2m2m) may match none — it
-// self-produces DRM_PRIME, so leaving no hwdevice is valid. Returns false only
-// on a device-create failure.
+// self-produces DRM_PRIME, so leaving no hwdevice is valid. So is a decoder
+// with no device at all: its frames are in system memory and are copied
+// (sw_to_dmabuf). Always returns true.
 bool configure_hw_decode(AVCodecContext* ctx,
                          const AVCodec* codec,
                          AVBufferRef** hw_dev) {
@@ -196,9 +198,16 @@ bool configure_hw_decode(AVCodecContext* ctx,
   }
   if (hw_type != AV_HWDEVICE_TYPE_NONE) {
     const char* node = std::getenv("ACL_DRM_RENDER_NODE");
-    if (g_ff.av_hwdevice_ctx_create(
-            hw_dev, hw_type, (node && *node) ? node : nullptr, nullptr, 0) < 0)
-      return false;
+    if (g_ff.av_hwdevice_ctx_create(hw_dev, hw_type,
+                                    (node && *node) ? node : nullptr, nullptr,
+                                    0) < 0) {
+      // No such device here (no VAAPI driver, no render node). The decoder
+      // still decodes, into system memory; sw_to_dmabuf copies each frame.
+      *hw_dev = nullptr;
+      log::w(kTag, "no {} device; decoding {} in software",
+             g_ff.av_hwdevice_get_type_name(hw_type), codec->name);
+      return true;
+    }
     ctx->hw_device_ctx = g_ff.av_buffer_ref(*hw_dev);
     ctx->opaque =
         reinterpret_cast<void*>(static_cast<std::intptr_t>(hw_pixfmt));
@@ -206,8 +215,7 @@ bool configure_hw_decode(AVCodecContext* ctx,
     log::i(kTag, "hw decode via {} ({})",
            g_ff.av_hwdevice_get_type_name(hw_type), codec->name);
   } else {
-    log::i(kTag, "decode via {} (no hwdevice; expecting DRM_PRIME output)",
-           codec->name);
+    log::i(kTag, "decode via {} (no hwdevice)", codec->name);
   }
   return true;
 }
@@ -273,6 +281,79 @@ const AVDRMFrameDescriptor* map_drm(AVFrame* hw, AVFrame* drm) {
   return reinterpret_cast<const AVDRMFrameDescriptor*>(drm->data[0]);
 }
 
+// True for a frame the decoder left in system memory: a software decoder, or
+// a hardware one that hands back mapped buffers (FFmpeg's V4L2 M2M wrapper).
+bool is_sw_frame(const AVFrame* f) {
+  return f->format != AV_PIX_FMT_DRM_PRIME && f->hw_frames_ctx == nullptr;
+}
+
+// Copies a system-memory frame into an NV12 dma-buf from *pool (made on first
+// use, and again when the picture size changes), so it goes down the same path
+// as a hardware surface at the cost of one copy. 8-bit 4:2:0 only.
+bool sw_to_dmabuf(const AVFrame* f,
+                  std::shared_ptr<gfx::SwFramePool>* pool,
+                  gfx::DmabufFrame* out,
+                  std::string* error) {
+  const bool planar =
+      f->format == AV_PIX_FMT_YUV420P || f->format == AV_PIX_FMT_YUVJ420P;
+  if (!planar && f->format != AV_PIX_FMT_NV12) {
+    if (error)
+      *error = "software frame is not 8-bit 4:2:0 (pixel format " +
+               std::to_string(f->format) + ")";
+    return false;
+  }
+  if (f->width <= 0 || f->height <= 0 || f->data[0] == nullptr ||
+      f->data[1] == nullptr || (planar && f->data[2] == nullptr) ||
+      f->linesize[0] < f->width) {
+    if (error)
+      *error = "malformed software frame";
+    return false;
+  }
+  const auto w = static_cast<std::uint32_t>(f->width);
+  const auto h = static_cast<std::uint32_t>(f->height);
+  if (*pool == nullptr || (*pool)->width() != w || (*pool)->height() != h) {
+    *pool = gfx::SwFramePool::create(w, h, error);
+    if (*pool == nullptr)
+      return false;
+    log::i(kTag, "software frames {}x{}: copied to NV12 dma-bufs", w, h);
+  }
+  const std::uint32_t cw = (w + 1) / 2;  // chroma samples per row
+  const std::uint32_t ch = (h + 1) / 2;  // chroma rows
+  if ((planar && (f->linesize[1] < static_cast<int>(cw) ||
+                  f->linesize[2] < static_cast<int>(cw))) ||
+      (!planar && f->linesize[1] < static_cast<int>(2 * cw))) {
+    if (error)
+      *error = "malformed software frame";
+    return false;
+  }
+  return (*pool)->write(
+      [&](const gfx::SwFramePool::Mapped& m) {
+        for (std::uint32_t y = 0; y < h; ++y)
+          std::memcpy(
+              m.y + static_cast<std::size_t>(y) * m.y_stride,
+              f->data[0] + static_cast<std::ptrdiff_t>(y) * f->linesize[0], w);
+        for (std::uint32_t y = 0; y < ch; ++y) {
+          std::uint8_t* dst = m.uv + static_cast<std::size_t>(y) * m.uv_stride;
+          if (!planar) {
+            std::memcpy(
+                dst,
+                f->data[1] + static_cast<std::ptrdiff_t>(y) * f->linesize[1],
+                2 * static_cast<std::size_t>(cw));
+            continue;
+          }
+          const std::uint8_t* u =
+              f->data[1] + static_cast<std::ptrdiff_t>(y) * f->linesize[1];
+          const std::uint8_t* v =
+              f->data[2] + static_cast<std::ptrdiff_t>(y) * f->linesize[2];
+          for (std::uint32_t x = 0; x < cw; ++x) {
+            dst[2 * x] = u[x];
+            dst[2 * x + 1] = v[x];
+          }
+        }
+      },
+      out, error);
+}
+
 // MediaCodec MIME -> AVCodecID (the video codecs acl targets). AV_CODEC_ID_NONE
 // if unmapped.
 enum AVCodecID codec_id_for_mime(const std::string& mime) {
@@ -306,6 +387,7 @@ struct VideoDecoder::Impl {
                                  // owns the dma-buf fds)
   int stream_index = -1;
   std::uint32_t width = 0, height = 0;
+  std::shared_ptr<gfx::SwFramePool> sw_pool;  // software frames only
 
   ~Impl() {
     if (drm_frame)
@@ -350,9 +432,16 @@ std::unique_ptr<VideoDecoder> VideoDecoder::open(const std::string& path,
   if (g_ff.avformat_find_stream_info(d->fmt, nullptr) < 0)
     return fail("find_stream_info failed");
 
+#if LIBAVFORMAT_VERSION_MAJOR >= 59
   const AVCodec* codec = nullptr;
   d->stream_index =
       g_ff.av_find_best_stream(d->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
+#else  // FFmpeg 4: the decoder comes back through a non-const pointer
+  AVCodec* found = nullptr;
+  d->stream_index =
+      g_ff.av_find_best_stream(d->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, &found, 0);
+  const AVCodec* codec = found;
+#endif
   if (d->stream_index < 0 || codec == nullptr)
     return fail("no video stream");
 
@@ -436,6 +525,8 @@ int VideoDecoder::next_frame(gfx::DmabufFrame* out, std::string* error) {
     }
   }
 
+  if (is_sw_frame(d->hw_frame))
+    return sw_to_dmabuf(d->hw_frame, &d->sw_pool, out, error) ? 1 : -1;
   const AVDRMFrameDescriptor* desc = map_drm(d->hw_frame, d->drm_frame);
   if (desc == nullptr)
     return err(
@@ -579,6 +670,7 @@ struct CodecDecoder::CImpl {
   AVFrame* hw_frame = nullptr;
   AVFrame* drm_frame = nullptr;
   std::uint32_t width = 0, height = 0;
+  std::shared_ptr<gfx::SwFramePool> sw_pool;  // software frames only
   ~CImpl() {
     if (drm_frame)
       g_ff.av_frame_free(&drm_frame);
@@ -738,6 +830,15 @@ int CodecDecoder::receive_frame(gfx::DmabufFrame* out,
     return 0;  // none ready / drained
   if (r < 0)
     return err("avcodec_receive_frame failed");
+  if (is_sw_frame(d->hw_frame)) {
+    // The copy owns its buffer (out->hold); the decoder's frame is not needed
+    // past this call.
+    if (!sw_to_dmabuf(d->hw_frame, &d->sw_pool, out, error))
+      return -1;
+    if (pts_us)
+      *pts_us = d->hw_frame->pts;
+    return 1;
+  }
   const AVDRMFrameDescriptor* desc = map_drm(d->hw_frame, d->drm_frame);
   if (desc == nullptr)
     return err("map DRM_PRIME failed (decoder not outputting a hw surface?)");
