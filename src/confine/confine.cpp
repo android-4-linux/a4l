@@ -280,6 +280,18 @@ void vendor_gpu_nodes(Plan& plan) {
   plan.devices.emplace_back("/dev/kgsl-3d0");
   if (is_char_device("/dev/ion"))
     plan.devices.emplace_back("/dev/ion");
+  // The driver's gbm will not start without a /dev/dri/card* it can open:
+  // it lists the directory, opens the first one and makes no call on it. A
+  // card node is the display controller, which an app has no business with,
+  // so the name is given and the node is not: a link to the render node,
+  // which the app has already.
+  const std::string render = "/dev/dri/renderD";
+  for (const std::string& d : plan.devices) {
+    if (d.compare(0, render.size(), render) == 0) {
+      plan.symlinks.emplace_back(d.substr(d.rfind('/') + 1), "/dev/dri/card0");
+      break;
+    }
+  }
   std::sort(plan.devices.begin(), plan.devices.end());
 }
 

@@ -20,6 +20,7 @@
 
 #include <sys/syscall.h>
 #include <unistd.h>
+#include "gfx/gl_egl.h"
 #include "log/log.h"
 
 namespace acl::gfx {
@@ -180,6 +181,8 @@ jboolean _eglChooseConfig(JNIEnv* e,
   if (num_config != nullptr)
     e->SetIntArrayRegion(num_config, 0, 1, &num);
   if (ok && configs != nullptr) {
+    order_window_configs(get_display(e, display), native.data(),
+                         num < want ? num : want);
     for (jint i = 0; i < num && i < want; ++i) {
       jobject o = e->NewObject(g_config_class, g_config_ctor,
                                reinterpret_cast<jlong>(native[i]));
@@ -207,6 +210,8 @@ jboolean _eglGetConfigs(JNIEnv* e,
   if (num_config != nullptr)
     e->SetIntArrayRegion(num_config, 0, 1, &num);
   if (ok && configs != nullptr) {
+    order_window_configs(get_display(e, display), native.data(),
+                         num < want ? num : want);
     for (jint i = 0; i < num && i < want; ++i) {
       jobject o = e->NewObject(g_config_class, g_config_ctor,
                                reinterpret_cast<jlong>(native[i]));
