@@ -245,14 +245,23 @@ if py3.found() and have_gl and have_ffmpeg
       is_parallel : false,
     )
     # A GLSurfaceView laid out again while it renders, single-process and under --split: the
-    # renderer must go on drawing and its surface must not be reported destroyed. Where sway
-    # is installed, the window is also resized and the renderer must be told. Starts a
-    # headless Weston (and sway) for itself. Needs host ART; SKIPs otherwise, which includes
-    # CI.
+    # renderer must go on drawing and its surface must not be reported destroyed. Starts a
+    # headless Weston for itself. Needs host ART; SKIPs otherwise, which includes CI.
     test(
       'gl-surface-relayout',
       py3,
       args : [files('run_gl_surface_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+      is_parallel : false,
+    )
+    # The same fixture with its window resized by the compositor, single-process and under
+    # --split. Starts a headless sway for itself. Needs host ART and sway; SKIPs otherwise,
+    # which includes CI. Its own test so that a machine without sway shows a skip.
+    test(
+      'gl-surface-resize',
+      py3,
+      args : [files('run_gl_surface_test.py'), acl_exe, framework_android_jar, 'resize'],
       depends : [acl_exe],
       timeout : 300,
       is_parallel : false,

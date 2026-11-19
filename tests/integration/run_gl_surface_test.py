@@ -13,12 +13,13 @@
 # A video SurfaceView failed all three before a4l stopped marking it as having a frame
 # (tests/fixtures/video_plane covers that); this holds the GL path to the same.
 #
-# Where sway is installed it also resizes the window, in both modes: a headless sway is
-# started, the app's window is floated and set to 800x600 once the renderer is up, and the
-# renderer must be told (onSurfaceChanged 800x600) and go on drawing. Across the boundary
-# the broker must also get a frame of that size and refuse none. Weston's headless
-# backend has no way to resize a client's window, so this part needs sway; without it the
-# test says so and passes on the rest.
+# With "resize" as a third argument it resizes the window instead, in both modes: a
+# headless sway is started, the app's window is floated and set to 800x600 once the
+# renderer is up, and the renderer must be told (onSurfaceChanged 800x600) and go on
+# drawing. Across the boundary the broker must also get a frame of that size and refuse
+# none. Weston's headless backend has no way to resize a client's window, so this part
+# needs sway, and is a test of its own so that a machine without sway reports a skip for
+# it: as one test, the layout part passing hid that the resize was not checked.
 #
 # Needs: a host ART build (ACL_ART_HOME), the AOSP toolchain, bubblewrap and a Wayland
 # compositor; it starts a headless Weston on its own socket unless ACL_TEST_WAYLAND_DISPLAY
@@ -119,8 +120,9 @@ def start_sway(runtime_dir, work):
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        sys.stderr.write("usage: run_gl_surface_test.py <a4l> <android.jar>\n")
+    resize_only = len(sys.argv) == 4 and sys.argv[3] == "resize"
+    if len(sys.argv) != 3 and not resize_only:
+        sys.stderr.write("usage: run_gl_surface_test.py <a4l> <android.jar> [resize]\n")
         return 2
     acl, android_jar = sys.argv[1], sys.argv[2]
     src_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -175,9 +177,9 @@ def main() -> int:
              os.path.join(app, "AndroidManifest.xml"), os.path.join(app, "classes.dex")])
         run([zipalign, "-f", "4", unaligned, apk])
 
-        # 2. A compositor.
+        # 2. A compositor. The resize runs have sway, started below.
         display = os.environ.get("ACL_TEST_WAYLAND_DISPLAY", "")
-        if not display:
+        if not display and not resize_only:
             weston, display = start_weston(runtime_dir, os.path.join(work, "weston.log"))
             if weston is None:
                 return skip(display)
@@ -224,39 +226,43 @@ def main() -> int:
             sys.stderr.write(f"FAIL: {why}\n{out[-6000:]}\n")
             return 1
 
-        # 3. Single process.
-        rc, out = launch(["--present"], "single")
-        if rc == SKIP:
-            return skip("run-apk.sh (vendored framework not built)", out[-2000:])
-        if "needs the GPU present path" in out or "CreateWayland failed" in out:
-            return skip("no GL present path here", out[-2000:])
-        err, single = check("single process", out)
-        if err:
-            return fail(f"single process: {err}", out)
+        if not resize_only:
+            # 3. Single process.
+            rc, out = launch(["--present"], "single")
+            if rc == SKIP:
+                return skip("run-apk.sh (vendored framework not built)", out[-2000:])
+            if "needs the GPU present path" in out or "CreateWayland failed" in out:
+                return skip("no GL present path here", out[-2000:])
+            err, single = check("single process", out)
+            if err:
+                return fail(f"single process: {err}", out)
 
-        # 4. Across the boundary.
-        rc, out = launch(["--split", "--present"], "split")
-        if "confinement is not available" in out or "cannot confine" in out:
-            return skip("the app process cannot be confined here", out[-2000:])
-        if "needs the GPU present path" in out:
-            sys.stdout.write(f"OK: {single}; --split not built (no GPU present path)\n")
+            # 4. Across the boundary.
+            rc, out = launch(["--split", "--present"], "split")
+            if "confinement is not available" in out or "cannot confine" in out:
+                return skip("the app process cannot be confined here", out[-2000:])
+            if "needs the GPU present path" in out:
+                sys.stdout.write(f"OK: {single}; --split not built (no GPU present path)\n")
+                return 0
+            err, split = check("--split", out)
+            if err:
+                return fail(f"--split: {err}", out)
+            s = re.search(r"split: app process ended \((\w+)\); .*?(\d+) message\(s\) rejected", out)
+            if not s:
+                return fail("no broker summary", out)
+            if s.group(1) != "exited":
+                return fail(f"the app process {s.group(1)}", out)
+            if int(s.group(2)) != 0:
+                return fail(f"the broker rejected {s.group(2)} message(s)", out)
+            sys.stdout.write(f"OK: {single}; {split}\n")
             return 0
-        err, split = check("--split", out)
-        if err:
-            return fail(f"--split: {err}", out)
-        s = re.search(r"split: app process ended \((\w+)\); .*?(\d+) message\(s\) rejected", out)
-        if not s:
-            return fail("no broker summary", out)
-        if s.group(1) != "exited":
-            return fail(f"the app process {s.group(1)}", out)
-        if int(s.group(2)) != 0:
-            return fail(f"the broker rejected {s.group(2)} message(s)", out)
+
         # 5. A resize under sway, in both modes.
         sway, sway_display, ipc = start_sway(runtime_dir, work)
         if sway is None:
-            sys.stdout.write(f"OK: {single}; {split}; resize not checked ({sway_display})\n")
-            return 0
+            return skip(sway_display)
         renv = dict(env, WAYLAND_DISPLAY=sway_display)
+        exit_codes = []  # of each resize run, in order
 
         def resize_run(args, tag):
             """Run the fixture and set its window to 800x600 once the renderer is up.
@@ -287,9 +293,11 @@ def main() -> int:
                 if time.time() > deadline:
                     p.kill()
                     break
-            p.wait(timeout=30)
+            exit_codes.append(p.wait(timeout=30))
             out = "".join(lines)
             if keep:
+                os.makedirs(keep, exist_ok=True)
+                shutil.copy(apk, keep)
                 with open(os.path.join(keep, f"run-{tag}.log"), "w") as fh:
                     fh.write(out)
             if not asked:
@@ -304,11 +312,17 @@ def main() -> int:
             return None, summary, out
 
         err, resized, out = resize_run(["--present"], "resize")
+        if exit_codes[-1] == SKIP:
+            return skip("run-apk.sh (vendored framework not built)", out[-2000:])
+        if "needs the GPU present path" in out or "CreateWayland failed" in out:
+            return skip("no GL present path here", out[-2000:])
         if err:
             return fail(f"resize: {err}", out)
         # Across the boundary the broker must also have had a frame of the new size from
         # the app process, and refused none on the way.
         err, resized_split, out = resize_run(["--split", "--present"], "resize --split")
+        if "confinement is not available" in out or "cannot confine" in out:
+            return skip("the app process cannot be confined here", out[-2000:])
         if err:
             return fail(f"resize --split: {err}", out)
         if "broker: the child took the resize to 800x600" not in out:
@@ -317,8 +331,7 @@ def main() -> int:
         if not s or s.group(1) != "exited" or int(s.group(2)) != 0:
             return fail("resize --split: the app process did not exit cleanly, or the "
                         "broker rejected a message", out)
-        sys.stdout.write(f"OK: {single}; {split}; {resized}; {resized_split}; "
-                         "renderer told 800x600 in both\n")
+        sys.stdout.write(f"OK: {resized}; {resized_split}; renderer told 800x600 in both\n")
         return 0
     except subprocess.CalledProcessError as e:
         sys.stderr.write(f"FAIL: build step: {e.cmd}\n{e.stderr}\n")
