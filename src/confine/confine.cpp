@@ -5,11 +5,15 @@
 
 #include "confine/confine.h"
 
+#include "acl_config.h"
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <system_error>
@@ -39,9 +43,10 @@ bool starts_with(std::string_view s, std::string_view prefix) {
 constexpr std::array<std::string_view, 8> kSystemTop = {
     "/usr", "/lib", "/lib64", "/lib32", "/bin", "/sbin", "/system", "/fonts"};
 
-// Under /etc: what the dynamic loader, the resolver, TLS, fontconfig and the
-// GPU loaders read. Nothing else from /etc is visible.
-constexpr std::array<std::string_view, 21> kEtc = {"/etc/ld.so.cache",
+// Under /etc: what the dynamic loader, the resolver, TLS, fontconfig, the
+// GPU loaders and GStreamer's OpenMAX plugin (which decoders the core has)
+// read. Nothing else from /etc is visible.
+constexpr std::array<std::string_view, 22> kEtc = {"/etc/ld.so.cache",
                                                    "/etc/ld.so.conf",
                                                    "/etc/ld.so.conf.d",
                                                    "/etc/alternatives",
@@ -61,7 +66,8 @@ constexpr std::array<std::string_view, 21> kEtc = {"/etc/ld.so.cache",
                                                    "/etc/drirc",
                                                    "/etc/OpenGL",
                                                    "/etc/libva.conf",
-                                                   "/etc/timezone"};
+                                                   "/etc/timezone",
+                                                   "/etc/xdg/gstomx.conf"};
 
 std::string real(const std::string& p) {
   std::error_code ec;
@@ -258,6 +264,25 @@ void gpu_nodes(Plan& plan) {
   std::sort(plan.devices.begin(), plan.devices.end());
 }
 
+bool is_char_device(const char* path) {
+  struct stat st{};
+  return ::stat(path, &st) == 0 && S_ISCHR(st.st_mode);
+}
+
+// A GPU whose kernel driver is not a DRM one has no render node. Qualcomm's
+// downstream Adreno driver (kgsl) is the one known here: its user space opens
+// /dev/kgsl-3d0 and takes every buffer from the ion allocator, and the
+// vendor's video decoder allocates there as well. Ion is passed only beside
+// that GPU.
+void vendor_gpu_nodes(Plan& plan) {
+  if (!is_char_device("/dev/kgsl-3d0"))
+    return;
+  plan.devices.emplace_back("/dev/kgsl-3d0");
+  if (is_char_device("/dev/ion"))
+    plan.devices.emplace_back("/dev/ion");
+  std::sort(plan.devices.begin(), plan.devices.end());
+}
+
 int xioctl(int fd, unsigned long request, void* arg) {
   int r;
   do {
@@ -306,11 +331,20 @@ void video_decoder_nodes(Plan& plan) {
       const std::uint32_t caps = (cap.capabilities & V4L2_CAP_DEVICE_CAPS) != 0
                                      ? cap.device_caps
                                      : cap.capabilities;
-      std::uint32_t input = 0;
-      if ((caps & V4L2_CAP_VIDEO_M2M_MPLANE) != 0)
+      // A driver older than the M2M capability says it has both queues.
+      constexpr std::uint32_t kBothMplane =
+          V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_VIDEO_OUTPUT_MPLANE;
+      constexpr std::uint32_t kBoth =
+          V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_VIDEO_OUTPUT;
+      std::uint32_t input = 0, output = 0;
+      if ((caps & V4L2_CAP_VIDEO_M2M_MPLANE) != 0 ||
+          (caps & kBothMplane) == kBothMplane) {
         input = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-      else if ((caps & V4L2_CAP_VIDEO_M2M) != 0)
+        output = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+      } else if ((caps & V4L2_CAP_VIDEO_M2M) != 0 || (caps & kBoth) == kBoth) {
         input = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+        output = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      }
       facts.m2m = input != 0;
       for (std::uint32_t i = 0; facts.m2m && i < 64; ++i) {
         v4l2_fmtdesc desc{};
@@ -322,6 +356,15 @@ void video_decoder_nodes(Plan& plan) {
           facts.coded_input = true;
         else
           facts.raw_input = true;
+      }
+      for (std::uint32_t i = 0; facts.m2m && i < 64; ++i) {
+        v4l2_fmtdesc desc{};
+        desc.index = i;
+        desc.type = output;
+        if (xioctl(fd, VIDIOC_ENUM_FMT, &desc) != 0)
+          break;
+        if ((desc.flags & V4L2_FMT_FLAG_COMPRESSED) != 0)
+          facts.coded_output = true;
       }
     }
     ::close(fd);
@@ -351,7 +394,8 @@ void video_decoder_nodes(Plan& plan) {
 }  // namespace
 
 bool is_video_decoder(const VideoNodeFacts& facts) {
-  return facts.m2m && facts.coded_input && !facts.raw_input;
+  return facts.m2m && facts.coded_input && !facts.raw_input &&
+         !facts.coded_output;
 }
 
 std::string normalize(std::string_view p) {
@@ -486,6 +530,67 @@ std::vector<std::string> bwrap_argv(const Plan& plan) {
   return a;
 }
 
+void spawn_close_from(posix_spawn_file_actions_t* fa, int first) {
+#if ACL_HAVE_SPAWN_CLOSEFROM
+  posix_spawn_file_actions_addclosefrom_np(fa, first);
+#else
+  std::error_code ec;
+  for (const auto& e : fs::directory_iterator("/proc/self/fd", ec)) {
+    const std::string name = e.path().filename().string();
+    char* end = nullptr;
+    const long fd = std::strtol(name.c_str(), &end, 10);
+    if (end != name.c_str() && *end == '\0' && fd >= first)
+      posix_spawn_file_actions_addclose(fa, static_cast<int>(fd));
+  }
+#endif
+}
+
+int run_in_sandbox(const Plan& plan,
+                   const std::vector<std::string>& program,
+                   const std::vector<std::string>& env,
+                   int timeout_ms) {
+  std::vector<std::string> args = bwrap_argv(plan);
+  args.insert(args.end(), program.begin(), program.end());
+  std::vector<std::string> env_copy = env;
+  std::vector<char*> argv, envp;
+  for (std::string& a : args)
+    argv.push_back(a.data());
+  argv.push_back(nullptr);
+  for (std::string& e : env_copy)
+    envp.push_back(e.data());
+  envp.push_back(nullptr);
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+  posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
+  posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+  spawn_close_from(&fa, 3);
+  pid_t pid = 0;
+  const int rc =
+      ::posix_spawn(&pid, argv[0], &fa, nullptr, argv.data(), envp.data());
+  posix_spawn_file_actions_destroy(&fa);
+  if (rc != 0)
+    return -1;
+  // Bubblewrap ends its child when it is killed (--die-with-parent).
+  int status = 0;
+  for (int waited = 0;; waited += 5) {
+    const pid_t r = ::waitpid(pid, &status, WNOHANG);
+    if (r == pid)
+      break;
+    if (r < 0 && errno != EINTR)
+      return -1;
+    if (waited >= timeout_ms) {
+      ::kill(pid, SIGKILL);
+      while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+      }
+      return -1;
+    }
+    const timespec ts{0, 5'000'000};
+    ::nanosleep(&ts, nullptr);
+  }
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 bool plan_launch(const Inputs& in,
                  char** environment,
                  Launch& out,
@@ -563,6 +668,7 @@ bool plan_launch(const Inputs& in,
   // aborted the app process on a Pi 5 while the plugins were scanned.
   plan.ro_optional.emplace_back("/sys/devices/system/cpu");
   gpu_nodes(plan);
+  vendor_gpu_nodes(plan);
   video_decoder_nodes(plan);
 
   // a4l's own inputs: what the caller named, what the environment names, and

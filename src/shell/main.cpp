@@ -36,6 +36,7 @@
 #include "dex/dex_to_jvm.h"
 #include "dex/dexfile.h"
 #include "log/log.h"
+#include "media/gst_codec.h"
 #include "pkg/apk.h"
 #include "pkg/apk_stage.h"
 #include "pkg/apk_verify.h"
@@ -392,27 +393,56 @@ struct SplitOptions {
   std::vector<std::string> rw_paths;  // --cache
 };
 
-// Close every descriptor from `first` up in the spawned child. glibc 2.34 has
-// an action for it. Before that the open descriptors are listed here and each
-// gets a close action; one opened without O_CLOEXEC by another thread between
-// the listing and the spawn is inherited. Closing one that is already gone
-// (the listing's own) is not an error to posix_spawn.
-[[maybe_unused]] void spawn_close_from(posix_spawn_file_actions_t* fa,
-                                       int first) {
-#if ACL_HAVE_SPAWN_CLOSEFROM
-  posix_spawn_file_actions_addclosefrom_np(fa, first);
-#else
-  std::error_code ec;
-  for (const auto& e :
-       std::filesystem::directory_iterator("/proc/self/fd", ec)) {
-    const std::string name = e.path().filename().string();
-    char* end = nullptr;
-    const long fd = std::strtol(name.c_str(), &end, 10);
-    if (end != name.c_str() && *end == '\0' && fd >= first)
-      posix_spawn_file_actions_addclose(fa, static_cast<int>(fd));
+#if ACL_HAVE_GL && ACL_HAVE_GST
+// GStreamer finds its plugins by scanning them, which it does by starting a
+// scanner program: something the app process may not do (the filter has no
+// execve), and loading every installed plugin is not something it should do
+// either. So the scan is done here, before the app process exists, by this
+// binary in the same sandbox and so over the same files, and written to a
+// directory the app process only reads. The app process is told to take that
+// registry as it is. Without one it scans in its own process.
+[[maybe_unused]] void prepare_gst_registry(const char* self,
+                                           acl::confine::Launch& launch,
+                                           std::vector<std::string>& env) {
+  // Whatever happens below, no scanner program.
+  env.emplace_back("GST_REGISTRY_FORK=no");
+  // Beside the apps' cache directories. A package name has a dot in it and
+  // this name has none.
+  const std::string dir =
+      (std::filesystem::path(launch.cache_dir).parent_path() / "gst").string();
+  struct stat st{};
+  if ((::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) ||
+      ::lstat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) ||
+      st.st_uid != ::geteuid()) {
+    acl::log::w(kTag, "split: {} is not a directory of this user", dir);
+    return;
   }
-#endif
+  const std::string file = dir + "/registry.bin";
+  // The same view as the app process will have, less the app's own
+  // directories: nothing an app wrote is read here.
+  acl::confine::Plan plan = launch.plan;
+  plan.rw = {dir};
+  std::vector<std::string> helper_env = launch.env;
+  helper_env.push_back("GST_REGISTRY=" + file);
+  const auto t0 = std::chrono::steady_clock::now();
+  const int rc = acl::confine::run_in_sandbox(plan, {self, "gst-registry"},
+                                              helper_env, 60'000);
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - t0)
+                      .count();
+  if (rc != 0 || ::access(file.c_str(), R_OK) != 0) {
+    acl::log::w(kTag,
+                "split: no GStreamer plugin registry for the app process "
+                "(status {}, {} ms); it scans the plugins itself",
+                rc, ms);
+    return;
+  }
+  acl::log::i(kTag, "split: GStreamer plugin registry current ({} ms)", ms);
+  launch.plan.ro.push_back(dir);
+  env.push_back("GST_REGISTRY=" + file);
+  env.emplace_back("GST_REGISTRY_UPDATE=no");
 }
+#endif
 
 int run_split(const acl::pkg::Apk& apk,
               const std::string& apk_path,
@@ -507,9 +537,14 @@ int run_split(const acl::pkg::Apk& apk,
                   why);
       return kBackendUnavailable;
     }
+    std::vector<std::string> gst_env;
+#if ACL_HAVE_GL && ACL_HAVE_GST
+    prepare_gst_registry(self, launch, gst_env);
+#endif
     const std::vector<std::string> wrap = acl::confine::bwrap_argv(launch.plan);
     argv_s.insert(argv_s.begin(), wrap.begin(), wrap.end());
     env_s = std::move(launch.env);
+    env_s.insert(env_s.end(), gst_env.begin(), gst_env.end());
     env_s.push_back("ACL_SPLIT_CONFINED=" +
                     acl::confine::describe_namespaces(!opt.share_net));
     acl::log::i(kTag,
@@ -573,7 +608,7 @@ int run_split(const acl::pkg::Apk& apk,
   // The child inherits the socket and the standard streams, nothing else
   // this process happens to hold open. A confined child gets no terminal
   // input either.
-  spawn_close_from(&fa, kChildFd + 1);
+  acl::confine::spawn_close_from(&fa, kChildFd + 1);
   if (opt.confine)
     posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
   pid_t pid = 0;
@@ -1281,6 +1316,12 @@ int main(int argc, char** argv) {
       return kRuntimeError;
     return cmd_run({args.begin() + 1, args.end()});
   }
+#if ACL_HAVE_GL && ACL_HAVE_GST
+  // Not a user command: the broker runs it in the sandbox ahead of a confined
+  // app (prepare_gst_registry).
+  if (cmd == "gst-registry")
+    return acl::media::gst_start() ? kOk : kRuntimeError;
+#endif
   if (cmd == "dex") {
     return cmd_dex({args.begin() + 1, args.end()});
   }

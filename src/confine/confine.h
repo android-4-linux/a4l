@@ -23,6 +23,8 @@
 #include <utility>
 #include <vector>
 
+#include <spawn.h>
+
 namespace acl::confine {
 
 // What the child sees. Every path is absolute and appears in the sandbox at
@@ -76,6 +78,24 @@ bool plan_launch(const Inputs& in,
                  Launch& out,
                  std::string& error);
 
+// Close every descriptor from `first` up in the spawned child. glibc 2.34 has
+// an action for it. Before that the open descriptors are listed here and each
+// gets a close action; one opened without O_CLOEXEC by another thread between
+// the listing and the spawn is inherited. Closing one that is already gone
+// (the listing's own) is not an error to posix_spawn.
+void spawn_close_from(posix_spawn_file_actions_t* fa, int first);
+
+// Run `program` inside the sandbox of `plan` with `env` as its environment,
+// no standard streams and no system call filter, and wait for it. For a4l's
+// own helpers, which prepare something the app process then only reads; never
+// for code from an APK. Returns its exit status, or -1 if it could not be
+// started, ended by a signal or was still running after `timeout_ms` (it is
+// then killed).
+int run_in_sandbox(const Plan& plan,
+                   const std::vector<std::string>& program,
+                   const std::vector<std::string>& env,
+                   int timeout_ms);
+
 // --- pieces, exposed for tests -------------------------------------------
 
 // Lexically normalized absolute path ("" if `p` is not absolute): no ".",
@@ -104,9 +124,10 @@ const std::vector<std::string_view>& path_variables();
 // What a V4L2 node says of itself (VIDIOC_QUERYCAP, VIDIOC_ENUM_FMT on its
 // input queue).
 struct VideoNodeFacts {
-  bool m2m = false;          // memory to memory: no sensor, no tuner
-  bool coded_input = false;  // takes a compressed format
-  bool raw_input = false;    // takes a raw one: an encoder, a scaler
+  bool m2m = false;  // an input and an output queue: no sensor, no tuner
+  bool coded_input = false;   // takes a compressed format
+  bool raw_input = false;     // takes a raw one: an encoder, a scaler
+  bool coded_output = false;  // gives a compressed one: an encoder
 };
 
 // True if the node is a video decoder and nothing else: compressed data in,

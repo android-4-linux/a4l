@@ -25,7 +25,8 @@
 // calls, personality, seccomp, pidfd_*, name_to_handle_at, open_by_handle_at.
 // clone3 answers ENOSYS without being listed (confine/seccomp_filter.cpp).
 // execve was recorded here: GStreamer starts its plugin scanner when it has
-// no registry, and scans in the process when that fails.
+// no registry. The broker builds the registry before the app process starts
+// and tells it not to start one (shell/main.cpp, prepare_gst_registry).
 //
 // To extend: record, review, add the line. Sorted within a section.
 

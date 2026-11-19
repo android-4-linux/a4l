@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <set>
@@ -457,4 +458,41 @@ TEST_CASE("confine: only a video decoder's node is passed", "[confine]") {
       is_video_decoder({.m2m = true, .coded_input = true, .raw_input = true}));
   // A node that listed no formats said nothing to go on.
   CHECK_FALSE(is_video_decoder({.m2m = true}));
+  // Nor is one that also gives compressed data out.
+  CHECK_FALSE(is_video_decoder(
+      {.m2m = true, .coded_input = true, .coded_output = true}));
+}
+
+TEST_CASE("confine: a helper run in the sandbox", "[confine]") {
+  using acl::confine::Plan;
+  using acl::confine::run_in_sandbox;
+  Plan plan;
+  plan.bwrap = "/usr/bin/bwrap";
+  plan.ro = {"/usr"};
+  for (const char* top : {"/bin", "/lib", "/lib64"}) {
+    char target[256];
+    const ssize_t n = ::readlink(top, target, sizeof(target) - 1);
+    if (n > 0) {
+      target[n] = '\0';
+      plan.symlinks.emplace_back(target, top);
+    } else if (::access(top, X_OK) == 0) {
+      plan.ro.emplace_back(top);
+    }
+  }
+  if (::access("/usr/bin/true", X_OK) != 0 ||
+      run_in_sandbox(plan, {"/usr/bin/true"}, {}, 10'000) != 0)
+    SKIP("no bubblewrap, or no user namespaces for it here");
+  CHECK(run_in_sandbox(plan, {"/usr/bin/false"}, {}, 10'000) == 1);
+  // The environment is the one given and nothing else.
+  CHECK(run_in_sandbox(plan, {"/usr/bin/sh", "-c", "test \"$A\" = b"}, {"A=b"},
+                       10'000) == 0);
+  CHECK(run_in_sandbox(plan, {"/usr/bin/sh", "-c", "test -z \"$HOME\""}, {},
+                       10'000) == 0);
+  // One that does not end is killed and reported as a failure.
+  const auto t0 = std::chrono::steady_clock::now();
+  CHECK(run_in_sandbox(plan, {"/usr/bin/sleep", "30"}, {}, 200) == -1);
+  CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10));
+  // So is a program that is not there.
+  CHECK(run_in_sandbox(plan, {"/usr/bin/a4l-no-such-program"}, {}, 10'000) !=
+        0);
 }

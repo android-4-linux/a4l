@@ -114,6 +114,10 @@ GstElement* pick(GstElementFactoryListType type,
 }
 }  // namespace
 
+bool gst_start() {
+  return gst_ready();
+}
+
 struct GstCodec::Impl {
   GstElement* pipeline = nullptr;
   GstElement* src = nullptr;   // appsrc
