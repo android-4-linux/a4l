@@ -752,7 +752,7 @@ Checked under headless sway, window floated and set to 800x600, 1000x700 and 640
 
 | App | Result |
 |---|---|
-| `GLSurfaceView` fixture, `--split` | `onSurfaceChanged` at 800x600, a frame of that size at the broker, 0 messages rejected (`gl-surface-relayout`) |
+| `GLSurfaceView` fixture, `--split` | `onSurfaceChanged` at 800x600, a frame of that size at the broker, 0 messages rejected (`gl-surface-resize`, then part of `gl-surface-relayout`) |
 | Flutter `video_player` app, `--split` | a frame of each of the three sizes at the broker; each screenshot is filled to the window's size |
 
 Found on the way: in most `--split` runs of the Flutter app the player reported its video
