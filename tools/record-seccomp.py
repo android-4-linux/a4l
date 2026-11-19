@@ -4,7 +4,7 @@
 # No GPL-3.0 sources.
 """Record the system calls a confined --split app process makes.
 
-The seccomp allowlist in src/confine/seccomp_allow_x86_64.inc is recorded,
+The seccomp allowlists in src/confine/seccomp_allow_<arch>.inc are recorded,
 not written by hand (ADR-0009, Follow-on). This tool does the recording:
 
   record-seccomp.py run   <trace-dir> <app.apk>...   trace each app

@@ -36,7 +36,8 @@ struct Plan {
   std::vector<std::string> ro_optional;
   // Writable directories: the app's data and cache, nothing else.
   std::vector<std::string> rw;
-  // Character devices passed through (GPU render nodes).
+  // Character devices passed through: GPU render nodes, and the nodes of
+  // hardware video decoders.
   std::vector<std::string> devices;
   // {target, link}: links recreated in the sandbox (/lib64 -> usr/lib64).
   std::vector<std::pair<std::string, std::string>> symlinks;
@@ -99,6 +100,19 @@ bool env_is_passed(std::string_view name);
 // The a4l environment variables whose value is a path, or a colon-separated
 // list of paths, that the child reads.
 const std::vector<std::string_view>& path_variables();
+
+// What a V4L2 node says of itself (VIDIOC_QUERYCAP, VIDIOC_ENUM_FMT on its
+// input queue).
+struct VideoNodeFacts {
+  bool m2m = false;          // memory to memory: no sensor, no tuner
+  bool coded_input = false;  // takes a compressed format
+  bool raw_input = false;    // takes a raw one: an encoder, a scaler
+};
+
+// True if the node is a video decoder and nothing else: compressed data in,
+// pictures out. A camera, an encoder and a converter are not, and the app
+// process is not given them.
+bool is_video_decoder(const VideoNodeFacts& facts);
 
 // Sort, drop duplicates and drop paths already covered by an ancestor in the
 // list. Bubblewrap applies binds in order, so a parent must precede a child.

@@ -514,7 +514,7 @@ int run_split(const acl::pkg::Apk& apk,
                     acl::confine::describe_namespaces(!opt.share_net));
     acl::log::i(kTag,
                 "split: confining the app process: {} read-only path(s), "
-                "data {}, cache {}, {} GPU node(s), network {}, seccomp {}",
+                "data {}, cache {}, {} device node(s), network {}, seccomp {}",
                 launch.plan.ro.size(), launch.data_dir, launch.cache_dir,
                 launch.plan.devices.size(),
                 opt.share_net ? "shared with the host" : "none",

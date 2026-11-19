@@ -16,7 +16,10 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <linux/media.h>
+#include <linux/videodev2.h>
 #include <spawn.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
@@ -255,7 +258,101 @@ void gpu_nodes(Plan& plan) {
   std::sort(plan.devices.begin(), plan.devices.end());
 }
 
+int xioctl(int fd, unsigned long request, void* arg) {
+  int r;
+  do {
+    r = ::ioctl(fd, request, arg);
+  } while (r == -1 && errno == EINTR);
+  return r;
+}
+
+// The numbered nodes /dev/<prefix>N, in order.
+std::vector<std::string> numbered_nodes(const char* prefix) {
+  std::vector<int> numbers;
+  const std::size_t len = std::strlen(prefix);
+  if (DIR* d = ::opendir("/dev")) {
+    while (const dirent* e = ::readdir(d)) {
+      if (std::strncmp(e->d_name, prefix, len) != 0)
+        continue;
+      char* end = nullptr;
+      const long n = std::strtol(e->d_name + len, &end, 10);
+      if (end != e->d_name + len && *end == '\0' && n >= 0 && n < 4096)
+        numbers.push_back(static_cast<int>(n));
+    }
+    ::closedir(d);
+  }
+  std::sort(numbers.begin(), numbers.end());
+  std::vector<std::string> out;
+  for (const int n : numbers)
+    out.push_back(std::string("/dev/") + prefix + std::to_string(n));
+  return out;
+}
+
+// Hardware video decoders. A decoder that is its own device (V4L2, on Arm
+// boards) is reached by its node, as the GPU is; without it the app process
+// decodes in software or not at all. Each /dev/video* is asked what it is,
+// and only a decoder is passed: the same directory holds cameras. A decoder
+// driven by requests is also reached through its media controller, found by
+// the driver's name.
+void video_decoder_nodes(Plan& plan) {
+  std::vector<std::string> drivers;
+  for (const std::string& node : numbered_nodes("video")) {
+    const int fd = ::open(node.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+      continue;
+    VideoNodeFacts facts;
+    v4l2_capability cap{};
+    if (xioctl(fd, VIDIOC_QUERYCAP, &cap) == 0) {
+      const std::uint32_t caps = (cap.capabilities & V4L2_CAP_DEVICE_CAPS) != 0
+                                     ? cap.device_caps
+                                     : cap.capabilities;
+      std::uint32_t input = 0;
+      if ((caps & V4L2_CAP_VIDEO_M2M_MPLANE) != 0)
+        input = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+      else if ((caps & V4L2_CAP_VIDEO_M2M) != 0)
+        input = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+      facts.m2m = input != 0;
+      for (std::uint32_t i = 0; facts.m2m && i < 64; ++i) {
+        v4l2_fmtdesc desc{};
+        desc.index = i;
+        desc.type = input;
+        if (xioctl(fd, VIDIOC_ENUM_FMT, &desc) != 0)
+          break;
+        if ((desc.flags & V4L2_FMT_FLAG_COMPRESSED) != 0)
+          facts.coded_input = true;
+        else
+          facts.raw_input = true;
+      }
+    }
+    ::close(fd);
+    if (!is_video_decoder(facts))
+      continue;
+    plan.devices.push_back(node);
+    cap.driver[sizeof(cap.driver) - 1] = 0;
+    drivers.emplace_back(reinterpret_cast<const char*>(cap.driver));
+  }
+  if (drivers.empty())
+    return;
+  for (const std::string& node : numbered_nodes("media")) {
+    const int fd = ::open(node.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+      continue;
+    media_device_info info{};
+    const bool known = xioctl(fd, MEDIA_IOC_DEVICE_INFO, &info) == 0;
+    ::close(fd);
+    info.driver[sizeof(info.driver) - 1] = 0;
+    if (known &&
+        std::find(drivers.begin(), drivers.end(), info.driver) != drivers.end())
+      plan.devices.push_back(node);
+  }
+  std::sort(plan.devices.begin(), plan.devices.end());
+}
+
 }  // namespace
+
+bool is_video_decoder(const VideoNodeFacts& facts) {
+  return facts.m2m && facts.coded_input && !facts.raw_input;
+}
 
 std::string normalize(std::string_view p) {
   if (p.empty() || p[0] != '/')
@@ -460,7 +557,13 @@ bool plan_launch(const Inputs& in,
   }
   for (const std::string_view e : kEtc)
     plan.ro_optional.emplace_back(e);
+  // How many processors there are and how they are laid out. The C library
+  // reads it for sysconf(), and a library that cannot may give up when it is
+  // loaded: with it hidden, a GStreamer plugin (ONNX Runtime inside it)
+  // aborted the app process on a Pi 5 while the plugins were scanned.
+  plan.ro_optional.emplace_back("/sys/devices/system/cpu");
   gpu_nodes(plan);
+  video_decoder_nodes(plan);
 
   // a4l's own inputs: what the caller named, what the environment names, and
   // the binary. Each is bound where it is and, if that is a symbolic link,
