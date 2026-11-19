@@ -24,6 +24,7 @@ import glob
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,18 @@ def skip(why, out=""):
     return SKIP
 
 
+def listening(path):
+    """Whether something accepts a connection on the socket at `path`."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
 def start_sway(runtime_dir, work):
     """A headless sway with one 1280x800 output. Returns (process, wayland socket, ipc
     socket) or (None, reason, None)."""
@@ -56,7 +69,11 @@ def start_sway(runtime_dir, work):
     with open(conf, "w") as fh:
         fh.write("output HEADLESS-1 resolution 1280x800\ndefault_border none\n")
     ipc = os.path.join(work, "sway.sock")
-    before = set(glob.glob(os.path.join(runtime_dir, "wayland-*")))
+    # Sway's socket is the one that is listening now and was not before. A name alone
+    # does not tell: a compositor that was killed leaves its socket file behind, and sway
+    # takes the first name nobody holds the lock of, which is that one.
+    before = {p for p in glob.glob(os.path.join(runtime_dir, "wayland-*"))
+              if not p.endswith(".lock") and listening(p)}
     env = {k: v for k, v in os.environ.items() if k not in ("WAYLAND_DISPLAY", "DISPLAY")}
     env.update(WLR_BACKENDS="headless", WLR_LIBINPUT_NO_DEVICES="1", SWAYSOCK=ipc)
     with open(os.path.join(work, "sway.log"), "wb") as log:
@@ -64,7 +81,7 @@ def start_sway(runtime_dir, work):
                                 start_new_session=True)
     for _ in range(50):
         new = [p for p in glob.glob(os.path.join(runtime_dir, "wayland-*"))
-               if p not in before and not p.endswith(".lock")]
+               if p not in before and not p.endswith(".lock") and listening(p)]
         if new and os.path.exists(ipc):
             return proc, os.path.basename(new[0]), ipc
         if proc.poll() is not None:
