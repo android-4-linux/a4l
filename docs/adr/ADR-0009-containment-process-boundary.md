@@ -166,8 +166,11 @@ Not covered, and what keeps C4 from being the last word:
   it can print escape sequences and change terminal settings.
 - **Landlock is not used.** Decision 2 allows either; this is the namespace form.
 - **arm64 (2026-11-18).** Has a system call list of its own, recorded on a Raspberry Pi 5
-  from five APKs (`src/confine/seccomp_allow_aarch64.inc`): 87 calls recorded there, 11 that
-  only x86-64's larger corpus made, 53 added in review. Its corpus is smaller: no app with
+  from five APKs (`src/confine/seccomp_allow_aarch64.inc`): 88 calls recorded, 10 that
+  only x86-64's larger corpus made, 53 added in review. The same day it was recorded again
+  on the Pi and on an SA8155P board (vendor kernel, GPU and decoder), 17 runs of eight app
+  forms: one call moved to the recorded group and none was outside the list, and every form
+  ran on both with the filter in `kill` mode. Its corpus is smaller: no app with
   native code runs on arm64 yet. On the Pi the video fixture plays confined with the filter
   in `kill` mode, HEVC through the board's hardware decoder, and so do a Java-only app and
   the GLSurfaceView fixture.

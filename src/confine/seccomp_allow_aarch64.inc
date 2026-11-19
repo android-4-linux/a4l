@@ -4,15 +4,23 @@
 //
 // The system calls a confined --split app process may make, arm64.
 //
-// Recorded 2026-11-18 on a Raspberry Pi 5 (kernel 6.18, 4 KiB pages, glibc
-// 2.41, Mesa V3D) with the glibc arm64 host ART (android-13.0.0_r84), from
-// five APKs, 20 to 50 s each: a Java-only app from tests/app-corpus
-// (octalsuntime), the video fixture twice (HEVC through the board's V4L2
-// decoder, H.264 through GStreamer in software), the GLSurfaceView fixture
-// and a class with a static main. That is a smaller corpus than x86-64's:
-// no app with native code runs on arm64 yet, and no Flutter app. The second
-// section is what x86-64's corpus made and this one did not. No input was
-// injected and no network was reachable.
+// Recorded 2026-11-18 on two machines with the glibc arm64 host ART
+// (android-13.0.0_r84), 20 to 100 s a run: a Raspberry Pi 5 (kernel 6.18,
+// glibc 2.41, Mesa V3D) and an SA8155P board (a vendor 5.4 kernel, glibc
+// 2.31, Qualcomm's downstream GPU and decoder user space). On each: a
+// Java-only app from tests/app-corpus (octalsuntime), a class with a static
+// main, the GLSurfaceView fixture, the SoundPool fixture, and the video
+// fixture four ways (the SurfaceView at launch and added late, frames
+// converted on the GPU, GStreamer forced). The video decoders between them:
+// the Pi's V4L2 HEVC decoder, FFmpeg in software, GStreamer in software and
+// through OpenMAX, and the board's OpenMAX core. The second machine and the
+// further forms were added after the list was first made, from the Pi and
+// five APKs; they made one call it did not have as recorded
+// (clock_nanosleep, on the board only) and none it did not allow.
+// That is still a smaller corpus than x86-64's: no app with native code
+// runs on arm64 yet, and no Flutter app. The second section is what
+// x86-64's corpus made and this one did not. No input was injected and no
+// network was reachable.
 //
 // arm64 has none of the calls that take a path without a directory (open,
 // stat, access, mkdir, unlink, rename, readlink, chmod), nor poll, select,
@@ -42,6 +50,9 @@ ACL_SYSCALL(chdir)
 #endif
 #ifdef SYS_clock_gettime
 ACL_SYSCALL(clock_gettime)
+#endif
+#ifdef SYS_clock_nanosleep
+ACL_SYSCALL(clock_nanosleep)
 #endif
 #ifdef SYS_clone
 ACL_SYSCALL(clone)
@@ -296,9 +307,6 @@ ACL_SYSCALL(write)
 // --- recorded on x86-64, not seen here --------------------------------------
 // What the larger corpus made (seccomp_allow_x86_64.inc) that arm64 also
 // has. The same code will make them here once those apps run.
-#ifdef SYS_clock_nanosleep
-ACL_SYSCALL(clock_nanosleep)
-#endif
 #ifdef SYS_fchown
 ACL_SYSCALL(fchown)
 #endif
