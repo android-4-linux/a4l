@@ -12,9 +12,10 @@
 # so it shows only through that hole, and the app has an opaque background for the hole to go
 # through.
 #
-# Needs: a host ART build (ACL_ART_HOME), the AOSP toolchain, ffmpeg, a VA-API decoder, and a
-# Wayland compositor. It starts a headless Weston on its own socket unless
-# ACL_TEST_WAYLAND_DISPLAY names one. Exits 77 (skip) where any of these is missing.
+# Needs: a host ART build (ACL_ART_HOME), the AOSP toolchain, ffmpeg, a decoder for H.264 (any
+# of a4l's, software included), and a Wayland compositor. It starts a headless Weston on its
+# own socket unless ACL_TEST_WAYLAND_DISPLAY names one. Exits 77 (skip) where any of these is
+# missing.
 #
 # The app is run in two forms: with the SurfaceView in the window at launch, and with it added
 # after the first frames.
@@ -23,6 +24,15 @@
 # ACL_TEST_VIDEO_ARGS="..." replaces the a4l arguments (default: --split --present) and
 #   leaves out the hole check.
 # ACL_TEST_VIDEO_VARIANT=launch|late|converted runs one form.
+#
+# On a board, where there is no AOSP tree to build the fixture or run it from:
+# ACL_TEST_VIDEO_APKS=<dir> takes video-plane-launch.apk and video-plane-late.apk from there
+#   and builds nothing. ACL_TEST_VIDEO_KEEP on a machine with the toolchain makes them.
+# ACL_TEST_VIDEO_ROOT=<dir> runs a4l from a staged tree (tools/stage-arm64-framework.sh:
+#   a4l, art/, fw/run.sh) in place of tools/run-apk.sh.
+# With both set the script takes no arguments and needs only this file, python3, the tree and
+# a compositor:
+#   ACL_TEST_VIDEO_ROOT=~/a4l ACL_TEST_VIDEO_APKS=~/apks python3 run_split_video_test.py
 import glob
 import os
 import re
@@ -72,89 +82,119 @@ def start_weston(runtime_dir, log_path):
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        sys.stderr.write("usage: run_split_video_test.py <a4l> <android.jar>\n")
+    staged = os.environ.get("ACL_TEST_VIDEO_ROOT", "")
+    prebuilt = os.environ.get("ACL_TEST_VIDEO_APKS", "")
+    if len(sys.argv) != 3 and not (staged and prebuilt and len(sys.argv) == 1):
+        sys.stderr.write("usage: run_split_video_test.py <a4l> <android.jar>\n"
+                         "   or: ACL_TEST_VIDEO_ROOT=<staged tree> ACL_TEST_VIDEO_APKS=<dir> "
+                         "run_split_video_test.py\n")
         return 2
-    acl, android_jar = sys.argv[1], sys.argv[2]
+    acl, android_jar = (sys.argv[1], sys.argv[2]) if len(sys.argv) == 3 else ("", "")
     src_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+    if staged:
+        staged = os.path.abspath(staged)
+        launcher = os.path.join(staged, "fw", "run.sh")
+        if not os.path.isfile(launcher) or not os.access(os.path.join(staged, "a4l"), os.X_OK):
+            sys.stderr.write(f"{staged} is not a staged tree (a4l, art/, fw/run.sh)\n")
+            return 2
     home = os.environ.get("ACL_ART_HOME", "")
-    if not home or not os.path.isdir(home):
+    if not staged and (not home or not os.path.isdir(home)):
         return skip("ACL_ART_HOME not set")
-    if not android_jar or not os.path.isfile(android_jar):
-        return skip("no staged android.jar")
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        return skip("ffmpeg CLI not found")
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "")
     if not runtime_dir or not os.path.isdir(runtime_dir):
         return skip("XDG_RUNTIME_DIR not set")
-    root = os.path.abspath(os.environ.get("AOSP", os.path.join(home, "..", "..", "..")))
-    d8 = os.path.join(home, "bin", "d8")
-    zipalign = first(os.path.join(root, "prebuilts/build-tools/linux*-x86/bin/zipalign"))
-    javac = first(os.path.join(root, "prebuilts/jdk/jdk11/linux-x86/bin/javac"),
-                  os.path.join(root, "prebuilts/jdk/jdk17/linux-x86/bin/javac"))
-    for name, tool in (("d8", d8), ("zipalign", zipalign), ("javac", javac)):
-        if not tool or not os.access(tool, os.X_OK):
-            return skip(f"{name} not found")
+    if prebuilt:
+        apks = {tag: os.path.join(os.path.abspath(prebuilt), f"video-plane-{tag}.apk")
+                for tag in ("launch", "late")}
+        for apk in apks.values():
+            if not os.path.isfile(apk):
+                sys.stderr.write(f"no {apk}\n")
+                return 2
+    else:
+        if not home or not os.path.isdir(home):
+            return skip("ACL_ART_HOME not set")
+        if not android_jar or not os.path.isfile(android_jar):
+            return skip("no staged android.jar")
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            return skip("ffmpeg CLI not found")
+        root = os.path.abspath(os.environ.get("AOSP", os.path.join(home, "..", "..", "..")))
+        d8 = os.path.join(home, "bin", "d8")
+        zipalign = first(os.path.join(root, "prebuilts/build-tools/linux*-x86/bin/zipalign"))
+        javac = first(os.path.join(root, "prebuilts/jdk/jdk11/linux-x86/bin/javac"),
+                      os.path.join(root, "prebuilts/jdk/jdk17/linux-x86/bin/javac"))
+        for name, tool in (("d8", d8), ("zipalign", zipalign), ("javac", javac)):
+            if not tool or not os.access(tool, os.X_OK):
+                return skip(f"{name} not found")
 
     def run(cmd, **kw):
         subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
 
     fixtures = os.path.join(src_root, "tests/fixtures")
-    sys.path.insert(0, fixtures)
-    from make_axml import build_axml  # noqa: E402
 
     keep = os.environ.get("ACL_TEST_VIDEO_KEEP", "")
     work = tempfile.mkdtemp(prefix="a4l-video-")
     weston = None
     try:
-        # 1. A moving test pattern, 640x360, 2 s at 30 fps, no B-frames, an access unit
-        #    delimiter before each frame so the fixture can cut the stream into frames.
-        clip = os.path.join(work, "clip.mp4")
-        g = subprocess.run(
-            [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
-             "-i", "testsrc2=s=640x360:r=30:d=2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-             "-profile:v", "main", "-bf", "0", "-g", "30", "-x264-params", "aud=1", clip],
-            capture_output=True, text=True)
-        if g.returncode != 0:
-            return skip("ffmpeg could not encode the fixture clip", g.stderr)
-        app = os.path.join(work, "app")
-        os.makedirs(os.path.join(app, "assets"))
-        run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", clip, "-c:v", "copy",
-             "-bsf:v", "h264_mp4toannexb", "-f", "h264", os.path.join(app, "assets/clip.h264")])
+        def build_fixture():
+            """({tag: path}, "") for both APKs, or (None, why) where no clip can be encoded."""
+            sys.path.insert(0, fixtures)
+            from make_axml import build_axml  # noqa: E402
 
-        # 2. The fixture, as two APKs off one dex: the SurfaceView in the window at launch
-        #    (Main) and added after the first frames (MainLate). a4l decides at launch whether
-        #    a SurfaceView is a GL surface or a video surface, so both are run.
-        cls = os.path.join(work, "cls")
-        os.makedirs(cls)
-        run([javac, "--release", "8", "-cp", android_jar, "-d", cls,
-             os.path.join(fixtures, "video_plane/Main.java"),
-             os.path.join(fixtures, "video_plane/MainLate.java")])
-        dexdir = os.path.join(work, "dex")
-        os.makedirs(dexdir)
-        run([d8, "--min-api", "24", "--lib", android_jar, "--output", dexdir]
-            + glob.glob(os.path.join(cls, "**/*.class"), recursive=True))
-        run(["cp", os.path.join(dexdir, "classes.dex"), app])
+            # 1. A moving test pattern, 640x360, 2 s at 30 fps, no B-frames, an access unit
+            #    delimiter before each frame so the fixture can cut the stream into frames.
+            clip = os.path.join(work, "clip.mp4")
+            g = subprocess.run(
+                [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+                 "-i", "testsrc2=s=640x360:r=30:d=2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                 "-profile:v", "main", "-bf", "0", "-g", "30", "-x264-params", "aud=1", clip],
+                capture_output=True, text=True)
+            if g.returncode != 0:
+                return None, g.stderr
+            app = os.path.join(work, "app")
+            os.makedirs(os.path.join(app, "assets"))
+            run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", clip, "-c:v", "copy",
+                 "-bsf:v", "h264_mp4toannexb", "-f", "h264", os.path.join(app, "assets/clip.h264")])
 
-        def build_apk(launcher, tag):
-            with open(os.path.join(app, "AndroidManifest.xml"), "wb") as fh:
-                fh.write(build_axml(utf8=True, package="com.acl.videoplane", launcher=launcher))
-            unaligned = os.path.join(work, f"u-{tag}.apk")
-            apk = os.path.join(work, f"video-plane-{tag}.apk")
-            run(["zip", "-X", "-0", "-j", "-q", unaligned,
-                 os.path.join(app, "AndroidManifest.xml"), os.path.join(app, "classes.dex")])
-            run(["zip", "-X", "-0", "-q", unaligned, "assets/clip.h264"], cwd=app)
-            run([zipalign, "-f", "4", unaligned, apk])
-            return apk
+            # 2. The fixture, as two APKs off one dex: the SurfaceView in the window at launch
+            #    (Main) and added after the first frames (MainLate). a4l decides at launch whether
+            #    a SurfaceView is a GL surface or a video surface, so both are run.
+            cls = os.path.join(work, "cls")
+            os.makedirs(cls)
+            run([javac, "--release", "8", "-cp", android_jar, "-d", cls,
+                 os.path.join(fixtures, "video_plane/Main.java"),
+                 os.path.join(fixtures, "video_plane/MainLate.java")])
+            dexdir = os.path.join(work, "dex")
+            os.makedirs(dexdir)
+            run([d8, "--min-api", "24", "--lib", android_jar, "--output", dexdir]
+                + glob.glob(os.path.join(cls, "**/*.class"), recursive=True))
+            run(["cp", os.path.join(dexdir, "classes.dex"), app])
+
+            def build_apk(launcher, tag):
+                with open(os.path.join(app, "AndroidManifest.xml"), "wb") as fh:
+                    fh.write(build_axml(utf8=True, package="com.acl.videoplane",
+                                        launcher=launcher))
+                unaligned = os.path.join(work, f"u-{tag}.apk")
+                apk = os.path.join(work, f"video-plane-{tag}.apk")
+                run(["zip", "-X", "-0", "-j", "-q", unaligned,
+                     os.path.join(app, "AndroidManifest.xml"), os.path.join(app, "classes.dex")])
+                run(["zip", "-X", "-0", "-q", unaligned, "assets/clip.h264"], cwd=app)
+                run([zipalign, "-f", "4", unaligned, apk])
+                return apk
+            return {"launch": build_apk("com.acl.videoplane.Main", "launch"),
+                    "late": build_apk("com.acl.videoplane.MainLate", "late")}, ""
+
+        if not prebuilt:
+            apks, why = build_fixture()
+            if apks is None:
+                return skip("ffmpeg could not encode the fixture clip", why)
 
         # A third run converts every frame to XBGR8888 (gfx::VideoConverter), as a4l does
         # for a compositor that does not take the decoder's NV12.
-        at_launch = build_apk("com.acl.videoplane.Main", "launch")
-        variants = [("launch", at_launch, {}),
-                    ("late", build_apk("com.acl.videoplane.MainLate", "late"), {}),
-                    ("converted", at_launch, {"ACL_VIDEO_CONVERT": "1"})]
+        variants = [("launch", apks["launch"], {}),
+                    ("late", apks["late"], {}),
+                    ("converted", apks["launch"], {"ACL_VIDEO_CONVERT": "1"})]
         only = os.environ.get("ACL_TEST_VIDEO_VARIANT", "")
         if only:
             variants = [v for v in variants if v[0] == only]
@@ -179,7 +219,10 @@ def main() -> int:
                        ACL_BIN=acl, ACL_PRESENT_GPU="1",
                        XDG_CACHE_HOME=os.path.join(work, f"cache-{tag}"),
                        XDG_DATA_HOME=os.path.join(work, f"data-{tag}"))
-            runner = [os.path.join(src_root, "tools/run-apk.sh"), apk, "--verify=off"]
+            if staged:
+                runner = ["sh", launcher, staged, apk, "--verify=off"]
+            else:
+                runner = [os.path.join(src_root, "tools/run-apk.sh"), apk, "--verify=off"]
 
             def launch(args, extra_env=None, label=""):
                 p = subprocess.run(runner + args, env=dict(env, **(extra_env or {})),
@@ -187,7 +230,8 @@ def main() -> int:
                 out = p.stdout + p.stderr
                 if keep:
                     os.makedirs(keep, exist_ok=True)
-                    shutil.copy(apk, keep)
+                    if not prebuilt:
+                        shutil.copy(apk, keep)
                     with open(os.path.join(keep, f"run-{tag}{label}.log"), "w") as fh:
                         fh.write(out)
                 return p.returncode, out
@@ -303,7 +347,10 @@ def main() -> int:
         sys.stderr.write(f"FAIL: build step: {e.cmd}\n{e.stderr}\n")
         return 1
     except subprocess.TimeoutExpired as e:
-        sys.stderr.write(f"FAIL: timed out\n{(e.stdout or '')[-4000:]}\n")
+        out = e.stdout or ""
+        if isinstance(out, bytes):  # what a timeout leaves, text mode or not
+            out = out.decode(errors="replace")
+        sys.stderr.write(f"FAIL: timed out\n{out[-4000:]}\n")
         return 1
     finally:
         if weston is not None:
