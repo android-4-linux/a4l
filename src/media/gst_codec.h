@@ -25,6 +25,11 @@
 
 namespace acl::media {
 
+// Start GStreamer in this process, which makes its plugin registry current:
+// read from the cache file, and written again if the installed plugins have
+// changed. False if GStreamer does not start.
+bool gst_start();
+
 class GstCodec final : public CodecEngine {
  public:
   // An appsrc ! [parser] ! decoder ! appsink pipeline for `mime`, playing.

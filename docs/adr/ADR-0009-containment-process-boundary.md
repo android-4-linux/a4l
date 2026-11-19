@@ -180,6 +180,24 @@ Not covered, and what keeps C4 from being the last word:
 - **`/sys/devices/system/cpu`** is visible, read-only (2026-11-18). With it hidden, GStreamer
   scanning its plugins in the app process (its scanner is a program, and the filter refuses
   `execve`) loaded a plugin that aborted for want of it.
+- **A GPU and a decoder outside DRM and V4L2 M2M (2026-11-18, an SA8155P board).** Qualcomm's
+  downstream Adreno driver has no render node: the sandbox is given `/dev/kgsl-3d0` and, beside
+  it only, the ion allocator its user space and the vendor's decoder take every buffer from.
+  The decoder (`msm_vidc`) does not report the M2M capability, so a node that has a capture
+  and an output queue counts as well; it must still take compressed formats only and give
+  none. The vendor's OpenMAX core then decodes confined, with the filter in `kill` mode, and
+  so does GStreamer's OpenMAX element, whose configuration (`/etc/xdg/gstomx.conf`) is
+  visible. The app process must run as a user that may open these nodes: bubblewrap drops
+  every capability, root's included.
+- **GStreamer's plugin registry is built ahead (2026-11-18).** Before the app process starts,
+  the broker runs `a4l gst-registry` in the same sandbox, without the filter, and that
+  writes the registry to `<cache>/acl/gst`, which the app process sees read-only. The app
+  process is told to use that registry as it is and never to start a scanner
+  (`GST_REGISTRY`, `GST_REGISTRY_UPDATE=no`, `GST_REGISTRY_FORK=no`), so it loads the plugins
+  it uses and no others. Before this a first run through GStreamer in `kill` mode ended at
+  the scanner's `execve`. Cost per launch once the registry exists: 20 ms on a desktop, 30 to
+  40 ms on a Pi 5, about 100 ms on the SA8155P board. The first time: 0.3 s, 0.6 to 0.9 s and
+  0.45 s.
 
 **C3 as built (x86-64, 2026-11-14): native GL.** Single-process, Mesa's Wayland platform does
 three things inside `eglSwapBuffers`: it hands the finished buffer to the compositor, takes back
