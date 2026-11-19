@@ -189,6 +189,16 @@ Not covered, and what keeps C4 from being the last word:
   so does GStreamer's OpenMAX element, whose configuration (`/etc/xdg/gstomx.conf`) is
   visible. The app process must run as a user that may open these nodes: bubblewrap drops
   every capability, root's included.
+- **A card name without a card (2026-11-18, the same board).** That driver's gbm will not
+  start without a `/dev/dri/card*` it can open; it opens the first and makes no call on it.
+  A card node is the display controller and is not passed. Beside `/dev/kgsl-3d0` the
+  sandbox has `/dev/dri/card0` as a link to the render node, which the app has already, so
+  nothing is added to what it can reach. With it the GPU video converter and a GLSurfaceView
+  come up confined. Two things in a4l went with it, neither a matter of confinement: that
+  driver lets a config draw only to a gbm surface of the config's own format, so the window
+  is made in the app's config's format and configs a window can be made for are listed
+  first; and its surface has three buffers where Mesa's has four, so a swap waits for the
+  compositor to let one go before the app draws again.
 - **GStreamer's plugin registry is built ahead (2026-11-18).** Before the app process starts,
   the broker runs `a4l gst-registry` in the same sandbox, without the filter, and that
   writes the registry to `<cache>/acl/gst`, which the app process sees read-only. The app

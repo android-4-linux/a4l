@@ -19,11 +19,14 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <vector>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -42,6 +45,28 @@ constexpr const char* kTag = "acl.gfx.gl";
 // default and the compositor's advertised XRGB8888 modifiers; a fullscreen GL
 // app is opaque.
 constexpr std::uint32_t kGbmFormat = GBM_FORMAT_XRGB8888;
+
+// Whether a gbm window can be made in `format` and its frames presented. The
+// two are the same layout; a frame goes out as XRGB8888 either way (a GL
+// window is opaque), which is what the broker takes.
+bool window_format(std::uint32_t format) {
+  return format == GBM_FORMAT_XRGB8888 || format == GBM_FORMAT_ARGB8888;
+}
+
+// A config's native visual: on the gbm platform, the format a gbm surface
+// has to have for the config to draw to it.
+std::uint32_t visual_of(EGLDisplay dpy, EGLConfig config) {
+  EGLint visual = 0;
+  if (config == nullptr || eglGetConfigAttrib(dpy, config, EGL_NATIVE_VISUAL_ID,
+                                              &visual) != EGL_TRUE) {
+    return 0;
+  }
+  return static_cast<std::uint32_t>(visual);
+}
+
+// The displays of the gbm devices alive, for order_window_configs.
+std::mutex g_gbm_displays_mutex;
+std::vector<void*> g_gbm_displays;
 
 std::string egl_err_str(EGLint e) {
   switch (e) {
@@ -363,6 +388,14 @@ class GbmGlWindow final : public GlWindow {
             const std::vector<std::uint64_t>& modifiers,
             void* egl_config,
             std::string* error) {
+    // The surface is made in the format of the app's config where a window can
+    // have it. Mesa lets a config draw to a surface of another format with the
+    // same channels; Qualcomm's driver does not ("gbm_surface bad match"), and
+    // a surface the app's config cannot draw to leaves its context with
+    // nothing to be made current on.
+    const std::uint32_t wanted =
+        visual_of(static_cast<EGLDisplay>(dpy_), egl_config);
+    format_ = window_format(wanted) ? wanted : kGbmFormat;
     if (!make_gbm_surface(w, h, modifiers)) {
       if (error)
         *error = "gbm_surface_create failed";
@@ -377,10 +410,24 @@ class GbmGlWindow final : public GlWindow {
       s = eglCreateWindowSurface(
           static_cast<EGLDisplay>(dpy_), static_cast<EGLConfig>(egl_config),
           reinterpret_cast<EGLNativeWindowType>(surf_), nullptr);
-    if (s == EGL_NO_SURFACE)
+    if (s != EGL_NO_SURFACE) {
+      window_cfg_ = egl_config;
+    } else {
+      if (format_ != kGbmFormat) {  // the device's config is of kGbmFormat
+        gbm_surface_destroy(surf_);
+        surf_ = nullptr;
+        format_ = kGbmFormat;
+        if (!make_gbm_surface(w, h, modifiers)) {
+          if (error)
+            *error = "gbm_surface_create failed";
+          return false;
+        }
+      }
+      window_cfg_ = cfg_;
       s = eglCreateWindowSurface(
           static_cast<EGLDisplay>(dpy_), static_cast<EGLConfig>(cfg_),
           reinterpret_cast<EGLNativeWindowType>(surf_), nullptr);
+    }
     if (s == EGL_NO_SURFACE) {
       if (error)
         *error = with_egl("eglCreateWindowSurface(gbm) failed");
@@ -451,7 +498,10 @@ class GbmGlWindow final : public GlWindow {
       out->fd = fd;
       out->width = gbm_bo_get_width(bo);
       out->height = gbm_bo_get_height(bo);
-      out->drm_format = gbm_bo_get_format(bo);
+      // Opaque whichever of the two formats the surface is in.
+      out->drm_format = window_format(gbm_bo_get_format(bo))
+                            ? kGbmFormat
+                            : gbm_bo_get_format(bo);
       out->modifier = gbm_bo_get_modifier(bo);
       const int planes = gbm_bo_get_plane_count(bo);
       out->plane_count = planes > 0 ? static_cast<std::uint32_t>(planes) : 1u;
@@ -477,6 +527,9 @@ class GbmGlWindow final : public GlWindow {
     return true;
   }
 
+  bool has_free_buffer() const override {
+    return surf_ == nullptr || gbm_surface_has_free_buffers(surf_) != 0;
+  }
   bool set_hold_buffers(bool hold) override {
     if (hold == hold_)
       return true;
@@ -559,8 +612,10 @@ class GbmGlWindow final : public GlWindow {
         *error = "gbm_surface_create (resize) failed";
       return false;
     }
+    // With the config the window was made with: the app's context is of it.
     EGLSurface s = eglCreateWindowSurface(
-        static_cast<EGLDisplay>(dpy_), static_cast<EGLConfig>(cfg_),
+        static_cast<EGLDisplay>(dpy_),
+        static_cast<EGLConfig>(window_cfg_ != nullptr ? window_cfg_ : cfg_),
         reinterpret_cast<EGLNativeWindowType>(surf_), nullptr);
     if (s == EGL_NO_SURFACE) {
       if (error)
@@ -582,19 +637,18 @@ class GbmGlWindow final : public GlWindow {
 #if ACL_HAVE_GBM_SURFACE_MODIFIERS2
       surf_ = gbm_surface_create_with_modifiers2(
           gbm_, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h),
-          kGbmFormat, modifiers.data(), modifiers.size(), flags);
+          format_, modifiers.data(), modifiers.size(), flags);
 #else  // gbm before Mesa 21.3: the same call, the usage left to the driver
       surf_ = gbm_surface_create_with_modifiers(
           gbm_, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h),
-          kGbmFormat, modifiers.data(),
+          format_, modifiers.data(),
           static_cast<unsigned int>(modifiers.size()));
 #endif
     }
     if (surf_ ==
         nullptr) {  // no modifiers given, or none supported by the driver
-      surf_ =
-          gbm_surface_create(gbm_, static_cast<std::uint32_t>(w),
-                             static_cast<std::uint32_t>(h), kGbmFormat, flags);
+      surf_ = gbm_surface_create(gbm_, static_cast<std::uint32_t>(w),
+                                 static_cast<std::uint32_t>(h), format_, flags);
     }
     return surf_ != nullptr;
   }
@@ -630,6 +684,8 @@ class GbmGlWindow final : public GlWindow {
 
   gbm_device* gbm_ = nullptr;  // borrowed from the device
   gbm_surface* surf_ = nullptr;
+  std::uint32_t format_ = kGbmFormat;  // the surface's
+  void* window_cfg_ = nullptr;         // the EGLConfig the surface is of
   gbm_bo* locked_ = nullptr;  // front buffer currently held for the presenter
   int exported_fd_ =
       -1;  // dup'd fd handed out in the last DmabufFrame (we own it)
@@ -639,6 +695,12 @@ class GbmGlDevice final : public GlDevice {
  public:
   GbmGlDevice() : GlDevice(GlBackend::Gbm) {}
   ~GbmGlDevice() override {
+    {
+      const std::lock_guard<std::mutex> lock(g_gbm_displays_mutex);
+      g_gbm_displays.erase(
+          std::remove(g_gbm_displays.begin(), g_gbm_displays.end(), dpy_),
+          g_gbm_displays.end());
+    }
     if (dpy_ != EGL_NO_DISPLAY && dpy_ != nullptr) {
       eglMakeCurrent(static_cast<EGLDisplay>(dpy_), EGL_NO_SURFACE,
                      EGL_NO_SURFACE, EGL_NO_CONTEXT);
@@ -698,6 +760,10 @@ class GbmGlDevice final : public GlDevice {
     cfg_ = cfg;
     log::i(kTag, "host GL device: {} (gbm platform, EGL {}.{}, node {})",
            renderer_, major, minor, node);
+    {
+      const std::lock_guard<std::mutex> lock(g_gbm_displays_mutex);
+      g_gbm_displays.push_back(dpy_);
+    }
     return true;
   }
 
@@ -724,6 +790,23 @@ class GbmGlDevice final : public GlDevice {
 }  // namespace
 
 // ── Factories (the single backend-selection point) ──────────────────────────
+void order_window_configs(void* egl_display, void** configs, int count) {
+  if (configs == nullptr || count < 2) {
+    return;
+  }
+  {
+    const std::lock_guard<std::mutex> lock(g_gbm_displays_mutex);
+    if (std::find(g_gbm_displays.begin(), g_gbm_displays.end(), egl_display) ==
+        g_gbm_displays.end()) {
+      return;
+    }
+  }
+  std::stable_partition(configs, configs + count, [&](void* config) {
+    return window_format(visual_of(static_cast<EGLDisplay>(egl_display),
+                                   static_cast<EGLConfig>(config)));
+  });
+}
+
 std::unique_ptr<GlDevice> GlDevice::CreateWayland(void* wl_display,
                                                   std::string* error) {
   auto dev = std::make_unique<WaylandGlDevice>();

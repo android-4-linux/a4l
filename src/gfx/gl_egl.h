@@ -91,6 +91,10 @@ class GlWindow {
   virtual void release_buffer(int /*index*/) {}
   // How many buffers are held right now.
   virtual int held_buffers() const { return 0; }
+  // Whether the driver has a buffer to draw the next frame into. False when
+  // every buffer of the surface is held: a frame drawn then is lost, since
+  // its swap has nothing to put in front. Always true where nothing is held.
+  virtual bool has_free_buffer() const { return true; }
 
   // Resize (SurfaceHolder.surfaceChanged). Wayland resizes the wl_egl_window;
   // gbm recreates the gbm_surface. Cheap no-op when unchanged.
@@ -195,6 +199,14 @@ class GlDevice {
   void* ctx_ = nullptr;  // EGLContext
   void* cfg_ = nullptr;  // EGLConfig
 };
+
+// Puts first, in the order they came, the configs a gbm device's window can
+// be made for: those whose native visual is a format the window's frames are
+// presented in. An app takes the first config that has the sizes it asked for,
+// and with a driver that ties a config to one surface format (Qualcomm's) the
+// first is as likely one a4l cannot make a window for. Leaves `configs` as it
+// is for a display that is not a gbm device's. `configs` are EGLConfigs.
+void order_window_configs(void* egl_display, void** configs, int count);
 
 }  // namespace acl::gfx
 

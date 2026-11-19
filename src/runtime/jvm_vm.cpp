@@ -374,13 +374,17 @@ bool split_gl_swap(void* egl_surface) {
 
   // Take back what the compositor released: a slot the broker reports free
   // again. The driver may render into those buffers from here on.
-  std::uint32_t free = presenter->free_mask();
-  for (int& slot : g_gl_session.slot_of) {
-    if (slot >= 0 && (free & (1u << slot)) != 0) {
-      win->release_buffer(static_cast<int>(&slot - g_gl_session.slot_of));
-      slot = -1;
+  std::uint32_t free = 0;
+  const auto take_back = [&] {
+    free = presenter->free_mask();
+    for (int& slot : g_gl_session.slot_of) {
+      if (slot >= 0 && (free & (1u << slot)) != 0) {
+        win->release_buffer(static_cast<int>(&slot - g_gl_session.slot_of));
+        slot = -1;
+      }
     }
-  }
+  };
+  take_back();
 
   gfx::DmabufFrame frame;
   std::string err;
@@ -433,6 +437,27 @@ bool split_gl_swap(void* egl_surface) {
       pollfd pfd{presenter->fd(), POLLIN, 0};
       ::poll(&pfd, 1, 2);
       presenter->dispatch();
+    }
+  }
+  // The app draws its next frame as soon as this returns, and the driver
+  // needs a buffer for it. Mesa's surface has four; Qualcomm's has three,
+  // and with the compositor holding two and the frame just sent the third
+  // there is none until the compositor lets one go, which it does about when
+  // it asks for the next frame. Drawn without one, the frame is lost at its
+  // swap: every other frame, on that driver. So wait for the release, as a
+  // Wayland EGL swap does. Bounded for the same reason as above.
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(kWaitMs);
+  const bool on_main = std::this_thread::get_id() == g_gl_main_thread;
+  for (take_back(); !win->has_free_buffer() && !presenter->closed() &&
+                    std::chrono::steady_clock::now() < deadline;
+       take_back()) {
+    if (on_main) {
+      pollfd pfd{presenter->fd(), POLLIN, 0};
+      ::poll(&pfd, 1, 2);
+      presenter->dispatch();
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
   return true;
