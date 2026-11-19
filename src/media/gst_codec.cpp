@@ -41,6 +41,108 @@ constexpr std::uint64_t kInFlightStart = 4;
 constexpr std::uint64_t kInFlightMax = 32;
 constexpr gint64 kStarvedUs = 50 * 1000;
 
+// ACL_VIDEO_GST_COPY: take every frame through system memory, to try the copy
+// path on a machine whose decoder has dma-bufs to give.
+bool copy_always() {
+  static const bool v = std::getenv("ACL_VIDEO_GST_COPY") != nullptr;
+  return v;
+}
+
+#if GST_CHECK_VERSION(1, 24, 0)
+// The appsink's answer to a decoder asking what the consumer supports: plane
+// offsets and strides carried on the buffer (GstVideoMeta). A decoder gives
+// out its own dma-bufs only to a consumer that says so; an appsink says
+// nothing unless asked through this callback.
+gboolean propose_allocation(GstAppSink*, GstQuery* query, gpointer) {
+  gst_query_add_allocation_meta(query, GST_VIDEO_META_API_TYPE, nullptr);
+  return TRUE;
+}
+
+// A frame whose caps name a DRM format and modifier (GStreamer 1.24's
+// "DMA_DRM"): a hardware decoder's own surface in the layout its driver
+// uses, which may be tiled. Each plane is found in the buffer's memories by
+// its video meta offset; the planes may be in one dma-buf or one each.
+// 1 with *out filled (fds borrowed from the buffer), -1 with *why.
+int drm_frame(GstBuffer* buf,
+              const GstCaps* caps,
+              gfx::DmabufFrame* out,
+              std::string* why) {
+  auto bad = [&](const char* m) {
+    *why = m;
+    return -1;
+  };
+  GstVideoInfoDmaDrm drm;
+  gst_video_info_dma_drm_init(&drm);
+  if (!gst_video_info_dma_drm_from_caps(&drm, caps))
+    return bad("GStreamer: DRM caps do not parse");
+  // What the video plane and the converter take; anything else has no path.
+  if (drm.drm_fourcc != DRM_FORMAT_NV12 && drm.drm_fourcc != DRM_FORMAT_P010)
+    return bad("GStreamer: DRM frame is not NV12 or P010");
+  const int w = GST_VIDEO_INFO_WIDTH(&drm.vinfo);
+  const int h = GST_VIDEO_INFO_HEIGHT(&drm.vinfo);
+  if (w <= 0 || h <= 0 || w > 16384 || h > 16384)
+    return bad("GStreamer: bad frame size");
+  const GstVideoMeta* vm = gst_buffer_get_video_meta(buf);
+  if (vm == nullptr || vm->n_planes < 2 ||
+      vm->n_planes > static_cast<guint>(gfx::DmabufFrame::kMaxPlanes))
+    return bad("GStreamer: DRM frame without a plane layout");
+
+  gfx::DmabufFrame f{};
+  f.width = static_cast<std::uint32_t>(w);
+  f.height = static_cast<std::uint32_t>(h);
+  f.drm_format = drm.drm_fourcc;
+  f.modifier = drm.drm_modifier;
+  f.modifier_tiled = f.modifier != DRM_FORMAT_MOD_LINEAR &&
+                     f.modifier != DRM_FORMAT_MOD_INVALID;
+  f.plane_count = vm->n_planes;
+  const std::uint64_t sample = drm.drm_fourcc == DRM_FORMAT_P010 ? 2 : 1;
+  for (guint i = 0; i < vm->n_planes; ++i) {
+    guint idx = 0;
+    guint len = 0;
+    gsize skip = 0;
+    if (!gst_buffer_find_memory(buf, vm->offset[i], 1, &idx, &len, &skip))
+      return bad("GStreamer: a plane is outside the buffer");
+    GstMemory* mem = gst_buffer_peek_memory(buf, idx);
+    if (!gst_is_dmabuf_memory(mem))
+      return bad("GStreamer: DRM frame is not in dma-bufs");
+    const int fd = gst_dmabuf_memory_get_fd(mem);
+    gsize mem_off = 0;
+    gsize mem_max = 0;
+    gst_memory_get_sizes(mem, &mem_off, &mem_max);
+    const std::uint64_t off = static_cast<std::uint64_t>(skip) + mem_off;
+    const off_t end = fd >= 0 ? ::lseek(fd, 0, SEEK_END) : -1;
+    const std::uint64_t size = end > 0 ? static_cast<std::uint64_t>(end) : 0;
+    if (fd < 0 || vm->stride[i] <= 0 || off > 0xffffffffu ||
+        (size != 0 && off >= size))
+      return bad("GStreamer: a plane does not fit its dma-buf");
+    // Rows are checked where the layout says what a row is: a tiled
+    // modifier's stride is the driver's own business.
+    if (!f.modifier_tiled && i < 2) {
+      const std::uint64_t row =
+          (i == 0 ? static_cast<std::uint64_t>(w)
+                  : (static_cast<std::uint64_t>(w) + 1) / 2 * 2) *
+          sample;
+      const std::uint64_t rows = i == 0
+                                     ? static_cast<std::uint64_t>(h)
+                                     : (static_cast<std::uint64_t>(h) + 1) / 2;
+      const auto stride = static_cast<std::uint64_t>(vm->stride[i]);
+      if (stride < row || (size != 0 && off + stride * rows > size))
+        return bad("GStreamer: a plane does not fit its dma-buf");
+    }
+    f.planes[i].offset = static_cast<std::uint32_t>(off);
+    f.planes[i].stride = static_cast<std::uint32_t>(vm->stride[i]);
+    if (i == 0) {
+      f.fd = fd;
+      f.mem_size = size;
+    } else if (fd != f.fd) {
+      f.planes[i].fd = fd;
+    }
+  }
+  *out = f;
+  return 1;
+}
+#endif
+
 bool gst_ready() {
   static std::once_flag once;
   static bool ok = false;
@@ -224,9 +326,25 @@ std::unique_ptr<GstCodec> GstCodec::configure(const std::string& mime,
                "max-bytes", static_cast<guint64>(0), nullptr);
   gst_caps_unref(caps);
   // NV12 or I420 in whatever memory the decoder has: a dma-buf is passed on
-  // as it is and anything else is copied. A vendor's compressed layout is not
-  // asked for: linux-dmabuf could not describe it.
-  caps = gst_caps_from_string("video/x-raw,format=(string){NV12,I420}");
+  // as it is and anything else is copied. Ahead of those, where GStreamer can
+  // say it (1.24), the decoder's own surface with its DRM format and
+  // modifier: a decoder whose surfaces are tiled (VA on most GPUs) has no
+  // linear dma-buf to give and would otherwise copy every frame out itself.
+  // The compositor is asked about the modifier where the frame is shown.
+  const char* out_caps = "video/x-raw,format=(string){NV12,I420}";
+#if GST_CHECK_VERSION(1, 24, 0)
+  if (!copy_always())
+    out_caps =
+        "video/x-raw(memory:DMABuf),format=(string)DMA_DRM; "
+        "video/x-raw,format=(string){NV12,I420}";
+#endif
+#if GST_CHECK_VERSION(1, 24, 0)
+  GstAppSinkCallbacks callbacks{};
+  callbacks.propose_allocation = propose_allocation;
+  gst_app_sink_set_callbacks(GST_APP_SINK(d->sink), &callbacks, nullptr,
+                             nullptr);
+#endif
+  caps = gst_caps_from_string(out_caps);
   g_object_set(d->sink, "caps", caps, "sync", FALSE, "max-buffers",
                kSinkBuffers, "drop", FALSE, "emit-signals", FALSE, nullptr);
   gst_caps_unref(caps);
@@ -338,9 +456,35 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
       s, [](void* p) { gst_sample_unref(static_cast<GstSample*>(p)); });
   GstBuffer* buf = gst_sample_get_buffer(s);
   GstCaps* caps = gst_sample_get_caps(s);
+  if (buf == nullptr || caps == nullptr)
+    return err("GStreamer: sample without video caps");
+#if GST_CHECK_VERSION(1, 24, 0)
+  if (gst_video_is_dma_drm_caps(caps)) {
+    // There is no copy to fall back on: such a buffer does not map as a
+    // picture.
+    gfx::DmabufFrame f{};
+    std::string why;
+    if (drm_frame(buf, caps, &f, &why) != 1)
+      return err(why);
+    ++d->got;
+    d->last_progress_us = g_get_monotonic_time();
+    if (pts_us != nullptr)
+      *pts_us =
+          GST_BUFFER_PTS_IS_VALID(buf)
+              ? static_cast<std::int64_t>(GST_BUFFER_PTS(buf) / GST_USECOND)
+              : 0;
+    if (d->got == 1)
+      log::i(kTag,
+             "frames {}x{}: the decoder's own dma-bufs, format 0x{:x} "
+             "modifier 0x{:x}, no copy",
+             f.width, f.height, f.drm_format, f.modifier);
+    f.hold = std::move(sample);
+    *out = f;
+    return 1;
+  }
+#endif
   GstVideoInfo info;
-  if (buf == nullptr || caps == nullptr ||
-      !gst_video_info_from_caps(&info, caps))
+  if (!gst_video_info_from_caps(&info, caps))
     return err("GStreamer: sample without video caps");
   const GstVideoFormat fmt = GST_VIDEO_INFO_FORMAT(&info);
   if (fmt != GST_VIDEO_FORMAT_NV12 && fmt != GST_VIDEO_FORMAT_I420)
@@ -359,9 +503,8 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
   // Zero-copy: one NV12 dma-buf. The plane layout is the buffer's video
   // meta where it has one (a hardware decoder pads rows and lines), else what
   // the caps imply.
-  static const bool copy_always = std::getenv("ACL_VIDEO_GST_COPY") != nullptr;
   GstMemory* mem = gst_buffer_peek_memory(buf, 0);
-  if (!copy_always && fmt == GST_VIDEO_FORMAT_NV12 &&
+  if (!copy_always() && fmt == GST_VIDEO_FORMAT_NV12 &&
       gst_buffer_n_memory(buf) == 1 && gst_is_dmabuf_memory(mem)) {
     const GstVideoMeta* vm = gst_buffer_get_video_meta(buf);
     gsize mem_off = 0;
