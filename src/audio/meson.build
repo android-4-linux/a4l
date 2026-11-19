@@ -28,7 +28,8 @@ module_libs += audio_lib
 # dlopen()'d at runtime (RTLD_LOCAL) — see soundpool.cpp — so its transitive OpenSSL never enters
 # the global scope where it would clash with AOSP conscrypt's BoringSSL.
 if have_ffmpeg
-  sp_deps = [fmt_dep, jni_dep] + ff_dep
+  # dlopen is in libdl before glibc 2.34.
+  sp_deps = [fmt_dep, jni_dep, cxx.find_library('dl', required : false)] + ff_dep
   if have_pipewire
     sp_deps += pw_dep
   endif

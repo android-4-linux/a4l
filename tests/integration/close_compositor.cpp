@@ -222,18 +222,26 @@ void surface_damage_buffer(wl_client*,
                            int32_t,
                            int32_t,
                            int32_t) {}
+#ifdef WL_SURFACE_OFFSET_SINCE_VERSION
 void surface_offset(wl_client*, wl_resource*, int32_t, int32_t) {}
-const struct wl_surface_interface surface_impl = {surface_destroy,
-                                                  surface_attach,
-                                                  surface_damage,
-                                                  surface_frame,
-                                                  surface_set_opaque_region,
-                                                  surface_set_input_region,
-                                                  surface_commit,
-                                                  surface_set_buffer_transform,
-                                                  surface_set_buffer_scale,
-                                                  surface_damage_buffer,
-                                                  surface_offset};
+#endif
+// wl_surface.offset is version 5 (libwayland 1.20); an older header's table
+// ends before it.
+const struct wl_surface_interface surface_impl = {
+    surface_destroy,
+    surface_attach,
+    surface_damage,
+    surface_frame,
+    surface_set_opaque_region,
+    surface_set_input_region,
+    surface_commit,
+    surface_set_buffer_transform,
+    surface_set_buffer_scale,
+    surface_damage_buffer,
+#ifdef WL_SURFACE_OFFSET_SINCE_VERSION
+    surface_offset,
+#endif
+};
 
 void surface_res_destroy(wl_resource* r) {
   delete surf_of(r);

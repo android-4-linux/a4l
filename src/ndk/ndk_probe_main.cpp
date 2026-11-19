@@ -152,6 +152,7 @@ static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, const char* so_path) {
   return ok;
 }
 
+#if defined(ACL_NDK_PROBE_REALVM)
 // End-to-end against a REAL JVM (the host OpenJDK linked via jni_dep) — the
 // strongest proof that the jvm_vm.cpp Runtime.nativeLoad hook will work: boot a
 // genuine JVM, load_library the bionic .so (drives JNI_OnLoad ->
@@ -199,6 +200,7 @@ static bool run_realvm(acl::ndk::BionicRuntime& rt, const char* so_path) {
               ok ? "(PASS)" : "(FAIL)");
   return ok;
 }
+#endif  // ACL_NDK_PROBE_REALVM
 #endif  // ACL_HAVE_JNI
 
 // Mappings currently owned by the process. An attached thread that never gave
@@ -402,7 +404,12 @@ int main(int argc, char** argv) {
     return 1;
   }
   if (std::string(argv[2]) == "--realvm") {
+#if defined(ACL_NDK_PROBE_REALVM)
     return run_realvm(*rt, argv[1]) ? 0 : 1;
+#else
+    std::fprintf(stderr, "--realvm: this build has no libjvm to link\n");
+    return 1;
+#endif
   }
 #endif
   void* fn = rt->symbol(h, argv[2]);

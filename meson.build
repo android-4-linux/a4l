@@ -29,6 +29,7 @@ build_tests        = get_option('tests')
 have_jni = false
 jni_dep = declare_dependency()       # jni.h headers only (no libjvm link)
 jvm_link_dep = declare_dependency()  # actual -ljvm link, for standalone JVM tools only
+have_libjvm = false
 java_home = ''
 java_prog = find_program('java', required : false)
 if java_prog.found()
@@ -55,9 +56,13 @@ if java_home != '' and import('fs').exists(java_home / 'include' / 'jni.h')
     )
     # The direct -ljvm link is reserved for standalone JVM-only tools (e.g. acl-ndk-probe
     # --realvm). The acl binary must NOT use this — see the RTLD_LOCAL comment above.
+    # Not found in a cross build: the JDK on the build machine has no libjvm for
+    # the target, and a tool that needs one then leaves that part out.
+    jvm_lib = cxx.find_library('jvm', dirs : [jvm_so_dir], required : false)
+    have_libjvm = jvm_lib.found()
     jvm_link_dep = declare_dependency(
-      dependencies : cxx.find_library('jvm', dirs : [jvm_so_dir], required : false),
-      link_args : ['-Wl,-rpath,' + jvm_so_dir],
+      dependencies : jvm_lib,
+      link_args : have_libjvm ? ['-Wl,-rpath,' + jvm_so_dir] : [],
     )
     jvm_libjvm_path = jvm_so_dir / 'libjvm.so'
     have_jni = true

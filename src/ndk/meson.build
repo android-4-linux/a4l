@@ -42,11 +42,13 @@ module_libs += acl_ndk
 # --thread.
 # The probe's --realvm self-test calls JNI_CreateJavaVM directly, so this standalone tool
 # links libjvm (jvm_link_dep). The acl binary never does — it dlopens libjvm with RTLD_LOCAL.
+# A cross build has no libjvm for the target; the probe is then built without --realvm.
 ndk_probe_exe = executable(
   'acl-ndk-probe',
   files('ndk_probe_main.cpp'),
   include_directories : [config_inc, core_inc],
   link_with : [acl_ndk, acl_log],
   dependencies : ndk_deps + (have_jni ? [jvm_link_dep] : []),
+  cpp_args : have_libjvm ? ['-DACL_NDK_PROBE_REALVM=1'] : [],
   install : false,
 )
