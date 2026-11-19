@@ -417,7 +417,13 @@ struct SplitOptions {
     acl::log::w(kTag, "split: {} is not a directory of this user", dir);
     return;
   }
-  const std::string file = dir + "/registry.bin";
+  // The number goes up when the app process's view changes in a way a plugin
+  // can see: GStreamer rescans a plugin when its file changes, not when what
+  // the plugin found does, so a registry made in the old view would keep the
+  // old answer. 2: the DRM class entry, without which the VA plugin
+  // registered no decoder.
+  const std::string file = dir + "/registry-2.bin";
+  ::unlink((dir + "/registry.bin").c_str());
   // The same view as the app process will have, less the app's own
   // directories: nothing an app wrote is read here.
   acl::confine::Plan plan = launch.plan;

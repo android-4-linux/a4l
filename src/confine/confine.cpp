@@ -258,6 +258,12 @@ void gpu_nodes(Plan& plan) {
     if (starts_with(device.string(), "/sys/devices/")) {
       plan.ro.push_back(device.string());
       plan.symlinks.emplace_back(target, link);
+      // And the node's entry in its class, which is how udev lists devices:
+      // GStreamer's VA plugin asks udev for the DRM devices and registers
+      // no decoder when it is told there are none. The entry leads to the
+      // directory above and to nothing else.
+      plan.symlinks.emplace_back("../.." + resolved.substr(4),
+                                 std::string("/sys/class/drm/") + e->d_name);
     }
   }
   ::closedir(d);

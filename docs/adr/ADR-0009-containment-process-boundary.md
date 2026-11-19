@@ -217,6 +217,12 @@ three things inside `eglSwapBuffers`: it hands the finished buffer to the compos
 the buffers the compositor released, and blocks until the compositor wants another frame. A
 split child has no compositor connection, so a4l does the same three against the broker.
 
+- **The DRM class entry (2026-11-18).** Each render node has its entry in `/sys/class/drm`,
+  a link into the device directory that was visible already. udev lists devices by class,
+  GStreamer's VA plugin asks udev for the DRM devices, and with none listed it registered
+  no decoder: GStreamer in the app process decoded in software on a machine with VA-API.
+  The registry file's name carries a number that goes up with such a change, since
+  GStreamer does not rescan a plugin whose file is the same.
 - **The window is a gbm surface.** The child's GL device is Mesa's gbm platform on the render
   node. The surface is created with the modifiers the compositor advertised, which the broker
   passed on when the surface was made.

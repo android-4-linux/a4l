@@ -51,6 +51,8 @@ say pid "$$"
 say procs "$(ls /proc | grep -c '^[0-9][0-9]*$')"
 say ifaces "$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | tr '\n' ' ')"
 say dri "$(ls /dev/dri 2>/dev/null | tr '\n' ' ')"
+say drm_class "$(ls /sys/class/drm 2>/dev/null | tr '\n' ' ')"
+say drm_class_dev "$(for n in /sys/class/drm/*; do test -r "$n/dev" && printf '%s ' "${n##*/}"; done)"
 say devs "$(ls /dev | tr '\n' ' ')"
 say nnp "$(grep '^NoNewPrivs' /proc/self/status | tr -dc 0-9)"
 say caps "$(grep '^CapEff' /proc/self/status | cut -f2)"
@@ -189,6 +191,14 @@ def main() -> int:
             dri = got.get("dri", "").split()
             check(all(n.startswith("renderD") for n in dri),
                   "non-render DRM nodes in the sandbox: %s" % dri, raw)
+            # Each has its entry in the DRM class, which is how udev finds
+            # it (GStreamer's VA plugin lists devices that way), and the
+            # class has nothing else: no card, no connector.
+            check(got.get("drm_class", "").split() == dri and
+                  got.get("drm_class_dev", "").split() == dri,
+                  "the DRM class in the sandbox is %r (with a device number: "
+                  "%r), the render nodes are %s" % (
+                      got.get("drm_class"), got.get("drm_class_dev"), dri), raw)
             devs = set(got.get("devs", "").split())
             check(devs <= {"console", "core", "dri", "fd", "full", "null",
                            "ptmx", "pts", "random", "shm", "stderr", "stdin",
