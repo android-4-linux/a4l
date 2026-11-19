@@ -36,6 +36,10 @@ extern "C" {
 #include <libswresample/swresample.h>
 }
 
+// AVChannelLayout replaced the channel count and mask in libavutil 57.28
+// (FFmpeg 5.1). Older libraries, as on a board with FFmpeg 4, have only those.
+#define ACL_FF_CH_LAYOUT (LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100))
+
 #include "audio/audio.h"
 #include "log/log.h"
 
@@ -55,7 +59,11 @@ struct Ff {
   FF_FN(av_free);
   FF_FN(av_freep);
   FF_FN(av_samples_alloc);
+#if ACL_FF_CH_LAYOUT
   FF_FN(av_channel_layout_default);
+#else
+  FF_FN(av_get_default_channel_layout);
+#endif
   FF_FN(av_frame_alloc);
   FF_FN(av_frame_free);
   FF_FN(av_packet_alloc);
@@ -76,7 +84,11 @@ struct Ff {
   FF_FN(avcodec_free_context);
   FF_FN(avcodec_send_packet);
   FF_FN(avcodec_receive_frame);
+#if ACL_FF_CH_LAYOUT
   FF_FN(swr_alloc_set_opts2);
+#else
+  FF_FN(swr_alloc_set_opts);
+#endif
   FF_FN(swr_init);
   FF_FN(swr_get_out_samples);
   FF_FN(swr_convert);
@@ -127,7 +139,11 @@ void load_ffmpeg() {
   FF_BIND(av_free);
   FF_BIND(av_freep);
   FF_BIND(av_samples_alloc);
+#if ACL_FF_CH_LAYOUT
   FF_BIND(av_channel_layout_default);
+#else
+  FF_BIND(av_get_default_channel_layout);
+#endif
   FF_BIND(av_frame_alloc);
   FF_BIND(av_frame_free);
   FF_BIND(av_packet_alloc);
@@ -148,7 +164,11 @@ void load_ffmpeg() {
   FF_BIND(avcodec_free_context);
   FF_BIND(avcodec_send_packet);
   FF_BIND(avcodec_receive_frame);
+#if ACL_FF_CH_LAYOUT
   FF_BIND(swr_alloc_set_opts2);
+#else
+  FF_BIND(swr_alloc_set_opts);
+#endif
   FF_BIND(swr_init);
   FF_BIND(swr_get_out_samples);
   FF_BIND(swr_convert);
@@ -237,6 +257,7 @@ bool decode_pcm(const std::uint8_t* data,
     if (g_ff.avcodec_open2(cc, dec, nullptr) < 0)
       break;
 
+#if ACL_FF_CH_LAYOUT
     AVChannelLayout out_layout;
     g_ff.av_channel_layout_default(&out_layout, kChannels);
     if (g_ff.swr_alloc_set_opts2(&swr, &out_layout, AV_SAMPLE_FMT_S16, kRate,
@@ -244,6 +265,19 @@ bool decode_pcm(const std::uint8_t* data,
                                  cc->sample_rate, 0, nullptr) < 0 ||
         g_ff.swr_init(swr) < 0)
       break;
+#else
+    // A decoder that gives no mask still gives a count.
+    const std::int64_t in_layout =
+        cc->channel_layout != 0
+            ? static_cast<std::int64_t>(cc->channel_layout)
+            : g_ff.av_get_default_channel_layout(cc->channels);
+    swr = g_ff.swr_alloc_set_opts(nullptr,
+                                  g_ff.av_get_default_channel_layout(kChannels),
+                                  AV_SAMPLE_FMT_S16, kRate, in_layout,
+                                  cc->sample_fmt, cc->sample_rate, 0, nullptr);
+    if (swr == nullptr || g_ff.swr_init(swr) < 0)
+      break;
+#endif
 
     pkt = g_ff.av_packet_alloc();
     frame = g_ff.av_frame_alloc();
