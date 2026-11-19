@@ -20,6 +20,14 @@ void register_framework_natives(JNIEnv* env);
 // libandroid_runtime for the rest) must call it too, as a supplement.
 void register_acl_supplemental_natives(JNIEnv* env);
 
+// Gives android.util.Log's write to a4l's log where liblog's would not be
+// ART's: a system with a liblog of its own (one that writes to syslog, on some
+// boards) whose symbols a system library has loaded ahead of ART's. An app's
+// log lines then went wherever that library sends them and not to a4l's
+// output. Does nothing where ART's liblog is the one bound. For the ART path,
+// once libandroid_runtime has registered its natives.
+void route_displaced_android_log(JNIEnv* env);
+
 }  // namespace acl::runtime
 
 #endif  // ACL_RUNTIME_FRAMEWORK_NATIVES_H

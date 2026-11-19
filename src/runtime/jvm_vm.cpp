@@ -6762,6 +6762,7 @@ class ArtVm final : public JniVm {
     // acl's (the vendored android.hardware.HardwareBuffer's native underside
     // over a gbm dma-buf — Flutter external textures).
     register_acl_supplemental_natives(env);
+    route_displaced_android_log(env);
     // Override InputEventReceiver.nativeDispose. The real one (just registered
     // above) destructs NativeInputEventReceiver, whose destructor calls
     // AndroidRuntime::getJNIEnv() — null on acl (we run the JNI Invocation API
