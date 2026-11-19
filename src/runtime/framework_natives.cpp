@@ -12,6 +12,7 @@
 
 #include "runtime/framework_natives.h"
 
+#include <dlfcn.h>
 #include <sys/syscall.h>  // SYS_gettid
 #include <time.h>
 #include <unistd.h>  // syscall
@@ -55,6 +56,33 @@ jint JNICALL Log_write0(JNIEnv* env,
     p = static_cast<int>(log::Level::Fatal);
   log::write(static_cast<log::Level>(p), tag_s, msg_s);
   return static_cast<jint>(msg_s.size());
+}
+
+// android.util.Log.println_native(bufID, priority, tag, msg) ->
+// acl::log::write. The buffer (main, radio, system...) is not kept: there is
+// one log here.
+jint JNICALL Log_println_native(JNIEnv* env,
+                                jclass cls,
+                                jint /*buf_id*/,
+                                jint priority,
+                                jstring tag,
+                                jstring msg) {
+  if (msg == nullptr) {  // as the framework's own does
+    if (jclass npe = env->FindClass("java/lang/NullPointerException")) {
+      env->ThrowNew(npe, "println needs a message");
+    }
+    return -1;
+  }
+  return Log_write0(env, cls, priority, tag, msg);
+}
+
+// The path of the library that `address` is in, or "?".
+std::string library_of(void* address) {
+  Dl_info info{};
+  if (::dladdr(address, &info) != 0 && info.dli_fname != nullptr) {
+    return info.dli_fname;
+  }
+  return "?";
 }
 
 // --- android.media.AudioTrack: 16-bit PCM -> acl::audio::Sink ---------------
@@ -503,6 +531,47 @@ void register_acl_supplemental_natives(JNIEnv* env) {
   // <clinit> loadLibrary( "media_jni") is intercepted in jvm_vm's nativeLoad
   // override (which calls register_image_reader_natives before nativeClassInit
   // runs), matching the real lib's JNI_OnLoad.
+}
+
+void route_displaced_android_log(JNIEnv* env) {
+  if (env == nullptr) {
+    return;
+  }
+  // android.util.Log's native calls liblog's __android_log_buf_write. ART's
+  // liblog is loaded with libandroid_runtime, after the process has started;
+  // a system library may have brought in a liblog of the system's by then,
+  // and the first one loaded is the one the call binds to.
+  constexpr const char* kWrite = "__android_log_buf_write";
+  void* art_liblog = ::dlopen("liblog.so", RTLD_NOLOAD | RTLD_LAZY);
+  if (art_liblog == nullptr) {
+    return;
+  }
+  void* own = ::dlsym(art_liblog, kWrite);
+  void* bound = ::dlsym(RTLD_DEFAULT, kWrite);
+  ::dlclose(art_liblog);
+  if (own == nullptr || bound == nullptr || own == bound) {
+    return;
+  }
+  jclass cls = env->FindClass("android/util/Log");
+  if (cls == nullptr) {
+    env->ExceptionClear();
+    return;
+  }
+  const JNINativeMethod method = {
+      const_cast<char*>("println_native"),
+      const_cast<char*>("(IILjava/lang/String;Ljava/lang/String;)I"),
+      reinterpret_cast<void*>(&Log_println_native)};
+  if (env->RegisterNatives(cls, &method, 1) != JNI_OK) {
+    env->ExceptionClear();
+    log::write(log::Level::Warn, "acl.runtime.jvm",
+               "android.util.Log writes through " + library_of(bound) +
+                   ", not ART's liblog, and could not be given a4l's log");
+  } else {
+    log::write(log::Level::Info, "acl.runtime.jvm",
+               "android.util.Log -> a4l's log: liblog's write is " +
+                   library_of(bound) + "'s here, not ART's");
+  }
+  env->DeleteLocalRef(cls);
 }
 
 void register_framework_natives(JNIEnv* env) {
