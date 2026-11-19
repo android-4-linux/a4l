@@ -22,6 +22,9 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#if __has_include(<libavcodec/bsf.h>)
+#include <libavcodec/bsf.h>  // its own header since FFmpeg 4.3
+#endif
 #include <libavformat/avformat.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_drm.h>
@@ -62,6 +65,13 @@ struct Ff {
   FF_FN(avcodec_find_decoder_by_name);
   FF_FN(avcodec_alloc_context3);
   FF_FN(avcodec_parameters_to_context);
+  FF_FN(avcodec_parameters_copy);
+  FF_FN(av_bsf_get_by_name);
+  FF_FN(av_bsf_alloc);
+  FF_FN(av_bsf_init);
+  FF_FN(av_bsf_send_packet);
+  FF_FN(av_bsf_receive_packet);
+  FF_FN(av_bsf_free);
   FF_FN(avcodec_open2);
   FF_FN(avcodec_free_context);
   FF_FN(avcodec_get_hw_config);
@@ -135,6 +145,13 @@ bool load_ffmpeg() {
   FF_BIND(avcodec_find_decoder_by_name);
   FF_BIND(avcodec_alloc_context3);
   FF_BIND(avcodec_parameters_to_context);
+  FF_BIND(avcodec_parameters_copy);
+  FF_BIND(av_bsf_get_by_name);
+  FF_BIND(av_bsf_alloc);
+  FF_BIND(av_bsf_init);
+  FF_BIND(av_bsf_send_packet);
+  FF_BIND(av_bsf_receive_packet);
+  FF_BIND(av_bsf_free);
   FF_BIND(avcodec_open2);
   FF_BIND(avcodec_free_context);
   FF_BIND(avcodec_get_hw_config);
@@ -546,11 +563,18 @@ const char* mime_for_codec_id(enum AVCodecID id) {
 struct Demuxer::DImpl {
   AVFormatContext* fmt = nullptr;
   AVPacket* pkt = nullptr;
+  // H.264 and HEVC out of a container that keeps them length-prefixed (MP4,
+  // Matroska) are rewritten to Annex B, parameter sets included: what
+  // MediaExtractor hands an app and what a MediaCodec engine is given.
+  // nullptr for any other codec.
+  AVBSFContext* bsf = nullptr;
   int stream_index = -1;
   std::string mime;
   std::vector<std::uint8_t> extradata;
   int width = 0, height = 0;
   ~DImpl() {
+    if (bsf)
+      g_ff.av_bsf_free(&bsf);
     if (pkt)
       g_ff.av_packet_free(&pkt);
     if (fmt)
@@ -599,6 +623,21 @@ std::unique_ptr<Demuxer> Demuxer::open(const std::string& path,
   d->width = par->width;
   d->height = par->height;
   d->mime = mime_for_codec_id(par->codec_id);
+  const char* to_annexb = par->codec_id == AV_CODEC_ID_H264 ? "h264_mp4toannexb"
+                          : par->codec_id == AV_CODEC_ID_HEVC
+                              ? "hevc_mp4toannexb"
+                              : nullptr;
+  if (to_annexb != nullptr) {
+    // The filter passes a stream that is Annex B already through as it is.
+    const AVBitStreamFilter* f = g_ff.av_bsf_get_by_name(to_annexb);
+    if (f == nullptr || g_ff.av_bsf_alloc(f, &d->bsf) < 0)
+      return fail("no Annex B bitstream filter");
+    d->bsf->time_base_in = d->fmt->streams[d->stream_index]->time_base;
+    if (g_ff.avcodec_parameters_copy(d->bsf->par_in, par) < 0 ||
+        g_ff.av_bsf_init(d->bsf) < 0)
+      return fail("Annex B bitstream filter did not start");
+    par = d->bsf->par_out;  // its extradata is the parameter sets, Annex B
+  }
   if (par->extradata != nullptr && par->extradata_size > 0)
     d->extradata.assign(par->extradata, par->extradata + par->extradata_size);
   d->pkt = g_ff.av_packet_alloc();
@@ -626,6 +665,23 @@ int Demuxer::read_sample(const std::uint8_t** data,
       return -1;
     }
     if (d->pkt->stream_index == d->stream_index) {
+      if (d->bsf != nullptr) {
+        // Takes the packet; gives it back rewritten, one for one.
+        if (g_ff.av_bsf_send_packet(d->bsf, d->pkt) < 0) {
+          g_ff.av_packet_unref(d->pkt);
+          if (error)
+            *error = "Annex B bitstream filter refused a packet";
+          return -1;
+        }
+        r = g_ff.av_bsf_receive_packet(d->bsf, d->pkt);
+        if (r == AVERROR(EAGAIN))
+          continue;
+        if (r < 0) {
+          if (error)
+            *error = "Annex B bitstream filter failed";
+          return -1;
+        }
+      }
       if (data)
         *data = d->pkt->data;
       if (size)
