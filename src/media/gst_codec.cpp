@@ -72,6 +72,28 @@ GstPadProbeReturn answer_allocation(GstPad*, GstPadProbeInfo* info, gpointer) {
   return GST_PAD_PROBE_HANDLED;  // answered, and the answer is yes
 }
 
+// What the caps say of the picture's matrix and range, onto the frame. The
+// matrix as H.273 numbers it; GStreamer's own function for that is from 1.18,
+// and this runs on 1.16.
+void note_color(const GstVideoInfo& info, gfx::DmabufFrame* out) {
+  std::uint8_t matrix = 2;  // not said
+  switch (info.colorimetry.matrix) {
+    case GST_VIDEO_COLOR_MATRIX_BT709:
+      matrix = 1;
+      break;
+    case GST_VIDEO_COLOR_MATRIX_BT601:
+      matrix = 6;
+      break;
+    case GST_VIDEO_COLOR_MATRIX_BT2020:
+      matrix = 9;
+      break;
+    default:
+      break;
+  }
+  out->yuv_matrix = matrix;
+  out->yuv_full_range = info.colorimetry.range == GST_VIDEO_COLOR_RANGE_0_255;
+}
+
 // Qualcomm's OpenMAX decoder element hands out system memory that is a
 // mapping of the decoder's own buffer, and names the buffer's dma-buf in the
 // slots of the GstVideoMeta that a two-plane frame leaves unused: offset[2]
@@ -168,6 +190,7 @@ int drm_frame(GstBuffer* buf,
       f.planes[i].fd = fd;
     }
   }
+  note_color(drm.vinfo, &f);
   *out = f;
   return 1;
 }
@@ -643,6 +666,7 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
       } else {
         f.hold = std::move(sample);
       }
+      note_color(info, &f);
       *out = f;
       return 1;
     }
@@ -686,6 +710,8 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
               : pool->write_420(planes, strides, nv12, out, error);
   }
   gst_video_frame_unmap(&vf);
+  if (ok)
+    note_color(info, out);
   return ok ? 1 : -1;
 }
 

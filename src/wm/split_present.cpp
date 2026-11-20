@@ -435,6 +435,8 @@ class SplitPresenter final : public IPresenter {
       v.offset[i] = frame.planes[i].offset;
     }
     v.dest = {x, y, w, h};
+    v.yuv_matrix = frame.yuv_matrix;
+    v.yuv_full_range = frame.yuv_full_range ? 1 : 0;
     // The broker and the compositor are told nothing of a decoder's surface
     // pool; the datagram carries only the descriptor. The surface is kept
     // here until the broker says it is done with the frame (VideoReleased),
@@ -1138,6 +1140,11 @@ class Broker {
     fr.drm_format = v.drm_format;
     fr.mem_size = facts[0].size;
     fr.modifier_tiled = v.modifier != 0;
+    // The child's word for the stream's matrix and range. Nothing in it can
+    // do harm: gfx::video_color() takes an unknown matrix as not said.
+    fr.yuv_matrix =
+        v.yuv_matrix <= 255 ? static_cast<std::uint8_t>(v.yuv_matrix) : 2;
+    fr.yuv_full_range = v.yuv_full_range == 1;
     // The presenter keeps a frame's hold until the compositor has released
     // its buffer, and drops it at once for a frame it has no room for. The
     // end of this one tells the child, which is keeping the decoder's surface

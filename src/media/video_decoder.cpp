@@ -366,6 +366,13 @@ bool sw_to_dmabuf(const AVFrame* f,
               : (*pool)->write_420(planes, strides, !planar, out, error);
 }
 
+// What the stream said of its matrix and range, onto the frame made of `f`.
+// FFmpeg's numbers for a matrix are H.273's.
+void note_color(const AVFrame* f, gfx::DmabufFrame* out) {
+  out->yuv_matrix = static_cast<std::uint8_t>(f->colorspace);
+  out->yuv_full_range = f->color_range == AVCOL_RANGE_JPEG;
+}
+
 // MediaCodec MIME -> AVCodecID (the video codecs acl targets). AV_CODEC_ID_NONE
 // if unmapped.
 enum AVCodecID codec_id_for_mime(const std::string& mime) {
@@ -537,8 +544,12 @@ int VideoDecoder::next_frame(gfx::DmabufFrame* out, std::string* error) {
     }
   }
 
-  if (is_sw_frame(d->hw_frame))
-    return sw_to_dmabuf(d->hw_frame, &d->sw_pool, out, error) ? 1 : -1;
+  if (is_sw_frame(d->hw_frame)) {
+    if (!sw_to_dmabuf(d->hw_frame, &d->sw_pool, out, error))
+      return -1;
+    note_color(d->hw_frame, out);
+    return 1;
+  }
   const AVDRMFrameDescriptor* desc = map_drm(d->hw_frame, d->drm_frame);
   if (desc == nullptr)
     return err(
@@ -549,6 +560,7 @@ int VideoDecoder::next_frame(gfx::DmabufFrame* out, std::string* error) {
     return err("multi-object DRM frame (per-plane fds) not yet supported");
   if (rc != 1)
     return err("empty/invalid DRM descriptor");
+  note_color(d->hw_frame, out);
   return 1;
 }
 
@@ -950,6 +962,7 @@ int CodecDecoder::receive_frame(gfx::DmabufFrame* out,
     // past this call.
     if (!sw_to_dmabuf(d->hw_frame, &d->sw_pool, out, error))
       return -1;
+    note_color(d->hw_frame, out);
     if (pts_us)
       *pts_us = d->hw_frame->pts;
     return 1;
@@ -962,6 +975,7 @@ int CodecDecoder::receive_frame(gfx::DmabufFrame* out,
     return err("multi-object DRM frame (per-plane fds) not yet supported");
   if (rc != 1)
     return err("invalid DRM descriptor");
+  note_color(d->hw_frame, out);
   if (pts_us)
     *pts_us = d->hw_frame->pts;
   // Keep the surface out of the decoder's pool for as long as the frame is

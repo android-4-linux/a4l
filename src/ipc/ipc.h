@@ -62,8 +62,8 @@ enum class MsgType : std::uint32_t {
 // 3: PresentState.frames_seen. 4: the Video* messages. 5: audio as samples
 // in the datagram (AudioOpen and AudioWrite changed, AudioClose added).
 // 6: AudioLatency. 7: VideoRefused. 8: VideoFrame.buffer. 9: VideoFrame.id
-// and VideoReleased.
-inline constexpr std::uint32_t kProtocolVersion = 9;
+// and VideoReleased. 10: VideoFrame.yuv_matrix and yuv_full_range.
+inline constexpr std::uint32_t kProtocolVersion = 10;
 
 // Bounds both ends enforce on what the other sends.
 inline constexpr std::uint32_t kMaxSurfaceDim = 16384;
@@ -155,6 +155,13 @@ struct VideoFrame {
   // VideoReleased when it and the compositor are done with it. Any value; the
   // broker only repeats it.
   std::uint32_t id;
+  // Appended. What the stream says its YUV is converted to RGB with: its
+  // matrix coefficients as H.273 numbers them (2: it does not say) and 1 for
+  // full range. The broker takes any value: one it does not know is treated
+  // as not said, and what the compositor is told is always one of the pairs
+  // the compositor listed.
+  std::uint32_t yuv_matrix;
+  std::uint32_t yuv_full_range;
   // the dma-buf fds travel as SCM_RIGHTS ancillary data.
 };
 

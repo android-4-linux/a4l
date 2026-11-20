@@ -954,6 +954,20 @@ stand-in is not in this repository. The server advertised one modifier for ARGB8
   - On the board, GStreamer forced: a 1920x1080 stream with B frames passes 114 of 120
     frames on without a copy, single process and under `--split` alike; before, `--split`
     stopped at the flush with more than 5 frames out.
+- **A video frame's matrix and range (2026-11-20).** A compositor that is not told converts
+  a YUV frame by a rule of its own: for one 640x360 frame Weston 15 took BT.709 and sway
+  BT.601, and green differed by 25 of 255. A frame now carries what its stream says
+  (`yuv_matrix`, `yuv_full_range`), and where the compositor has `wp_color_representation`
+  the video plane tells it; a stream that does not say is taken as BT.601 up to 720x576 and
+  BT.709 above. `VideoFrame` carries both across the boundary (protocol version 10). The
+  broker takes any value: a matrix it has no conversion for counts as not said, and what the
+  compositor is told is always one of the pairs it listed, since another is a protocol
+  error that ends the connection. So there is nothing here for the child to do harm with,
+  and nothing is refused.
+  - Checked by unit test (the values reach the broker's presenter; a matrix past a byte
+    and a range that is not 1 are taken as not said and narrow) and on a screen: a clip
+    made with BT.709 that says so reads back right under Weston, straight and across
+    `--split`.
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 

@@ -68,8 +68,9 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "The Android Open Source Project"
 SPDX-License-Identifier = "Apache-2.0"
 
-# Vendored Wayland shell protocol definitions (unmodified upstream XML, MIT). Consumed by
-# the wcs scanner to generate the agl/ivi/fullscreen client bindings for ACL_WL_SHELL. Each
+# Vendored Wayland protocol definitions (unmodified upstream XML, MIT). Consumed by the wcs
+# scanner to generate the agl/ivi/fullscreen client bindings for ACL_WL_SHELL, and the
+# color-representation bindings for the video plane. Each
 # carries its own upstream copyright in-file; declared here for REUSE. Origins in METADATA.
 [[annotations]]
 path = ["third_party/wayland-protocols/*.xml"]
@@ -80,6 +81,8 @@ SPDX-FileCopyrightText = [
   "Copyright (c) 2013 BMW Car IT GmbH",
   "Copyright © 2016 Yong Bakos",
   "Copyright © 2015 Jason Ekstrand",
+  "Copyright 2022 Simon Ser",
+  "Copyright 2022-2025 Red Hat, Inc.",
 ]
 SPDX-License-Identifier = "MIT"
 
