@@ -13,7 +13,10 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <mutex>
+#include <system_error>
+#include <thread>
 #include <vector>
 
 #include <drm_fourcc.h>
@@ -73,13 +76,20 @@ GstPadProbeReturn answer_allocation(GstPad*, GstPadProbeInfo* info, gpointer) {
   return GST_PAD_PROBE_HANDLED;  // answered, and the answer is yes
 }
 
-// What the caps say of the picture's matrix and range, onto the frame. The
-// matrix as H.273 numbers it; GStreamer's own function for that is from 1.18,
-// and this runs on 1.16. What the caps leave unknown is taken from `said`, the
-// stream's own word where it was read (H.264: h264parse gives no range).
+// The picture's matrix and range, onto the frame. Where the stream itself
+// said them (`said`, from an H.264 SPS) its word is taken: a decoder's caps
+// may carry a default instead. GStreamer 1.16's h264parse gives no
+// colorimetry, and omxh264dec then states bt601 (limited range) whatever the
+// stream says. Otherwise the caps, with the matrix as H.273 numbers it;
+// GStreamer's own function for that is from 1.18, and this runs on 1.16.
 void note_color(const GstVideoInfo& info,
                 const H264Color* said,
                 gfx::DmabufFrame* out) {
+  if (said != nullptr) {
+    out->yuv_matrix = said->matrix;
+    out->yuv_full_range = said->full_range;
+    return;
+  }
   std::uint8_t matrix = 2;  // not said
   switch (info.colorimetry.matrix) {
     case GST_VIDEO_COLOR_MATRIX_BT709:
@@ -94,13 +104,8 @@ void note_color(const GstVideoInfo& info,
     default:
       break;
   }
-  if (matrix == 2 && said != nullptr)
-    matrix = said->matrix;
   out->yuv_matrix = matrix;
-  out->yuv_full_range =
-      info.colorimetry.range == GST_VIDEO_COLOR_RANGE_UNKNOWN && said != nullptr
-          ? said->full_range
-          : info.colorimetry.range == GST_VIDEO_COLOR_RANGE_0_255;
+  out->yuv_full_range = info.colorimetry.range == GST_VIDEO_COLOR_RANGE_0_255;
 }
 
 // Qualcomm's OpenMAX decoder element hands out system memory that is a
@@ -289,7 +294,7 @@ struct GstCodec::Impl {
   GstElement* sink = nullptr;  // appsink
   GstBus* bus = nullptr;
   std::string csd;  // sent ahead of the first access unit
-  // H.264: the color its last SPS said, for what the caps leave unknown. Read
+  // H.264: the color its last SPS said, which goes before the caps. Read
   // as the access units go in; one thread makes every call here. A picture
   // still in the decoder when a new SPS arrives is given the new one's color.
   bool avc = false;
@@ -345,9 +350,42 @@ struct GstCodec::Impl {
              tagged_passed, tagged_copied, tagged_fds.size());
   }
 
+  // Runs `step` (a state change, a flush) while taking whatever appsink
+  // holds. A decoder may have a drain query waiting in appsink for its queue
+  // to empty, and the query keeps the sink pad's stream lock, which the step
+  // needs. Stopping the sink unlocks it and undoes the unlock at once; with
+  // GStreamer 1.16 (an SA8155P, omxh264dec) the query stayed waiting through
+  // that, and the step never returned. Emptying the queue lets the query
+  // finish.
+  void pumping(const std::function<void()>& step) {
+    std::atomic<bool> done{false};
+    std::thread t;
+    try {
+      t = std::thread([&] {
+        step();
+        done.store(true, std::memory_order_release);
+      });
+    } catch (const std::system_error&) {
+      step();  // no thread to be had: as before
+      return;
+    }
+    while (!done.load(std::memory_order_acquire)) {
+      if (GstSample* s =
+              gst_app_sink_try_pull_sample(GST_APP_SINK(sink), 5 * GST_MSECOND))
+        gst_sample_unref(s);
+      else
+        g_usleep(1000);  // stopped: pulling returns at once
+    }
+    t.join();
+  }
+
   ~Impl() {
-    if (pipeline != nullptr)
-      gst_element_set_state(pipeline, GST_STATE_NULL);
+    if (pipeline != nullptr) {
+      if (sink != nullptr)
+        pumping([this] { gst_element_set_state(pipeline, GST_STATE_NULL); });
+      else
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+    }
     if (bus != nullptr)
       gst_object_unref(bus);
     if (src != nullptr)
@@ -741,8 +779,10 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
 
 void GstCodec::flush() {
   Impl* d = d_.get();
-  gst_element_send_event(d->pipeline, gst_event_new_flush_start());
-  gst_element_send_event(d->pipeline, gst_event_new_flush_stop(TRUE));
+  d->pumping([d] {
+    gst_element_send_event(d->pipeline, gst_event_new_flush_start());
+    gst_element_send_event(d->pipeline, gst_event_new_flush_stop(TRUE));
+  });
   while (GstSample* s = gst_app_sink_try_pull_sample(GST_APP_SINK(d->sink), 0))
     gst_sample_unref(s);
   d->eos_sent = false;
