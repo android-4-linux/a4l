@@ -25,6 +25,7 @@
 
 #include "gfx/sw_frame_pool.h"
 #include "log/log.h"
+#include "media/h264_color.h"
 
 namespace acl::media {
 namespace {
@@ -74,8 +75,11 @@ GstPadProbeReturn answer_allocation(GstPad*, GstPadProbeInfo* info, gpointer) {
 
 // What the caps say of the picture's matrix and range, onto the frame. The
 // matrix as H.273 numbers it; GStreamer's own function for that is from 1.18,
-// and this runs on 1.16.
-void note_color(const GstVideoInfo& info, gfx::DmabufFrame* out) {
+// and this runs on 1.16. What the caps leave unknown is taken from `said`, the
+// stream's own word where it was read (H.264: h264parse gives no range).
+void note_color(const GstVideoInfo& info,
+                const H264Color* said,
+                gfx::DmabufFrame* out) {
   std::uint8_t matrix = 2;  // not said
   switch (info.colorimetry.matrix) {
     case GST_VIDEO_COLOR_MATRIX_BT709:
@@ -90,8 +94,13 @@ void note_color(const GstVideoInfo& info, gfx::DmabufFrame* out) {
     default:
       break;
   }
+  if (matrix == 2 && said != nullptr)
+    matrix = said->matrix;
   out->yuv_matrix = matrix;
-  out->yuv_full_range = info.colorimetry.range == GST_VIDEO_COLOR_RANGE_0_255;
+  out->yuv_full_range =
+      info.colorimetry.range == GST_VIDEO_COLOR_RANGE_UNKNOWN && said != nullptr
+          ? said->full_range
+          : info.colorimetry.range == GST_VIDEO_COLOR_RANGE_0_255;
 }
 
 // Qualcomm's OpenMAX decoder element hands out system memory that is a
@@ -117,6 +126,7 @@ int tagged_fd(const GstVideoMeta* vm) {
 // 1 with *out filled (fds borrowed from the buffer), -1 with *why.
 int drm_frame(GstBuffer* buf,
               const GstCaps* caps,
+              const H264Color* said,
               gfx::DmabufFrame* out,
               std::string* why) {
   auto bad = [&](const char* m) {
@@ -190,7 +200,7 @@ int drm_frame(GstBuffer* buf,
       f.planes[i].fd = fd;
     }
   }
-  note_color(drm.vinfo, &f);
+  note_color(drm.vinfo, said, &f);
   *out = f;
   return 1;
 }
@@ -279,6 +289,17 @@ struct GstCodec::Impl {
   GstElement* sink = nullptr;  // appsink
   GstBus* bus = nullptr;
   std::string csd;  // sent ahead of the first access unit
+  // H.264: the color its last SPS said, for what the caps leave unknown. Read
+  // as the access units go in; one thread makes every call here. A picture
+  // still in the decoder when a new SPS arrives is given the new one's color.
+  bool avc = false;
+  bool color_said = false;
+  H264Color color;
+  const H264Color* said() const { return color_said ? &color : nullptr; }
+  void read_color(const std::uint8_t* p, std::size_t n) {
+    if (avc && h264_color(p, n, &color))
+      color_said = true;
+  }
   bool csd_sent = false;
   bool eos_sent = false;
   std::uint64_t sent = 0;  // access units in
@@ -450,6 +471,8 @@ std::unique_ptr<GstCodec> GstCodec::configure(const std::string& mime,
 
   if (csd != nullptr && csd_size > 0)
     d->csd.assign(reinterpret_cast<const char*>(csd), csd_size);
+  d->avc = mime == "video/avc";
+  d->read_color(csd, csd_size);
   if (gst_element_set_state(d->pipeline, GST_STATE_PLAYING) ==
       GST_STATE_CHANGE_FAILURE)
     return fail("GStreamer pipeline did not start");
@@ -499,6 +522,7 @@ int GstCodec::send_packet(const std::uint8_t* data,
     gst_buffer_fill(buf, 0, d->csd.data(), head);
   gst_buffer_fill(buf, head, data, size);
   d->csd_sent = true;
+  d->read_color(data, size);
   if (pts_us >= 0)
     GST_BUFFER_PTS(buf) = static_cast<GstClockTime>(pts_us) * GST_USECOND;
   // Takes the buffer.
@@ -557,7 +581,7 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
     // picture.
     gfx::DmabufFrame f{};
     std::string why;
-    if (drm_frame(buf, caps, &f, &why) != 1)
+    if (drm_frame(buf, caps, d->said(), &f, &why) != 1)
       return err(why);
     ++d->got;
     d->last_progress_us = g_get_monotonic_time();
@@ -666,7 +690,7 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
       } else {
         f.hold = std::move(sample);
       }
-      note_color(info, &f);
+      note_color(info, d->said(), &f);
       *out = f;
       return 1;
     }
@@ -711,7 +735,7 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
   }
   gst_video_frame_unmap(&vf);
   if (ok)
-    note_color(info, out);
+    note_color(info, d->said(), out);
   return ok ? 1 : -1;
 }
 

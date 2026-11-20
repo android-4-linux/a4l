@@ -32,6 +32,7 @@ unit_test_sources = files(
   'gfx_test.cpp',
   'dmabuf_frame_test.cpp',
   'sw_frame_pool_test.cpp',
+  'h264_color_test.cpp',
 )
 
 # Automotive-only: the media bridge (hosts/media) is compiled out under the phone
