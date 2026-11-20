@@ -85,6 +85,26 @@ void interleave_row(std::uint8_t* dst,
   }
 }
 
+// `n` Cb bytes from `u` and `n` Cr bytes from `v`, interleaved into `dst`.
+// Through a local array as above: written straight to `dst`, which may alias
+// `u` and `v` as far as the compiler knows, the loop ran a byte at a time.
+void interleave_row8(std::uint8_t* dst,
+                     const std::uint8_t* u,
+                     const std::uint8_t* v,
+                     std::uint32_t n) {
+  std::uint8_t pairs[2 * kChunk];
+  for (std::uint32_t at = 0; at < n; at += kChunk) {
+    const std::uint32_t k = std::min(kChunk, n - at);
+    const std::uint8_t* a = u + at;
+    const std::uint8_t* b = v + at;
+    for (std::uint32_t i = 0; i < k; ++i) {
+      pairs[2 * i] = a[i];
+      pairs[2 * i + 1] = b[i];
+    }
+    std::memcpy(dst + 2 * static_cast<std::size_t>(at), pairs, 2 * k);
+  }
+}
+
 // Brackets CPU access to a mapped dma-buf, which is what makes the exporter
 // flush caches for the device that reads the buffer next.
 void dmabuf_sync(int fd, std::uint64_t flags) {
@@ -340,12 +360,9 @@ bool SwFramePool::write_420(const std::uint8_t* const planes[3],
             std::memcpy(dst, u, 2 * static_cast<std::size_t>(cw));
             continue;
           }
-          const std::uint8_t* v =
-              planes[2] + static_cast<std::ptrdiff_t>(y) * strides[2];
-          for (std::uint32_t x = 0; x < cw; ++x) {
-            dst[2 * x] = u[x];
-            dst[2 * x + 1] = v[x];
-          }
+          interleave_row8(
+              dst, u, planes[2] + static_cast<std::ptrdiff_t>(y) * strides[2],
+              cw);
         }
       },
       out, error);

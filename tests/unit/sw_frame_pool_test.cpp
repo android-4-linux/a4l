@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: original a4l test. No GPL-3.0 sources.
 //
-// gfx::SwFramePool's 16-bit copy (write_420_16): every sample lands where P010
-// puts it, moved up by the shift, from rows that are not 16-bit aligned and
-// wider than the copy's chunk. Needs a gbm device and a buffer the CPU can
+// gfx::SwFramePool's copies: every sample lands where P010 (write_420_16) or
+// NV12 (write_420) puts it, from rows wider than the copy's chunk and, for
+// 16 bits, not 16-bit aligned. Needs a gbm device and a buffer the CPU can
 // map; SKIPs (with a note) where there is none.
 
 #include <catch2/catch_test_macros.hpp>
@@ -149,6 +149,62 @@ TEST_CASE("SwFramePool: 16-bit samples land where P010 puts them",
     const int short_rows[3] = {2 * static_cast<int>(kW) - 2, uv.stride, 0};
     CHECK_FALSE(pool->write_420_16(planes, short_rows, true, 0, &f, &err));
   }
+}
+
+TEST_CASE("SwFramePool: 8-bit planar chroma is interleaved into NV12",
+          "[gfx][swpool]") {
+  std::string err;
+  auto pool = SwFramePool::create(kW, kH, &err);
+  if (!pool) {
+    WARN("no gbm device (skipping): " + err);
+    SUCCEED();
+    return;
+  }
+  // Rows padded past their width, as a decoder's are.
+  const int ys = static_cast<int>(kW) + 5, cs = static_cast<int>(kCw) + 3;
+  std::vector<std::uint8_t> y(static_cast<std::size_t>(ys) * kH, 0xee),
+      u(static_cast<std::size_t>(cs) * kCh, 0xee),
+      v(static_cast<std::size_t>(cs) * kCh, 0xee);
+  for (std::uint32_t r = 0; r < kH; ++r)
+    for (std::uint32_t x = 0; x < kW; ++x)
+      y[r * ys + x] = static_cast<std::uint8_t>(luma(x, r));
+  for (std::uint32_t r = 0; r < kCh; ++r)
+    for (std::uint32_t x = 0; x < kCw; ++x) {
+      u[r * cs + x] = static_cast<std::uint8_t>(cb(x, r));
+      v[r * cs + x] = static_cast<std::uint8_t>(cr(x, r));
+    }
+  const std::uint8_t* planes[3] = {y.data(), u.data(), v.data()};
+  const int strides[3] = {ys, cs, cs};
+  DmabufFrame f;
+  if (!pool->write_420(planes, strides, false, &f, &err)) {
+    WARN("no NV12 buffer here (skipping): " + err);
+    SUCCEED();
+    return;
+  }
+  REQUIRE(f.drm_format == 0x3231564eu);  // NV12
+  const off_t size = ::lseek(f.fd, 0, SEEK_END);
+  REQUIRE(size > 0);
+  void* map = ::mmap(nullptr, static_cast<std::size_t>(size), PROT_READ,
+                     MAP_SHARED, f.fd, 0);
+  if (map == MAP_FAILED) {
+    WARN("the buffer cannot be mapped to read back (skipping)");
+    return;
+  }
+  const auto* base = static_cast<const std::uint8_t*>(map);
+  int bad = 0;
+  for (std::uint32_t r = 0; r < kH; ++r)
+    for (std::uint32_t x = 0; x < kW; ++x)
+      bad += base[f.planes[0].offset + r * f.planes[0].stride + x] !=
+             static_cast<std::uint8_t>(luma(x, r));
+  for (std::uint32_t r = 0; r < kCh; ++r)
+    for (std::uint32_t x = 0; x < kCw; ++x) {
+      const std::uint8_t* p =
+          base + f.planes[1].offset + r * f.planes[1].stride + 2 * x;
+      bad += p[0] != static_cast<std::uint8_t>(cb(x, r));
+      bad += p[1] != static_cast<std::uint8_t>(cr(x, r));
+    }
+  ::munmap(map, static_cast<std::size_t>(size));
+  CHECK(bad == 0);
 }
 
 #endif  // ACL_HAVE_GL
