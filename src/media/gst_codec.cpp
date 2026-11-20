@@ -31,7 +31,9 @@
 #include "media/h264_color.h"
 
 #if ACL_HAVE_DMABUF_CODEC
-#include "parse/sps_color.h"  // dmabuf-codec's H.265 (and H.264) SPS reader
+#include "parse/h265/nal.h"  // dmabuf-codec's H.265 NAL and SPS readers
+#include "parse/h265/sps.h"
+#include "parse/sps_color.h"
 #endif
 
 namespace acl::media {
@@ -263,17 +265,67 @@ void limit_threads(GstElement* e) {
     g_object_set(e, "max-threads", 4, nullptr);
 }
 
+// Whether an HEVC stream is deeper than 8 bits, as the SPS in its csd says.
+// False where that cannot be told (no csd, or a4l built without
+// dmabuf-codec, whose reader this is).
+bool hevc_deep(const std::uint8_t* csd, std::size_t size) {
+#if ACL_HAVE_DMABUF_CODEC
+  if (csd == nullptr || size == 0)
+    return false;
+  for (const auto& n : v4l2wc::h265::ParseAnnexB(csd, size)) {
+    v4l2wc::h265::Sps sps;
+    if (n.type == v4l2wc::h265::NalUnitType::kSpsNut &&
+        v4l2wc::h265::ParseSps(n.rbsp.data(), n.rbsp.size(), &sps))
+      return sps.bit_depth_luma > 8 || sps.bit_depth_chroma > 8;
+  }
+#else
+  (void)csd;
+  (void)size;
+#endif
+  return false;
+}
+
+// Whether a decoder's output can be a picture deeper than 8 bits in a form
+// taken here: P010 or planar 16-bit, or a dma-buf with its DRM format named.
+// Qualcomm's omxh265dec cannot (NV12, or its compressed tiles), and with a
+// 10-bit stream fails once data flows ("Could not configure supporting
+// library"); a decoder further down the list is wanted instead.
+bool gives_deep(GstElementFactory* f) {
+  GstCaps* deep = gst_caps_from_string(
+      "video/x-raw,format=(string){P010_10LE,I420_10LE}; "
+      "video/x-raw(memory:DMABuf),format=(string)DMA_DRM");
+  bool yes = false;
+  for (const GList* l = gst_element_factory_get_static_pad_templates(f);
+       l != nullptr && !yes; l = l->next) {
+    auto* t = static_cast<GstStaticPadTemplate*>(l->data);
+    if (t->direction != GST_PAD_SRC)
+      continue;
+    GstCaps* c = gst_static_pad_template_get_caps(t);
+    yes = gst_caps_can_intersect(c, deep);
+    gst_caps_unref(c);
+  }
+  gst_caps_unref(deep);
+  return yes;
+}
+
 // The highest-ranked installed element of `type` that takes `caps`, as an
-// autoplugger would choose. nullptr if there is none. *name gets its factory
-// name, with "(hardware)" when it says it is one.
+// autoplugger would choose, and for a `deep` stream one that gives_deep().
+// nullptr if there is none. *name gets its factory name, with "(hardware)"
+// when it says it is one.
 GstElement* pick(GstElementFactoryListType type,
                  const GstCaps* caps,
-                 std::string* name) {
+                 std::string* name,
+                 bool deep = false) {
   GList* all = gst_element_factory_list_get_elements(type, GST_RANK_MARGINAL);
   GList* fit = gst_element_factory_list_filter(all, caps, GST_PAD_SINK, FALSE);
   GstElement* e = nullptr;
   for (GList* l = fit; l != nullptr && e == nullptr; l = l->next) {
     auto* f = GST_ELEMENT_FACTORY(l->data);
+    if (deep && !gives_deep(f)) {
+      log::i(kTag, "{} passed over: no output deeper than 8 bits taken here",
+             GST_OBJECT_NAME(f));
+      continue;
+    }
     e = gst_element_factory_create(f, nullptr);
     if (e != nullptr && name != nullptr) {
       *name = GST_OBJECT_NAME(f);
@@ -465,9 +517,10 @@ std::unique_ptr<GstCodec> GstCodec::configure(const std::string& mime,
   GstElement* parser = pick(
       GST_ELEMENT_FACTORY_TYPE_PARSER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO,
       caps, nullptr);
+  const bool deep = mime == "video/hevc" && hevc_deep(csd, csd_size);
   GstElement* decoder = pick(
       GST_ELEMENT_FACTORY_TYPE_DECODER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO,
-      caps, &dec_name);
+      caps, &dec_name, deep);
   d->pipeline = gst_pipeline_new(nullptr);
   d->src = gst_element_factory_make("appsrc", nullptr);
   d->sink = gst_element_factory_make("appsink", nullptr);
