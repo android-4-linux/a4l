@@ -216,6 +216,22 @@ void* egl_image_from_ahb(void* dpy,
       attrs.push_back(static_cast<EGLint>(f.modifier >> 32));
     }
   }
+  // For YUV, which matrix and range the sampler converts with. Without the
+  // hints a driver takes its own default (Mesa: BT.601, narrow range), so a
+  // stream made with BT.709 came out in the wrong colors. Both hints are
+  // part of EGL_EXT_image_dma_buf_import itself, so any driver that takes
+  // this image takes them.
+  if (f.drm_format == DRM_FORMAT_NV12 || f.drm_format == DRM_FORMAT_P010 ||
+      f.drm_format == DRM_FORMAT_YUV420) {
+    const VideoColor c = video_color(f);
+    attrs.push_back(EGL_YUV_COLOR_SPACE_HINT_EXT);
+    attrs.push_back(c.matrix == YuvMatrix::Bt709    ? EGL_ITU_REC709_EXT
+                    : c.matrix == YuvMatrix::Bt2020 ? EGL_ITU_REC2020_EXT
+                                                    : EGL_ITU_REC601_EXT);
+    attrs.push_back(EGL_SAMPLE_RANGE_HINT_EXT);
+    attrs.push_back(c.full_range ? EGL_YUV_FULL_RANGE_EXT
+                                 : EGL_YUV_NARROW_RANGE_EXT);
+  }
   attrs.push_back(EGL_IMAGE_PRESERVED_KHR);
   attrs.push_back(preserved);
   attrs.push_back(EGL_NONE);
