@@ -193,6 +193,15 @@ if py3.found() and have_gl and have_ffmpeg
     depends : [video_decode_probe],
     timeout : 120,
   )
+  # Clips that say their matrix and range (BT.709 narrow, BT.601 full) read back right
+  # through the converter: the GL import is told them. Needs an HEVC encoder in ffmpeg.
+  test(
+    'video-decode-said',
+    py3,
+    args : [files('run_video_decode_test.py'), video_decode_probe, 'said'],
+    depends : [video_decode_probe],
+    timeout : 120,
+  )
   # 10 bits with no hardware device: each frame is copied into a P010 dma-buf.
   test(
     'video-decode-10bit-software',
@@ -208,6 +217,14 @@ if py3.found() and have_gl and have_ffmpeg
       'video-decode-gst',
       py3,
       args : [files('run_video_decode_test.py'), video_decode_probe],
+      depends : [video_decode_probe],
+      env : ['ACL_VIDEO_BACKEND=gst'],
+      timeout : 120,
+    )
+    test(
+      'video-decode-said-gst',
+      py3,
+      args : [files('run_video_decode_test.py'), video_decode_probe, 'said'],
       depends : [video_decode_probe],
       env : ['ACL_VIDEO_BACKEND=gst'],
       timeout : 120,
