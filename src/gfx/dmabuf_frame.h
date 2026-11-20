@@ -42,6 +42,13 @@ struct DmabufFrame {
   Plane planes[kMaxPlanes]{};
   std::uint64_t modifier = 0;    // DRM format modifier (0 == LINEAR)
   std::uint32_t drm_format = 0;  // DRM_FORMAT_* fourcc
+  // For a YUV picture, how it turns into RGB: the stream's matrix
+  // coefficients as H.273 numbers them (1 BT.709, 5 and 6 BT.601, 9 BT.2020;
+  // 2 when the stream does not say), and whether its samples use the full
+  // range or the narrow one. What a consumer does with "does not say" is
+  // video_color()'s to decide, in one place.
+  std::uint8_t yuv_matrix = 2;
+  bool yuv_full_range = false;
   std::uint64_t mem_size = 0;
   bool host_mapped = false;  // export memory is host-visible (mmap/verifiable)
   bool modifier_tiled =
@@ -117,6 +124,39 @@ inline bool dup_frame(const DmabufFrame& src, DmabufFrame* out) {
   }
   *out = std::move(f);
   return true;
+}
+
+// The matrix a YUV picture is converted with.
+enum class YuvMatrix : std::uint8_t { Bt601, Bt709, Bt2020 };
+
+struct VideoColor {
+  YuvMatrix matrix = YuvMatrix::Bt601;
+  bool full_range = false;
+};
+
+// What `frame` is converted to RGB with. A stream that names one of the three
+// matrices gets it. One that does not, or names another, is taken the way
+// Android takes it: BT.601 up to 720x576, BT.709 above. A compositor left to
+// itself picks either, and two of them picked differently for the same frame.
+inline VideoColor video_color(const DmabufFrame& frame) {
+  VideoColor c;
+  c.full_range = frame.yuv_full_range;
+  switch (frame.yuv_matrix) {
+    case 1:
+      c.matrix = YuvMatrix::Bt709;
+      break;
+    case 5:
+    case 6:
+      c.matrix = YuvMatrix::Bt601;
+      break;
+    case 9:
+      c.matrix = YuvMatrix::Bt2020;
+      break;
+    default:
+      c.matrix = frame.width > 720 || frame.height > 576 ? YuvMatrix::Bt709
+                                                         : YuvMatrix::Bt601;
+  }
+  return c;
 }
 
 }  // namespace acl::gfx

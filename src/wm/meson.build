@@ -74,11 +74,20 @@ if have_wcs
     command : [wcs_scanner, '--mode=client-header', '--std=c++23',
                '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
   )
+  # wp_color_representation: tells the compositor which YUV to RGB matrix and range a video
+  # frame wants. Vendored (MIT): wayland-protocols has it only from 1.44.
+  color_representation_client_hpp = custom_target(
+    'wm-color-representation-client-header',
+    input : files('../../third_party/wayland-protocols/color-representation-v1.xml'),
+    output : 'color_representation_v1_client.hpp',
+    command : [wcs_scanner, '--mode=client-header', '--std=c++23',
+               '--emit-interface-tables', '@INPUT@', '@OUTPUT@'],
+  )
   wm_sources += [files('wayland_presenter.cpp'), wayland_client_hpp,
                  ivi_application_client_hpp,
                  xdg_shell_client_hpp, presentation_time_client_hpp,
                  text_input_v3_client_hpp, fractional_scale_client_hpp,
-                 viewporter_client_hpp]
+                 viewporter_client_hpp, color_representation_client_hpp]
   # include_directories('.') resolves to BOTH src/wm (source) and build/src/wm
   # (where the generated headers land); wcs_dep supplies the wl/ framework headers.
   wm_inc += include_directories('.')

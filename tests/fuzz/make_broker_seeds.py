@@ -62,9 +62,10 @@ def video(w, h, fmt=NV12, modifier=0, planes=2, dest=None, stride=None,
     dest = (0, 0, w, h) if dest is None else dest
     # The last field is the frame's id: nonzero, so that the broker answers with
     # VideoReleased when it is done with the frame.
-    body = struct.pack("<IIIIQ4I4I4i4II", w, h, fmt, planes, modifier,
+    # Then the stream's matrix (1: BT.709) and range (0: narrow).
+    body = struct.pack("<IIIIQ4I4I4i4IIII", w, h, fmt, planes, modifier,
                        stride, stride, 0, 0, 0, chroma_offset, 0, 0, *dest,
-                       0, chroma_buffer, 0, 0, 7)
+                       0, chroma_buffer, 0, 0, 7, 1, 0)
     return message(VIDEO_FRAME, body)
 
 

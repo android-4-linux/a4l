@@ -106,3 +106,48 @@ TEST_CASE("DmabufFrame: a copy that cannot be made leaves nothing open",
   CHECK_FALSE(acl::gfx::dup_frame(none, &own));
   ::close(luma);
 }
+
+TEST_CASE("video_color: the stream's matrix, or one by the picture's size",
+          "[gfx][dmabuf]") {
+  using acl::gfx::YuvMatrix;
+  acl::gfx::DmabufFrame f{};
+  f.width = 640;
+  f.height = 360;
+  // Not said (2 is what a frame starts with): BT.601 up to 720x576.
+  CHECK(f.yuv_matrix == 2);
+  CHECK(acl::gfx::video_color(f).matrix == YuvMatrix::Bt601);
+  CHECK_FALSE(acl::gfx::video_color(f).full_range);
+  f.width = 720;
+  f.height = 576;
+  CHECK(acl::gfx::video_color(f).matrix == YuvMatrix::Bt601);
+  // Above that, BT.709: wider, or taller.
+  f.width = 1280;
+  f.height = 544;
+  CHECK(acl::gfx::video_color(f).matrix == YuvMatrix::Bt709);
+  f.width = 704;
+  f.height = 578;
+  CHECK(acl::gfx::video_color(f).matrix == YuvMatrix::Bt709);
+
+  // Said: the size no longer matters.
+  f.width = 1920;
+  f.height = 1080;
+  for (const std::uint8_t bt601 : {5, 6}) {
+    f.yuv_matrix = bt601;
+    CHECK(acl::gfx::video_color(f).matrix == YuvMatrix::Bt601);
+  }
+  f.yuv_matrix = 9;
+  CHECK(acl::gfx::video_color(f).matrix == YuvMatrix::Bt2020);
+  f.width = 320;
+  f.height = 240;
+  f.yuv_matrix = 1;
+  CHECK(acl::gfx::video_color(f).matrix == YuvMatrix::Bt709);
+
+  // A matrix there is no conversion for here (identity, YCgCo, ...) is taken
+  // as not said, and the range is the stream's either way.
+  for (const std::uint8_t other : {0, 3, 4, 7, 8, 10, 255}) {
+    f.yuv_matrix = other;
+    CHECK(acl::gfx::video_color(f).matrix == YuvMatrix::Bt601);
+  }
+  f.yuv_full_range = true;
+  CHECK(acl::gfx::video_color(f).full_range);
+}

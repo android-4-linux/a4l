@@ -81,6 +81,8 @@ struct World {
     int x, y, dw, dh;
     char byte;
     char byte1;  // first byte of the chroma's own buffer, 0 if it has none
+    std::uint8_t yuv_matrix;
+    bool yuv_full_range;
   };
   std::vector<Video> video;
   // With keep_video, the hold of each video frame, as a compositor that has
@@ -264,10 +266,10 @@ class FakePresenter final : public wm::IPresenter {
       ++world_.video_violations;
     if (world_.keep_video)
       world_.video_kept.push_back(frame.hold);
-    world_.video.push_back({frame.width, frame.height, frame.drm_format,
-                            frame.plane_count, frame.planes[1].stride,
-                            frame.planes[1].offset, frame.modifier, x, y, w, h,
-                            byte, byte1});
+    world_.video.push_back(
+        {frame.width, frame.height, frame.drm_format, frame.plane_count,
+         frame.planes[1].stride, frame.planes[1].offset, frame.modifier, x, y,
+         w, h, byte, byte1, frame.yuv_matrix, frame.yuv_full_range});
   }
   void hide_video() noexcept override {
     std::lock_guard<std::mutex> lock(world_.mu);
@@ -939,6 +941,55 @@ TEST_CASE(
   const wm::BrokerStats stats = rig.finish();
   CHECK(stats.video_frames == 3);
   CHECK(stats.rejected == 0);
+}
+
+TEST_CASE(
+    "split: a video frame's matrix and range reach the broker's presenter",
+    "[split]") {
+  Rig rig;
+  auto p =
+      wm::split_presenter_open_on(rig.child, 1280, 800, "t", "a", {}, false);
+  REQUIRE(p != nullptr);
+  const int fd = buffer_fd('m');
+  // Not said, BT.709 narrow, BT.601 full.
+  gfx::DmabufFrame f = video_of(fd);
+  p->present_video(f, 0, 0, 640, 360);
+  f.yuv_matrix = 1;
+  p->present_video(f, 0, 0, 640, 360);
+  f.yuv_matrix = 6;
+  f.yuv_full_range = true;
+  p->present_video(f, 0, 0, 640, 360);
+  REQUIRE(settle(rig.world, [&] { return rig.world.video.size() == 3; }));
+
+  // What the child says is not trusted to be a matrix at all: a value past a
+  // byte is taken as not said, and a range that is not 1 as narrow.
+  ipc::Message m;
+  m.type = ipc::MsgType::VideoFrame;
+  ipc::VideoFrame& v = m.video;
+  v.w = 640;
+  v.h = 360;
+  v.drm_format = 0x3231564e;
+  v.plane_count = 2;
+  v.stride[0] = v.stride[1] = 640;
+  v.offset[1] = 640 * 360;
+  v.dest = {0, 0, 640, 360};
+  v.yuv_matrix = 0x10001;
+  v.yuv_full_range = 7;
+  REQUIRE(rig.child.send(m, {}, fd));
+  ::close(fd);
+  REQUIRE(settle(rig.world, [&] { return rig.world.video.size() == 4; }));
+
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.rejected == 0);
+  const auto& got = rig.world.video;
+  CHECK(got[0].yuv_matrix == 2);
+  CHECK_FALSE(got[0].yuv_full_range);
+  CHECK(got[1].yuv_matrix == 1);
+  CHECK_FALSE(got[1].yuv_full_range);
+  CHECK(got[2].yuv_matrix == 6);
+  CHECK(got[2].yuv_full_range);
+  CHECK(got[3].yuv_matrix == 2);
+  CHECK_FALSE(got[3].yuv_full_range);
 }
 
 TEST_CASE("split: the child is told of a video format the compositor refuses",

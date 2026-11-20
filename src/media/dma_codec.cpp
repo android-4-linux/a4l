@@ -473,6 +473,8 @@ int DmaCodec::receive_frame(gfx::DmabufFrame* out,
     frame.drm_format = f.drm_fourcc;
     frame.modifier = f.modifier;
     frame.modifier_tiled = f.modifier != 0;
+    frame.yuv_matrix = f.matrix_coefficients;
+    frame.yuv_full_range = f.video_full_range;
     frame.plane_count = f.num_planes;
     for (std::uint32_t i = 0; i < f.num_planes; ++i) {
       frame.planes[i].offset = f.offsets[i];

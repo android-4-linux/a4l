@@ -4,10 +4,11 @@
 # for the non-standard shells acl targets via ACL_WL_SHELL (agl / ivi / simple). The stable
 # desktop shells (xdg-shell, presentation-time, viewporter, fractional-scale, linux-dmabuf,
 # text-input-v3) come from the system `wayland-protocols` package and are NOT vendored here;
-# only protocols absent from that package are vendored.
+# only protocols absent from that package are vendored. color-representation is in that
+# package from 1.44 on, and vendored because a4l builds against older ones too.
 #
 # These are unmodified upstream interface definitions. No implementation code is vendored.
-# All three are MIT-licensed (permitted; see PROVENANCE.md). No GPL-3.0 sources.
+# All are MIT-licensed (permitted; see PROVENANCE.md). No GPL-3.0 sources.
 
 name: "wayland-protocols (vendored shell subset)"
 description: "agl_shell, ivi_application, and zwp_fullscreen_shell_v1 protocol XML for wcs codegen."
@@ -40,5 +41,14 @@ third_party {
     license: "MIT"
     sha256: "fcc50bf0b48610d55bbe096a53da433e8557ea36a31feba2d77bf0cb9181bb52"
     version: "zwp_fullscreen_shell_v1 interface version 1"
+  }
+  identifier {
+    type: "File"
+    value: "color-representation-v1.xml"
+    # Origin: wayland-protocols 1.50, staging/color-representation/color-representation-v1.xml
+    # Upstream: https://gitlab.freedesktop.org/wayland/wayland-protocols
+    license: "MIT"
+    sha256: "b824688e0e5c1d01e12afe1d3f82503092ec7599affcd6471fda6d296d4f7e3b"
+    version: "wp_color_representation_manager_v1 interface version 1"
   }
 }

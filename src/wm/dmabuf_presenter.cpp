@@ -44,6 +44,7 @@
 // Generated CRTP client headers (scanner output) — MUST precede the wl/
 // framework.
 #include "agl_shell_client.hpp"  // ACL_WL_SHELL=agl (AGL agl_shell)
+#include "color_representation_v1_client.hpp"  // the video plane's YUV matrix and range
 #include "fullscreen_shell_client.hpp"  // ACL_WL_SHELL=simple (zwp_fullscreen_shell_v1)
 #include "ivi_application_client.hpp"  // ACL_WL_SHELL=ivi (ivi-shell)
 #include "linux_dmabuf_client.hpp"
@@ -78,6 +79,7 @@ using namespace wayland::client;
 using namespace xdg_shell::client;
 namespace dmabuf = linux_dmabuf_unstable_v1::client;
 namespace vp = viewporter::client;
+namespace cr = color_representation_v1::client;
 
 constexpr const char* kTag = "acl.wm.dmabuf";
 
@@ -135,6 +137,30 @@ class ViewporterH : public vp::CWpViewporter<ViewporterH> {
 class ViewportH : public vp::CWpViewport<ViewportH> {};
 class RegionH : public CWlRegion<RegionH> {
 };  // wl_region for the toplevel opaque region (video hole)
+// wp_color_representation_manager_v1: the compositor lists the matrix and
+// range pairs it converts YUV with. Only a listed pair may be set; another
+// is a protocol error, which ends the connection.
+class ColorManagerH
+    : public cr::CWpColorRepresentationManagerV1<ColorManagerH> {
+ public:
+  void OnSupportedAlphaMode(std::uint32_t) override {}
+  void OnSupportedCoefficientsAndRanges(std::uint32_t coefficients,
+                                        std::uint32_t range) override {
+    if (pairs_.size() < 64)  // the protocol has 8 x 2
+      pairs_.push_back((coefficients << 8) | (range & 0xffu));
+  }
+  void OnDone() override {}
+  bool supports(std::uint32_t coefficients, std::uint32_t range) const {
+    return std::find(pairs_.begin(), pairs_.end(),
+                     (coefficients << 8) | (range & 0xffu)) != pairs_.end();
+  }
+
+ private:
+  std::vector<std::uint32_t> pairs_;
+};
+class ColorSurfaceH
+    : public cr::CWpColorRepresentationSurfaceV1<ColorSurfaceH> {
+};  // event-less -> Attach
 
 // ── SubsurfacePlane: a video HW-plane path
 // ───────────────────────────────────────────────────── A wl_subsurface under
@@ -155,9 +181,11 @@ class SubsurfacePlane {
               SubcompositorH& subcomp,
               SurfaceH& parent,
               ViewporterH* viewporter,
+              ColorManagerH* color_manager,
               std::function<wl_proxy*()> create_params,
               std::string* err) noexcept {
     create_params_ = std::move(create_params);
+    color_manager_ = color_manager;
     if (!wl::SetupHandler(
             surface_,
             wl::construct<wl_surface_traits,
@@ -321,6 +349,7 @@ class SubsurfacePlane {
       frame_cb_.need = &frame_ready_;
     }
     frame_ready_ = false;
+    say_color(frame);
     surface_.Get()->Attach(slot->buf.Get()->GetProxy(), 0, 0);
     surface_.Get()->DamageBuffer(0, 0, static_cast<std::int32_t>(frame.width),
                                  static_cast<std::int32_t>(frame.height));
@@ -375,6 +404,62 @@ class SubsurfacePlane {
   bool diag_ = false;
   std::uint64_t presented_ = 0, bail_full_ = 0;
   std::vector<std::unique_ptr<InFlight>> inflight_;
+  // Tells the compositor what `frame`'s YUV is converted with, where it can
+  // be told (wp_color_representation). Left to itself a compositor picks a
+  // matrix by its own rule: for one 640x360 frame Weston 15 took BT.709 and
+  // sway BT.601, and green differed by 25 of 255. Takes effect with the
+  // commit that follows. An RGB frame (one the converter made) has no matrix:
+  // the object is destroyed, which unsets what was said.
+  void say_color(const gfx::DmabufFrame& frame) noexcept {
+    // A WlPtr's Get() is never null; whether it holds an object is IsNull().
+    if (color_manager_ == nullptr || color_manager_->IsNull())
+      return;
+    constexpr std::uint32_t kNv12 = 0x3231564e, kP010 = 0x30313050;
+    std::uint32_t coefficients = 0;  // 0: nothing to say
+    std::uint32_t range = 0;
+    if (frame.drm_format == kNv12 || frame.drm_format == kP010) {
+      const gfx::VideoColor c = gfx::video_color(frame);
+      using K = cr::WpColorRepresentationSurfaceV1Coefficients;
+      using R = cr::WpColorRepresentationSurfaceV1Range;
+      coefficients = static_cast<std::uint32_t>(
+          c.matrix == gfx::YuvMatrix::Bt709    ? K::Bt709
+          : c.matrix == gfx::YuvMatrix::Bt2020 ? K::Bt2020
+                                               : K::Bt601);
+      range = static_cast<std::uint32_t>(c.full_range ? R::Full : R::Limited);
+      if (!color_manager_->supports(coefficients, range))
+        coefficients = 0;
+    }
+    if (coefficients == 0) {
+      if (!color_.IsNull()) {
+        color_.Reset();
+        color_said_ = 0;
+      }
+      return;
+    }
+    if (color_.IsNull()) {
+      wl_proxy* raw = wl::construct<
+          cr::wp_color_representation_surface_v1_traits,
+          cr::wp_color_representation_manager_v1_traits::Op::GetSurface>(
+          *color_manager_, surface_.Get()->GetProxy());
+      if (raw == nullptr)
+        return;
+      color_.Attach(raw);
+    }
+    const std::uint32_t said = (coefficients << 8) | range;
+    if (said == color_said_)
+      return;
+    color_.Get()->SetCoefficientsAndRange(coefficients, range);
+    color_said_ = said;
+    log::i("acl.wm.dmabuf", "video plane: the compositor is told {} {} range",
+           coefficients == 2   ? "BT.709"
+           : coefficients == 6 ? "BT.2020"
+                               : "BT.601",
+           range == 1 ? "full" : "limited");
+  }
+
+  ColorManagerH* color_manager_ = nullptr;  // the presenter's; may be null
+  wl::WlPtr<ColorSurfaceH> color_;          // while a matrix is said
+  std::uint32_t color_said_ = 0;            // coefficients << 8 | range
   std::function<wl_proxy*()> create_params_;
   int x_ = 0, y_ = 0;
   bool created_ = false;
@@ -1057,6 +1142,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       std::string err;
       if (!video_plane_.create(
               *comp_.Get(), *subcomp_.Get(), *surface_.Get(), viewporter_.Get(),
+              color_manager_.Get(),
               [this]() -> wl_proxy* { return feedback_.CreateParams(); },
               &err)) {
         log::w(kTag, "video HW-plane: subsurface create failed: {}", err);
@@ -1355,6 +1441,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       } else if (iface == vp::wp_viewporter_traits::interface_name) {
         vpr_name_ = name;
         vpr_ver_ = ver;
+      } else if (iface == cr::wp_color_representation_manager_v1_traits::
+                              interface_name) {
+        color_name_ = name;
+        color_ver_ = ver;
       } else if (iface == wl_shm_traits::interface_name) {
         shm_name_ = name;
         shm_ver_ = ver;
@@ -1427,6 +1517,12 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
               vpr_name_, std::min(vpr_ver_, vp::wp_viewporter_traits::version)))
         viewporter_.Attach(raw);
     }
+    // wp_color_representation is optional as well: where it is, the video
+    // plane says which matrix its frames want. What the compositor supports
+    // arrives as events, before the first frame is shown.
+    if (color_name_ != 0)
+      (void)wl::BindHandler<cr::wp_color_representation_manager_v1_traits>(
+          registry_, color_manager_, color_name_, color_ver_);
     // Bind xdg_wm_base whenever present: the Xdg shell needs it, and Agl falls
     // back to it.
     if (xdg_name_ != 0 && !wl::BindHandler<xdg_wm_base_traits>(
@@ -2113,8 +2209,9 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       subcomp_;  // wl_subcompositor (video HW-plane subsurface); optional
   wl::WlPtr<ViewporterH> viewporter_;  // wp_viewporter (scale the video plane
                                        // to View bounds); optional
-  wl::WlPtr<ShmH> shm_;                // bound only for the cursor theme
-  wl::CursorManager cursor_;           // wl_pointer.set_cursor on enter
+  wl::WlPtr<ColorManagerH> color_manager_;  // wp_color_representation; optional
+  wl::WlPtr<ShmH> shm_;                     // bound only for the cursor theme
+  wl::CursorManager cursor_;                // wl_pointer.set_cursor on enter
   bool cursor_ready_ = false;
   std::uint32_t pointer_enter_serial_ = 0;
   std::uint32_t last_input_serial_ =
@@ -2206,7 +2303,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
                 subcomp_ver_ = 0;  // wl_subcompositor (video plane)
   std::uint32_t vpr_name_ = 0,
                 vpr_ver_ = 0;  // wp_viewporter (video plane scaling)
-  std::uint32_t shm_name_ = 0, shm_ver_ = 0;  // wl_shm (cursor theme only)
+  std::uint32_t color_name_ = 0, color_ver_ = 0;  // wp_color_representation
+  std::uint32_t shm_name_ = 0, shm_ver_ = 0;      // wl_shm (cursor theme only)
   std::uint32_t seat_name_ = 0, seat_ver_ = 0, ti_name_ = 0, ti_ver_ = 0;
   std::uint32_t ddm_name_ = 0,
                 ddm_ver_ = 0;  // wl_data_device_manager (clipboard)
