@@ -5,7 +5,7 @@
 # (LGPL, dynamic link only). MediaPlayer facade. The zero-copy video-decode path
 # ([[flutter-texture-bridge]] M5): VideoDecoder produces DRM_PRIME dma-buf frames the
 # ImageReader consumer imports with no copy.
-media_sources = files('media.cpp', 'audio_decoder.cpp', 'audio_codec.cpp')
+media_sources = files('media.cpp', 'audio_decoder.cpp', 'audio_codec.cpp', 'h264_color.cpp')
 media_deps = [fmt_dep]   # via log/log.h
 if have_ffmpeg
   # Headers only: FFmpeg is dlopen'd at run time (audio_decoder.cpp, video_decoder.cpp).

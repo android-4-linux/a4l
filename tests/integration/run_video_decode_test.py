@@ -14,10 +14,11 @@
 # A test of its own, since it also needs an HEVC encoder and a decoder that does 10 bits.
 # With no hardware decoder a 10-bit frame is copied into a P010 dma-buf.
 #
-# With "said" as the second argument the four-color clips are 8-bit HEVC that say how they
-# were made, one BT.709 narrow range and one BT.601 full range, and must read back right
-# through the converter: the GL import has to be told the matrix and the range, or the
-# driver takes its own (Mesa: BT.601 narrow) and both come out wrong.
+# With "said" as the second argument the four-color clips are 8-bit HEVC and H.264 that say
+# how they were made, one BT.709 narrow range and one BT.601 full range, and must read back
+# right through the converter: the GL import has to be told the matrix and the range, or the
+# driver takes its own (Mesa: BT.601 narrow) and both come out wrong. Each engine has to
+# find out what the stream says; GStreamer's h264parse gives no range for H.264.
 #
 # The file decoder is always FFmpeg's. The packet runs go through the engine
 # ACL_VIDEO_BACKEND names (dma, gst, ffmpeg), or the one a4l picks.
@@ -41,17 +42,20 @@ def main() -> int:
     probe = sys.argv[1]
     # The encoder's arguments for a clip of each kind.
     x265 = ["-c:v", "libx265", "-x265-params", "log-level=error", "-tag:v", "hvc1"]
+    h264 = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "main"]
     codec = (x265 + ["-pix_fmt", "yuv420p10le"] if ten else
-             x265 + ["-pix_fmt", "yuv420p"] if mode == "said" else
-             ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "main"])
+             x265 + ["-pix_fmt", "yuv420p"] if mode == "said" else h264)
     # The four-color clips: a name, how the RGB is made YUV (empty: the encoder's own
-    # way), and what the stream says of it.
-    quads = ([("BT.709 narrow", "scale=out_color_matrix=bt709:out_range=tv",
-               ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-                "-color_range", "tv"]),
-              ("BT.601 full", "scale=out_color_matrix=bt601:out_range=pc",
-               ["-colorspace", "smpte170m", "-color_range", "pc"])]
-             if mode == "said" else [("", "", [])])
+    # way), what the stream says of it, and the encoder.
+    said = [("BT.709 narrow", "scale=out_color_matrix=bt709:out_range=tv",
+             ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+              "-color_range", "tv"]),
+            ("BT.601 full", "scale=out_color_matrix=bt601:out_range=pc",
+             ["-colorspace", "smpte170m", "-color_range", "pc"])]
+    quads = ([(f"{name}, {kind}", made, says, enc)
+              for kind, enc in (("HEVC", codec), ("H.264", h264))
+              for name, made, says in said]
+             if mode == "said" else [("", "", [], codec)])
     if not os.access(probe, os.X_OK):
         sys.stdout.write("SKIP: probe not built\n")
         return SKIP
@@ -92,7 +96,7 @@ def main() -> int:
         # mirrored picture and a wrong color matrix both show.
         colors = {"tl": (0xC0, 0x20, 0x20), "tr": (0x20, 0x20, 0xC0),
                   "bl": (0x20, 0xC0, 0x20), "br": (0xE0, 0xE0, 0xE0)}
-        for qname, made, says in quads:
+        for qname, made, says, enc in quads:
             quad = os.path.join(work, "quad.mp4")
             inputs = []
             for name in ("tl", "tr", "bl", "br"):
@@ -103,7 +107,7 @@ def main() -> int:
             gen = subprocess.run(
                 [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"] + inputs +
                 ["-filter_complex", "[0][1]hstack[t];[2][3]hstack[b];[t][b]vstack" +
-                 (f",{made},format=yuv420p" if made else "")] + codec + says + [quad],
+                 (f",{made},format=yuv420p" if made else "")] + enc + says + [quad],
                 capture_output=True, text=True)
             if gen.returncode != 0 or not os.path.isfile(quad):
                 sys.stdout.write(f"SKIP: ffmpeg could not encode the quadrant clip "
