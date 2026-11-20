@@ -30,6 +30,10 @@
 #include "log/log.h"
 #include "media/h264_color.h"
 
+#if ACL_HAVE_DMABUF_CODEC
+#include "parse/sps_color.h"  // dmabuf-codec's H.265 (and H.264) SPS reader
+#endif
+
 namespace acl::media {
 namespace {
 constexpr const char* kTag = "acl.media.gst";
@@ -77,11 +81,12 @@ GstPadProbeReturn answer_allocation(GstPad*, GstPadProbeInfo* info, gpointer) {
 }
 
 // The picture's matrix and range, onto the frame. Where the stream itself
-// said them (`said`, from an H.264 SPS) its word is taken: a decoder's caps
-// may carry a default instead. GStreamer 1.16's h264parse gives no
-// colorimetry, and omxh264dec then states bt601 (limited range) whatever the
-// stream says. Otherwise the caps, with the matrix as H.273 numbers it;
-// GStreamer's own function for that is from 1.18, and this runs on 1.16.
+// said them (`said`, from an H.264 or HEVC SPS) its word is taken: a
+// decoder's caps may carry a default instead. GStreamer 1.16's h264parse and
+// h265parse give no colorimetry, and omxh264dec and omxh265dec then state
+// bt601 (limited range) whatever the stream says. Otherwise the caps, with the
+// matrix as H.273 numbers it; GStreamer's own function for that is from 1.18,
+// and this runs on 1.16.
 void note_color(const GstVideoInfo& info,
                 const H264Color* said,
                 gfx::DmabufFrame* out) {
@@ -294,16 +299,31 @@ struct GstCodec::Impl {
   GstElement* sink = nullptr;  // appsink
   GstBus* bus = nullptr;
   std::string csd;  // sent ahead of the first access unit
-  // H.264: the color its last SPS said, which goes before the caps. Read
+  // The color the stream's last SPS said, which goes before the caps. Read
   // as the access units go in; one thread makes every call here. A picture
   // still in the decoder when a new SPS arrives is given the new one's color.
+  // H.264 with a4l's own reader; HEVC with dmabuf-codec's, where a4l is
+  // built with it, and otherwise not at all (the caps alone).
   bool avc = false;
+  bool hevc = false;
   bool color_said = false;
   H264Color color;
   const H264Color* said() const { return color_said ? &color : nullptr; }
   void read_color(const std::uint8_t* p, std::size_t n) {
     if (avc && h264_color(p, n, &color))
       color_said = true;
+#if ACL_HAVE_DMABUF_CODEC
+    v4l2wc::SpsColor c;
+    // An SPS with no VUI, or a VUI without the video signal type, reads as
+    // matrix 2, limited range: nothing said, and the caps stand.
+    if (hevc && p != nullptr &&
+        v4l2wc::FindSpsColor(v4l2wc::SpsCodec::kH265, p, n, &c) &&
+        (c.matrix_coeffs != 2 || c.video_full_range_flag)) {
+      color.matrix = c.matrix_coeffs;
+      color.full_range = c.video_full_range_flag;
+      color_said = true;
+    }
+#endif
   }
   bool csd_sent = false;
   bool eos_sent = false;
@@ -510,6 +530,7 @@ std::unique_ptr<GstCodec> GstCodec::configure(const std::string& mime,
   if (csd != nullptr && csd_size > 0)
     d->csd.assign(reinterpret_cast<const char*>(csd), csd_size);
   d->avc = mime == "video/avc";
+  d->hevc = mime == "video/hevc";
   d->read_color(csd, csd_size);
   if (gst_element_set_state(d->pipeline, GST_STATE_PLAYING) ==
       GST_STATE_CHANGE_FAILURE)
