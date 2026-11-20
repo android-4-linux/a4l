@@ -283,8 +283,15 @@ int drm_desc_to_dmabuf(const AVDRMFrameDescriptor* desc,
   f.plane_count = pc;
   f.mem_size = total;
   f.host_mapped = false;
+  // Two planes are NV12, or P010 where the samples are 16 bits wide: one
+  // layer of that format, or (radeonsi) a layer of R16 luma and one of
+  // GR1616 chroma. Calling a 10-bit frame NV12 gave it half its row length,
+  // and nothing imported it.
   if (pc == 2)
-    f.drm_format = DRM_FORMAT_NV12;
+    f.drm_format = desc->layers[0].format == DRM_FORMAT_P010 ||
+                           desc->layers[0].format == DRM_FORMAT_R16
+                       ? DRM_FORMAT_P010
+                       : DRM_FORMAT_NV12;
   else if (pc == 3)
     f.drm_format = DRM_FORMAT_YUV420;
   else
