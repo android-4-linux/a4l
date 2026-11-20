@@ -12,6 +12,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <bit>
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
@@ -25,6 +27,63 @@
 namespace acl::gfx {
 namespace {
 constexpr const char* kTag = "gfx.swpool";
+
+// 16-bit little-endian samples, as P010 and a software decoder's 10-bit
+// planes keep them. A decoder's rows are not promised to be aligned for 16-bit
+// loads, and a compiler will not vectorize a loop of unaligned 16-bit loads
+// through a byte pointer (GCC 14: "relevant stmt not supported"), which left
+// it moving one sample at a time. So a row goes in chunks: copied as bytes
+// into a small array of uint16_t, shifted there, where the loop does
+// vectorize, and copied out. On a big-endian host the bytes are swapped on
+// the way.
+constexpr bool kLittle = std::endian::native == std::endian::little;
+constexpr std::uint32_t kChunk = 256;  // samples: 512 bytes on the stack
+
+std::uint16_t le16(std::uint16_t v) {
+  if constexpr (kLittle)
+    return v;
+  else
+    return static_cast<std::uint16_t>((v >> 8) | (v << 8));
+}
+
+// `n` samples from `src` to `dst`, each moved up by `shift` bits.
+void shift_row(std::uint8_t* dst,
+               const std::uint8_t* src,
+               std::uint32_t n,
+               unsigned shift) {
+  if (shift == 0) {
+    std::memcpy(dst, src, 2 * static_cast<std::size_t>(n));
+    return;
+  }
+  std::uint16_t s[kChunk];
+  for (std::uint32_t at = 0; at < n; at += kChunk) {
+    const std::uint32_t k = std::min(kChunk, n - at);
+    std::memcpy(s, src + 2 * static_cast<std::size_t>(at), 2 * k);
+    for (std::uint32_t i = 0; i < k; ++i)
+      s[i] = le16(static_cast<std::uint16_t>(le16(s[i]) << shift));
+    std::memcpy(dst + 2 * static_cast<std::size_t>(at), s, 2 * k);
+  }
+}
+
+// `n` Cb samples from `u` and `n` Cr samples from `v`, interleaved into
+// `dst`, each moved up by `shift` bits.
+void interleave_row(std::uint8_t* dst,
+                    const std::uint8_t* u,
+                    const std::uint8_t* v,
+                    std::uint32_t n,
+                    unsigned shift) {
+  std::uint16_t a[kChunk], b[kChunk], pairs[2 * kChunk];
+  for (std::uint32_t at = 0; at < n; at += kChunk) {
+    const std::uint32_t k = std::min(kChunk, n - at);
+    std::memcpy(a, u + 2 * static_cast<std::size_t>(at), 2 * k);
+    std::memcpy(b, v + 2 * static_cast<std::size_t>(at), 2 * k);
+    for (std::uint32_t i = 0; i < k; ++i) {
+      pairs[2 * i] = le16(static_cast<std::uint16_t>(le16(a[i]) << shift));
+      pairs[2 * i + 1] = le16(static_cast<std::uint16_t>(le16(b[i]) << shift));
+    }
+    std::memcpy(dst + 4 * static_cast<std::size_t>(at), pairs, 4 * k);
+  }
+}
 
 // Brackets CPU access to a mapped dma-buf, which is what makes the exporter
 // flush caches for the device that reads the buffer next.
@@ -313,49 +372,23 @@ bool SwFramePool::write_420_16(const std::uint8_t* const planes[3],
       *error = "malformed software frame";
     return false;
   }
-  // Samples are read and written a byte at a time: a decoder's rows are not
-  // promised to be aligned for 16-bit loads, and the bytes are little-endian
-  // whatever the host is.
-  const auto get = [](const std::uint8_t* p) {
-    return static_cast<unsigned>(p[0]) | (static_cast<unsigned>(p[1]) << 8);
-  };
-  const auto put = [shift](std::uint8_t* p, unsigned v) {
-    v = (v << shift) & 0xffffu;
-    p[0] = static_cast<std::uint8_t>(v);
-    p[1] = static_cast<std::uint8_t>(v >> 8);
-  };
   return write(
       [&](const Mapped& m) {
-        for (std::uint32_t y = 0; y < h; ++y) {
-          std::uint8_t* dst = m.y + static_cast<std::size_t>(y) * m.y_stride;
-          const std::uint8_t* src =
-              planes[0] + static_cast<std::ptrdiff_t>(y) * strides[0];
-          if (shift == 0) {
-            std::memcpy(dst, src, 2 * static_cast<std::size_t>(w));
-            continue;
-          }
-          for (std::uint32_t x = 0; x < w; ++x)
-            put(dst + 2 * x, get(src + 2 * x));
-        }
+        for (std::uint32_t y = 0; y < h; ++y)
+          shift_row(m.y + static_cast<std::size_t>(y) * m.y_stride,
+                    planes[0] + static_cast<std::ptrdiff_t>(y) * strides[0], w,
+                    shift);
         for (std::uint32_t y = 0; y < ch; ++y) {
           std::uint8_t* dst = m.uv + static_cast<std::size_t>(y) * m.uv_stride;
           const std::uint8_t* u =
               planes[1] + static_cast<std::ptrdiff_t>(y) * strides[1];
           if (nv12) {
-            if (shift == 0) {
-              std::memcpy(dst, u, 4 * static_cast<std::size_t>(cw));
-              continue;
-            }
-            for (std::uint32_t x = 0; x < 2 * cw; ++x)
-              put(dst + 2 * x, get(u + 2 * x));
+            shift_row(dst, u, 2 * cw, shift);
             continue;
           }
-          const std::uint8_t* v =
-              planes[2] + static_cast<std::ptrdiff_t>(y) * strides[2];
-          for (std::uint32_t x = 0; x < cw; ++x) {
-            put(dst + 4 * x, get(u + 2 * x));
-            put(dst + 4 * x + 2, get(v + 2 * x));
-          }
+          interleave_row(
+              dst, u, planes[2] + static_cast<std::ptrdiff_t>(y) * strides[2],
+              cw, shift);
         }
       },
       out, error);
