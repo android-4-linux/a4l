@@ -159,6 +159,35 @@ if py3.found() and have_gl and have_ffmpeg
     depends : [video_decode_probe],
     timeout : 120,
   )
+  # The same checks on HEVC Main 10, which comes out as P010. Needs an HEVC encoder in ffmpeg
+  # and a hardware decoder that does 10 bits; SKIPs otherwise. There is no software case: a
+  # 10-bit frame in system memory is refused, not copied.
+  test(
+    'video-decode-10bit',
+    py3,
+    args : [files('run_video_decode_test.py'), video_decode_probe, '10bit'],
+    depends : [video_decode_probe],
+    timeout : 120,
+  )
+  # Both depths with GStreamer's installed decoder as the packet engine.
+  if have_gst
+    test(
+      'video-decode-gst',
+      py3,
+      args : [files('run_video_decode_test.py'), video_decode_probe],
+      depends : [video_decode_probe],
+      env : ['ACL_VIDEO_BACKEND=gst'],
+      timeout : 120,
+    )
+    test(
+      'video-decode-10bit-gst',
+      py3,
+      args : [files('run_video_decode_test.py'), video_decode_probe, '10bit'],
+      depends : [video_decode_probe],
+      env : ['ACL_VIDEO_BACKEND=gst'],
+      timeout : 120,
+    )
+  endif
   # The same checks with no hardware device, so the decoder returns frames in system memory
   # and each is copied into an NV12 dma-buf (gfx::SwFramePool). Needs a render node for gbm.
   test(
