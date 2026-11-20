@@ -60,9 +60,11 @@ def video(w, h, fmt=NV12, modifier=0, planes=2, dest=None, stride=None,
     if chroma_offset is None:
         chroma_offset = 0 if chroma_buffer else stride * h
     dest = (0, 0, w, h) if dest is None else dest
-    body = struct.pack("<IIIIQ4I4I4i4I", w, h, fmt, planes, modifier,
+    # The last field is the frame's id: nonzero, so that the broker answers with
+    # VideoReleased when it is done with the frame.
+    body = struct.pack("<IIIIQ4I4I4i4II", w, h, fmt, planes, modifier,
                        stride, stride, 0, 0, 0, chroma_offset, 0, 0, *dest,
-                       0, chroma_buffer, 0, 0)
+                       0, chroma_buffer, 0, 0, 7)
     return message(VIDEO_FRAME, body)
 
 

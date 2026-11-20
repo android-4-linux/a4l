@@ -83,6 +83,10 @@ struct World {
     char byte1;  // first byte of the chroma's own buffer, 0 if it has none
   };
   std::vector<Video> video;
+  // With keep_video, the hold of each video frame, as a compositor that has
+  // not released the buffer keeps it.
+  bool keep_video = false;
+  std::vector<std::shared_ptr<void>> video_kept;
   std::vector<std::array<int, 4>> video_bounds;
   int video_hides = 0, video_resets = 0, video_pumps = 0;
   int video_violations = 0;  // video frames that should not have got through
@@ -258,6 +262,8 @@ class FakePresenter final : public wm::IPresenter {
         chroma_end > chroma_size || w <= 0 || h <= 0 || w > 65536 ||
         h > 65536 || x < -65536 || x > 65536 || y < -65536 || y > 65536)
       ++world_.video_violations;
+    if (world_.keep_video)
+      world_.video_kept.push_back(frame.hold);
     world_.video.push_back({frame.width, frame.height, frame.drm_format,
                             frame.plane_count, frame.planes[1].stride,
                             frame.planes[1].offset, frame.modifier, x, y, w, h,
@@ -879,6 +885,60 @@ TEST_CASE("split: the broker checks each of a video frame's buffers",
   CHECK(count(V::NotDmabuf) == 1);
   CHECK(count(V::BadPlanes) == 3);
   CHECK(rig.world.video_violations == 0);
+}
+
+TEST_CASE(
+    "split: a decoder's surface is kept until the broker is done with "
+    "the frame",
+    "[split]") {
+  Rig rig;
+  auto p =
+      wm::split_presenter_open_on(rig.child, 1280, 800, "t", "a", {}, false);
+  REQUIRE(p != nullptr);
+  const auto send = [&](char byte, std::weak_ptr<int>* alive) {
+    auto surface = std::make_shared<int>(0);
+    *alive = surface;
+    const int fd = buffer_fd(byte);
+    gfx::DmabufFrame f = video_of(fd);
+    f.hold = std::move(surface);
+    p->present_video(f, 0, 0, 640, 360);
+    ::close(fd);
+  };
+
+  // A frame the compositor takes and lets go of at once: the surface goes
+  // back as soon as the broker has said so.
+  std::weak_ptr<int> first;
+  send('a', &first);
+  REQUIRE(pump(*p, [&] { return first.expired(); }));
+
+  // One the compositor keeps: the surface stays, however long.
+  {
+    std::lock_guard<std::mutex> lock(rig.world.mu);
+    rig.world.keep_video = true;
+  }
+  std::weak_ptr<int> second;
+  send('b', &second);
+  REQUIRE(settle(rig.world, [&] { return rig.world.video_kept.size() == 1; }));
+  for (int i = 0; i < 20; ++i) {  // 200 ms of the child reading its socket
+    pollfd fd{p->fd(), POLLIN, 0};
+    ::poll(&fd, 1, 10);
+    p->dispatch();
+  }
+  CHECK_FALSE(second.expired());
+
+  // The compositor releases the buffer, on the broker's thread.
+  rig.world.post([&] { rig.world.video_kept.clear(); });
+  REQUIRE(pump(*p, [&] { return second.expired(); }));
+
+  // A frame with nothing to keep costs no answer. Three frames were shown and
+  // two releases went back.
+  const int fd = buffer_fd('c');
+  p->present_video(video_of(fd), 0, 0, 640, 360);
+  ::close(fd);
+  REQUIRE(settle(rig.world, [&] { return rig.world.video.size() == 3; }));
+  const wm::BrokerStats stats = rig.finish();
+  CHECK(stats.video_frames == 3);
+  CHECK(stats.rejected == 0);
 }
 
 TEST_CASE("split: the child is told of a video format the compositor refuses",

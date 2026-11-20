@@ -51,6 +51,9 @@ enum class MsgType : std::uint32_t {
   AudioLatency,  // acl -> child: how far behind the broker a stream sounds
   // Appended so that the child can send video the compositor takes.
   VideoRefused,  // acl -> child: no video of this format is shown (u32 fourcc)
+  // Appended so that the child keeps a decoder's buffer only for as long as
+  // the broker has the frame in use.
+  VideoReleased,  // acl -> child: done with a video frame (u32 = its id)
 };
 
 // Sent in Hello. Bump when Message changes size or a payload changes layout:
@@ -58,8 +61,9 @@ enum class MsgType : std::uint32_t {
 // refused as truncated. 2: PresentFrame planes, Input keysym, PresentState.
 // 3: PresentState.frames_seen. 4: the Video* messages. 5: audio as samples
 // in the datagram (AudioOpen and AudioWrite changed, AudioClose added).
-// 6: AudioLatency. 7: VideoRefused. 8: VideoFrame.buffer.
-inline constexpr std::uint32_t kProtocolVersion = 8;
+// 6: AudioLatency. 7: VideoRefused. 8: VideoFrame.buffer. 9: VideoFrame.id
+// and VideoReleased.
+inline constexpr std::uint32_t kProtocolVersion = 9;
 
 // Bounds both ends enforce on what the other sends.
 inline constexpr std::uint32_t kMaxSurfaceDim = 16384;
@@ -147,6 +151,10 @@ struct VideoFrame {
   // Appended. Which of the descriptors sent with the message each plane is
   // in: 0 the first, 1 the second. Plane 0 is in the first.
   std::uint32_t buffer[4];
+  // Appended. The child's name for this frame, which the broker says back in
+  // VideoReleased when it and the compositor are done with it. Any value; the
+  // broker only repeats it.
+  std::uint32_t id;
   // the dma-buf fds travel as SCM_RIGHTS ancillary data.
 };
 
