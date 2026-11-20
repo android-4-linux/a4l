@@ -319,18 +319,22 @@ bool is_sw_frame(const AVFrame* f) {
   return f->format != AV_PIX_FMT_DRM_PRIME && f->hw_frames_ctx == nullptr;
 }
 
-// Copies a system-memory frame into an NV12 dma-buf from *pool (made on first
-// use, and again when the picture size changes), so it goes down the same path
-// as a hardware surface at the cost of one copy. 8-bit 4:2:0 only.
+// Copies a system-memory frame into a dma-buf from *pool (made on first use,
+// and again when the picture's size or depth changes), so it goes down the
+// same path as a hardware surface at the cost of one copy. 4:2:0 only: 8-bit
+// into NV12, 10-bit into P010.
 bool sw_to_dmabuf(const AVFrame* f,
                   std::shared_ptr<gfx::SwFramePool>* pool,
                   gfx::DmabufFrame* out,
                   std::string* error) {
-  const bool planar =
+  const bool planar8 =
       f->format == AV_PIX_FMT_YUV420P || f->format == AV_PIX_FMT_YUVJ420P;
-  if (!planar && f->format != AV_PIX_FMT_NV12) {
+  const bool planar10 = f->format == AV_PIX_FMT_YUV420P10LE;
+  const bool deep = planar10 || f->format == AV_PIX_FMT_P010LE;
+  const bool planar = planar8 || planar10;
+  if (!planar && !deep && f->format != AV_PIX_FMT_NV12) {
     if (error)
-      *error = "software frame is not 8-bit 4:2:0 (pixel format " +
+      *error = "software frame is not 8-bit or 10-bit 4:2:0 (pixel format " +
                std::to_string(f->format) + ")";
     return false;
   }
@@ -343,17 +347,23 @@ bool sw_to_dmabuf(const AVFrame* f,
   }
   const auto w = static_cast<std::uint32_t>(f->width);
   const auto h = static_cast<std::uint32_t>(f->height);
-  if (*pool == nullptr || (*pool)->width() != w || (*pool)->height() != h) {
-    *pool = gfx::SwFramePool::create(w, h, error);
+  if (*pool == nullptr || (*pool)->width() != w || (*pool)->height() != h ||
+      (*pool)->deep() != deep) {
+    *pool = gfx::SwFramePool::create(w, h, error, deep);
     if (*pool == nullptr)
       return false;
-    log::i(kTag, "software frames {}x{}: copied to NV12 dma-bufs", w, h);
+    log::i(kTag, "software frames {}x{}: copied to {} dma-bufs", w, h,
+           deep ? "P010" : "NV12");
   }
   const std::uint8_t* const planes[3] = {f->data[0], f->data[1],
                                          planar ? f->data[2] : nullptr};
   const int strides[3] = {f->linesize[0], f->linesize[1],
                           planar ? f->linesize[2] : 0};
-  return (*pool)->write_420(planes, strides, !planar, out, error);
+  // A software decoder keeps 10 bits in the low end of each 16; P010 has
+  // them at the top.
+  return deep ? (*pool)->write_420_16(planes, strides, !planar,
+                                      planar10 ? 6 : 0, out, error)
+              : (*pool)->write_420(planes, strides, !planar, out, error);
 }
 
 // MediaCodec MIME -> AVCodecID (the video codecs acl targets). AV_CODEC_ID_NONE

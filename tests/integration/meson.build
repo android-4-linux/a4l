@@ -160,13 +160,21 @@ if py3.found() and have_gl and have_ffmpeg
     timeout : 120,
   )
   # The same checks on HEVC Main 10, which comes out as P010. Needs an HEVC encoder in ffmpeg
-  # and a hardware decoder that does 10 bits; SKIPs otherwise. There is no software case: a
-  # 10-bit frame in system memory is refused, not copied.
+  # and a hardware decoder that does 10 bits; SKIPs otherwise.
   test(
     'video-decode-10bit',
     py3,
     args : [files('run_video_decode_test.py'), video_decode_probe, '10bit'],
     depends : [video_decode_probe],
+    timeout : 120,
+  )
+  # 10 bits with no hardware device: each frame is copied into a P010 dma-buf.
+  test(
+    'video-decode-10bit-software',
+    py3,
+    args : [files('run_video_decode_test.py'), video_decode_probe, '10bit'],
+    depends : [video_decode_probe],
+    env : ['ACL_HWDEC_DEVICE=none'],
     timeout : 120,
   )
   # Both depths with GStreamer's installed decoder as the packet engine.
@@ -185,6 +193,16 @@ if py3.found() and have_gl and have_ffmpeg
       args : [files('run_video_decode_test.py'), video_decode_probe, '10bit'],
       depends : [video_decode_probe],
       env : ['ACL_VIDEO_BACKEND=gst'],
+      timeout : 120,
+    )
+    # The same with GStreamer's VA decoders ranked out, which leaves a software decoder
+    # where no other hardware one is installed: its 10-bit frames are copied into P010.
+    test(
+      'video-decode-10bit-gst-software',
+      py3,
+      args : [files('run_video_decode_test.py'), video_decode_probe, '10bit'],
+      depends : [video_decode_probe],
+      env : ['ACL_VIDEO_BACKEND=gst', 'GST_PLUGIN_FEATURE_RANK=vah265dec:NONE,vah264dec:NONE'],
       timeout : 120,
     )
   endif

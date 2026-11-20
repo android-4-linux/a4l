@@ -3,10 +3,11 @@
 // dma-buf uapi (linux/dma-buf.h, DMA_BUF_IOCTL_SYNC), libdrm drm_fourcc.h.
 // No GPL-3.0 sources.
 //
-// NV12 dma-bufs for a producer that has its pixels in system memory: a
-// software video decoder. The producer writes a frame into a buffer and gets a
-// gfx::DmabufFrame, which goes down the same path as a hardware decoder's
-// surface. One copy per frame; the hardware path has none.
+// NV12 dma-bufs, or P010 for a picture deeper than 8 bits, for a producer
+// that has its pixels in system memory: a software video decoder. The producer
+// writes a frame into a buffer and gets a gfx::DmabufFrame, which goes down the
+// same path as a hardware decoder's surface. One copy per frame; the hardware
+// path has none.
 
 #ifndef ACL_GFX_SW_FRAME_POOL_H
 #define ACL_GFX_SW_FRAME_POOL_H
@@ -31,8 +32,10 @@ class SwFramePool : public std::enable_shared_from_this<SwFramePool> {
   // decoder's surface pool is sized for.
   static constexpr std::size_t kMaxBuffers = 32;
 
-  // Where to write one frame. Rows are `width` bytes of luma, and
-  // `(width + 1) / 2` interleaved Cb,Cr pairs of chroma.
+  // Where to write one frame. Rows are `width` samples of luma, and
+  // `(width + 1) / 2` interleaved Cb,Cr pairs of chroma. A sample is a byte,
+  // or in a deep pool 16 bits, little-endian, the value in the high bits
+  // (P010). Strides are in bytes.
   struct Mapped {
     std::uint8_t* y = nullptr;
     std::uint32_t y_stride = 0;
@@ -40,17 +43,19 @@ class SwFramePool : public std::enable_shared_from_this<SwFramePool> {
     std::uint32_t uv_stride = 0;
   };
 
-  // A pool of width x height buffers. No buffer is allocated until write().
-  // nullptr + *error when there is no gbm device.
+  // A pool of width x height buffers: NV12, or with `deep` P010. No buffer
+  // is allocated until write(). nullptr + *error when there is no gbm device.
   static std::shared_ptr<SwFramePool> create(std::uint32_t width,
                                              std::uint32_t height,
-                                             std::string* error);
+                                             std::string* error,
+                                             bool deep = false);
   ~SwFramePool();
   SwFramePool(const SwFramePool&) = delete;
   SwFramePool& operator=(const SwFramePool&) = delete;
 
   std::uint32_t width() const { return width_; }
   std::uint32_t height() const { return height_; }
+  bool deep() const { return deep_; }
 
   // Takes a buffer nobody holds, calls `fill` to write the frame, and
   // describes it in *out. out->fd is the pool's; out->hold keeps the buffer
@@ -71,6 +76,18 @@ class SwFramePool : public std::enable_shared_from_this<SwFramePool> {
                  DmabufFrame* out,
                  std::string* error);
 
+  // The same for a deep pool and a 4:2:0 picture of 16-bit little-endian
+  // samples: `shift` is how far a sample's value is below the top of its 16
+  // bits (6 for 10 bits kept in the low ones, as a software decoder leaves
+  // them; 0 for P010). Strides are in bytes. False + *error as write_420, and
+  // on a pool that is not deep or a shift over 8.
+  bool write_420_16(const std::uint8_t* const planes[3],
+                    const int strides[3],
+                    bool nv12,
+                    unsigned shift,
+                    DmabufFrame* out,
+                    std::string* error);
+
  private:
   SwFramePool() = default;
   struct Buffer;
@@ -82,6 +99,7 @@ class SwFramePool : public std::enable_shared_from_this<SwFramePool> {
   void* gbm_dev_ = nullptr;         // gbm_device*
   std::uint32_t width_ = 0;
   std::uint32_t height_ = 0;
+  bool deep_ = false;  // P010: two bytes a sample
   std::mutex mu_;
   std::vector<std::unique_ptr<Buffer>> buffers_;  // guarded by mu_
   bool r8_only_ = false;  // guarded by mu_: gbm has no usable NV12
