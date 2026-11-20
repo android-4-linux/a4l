@@ -159,6 +159,20 @@ if py3.found() and have_gl and have_ffmpeg
     depends : [video_decode_probe],
     timeout : 120,
   )
+  # A hardware-decoded picture on a compositor's video plane, read back off a screenshot:
+  # four colors, 8-bit and 10-bit, straight to the compositor and across --split. Starts a
+  # headless sway for itself. Needs sway, grim, an HEVC encoder in ffmpeg and a hardware HEVC
+  # decoder; SKIPs otherwise, which includes CI. is_parallel off: it reads the screen.
+  if is_variable('video_plane_probe')
+    test(
+      'video-plane-colors',
+      py3,
+      args : [files('run_video_plane_test.py'), video_plane_probe],
+      depends : [video_plane_probe],
+      timeout : 180,
+      is_parallel : false,
+    )
+  endif
   # The same checks on HEVC Main 10, which comes out as P010. Needs an HEVC encoder in ffmpeg
   # and a hardware decoder that does 10 bits; SKIPs otherwise.
   test(
