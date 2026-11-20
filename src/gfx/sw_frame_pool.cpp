@@ -58,7 +58,8 @@ struct SwFramePool::Buffer {
 
 std::shared_ptr<SwFramePool> SwFramePool::create(std::uint32_t width,
                                                  std::uint32_t height,
-                                                 std::string* error) {
+                                                 std::string* error,
+                                                 bool deep) {
   if (width == 0 || height == 0 || width > 16384 || height > 16384) {
     if (error)
       *error = "bad frame size";
@@ -70,14 +71,17 @@ std::shared_ptr<SwFramePool> SwFramePool::create(std::uint32_t width,
     return nullptr;
   pool->width_ = width;
   pool->height_ = height;
+  pool->deep_ = deep;
   return pool;
 }
 
 SwFramePool::~SwFramePool() = default;
 
-// One attempt at a buffer: `native` asks the allocator for NV12, otherwise
-// for linear R8 one and a half frames tall, which is the same memory (luma
-// rows, then chroma rows) from an allocator with no NV12.
+// One attempt at a buffer: `native` asks the allocator for NV12 (P010 in a
+// deep pool), otherwise for linear R8 one and a half frames tall, which is
+// the same memory (luma rows, then chroma rows) from an allocator without
+// the format; in a deep pool that R8 buffer is twice as wide, a sample being
+// two bytes.
 std::unique_ptr<SwFramePool::Buffer> SwFramePool::allocate_as(
     bool native,
     std::string* error) {
@@ -91,32 +95,37 @@ std::unique_ptr<SwFramePool::Buffer> SwFramePool::allocate_as(
   // dimensions.
   const std::uint32_t w = (width_ + 1u) & ~1u;
   const std::uint32_t h = (height_ + 1u) & ~1u;
+  const std::uint32_t row =
+      deep_ ? 2 * w : w;  // bytes in a row of either plane
   auto b = std::make_unique<Buffer>();
   DmabufFrame& f = b->frame;
   f.width = width_;
   f.height = height_;
-  f.drm_format = DRM_FORMAT_NV12;
+  f.drm_format = deep_ ? DRM_FORMAT_P010 : DRM_FORMAT_NV12;
   f.modifier = DRM_FORMAT_MOD_LINEAR;
   f.plane_count = 2;
 
   if (native) {
-    b->bo = gbm_bo_create(dev, w, h, GBM_FORMAT_NV12, GBM_BO_USE_LINEAR);
+    // gbm's formats are the DRM fourccs; not every gbm.h names P010.
+    b->bo = gbm_bo_create(dev, w, h, deep_ ? DRM_FORMAT_P010 : GBM_FORMAT_NV12,
+                          GBM_BO_USE_LINEAR);
     if (b->bo == nullptr || gbm_bo_get_plane_count(b->bo) != 2 ||
         gbm_bo_get_modifier(b->bo) != DRM_FORMAT_MOD_LINEAR)
-      return fail("no linear NV12 from gbm");
+      return fail("no linear NV12 or P010 from gbm");
     for (int i = 0; i < 2; ++i) {
       f.planes[i].offset = gbm_bo_get_offset(b->bo, i);
       f.planes[i].stride = gbm_bo_get_stride_for_plane(b->bo, i);
     }
-    if (f.planes[0].stride < w || f.planes[1].stride < w ||
+    if (f.planes[0].stride < row || f.planes[1].stride < row ||
         f.planes[1].offset < static_cast<std::uint64_t>(f.planes[0].stride) * h)
-      return fail("gbm NV12 layout not understood");
+      return fail("gbm NV12 or P010 layout not understood");
   } else {
-    b->bo = gbm_bo_create(dev, w, h + h / 2, GBM_FORMAT_R8, GBM_BO_USE_LINEAR);
+    b->bo =
+        gbm_bo_create(dev, row, h + h / 2, GBM_FORMAT_R8, GBM_BO_USE_LINEAR);
     if (b->bo == nullptr)
-      return fail("gbm_bo_create failed (NV12 and R8)");
+      return fail("gbm_bo_create failed (NV12 or P010, and R8)");
     const std::uint32_t stride = gbm_bo_get_stride(b->bo);
-    if (stride < w)
+    if (stride < row)
       return fail("gbm R8 stride below the frame width");
     f.planes[0].offset = 0;
     f.planes[0].stride = stride;
@@ -144,7 +153,7 @@ std::unique_ptr<SwFramePool::Buffer> SwFramePool::allocate_as(
     }
   }
   if (b->map == nullptr && native)
-    return fail("gbm NV12 buffer cannot be mapped");
+    return fail("gbm NV12 or P010 buffer cannot be mapped");
   f.host_mapped = b->map != nullptr;
   return b;
 }
@@ -179,9 +188,9 @@ SwFramePool::Buffer* SwFramePool::take(std::string* error) {
   buffers_.push_back(std::move(b));
   if (buffers_.size() == 1) {
     const DmabufFrame& f = buffers_.back()->frame;
-    log::i(kTag, "NV12 {}x{} stride {} chroma at {} ({})", f.width, f.height,
-           f.planes[0].stride, f.planes[1].offset,
-           f.host_mapped ? "mmap" : "gbm_bo_map");
+    log::i(kTag, "{} {}x{} stride {} chroma at {} ({})",
+           deep_ ? "P010" : "NV12", f.width, f.height, f.planes[0].stride,
+           f.planes[1].offset, f.host_mapped ? "mmap" : "gbm_bo_map");
   }
   return buffers_.back().get();
 }
@@ -218,8 +227,8 @@ bool SwFramePool::write(const std::function<void(const Mapped&)>& fill,
     const std::uint32_t h = (height_ + 1u) & ~1u;
     std::uint32_t stride = 0;
     void* cookie = nullptr;
-    void* p = gbm_bo_map(b->bo, 0, 0, w, h + h / 2, GBM_BO_TRANSFER_WRITE,
-                         &stride, &cookie);
+    void* p = gbm_bo_map(b->bo, 0, 0, deep_ ? 2 * w : w, h + h / 2,
+                         GBM_BO_TRANSFER_WRITE, &stride, &cookie);
     if (p == nullptr || p == MAP_FAILED || stride != f.planes[0].stride) {
       if (p != nullptr && p != MAP_FAILED)
         gbm_bo_unmap(b->bo, cookie);
@@ -248,7 +257,7 @@ bool SwFramePool::write_420(const std::uint8_t* const planes[3],
   const std::uint32_t cw = (w + 1) / 2;  // chroma samples per row
   const std::uint32_t ch = (h + 1) / 2;  // chroma rows
   const bool ok =
-      planes[0] != nullptr && planes[1] != nullptr &&
+      !deep_ && planes[0] != nullptr && planes[1] != nullptr &&
       strides[0] >= static_cast<int>(w) &&
       (nv12 ? strides[1] >= static_cast<int>(2 * cw)
             : (planes[2] != nullptr && strides[1] >= static_cast<int>(cw) &&
@@ -277,6 +286,75 @@ bool SwFramePool::write_420(const std::uint8_t* const planes[3],
           for (std::uint32_t x = 0; x < cw; ++x) {
             dst[2 * x] = u[x];
             dst[2 * x + 1] = v[x];
+          }
+        }
+      },
+      out, error);
+}
+
+bool SwFramePool::write_420_16(const std::uint8_t* const planes[3],
+                               const int strides[3],
+                               bool nv12,
+                               unsigned shift,
+                               DmabufFrame* out,
+                               std::string* error) {
+  const std::uint32_t w = width_;
+  const std::uint32_t h = height_;
+  const std::uint32_t cw = (w + 1) / 2;  // chroma samples per row
+  const std::uint32_t ch = (h + 1) / 2;  // chroma rows
+  const bool ok =
+      deep_ && shift <= 8 && planes[0] != nullptr && planes[1] != nullptr &&
+      strides[0] >= static_cast<int>(2 * w) &&
+      (nv12 ? strides[1] >= static_cast<int>(4 * cw)
+            : (planes[2] != nullptr && strides[1] >= static_cast<int>(2 * cw) &&
+               strides[2] >= static_cast<int>(2 * cw)));
+  if (!ok) {
+    if (error)
+      *error = "malformed software frame";
+    return false;
+  }
+  // Samples are read and written a byte at a time: a decoder's rows are not
+  // promised to be aligned for 16-bit loads, and the bytes are little-endian
+  // whatever the host is.
+  const auto get = [](const std::uint8_t* p) {
+    return static_cast<unsigned>(p[0]) | (static_cast<unsigned>(p[1]) << 8);
+  };
+  const auto put = [shift](std::uint8_t* p, unsigned v) {
+    v = (v << shift) & 0xffffu;
+    p[0] = static_cast<std::uint8_t>(v);
+    p[1] = static_cast<std::uint8_t>(v >> 8);
+  };
+  return write(
+      [&](const Mapped& m) {
+        for (std::uint32_t y = 0; y < h; ++y) {
+          std::uint8_t* dst = m.y + static_cast<std::size_t>(y) * m.y_stride;
+          const std::uint8_t* src =
+              planes[0] + static_cast<std::ptrdiff_t>(y) * strides[0];
+          if (shift == 0) {
+            std::memcpy(dst, src, 2 * static_cast<std::size_t>(w));
+            continue;
+          }
+          for (std::uint32_t x = 0; x < w; ++x)
+            put(dst + 2 * x, get(src + 2 * x));
+        }
+        for (std::uint32_t y = 0; y < ch; ++y) {
+          std::uint8_t* dst = m.uv + static_cast<std::size_t>(y) * m.uv_stride;
+          const std::uint8_t* u =
+              planes[1] + static_cast<std::ptrdiff_t>(y) * strides[1];
+          if (nv12) {
+            if (shift == 0) {
+              std::memcpy(dst, u, 4 * static_cast<std::size_t>(cw));
+              continue;
+            }
+            for (std::uint32_t x = 0; x < 2 * cw; ++x)
+              put(dst + 2 * x, get(u + 2 * x));
+            continue;
+          }
+          const std::uint8_t* v =
+              planes[2] + static_cast<std::ptrdiff_t>(y) * strides[2];
+          for (std::uint32_t x = 0; x < cw; ++x) {
+            put(dst + 4 * x, get(u + 2 * x));
+            put(dst + 4 * x + 2, get(v + 2 * x));
           }
         }
       },

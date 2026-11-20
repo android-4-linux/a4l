@@ -398,12 +398,13 @@ std::unique_ptr<GstCodec> GstCodec::configure(const std::string& mime,
   // modifier: a decoder whose surfaces are tiled (VA on most GPUs) has no
   // linear dma-buf to give and would otherwise copy every frame out itself.
   // The compositor is asked about the modifier where the frame is shown.
-  const char* out_caps = "video/x-raw,format=(string){NV12,I420}";
+  const char* out_caps =
+      "video/x-raw,format=(string){NV12,I420,P010_10LE,I420_10LE}";
 #if GST_CHECK_VERSION(1, 24, 0)
   if (!copy_always())
     out_caps =
         "video/x-raw(memory:DMABuf),format=(string)DMA_DRM; "
-        "video/x-raw,format=(string){NV12,I420}";
+        "video/x-raw,format=(string){NV12,I420,P010_10LE,I420_10LE}";
 #endif
   if (GstPad* pad = gst_element_get_static_pad(d->sink, "sink")) {
     gst_pad_add_probe(
@@ -556,8 +557,11 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
   if (!gst_video_info_from_caps(&info, caps))
     return err("GStreamer: sample without video caps");
   const GstVideoFormat fmt = GST_VIDEO_INFO_FORMAT(&info);
-  if (fmt != GST_VIDEO_FORMAT_NV12 && fmt != GST_VIDEO_FORMAT_I420)
-    return err("GStreamer: frame is not NV12 or I420");
+  // 10 bits: P010 as it is, or planar with the bits at the low end.
+  const bool deep =
+      fmt == GST_VIDEO_FORMAT_P010_10LE || fmt == GST_VIDEO_FORMAT_I420_10LE;
+  if (fmt != GST_VIDEO_FORMAT_NV12 && fmt != GST_VIDEO_FORMAT_I420 && !deep)
+    return err("GStreamer: frame is not 8-bit or 10-bit 4:2:0");
   const int w = GST_VIDEO_INFO_WIDTH(&info);
   const int h = GST_VIDEO_INFO_HEIGHT(&info);
   if (w <= 0 || h <= 0 || w > 16384 || h > 16384)
@@ -651,11 +655,12 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
   auto pool = d->sw_pool;
   const auto uw = static_cast<std::uint32_t>(w);
   const auto uh = static_cast<std::uint32_t>(h);
-  if (pool == nullptr || pool->width() != uw || pool->height() != uh) {
-    pool = gfx::SwFramePool::create(uw, uh, error);
+  if (pool == nullptr || pool->width() != uw || pool->height() != uh ||
+      pool->deep() != deep) {
+    pool = gfx::SwFramePool::create(uw, uh, error, deep);
     if (pool != nullptr)
-      log::i(kTag, "frames {}x{}: copied to NV12 dma-bufs (from {} memory)", w,
-             h,
+      log::i(kTag, "frames {}x{}: copied to {} dma-bufs (from {} memory)", w, h,
+             deep ? "P010" : "NV12",
              mem != nullptr && mem->allocator != nullptr &&
                      mem->allocator->mem_type != nullptr
                  ? mem->allocator->mem_type
@@ -664,7 +669,8 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
   }
   bool ok = pool != nullptr;
   if (ok) {
-    const bool nv12 = fmt == GST_VIDEO_FORMAT_NV12;
+    const bool nv12 =
+        fmt == GST_VIDEO_FORMAT_NV12 || fmt == GST_VIDEO_FORMAT_P010_10LE;
     const std::uint8_t* const planes[3] = {
         static_cast<const std::uint8_t*>(GST_VIDEO_FRAME_PLANE_DATA(&vf, 0)),
         static_cast<const std::uint8_t*>(GST_VIDEO_FRAME_PLANE_DATA(&vf, 1)),
@@ -674,7 +680,10 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
     const int strides[3] = {GST_VIDEO_FRAME_PLANE_STRIDE(&vf, 0),
                             GST_VIDEO_FRAME_PLANE_STRIDE(&vf, 1),
                             nv12 ? 0 : GST_VIDEO_FRAME_PLANE_STRIDE(&vf, 2)};
-    ok = pool->write_420(planes, strides, nv12, out, error);
+    // Planar 10-bit has its bits at the low end of each 16; P010 at the top.
+    ok = deep ? pool->write_420_16(planes, strides, nv12, nv12 ? 0 : 6, out,
+                                   error)
+              : pool->write_420(planes, strides, nv12, out, error);
   }
   gst_video_frame_unmap(&vf);
   return ok ? 1 : -1;

@@ -12,6 +12,7 @@
 # gives as P010: 16-bit samples, rows twice as long. A frame described as NV12 there is
 # refused by the GL import, which is how the FFmpeg engine failed until it was told apart.
 # A test of its own, since it also needs an HEVC encoder and a decoder that does 10 bits.
+# With no hardware decoder a 10-bit frame is copied into a P010 dma-buf.
 #
 # The file decoder is always FFmpeg's. The packet runs go through the engine
 # ACL_VIDEO_BACKEND names (dma, gst, ffmpeg), or the one a4l picks.
