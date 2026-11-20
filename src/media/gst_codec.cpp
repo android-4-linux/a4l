@@ -9,6 +9,7 @@
 
 #include <unistd.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -32,6 +33,13 @@ constexpr const char* kTag = "acl.media.gst";
 // without this the encoded stream would pile up in appsrc without bound.
 constexpr guint64 kMaxQueuedBytes = 2u * 1024u * 1024u;
 constexpr guint kSinkBuffers = 4;
+// Frames of a decoder whose pool is small and fixed that may be out of it at
+// once (see tagged_fd). The board this was found on gives its decoder 9
+// output buffers whatever the consumer asks for, and under --split the video
+// plane alone keeps 8 frames: passed on without limit, the decoder ran dry
+// and playback stopped at the first flush. A frame beyond this many is
+// copied, which gives its buffer straight back.
+constexpr int kTaggedOutMax = 4;
 // Access units the pipeline may hold that have not come out as frames. A
 // MediaCodec takes input only about as fast as it gives output, and a player
 // counts on that: what is inside the codec is what a seek throws away. The
@@ -48,16 +56,36 @@ bool copy_always() {
   return v;
 }
 
-#if GST_CHECK_VERSION(1, 24, 0)
 // The appsink's answer to a decoder asking what the consumer supports: plane
 // offsets and strides carried on the buffer (GstVideoMeta). A decoder gives
-// out its own dma-bufs only to a consumer that says so; an appsink says
-// nothing unless asked through this callback.
-gboolean propose_allocation(GstAppSink*, GstQuery* query, gpointer) {
+// out its own buffers only to a consumer that says so: VA will not negotiate
+// dma-bufs at all without it. An appsink says nothing by itself, and the
+// callback that lets it is from GStreamer 1.24, so the query is answered on
+// the pad, which every version has.
+GstPadProbeReturn answer_allocation(GstPad*, GstPadProbeInfo* info, gpointer) {
+  GstQuery* query = GST_PAD_PROBE_INFO_QUERY(info);
+  if (GST_QUERY_TYPE(query) != GST_QUERY_ALLOCATION)
+    return GST_PAD_PROBE_OK;
   gst_query_add_allocation_meta(query, GST_VIDEO_META_API_TYPE, nullptr);
-  return TRUE;
+  return GST_PAD_PROBE_HANDLED;  // answered, and the answer is yes
 }
 
+// Qualcomm's OpenMAX decoder element hands out system memory that is a
+// mapping of the decoder's own buffer, and names the buffer's dma-buf in the
+// slots of the GstVideoMeta that a two-plane frame leaves unused: offset[2]
+// holds the tag "QaUT" and stride[2] the descriptor. (Its own log says so:
+// "Add ion/gbm fd N ... with signature QaUT in GstVideoMeta".) Without this
+// every frame of that decoder is copied. The descriptor, or -1 where the meta
+// carries no such tag.
+int tagged_fd(const GstVideoMeta* vm) {
+  constexpr gsize kTag4 = 0x54556151;  // 'Q' 'a' 'U' 'T', little-endian
+  if (vm == nullptr || vm->n_planes != 2 || vm->offset[2] != kTag4 ||
+      vm->stride[2] < 0)
+    return -1;
+  return vm->stride[2];
+}
+
+#if GST_CHECK_VERSION(1, 24, 0)
 // A frame whose caps name a DRM format and modifier (GStreamer 1.24's
 // "DMA_DRM"): a hardware decoder's own surface in the layout its driver
 // uses, which may be tiled. Each plane is found in the buffer's memories by
@@ -233,6 +261,23 @@ struct GstCodec::Impl {
   std::uint64_t in_flight_max = kInFlightStart;
   gint64 last_progress_us = 0;  // monotonic: last frame out, or allowance raise
   std::shared_ptr<gfx::SwFramePool> sw_pool;
+  // Frames passed on by tagged_fd that are still in use. Shared with each
+  // such frame, which may outlive the codec.
+  std::shared_ptr<std::atomic<int>> tagged_out =
+      std::make_shared<std::atomic<int>>(0);
+  std::uint64_t tagged_passed = 0;  // for the tally below
+  std::uint64_t tagged_copied = 0;
+
+  // Said every so often, since an app seldom ends by releasing its codec:
+  // how the frames of such a decoder have gone so far.
+  void tally() {
+    constexpr std::uint64_t kEvery = 120;
+    if ((tagged_passed + tagged_copied) % kEvery == 0)
+      log::i(kTag,
+             "frames named in the video meta: {} passed on, {} copied (more "
+             "than {} were out)",
+             tagged_passed, tagged_copied, kTaggedOutMax);
+  }
 
   ~Impl() {
     if (pipeline != nullptr)
@@ -338,12 +383,14 @@ std::unique_ptr<GstCodec> GstCodec::configure(const std::string& mime,
         "video/x-raw(memory:DMABuf),format=(string)DMA_DRM; "
         "video/x-raw,format=(string){NV12,I420}";
 #endif
-#if GST_CHECK_VERSION(1, 24, 0)
-  GstAppSinkCallbacks callbacks{};
-  callbacks.propose_allocation = propose_allocation;
-  gst_app_sink_set_callbacks(GST_APP_SINK(d->sink), &callbacks, nullptr,
-                             nullptr);
-#endif
+  if (GstPad* pad = gst_element_get_static_pad(d->sink, "sink")) {
+    gst_pad_add_probe(
+        pad,
+        static_cast<GstPadProbeType>(GST_PAD_PROBE_TYPE_QUERY_DOWNSTREAM |
+                                     GST_PAD_PROBE_TYPE_PUSH),
+        answer_allocation, nullptr, nullptr);
+    gst_object_unref(pad);
+  }
   caps = gst_caps_from_string(out_caps);
   g_object_set(d->sink, "caps", caps, "sync", FALSE, "max-buffers",
                kSinkBuffers, "drop", FALSE, "emit-signals", FALSE, nullptr);
@@ -502,16 +549,29 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
 
   // Zero-copy: one NV12 dma-buf. The plane layout is the buffer's video
   // meta where it has one (a hardware decoder pads rows and lines), else what
-  // the caps imply.
+  // the caps imply. The dma-buf is the buffer's memory, or the one a vendor
+  // decoder names beside a mapping of it (tagged_fd).
   GstMemory* mem = gst_buffer_peek_memory(buf, 0);
-  if (!copy_always() && fmt == GST_VIDEO_FORMAT_NV12 &&
-      gst_buffer_n_memory(buf) == 1 && gst_is_dmabuf_memory(mem)) {
-    const GstVideoMeta* vm = gst_buffer_get_video_meta(buf);
-    gsize mem_off = 0;
+  const GstVideoMeta* vm = gst_buffer_get_video_meta(buf);
+  int fd = -1;
+  gsize mem_off = 0;
+  bool tagged = false;
+  if (gst_buffer_n_memory(buf) == 1 && gst_is_dmabuf_memory(mem)) {
     gsize mem_max = 0;
     gst_memory_get_sizes(mem, &mem_off, &mem_max);
+    fd = gst_dmabuf_memory_get_fd(mem);
+  } else if (tagged_fd(vm) >= 0) {
+    if (d->tagged_out->load(std::memory_order_relaxed) < kTaggedOutMax) {
+      fd = tagged_fd(vm);
+      tagged = true;
+    } else {
+      ++d->tagged_copied;
+      d->tally();
+    }
+  }
+  if (!copy_always() && fmt == GST_VIDEO_FORMAT_NV12 && fd >= 0) {
     gfx::DmabufFrame f{};
-    f.fd = gst_dmabuf_memory_get_fd(mem);
+    f.fd = fd;
     f.width = static_cast<std::uint32_t>(w);
     f.height = static_cast<std::uint32_t>(h);
     f.drm_format = DRM_FORMAT_NV12;
@@ -536,13 +596,26 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
           f.planes[1].offset +
           static_cast<std::uint64_t>(f.planes[1].stride) * ((h + 1) / 2);
       f.mem_size = size > 0 ? static_cast<std::uint64_t>(size) : need;
-      sane = need <= f.mem_size;
+      // A descriptor taken from a tag has to show it is a buffer of that
+      // size; one that will not say its size is not passed on.
+      sane = need <= f.mem_size && (!tagged || size > 0);
     }
     if (sane) {
       if (d->got == 1)
-        log::i(kTag, "frames {}x{}: the decoder's own NV12 dma-bufs, no copy",
-               w, h);
-      f.hold = std::move(sample);
+        log::i(kTag, "frames {}x{}: the decoder's own NV12 dma-bufs{}, no copy",
+               w, h, tagged ? " (named in the video meta)" : "");
+      if (tagged) {
+        ++d->tagged_passed;
+        d->tally();
+        d->tagged_out->fetch_add(1, std::memory_order_relaxed);
+        f.hold = std::shared_ptr<void>(
+            sample.get(), [keep = sample, n = d->tagged_out](void*) mutable {
+              keep.reset();
+              n->fetch_sub(1, std::memory_order_relaxed);
+            });
+      } else {
+        f.hold = std::move(sample);
+      }
       *out = f;
       return 1;
     }
@@ -558,7 +631,12 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
   if (pool == nullptr || pool->width() != uw || pool->height() != uh) {
     pool = gfx::SwFramePool::create(uw, uh, error);
     if (pool != nullptr)
-      log::i(kTag, "frames {}x{}: copied to NV12 dma-bufs", w, h);
+      log::i(kTag, "frames {}x{}: copied to NV12 dma-bufs (from {} memory)", w,
+             h,
+             mem != nullptr && mem->allocator != nullptr &&
+                     mem->allocator->mem_type != nullptr
+                 ? mem->allocator->mem_type
+                 : "unnamed");
     d->sw_pool = pool;
   }
   bool ok = pool != nullptr;
