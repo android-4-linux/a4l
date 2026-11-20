@@ -4,8 +4,8 @@
 //
 // What an H.264 sequence parameter set says of its picture's color: the
 // matrix and the range from the VUI's video_signal_type. For an engine whose
-// decoder does not pass them on (GStreamer's h264parse gives the matrix but
-// never the range).
+// decoder does not pass them on: GStreamer 1.28's h264parse gives the matrix
+// but never the range, and 1.16's gives neither.
 
 #ifndef ACL_MEDIA_H264_COLOR_H
 #define ACL_MEDIA_H264_COLOR_H
