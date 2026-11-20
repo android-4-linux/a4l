@@ -574,8 +574,9 @@ found exact:
   codec's output queue, up to eight deep, showed that picture. A frame now carries a hold on
   its surface (`gfx::DmabufFrame::hold`), kept by whoever keeps the frame: a queued output
   buffer, an imported `AHardwareBuffer`, a `wl_buffer` the compositor has not released, and
-  under `--split` the last eight frames sent to the broker. The decoder's pool is larger by
-  the same count (24 extra surfaces, was 12).
+  under `--split` the last eight frames sent to the broker (since 2026-11-19: each frame
+  until the broker says it is released, see "A video frame is released"). The decoder's pool
+  is larger by the same count (24 extra surfaces, was 12).
 - **Frames were shown as soon as released.** A player releases a frame with the time it is
   to be shown, and ahead of it: media3 by 45 ms at the median here, 50 at most. Android holds
   the buffer until then. a4l showed it at once. `MediaCodec.releaseOutputBuffer(index,
@@ -936,6 +937,23 @@ stand-in is not in this repository. The server advertised one modifier for ARGB8
   - On the Pi 5 the video fixture (rebuilt with an HEVC clip) plays through `--split=unconfined`
     with the picture right: 181 units fed, 360 presents, p50 16.7 ms. `--split` itself has no
     system call list for arm64.
+- **A video frame is released (2026-11-19).** The child kept the decoder surfaces of the last
+  eight video frames it sent, whatever the broker had done with them, because nothing told it
+  when one was free. A decoder with a small fixed pool then ran dry: GStreamer's OpenMAX
+  element on an SA8155P board has 9 or 10 output buffers and takes no request for more, and
+  with its frames passed on uncopied, playback stopped at the first flush. `VideoFrame` now
+  carries an id the child chooses, and the broker answers `VideoReleased` with it when the
+  presenter drops the frame's hold, which is when the compositor has released the buffer or
+  the frame was dropped unshown (protocol version 9). The child keeps a surface until that
+  answer, in a table of 16; a broker that stops answering costs the oldest entry, as before.
+  The id is the child's and the broker only repeats it, so it is not validated; id 0 means the
+  child keeps nothing and gets no answer.
+  - Checked by unit test (a frame the compositor keeps holds its surface; released, it does
+    not) and by the fuzz harness, whose video seeds now carry an id (91 s of mutation, about
+    1.4 million runs, no finding).
+  - On the board, GStreamer forced: a 1920x1080 stream with B frames passes 114 of 120
+    frames on without a copy, single process and under `--split` alike; before, `--split`
+    stopped at the flush with more than 5 frames out.
 
 **C5 as built (x86-64, 2026-11-14).** What the broker does with each thing the child can send:
 

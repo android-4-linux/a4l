@@ -435,15 +435,35 @@ class SplitPresenter final : public IPresenter {
       v.offset[i] = frame.planes[i].offset;
     }
     v.dest = {x, y, w, h};
-    channel_.send(m, {}, frame.fd, second);
     // The broker and the compositor are told nothing of a decoder's surface
     // pool; the datagram carries only the descriptor. The surface is kept
-    // here for as long as the broker may hold the frame on screen: the last
-    // kVideoHolds frames, twice what the plane keeps in flight.
+    // here until the broker says it is done with the frame (VideoReleased),
+    // which is when the compositor has let go of it: a decoder with a small
+    // pool gets its buffers back as fast as the screen gives them up. Kept
+    // before the send, so that an answer cannot come first.
+    std::shared_ptr<void> displaced;
     if (frame.hold) {
       std::lock_guard<std::mutex> lock(state_mu_);
-      video_holds_[video_hold_next_] = frame.hold;
+      v.id = ++video_id_;
+      // A broker that stops answering does not get to keep every surface:
+      // the oldest goes when the table is full.
+      VideoHold& slot = video_holds_[video_hold_next_];
       video_hold_next_ = (video_hold_next_ + 1) % kVideoHolds;
+      displaced = std::move(slot.hold);
+      slot.id = v.id;
+      slot.hold = frame.hold;
+    }
+    channel_.send(m, {}, frame.fd, second);
+  }
+  // The broker is done with video frame `id`. Looper thread.
+  void video_released(std::uint32_t id) noexcept {
+    std::shared_ptr<void> done;  // dropped outside the lock
+    std::lock_guard<std::mutex> lock(state_mu_);
+    for (VideoHold& slot : video_holds_) {
+      if (slot.hold && slot.id == id) {
+        done = std::move(slot.hold);
+        break;
+      }
     }
   }
   bool video_refused(std::uint32_t drm_format) const noexcept override {
@@ -475,8 +495,8 @@ class SplitPresenter final : public IPresenter {
     {
       std::lock_guard<std::mutex> lock(state_mu_);
       video_bounds_set_ = false;
-      for (auto& h : video_holds_)
-        h.reset();
+      for (VideoHold& slot : video_holds_)
+        slot.hold.reset();
     }
     ipc::Message m;
     m.type = ipc::MsgType::VideoReset;
@@ -546,6 +566,9 @@ class SplitPresenter final : public IPresenter {
         break;
       case ipc::MsgType::VideoRefused:
         video_refused_format_.store(r.msg.u32, std::memory_order_relaxed);
+        break;
+      case ipc::MsgType::VideoReleased:
+        video_released(r.msg.u32);
         break;
       case ipc::MsgType::SurfaceResize: {
         const ipc::SurfaceInfo& si = r.msg.surface;
@@ -622,9 +645,17 @@ class SplitPresenter final : public IPresenter {
   std::uint32_t sent_frames_ = 0;     // PresentFrame messages sent
   std::uint32_t slot_seq_[32] = {};   // the last frame put in each slot
   std::uint32_t any_slot_seq_ = 0;    // the last frame the broker placed
-  static constexpr int kVideoHolds = 8;
-  std::shared_ptr<void> video_holds_[kVideoHolds];
+  // Decoder surfaces of the video frames the broker has not released yet,
+  // under state_mu_. The plane keeps 4 in flight; the rest is room for
+  // answers on their way.
+  struct VideoHold {
+    std::uint32_t id = 0;
+    std::shared_ptr<void> hold;
+  };
+  static constexpr int kVideoHolds = 16;
+  VideoHold video_holds_[kVideoHolds];
   int video_hold_next_ = 0;
+  std::uint32_t video_id_ = 0;     // the last id given
   ipc::VideoRect video_bounds_{};  // the last VideoBounds sent
   bool video_bounds_set_ = false;
 };
@@ -717,6 +748,7 @@ class Broker {
   // The child is gone or the window is. What its streams still hold is
   // played out, so that a sound's tail is not cut by the app exiting.
   ~Broker() {
+    live_->store(false, std::memory_order_relaxed);
     for (AudioStream& st : audio_) {
       if (st.sink) {
         st.sink->drain();
@@ -1106,6 +1138,21 @@ class Broker {
     fr.drm_format = v.drm_format;
     fr.mem_size = facts[0].size;
     fr.modifier_tiled = v.modifier != 0;
+    // The presenter keeps a frame's hold until the compositor has released
+    // its buffer, and drops it at once for a frame it has no room for. The
+    // end of this one tells the child, which is keeping the decoder's surface
+    // for exactly that long. Not after the broker has gone: `live` says.
+    fr.hold = std::shared_ptr<void>(
+        nullptr, [this, live = live_, id = v.id](void*) noexcept {
+          // 0: a frame the child keeps nothing for.
+          if (id == 0 || !live->load(std::memory_order_relaxed))
+            return;
+          ipc::Message done;
+          done.type = ipc::MsgType::VideoReleased;
+          done.u32 = id;
+          if (channel_.send(done))
+            ++stats_.to_child;
+        });
     presenter_->present_video(fr, v.dest.x, v.dest.y, v.dest.w, v.dest.h);
     // This is the presenter's own thread: show the frame now. A frame the
     // compositor has no room for is dropped there, so a child that sends
@@ -1384,6 +1431,10 @@ class Broker {
   std::uint32_t video_mods_format_ = 0;
   std::uint32_t video_refused_told_ = 0;  // VideoRefused sent for it
   std::vector<std::uint64_t> video_mods_;
+  // False once the broker is being destroyed: what a video frame's hold
+  // checks before it speaks to the child (see present_video).
+  std::shared_ptr<std::atomic<bool>> live_ =
+      std::make_shared<std::atomic<bool>>(true);
   std::unique_ptr<IPresenter> presenter_;
   BrokerStats stats_;
   bool child_ready_ = false;  // the child's view of ready()

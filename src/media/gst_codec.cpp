@@ -9,10 +9,12 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <vector>
 
 #include <drm_fourcc.h>
 #include <gst/allocators/gstdmabuf.h>
@@ -34,12 +36,12 @@ constexpr const char* kTag = "acl.media.gst";
 constexpr guint64 kMaxQueuedBytes = 2u * 1024u * 1024u;
 constexpr guint kSinkBuffers = 4;
 // Frames of a decoder whose pool is small and fixed that may be out of it at
-// once (see tagged_fd). The board this was found on gives its decoder 9
-// output buffers whatever the consumer asks for, and under --split the video
-// plane alone keeps 8 frames: passed on without limit, the decoder ran dry
-// and playback stopped at the first flush. A frame beyond this many is
-// copied, which gives its buffer straight back.
-constexpr int kTaggedOutMax = 4;
+// once (see tagged_fd): one fewer than the buffers the decoder has been seen
+// to use, so that it always has one to decode into, and this many until more
+// have been seen. The board this was found on gives its decoder 9 output
+// buffers whatever the consumer asks for. A frame beyond the limit is copied,
+// which gives its buffer straight back.
+constexpr std::size_t kTaggedOutMin = 4;
 // Access units the pipeline may hold that have not come out as frames. A
 // MediaCodec takes input only about as fast as it gives output, and a player
 // counts on that: what is inside the codec is what a seek throws away. The
@@ -265,8 +267,28 @@ struct GstCodec::Impl {
   // such frame, which may outlive the codec.
   std::shared_ptr<std::atomic<int>> tagged_out =
       std::make_shared<std::atomic<int>>(0);
+  // The descriptors such frames have come with, for one picture size: the
+  // part of the decoder's pool seen so far. A new size is a new pool.
+  std::vector<int> tagged_fds;
+  int tagged_w = 0;
+  int tagged_h = 0;
   std::uint64_t tagged_passed = 0;  // for the tally below
   std::uint64_t tagged_copied = 0;
+
+  // How many frames named by tagged_fd may be out at once, having now seen
+  // `fd` on a `w` x `h` frame.
+  int tagged_limit(int fd, int w, int h) {
+    constexpr std::size_t kMostBuffers = 64;  // more is not a small pool
+    if (w != tagged_w || h != tagged_h) {
+      tagged_fds.clear();
+      tagged_w = w;
+      tagged_h = h;
+    }
+    if (tagged_fds.size() < kMostBuffers &&
+        std::find(tagged_fds.begin(), tagged_fds.end(), fd) == tagged_fds.end())
+      tagged_fds.push_back(fd);
+    return static_cast<int>(std::max(kTaggedOutMin, tagged_fds.size() - 1));
+  }
 
   // Said every so often, since an app seldom ends by releasing its codec:
   // how the frames of such a decoder have gone so far.
@@ -274,9 +296,9 @@ struct GstCodec::Impl {
     constexpr std::uint64_t kEvery = 120;
     if ((tagged_passed + tagged_copied) % kEvery == 0)
       log::i(kTag,
-             "frames named in the video meta: {} passed on, {} copied (more "
-             "than {} were out)",
-             tagged_passed, tagged_copied, kTaggedOutMax);
+             "frames named in the video meta: {} passed on, {} copied (the "
+             "decoder has shown {} buffers)",
+             tagged_passed, tagged_copied, tagged_fds.size());
   }
 
   ~Impl() {
@@ -561,7 +583,8 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
     gst_memory_get_sizes(mem, &mem_off, &mem_max);
     fd = gst_dmabuf_memory_get_fd(mem);
   } else if (tagged_fd(vm) >= 0) {
-    if (d->tagged_out->load(std::memory_order_relaxed) < kTaggedOutMax) {
+    if (d->tagged_out->load(std::memory_order_relaxed) <
+        d->tagged_limit(tagged_fd(vm), w, h)) {
       fd = tagged_fd(vm);
       tagged = true;
     } else {
@@ -666,6 +689,8 @@ void GstCodec::flush() {
   d->eos_sent = false;
   d->sent = 0;
   d->got = 0;
+  // A decoder may come back from a flush with other buffers; count again.
+  d->tagged_fds.clear();
   d->last_progress_us = g_get_monotonic_time();
 }
 
