@@ -183,6 +183,16 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 180,
       is_parallel : false,
     )
+    # The 8-bit and 10-bit clips decoded by FFmpeg in software, each frame copied into an
+    # NV12 or P010 dma-buf on its way to the plane. Needs no hardware decoder.
+    test(
+      'video-plane-colors-software',
+      py3,
+      args : [files('run_video_plane_test.py'), video_plane_probe, 'software'],
+      depends : [video_plane_probe],
+      timeout : 180,
+      is_parallel : false,
+    )
   endif
   # The same checks on HEVC Main 10, which comes out as P010. Needs an HEVC encoder in ffmpeg
   # and a hardware decoder that does 10 bits; SKIPs otherwise.

@@ -28,9 +28,14 @@
 # matrix lost on the way across --split, it comes out wrong. A test of its own, so that
 # where no such compositor is installed it shows as a skip.
 #
+# With "software" as a second argument the 8-bit and 10-bit clips are decoded by FFmpeg in
+# software (--software), and each frame is copied into a dma-buf: NV12, and P010 with the
+# ten bits moved to the top of each sample. No hardware decoder is needed.
+#
 # Needs: one of the two compositors with its screenshot tool, ffmpeg with an HEVC encoder,
-# and a hardware HEVC decoder that media::DmaCodec reaches. Exits 77 (skip) where any of
-# these is missing. A 10-bit run on a decoder that does 8 bits only is a skip too.
+# and a hardware HEVC decoder that media::DmaCodec reaches (in software mode, FFmpeg's
+# HEVC decoder). Exits 77 (skip) where any of these is missing. A 10-bit run on a decoder
+# that does 8 bits only is a skip too.
 import glob
 import os
 import re
@@ -236,9 +241,12 @@ def shot_weston(display, work):
 
 
 def main() -> int:
-    said = len(sys.argv) == 3 and sys.argv[2] == "said"
-    if len(sys.argv) != 2 and not said:
-        sys.stderr.write("usage: run_video_plane_test.py <acl-video-plane-probe> [said]\n")
+    mode = sys.argv[2] if len(sys.argv) == 3 else ""
+    said = mode == "said"
+    software = mode == "software"
+    if len(sys.argv) not in (2, 3) or mode not in ("", "said", "software"):
+        sys.stderr.write(
+            "usage: run_video_plane_test.py <acl-video-plane-probe> [said|software]\n")
         return 2
     probe = sys.argv[1]
     if not os.access(probe, os.X_OK):
@@ -304,6 +312,8 @@ def main() -> int:
                 for split in (False, True):
                     tag = f"{comp}, {kind}" + (", --split" if split else "")
                     cmd = [probe, clips[kind], "--size", f"{W}x{H}", "--loops", "2"]
+                    if software:
+                        cmd.append("--software")
                     p = subprocess.Popen(cmd + (["--split"] if split else []), env=env,
                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                          text=True, errors="replace")
@@ -332,6 +342,10 @@ def main() -> int:
                         return fail(f"the probe exited {p.returncode}")
                     if f"format {fourcc} " not in out:
                         return fail(f"the frames are not format {fourcc}")
+                    if software:
+                        want = "P010" if fourcc == "0x30313050" else "NV12"
+                        if not re.search(rf"software frames \d+x\d+: copied to {want}", out):
+                            return fail(f"the frames were not decoded in software into {want}")
                     if split:
                         m = re.search(r"broker took (\d+) video frame\(s\), refused (\d+)", out)
                         if not m or int(m.group(1)) == 0 or int(m.group(2)) != 0:
