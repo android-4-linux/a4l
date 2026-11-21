@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: original a4l design (ADR-0009 Decision 2, C4); bwrap(1),
-// user_namespaces(7), the sysfs layout of DRM devices as documented in
-// Documentation/ABI. No GPL-3.0 sources.
+// user_namespaces(7), the sysfs layout of DRM, V4L2 and media devices as
+// documented in Documentation/ABI. No GPL-3.0 sources.
 
 #include "confine/confine.h"
 
@@ -231,8 +231,47 @@ void own_mappings(std::vector<std::string>& out) {
   }
 }
 
-// The GPU render nodes, and for each the sysfs device directory the driver
-// loaders read to identify it.
+// The sysfs entries a device node is looked up by, as udev (and so
+// GStreamer) does: the device's directory, read-only; the
+// /sys/dev/char/<major>:<minor> link that finds it by number; and its entry
+// in `list`, the directory its subsystem's devices are listed in. Each link
+// leads to that one directory and nothing else. `up` is how many levels the
+// device's directory is above the node's own sysfs directory: 2 under a
+// class directory (.../<device>/drm/renderD128), 1 on a bus
+// (.../<device>/media0).
+void sysfs_entries(Plan& plan,
+                   const std::string& node,
+                   const std::string& list,
+                   int up) {
+  struct stat st{};
+  if (::stat(node.c_str(), &st) != 0 || !S_ISCHR(st.st_mode))
+    return;
+  const std::string link = "/sys/dev/char/" +
+                           std::to_string(major(st.st_rdev)) + ":" +
+                           std::to_string(minor(st.st_rdev));
+  char target[512];
+  const ssize_t n = ::readlink(link.c_str(), target, sizeof(target) - 1);
+  const std::string resolved = real(link);  // /sys/devices/.../<node>
+  if (n <= 0 || resolved.empty() || !starts_with(resolved, "/sys/devices/"))
+    return;
+  target[n] = '\0';
+  fs::path device(resolved);
+  for (int i = 0; i < up; ++i)
+    device = device.parent_path();
+  if (!starts_with(device.string(), "/sys/devices/"))
+    return;
+  if (std::find(plan.ro.begin(), plan.ro.end(), device.string()) ==
+      plan.ro.end())
+    plan.ro.push_back(device.string());
+  plan.symlinks.emplace_back(target, link);
+  const std::string name = fs::path(resolved).filename().string();
+  plan.symlinks.emplace_back(
+      fs::path(resolved).lexically_relative(list).string(), list + "/" + name);
+}
+
+// The GPU render nodes, and for each its sysfs entries, which the driver
+// loaders read to identify it. GStreamer's VA plugin asks udev for the DRM
+// devices and registers no decoder when it is told there are none.
 void gpu_nodes(Plan& plan) {
   DIR* d = ::opendir("/dev/dri");
   if (d == nullptr)
@@ -245,26 +284,7 @@ void gpu_nodes(Plan& plan) {
     if (::stat(node.c_str(), &st) != 0 || !S_ISCHR(st.st_mode))
       continue;
     plan.devices.push_back(node);
-    const std::string link = "/sys/dev/char/" +
-                             std::to_string(major(st.st_rdev)) + ":" +
-                             std::to_string(minor(st.st_rdev));
-    char target[512];
-    const ssize_t n = ::readlink(link.c_str(), target, sizeof(target) - 1);
-    const std::string resolved = real(link);  // .../<device>/drm/renderD128
-    if (n <= 0 || resolved.empty())
-      continue;
-    target[n] = '\0';
-    const fs::path device = fs::path(resolved).parent_path().parent_path();
-    if (starts_with(device.string(), "/sys/devices/")) {
-      plan.ro.push_back(device.string());
-      plan.symlinks.emplace_back(target, link);
-      // And the node's entry in its class, which is how udev lists devices:
-      // GStreamer's VA plugin asks udev for the DRM devices and registers
-      // no decoder when it is told there are none. The entry leads to the
-      // directory above and to nothing else.
-      plan.symlinks.emplace_back("../.." + resolved.substr(4),
-                                 std::string("/sys/class/drm/") + e->d_name);
-    }
+    sysfs_entries(plan, node, "/sys/class/drm", 2);
   }
   ::closedir(d);
   std::sort(plan.devices.begin(), plan.devices.end());
@@ -336,7 +356,9 @@ std::vector<std::string> numbered_nodes(const char* prefix) {
 // decodes in software or not at all. Each /dev/video* is asked what it is,
 // and only a decoder is passed: the same directory holds cameras. A decoder
 // driven by requests is also reached through its media controller, found by
-// the driver's name.
+// the driver's name. Each has its sysfs entries: GStreamer's V4L2 stateless
+// plugin finds a decoder by listing the media bus and following the media
+// controller to its video node, and registers none when udev shows neither.
 void video_decoder_nodes(Plan& plan) {
   std::vector<std::string> drivers;
   for (const std::string& node : numbered_nodes("video")) {
@@ -389,6 +411,7 @@ void video_decoder_nodes(Plan& plan) {
     if (!is_video_decoder(facts))
       continue;
     plan.devices.push_back(node);
+    sysfs_entries(plan, node, "/sys/class/video4linux", 2);
     cap.driver[sizeof(cap.driver) - 1] = 0;
     drivers.emplace_back(reinterpret_cast<const char*>(cap.driver));
   }
@@ -402,9 +425,11 @@ void video_decoder_nodes(Plan& plan) {
     const bool known = xioctl(fd, MEDIA_IOC_DEVICE_INFO, &info) == 0;
     ::close(fd);
     info.driver[sizeof(info.driver) - 1] = 0;
-    if (known &&
-        std::find(drivers.begin(), drivers.end(), info.driver) != drivers.end())
+    if (known && std::find(drivers.begin(), drivers.end(), info.driver) !=
+                     drivers.end()) {
       plan.devices.push_back(node);
+      sysfs_entries(plan, node, "/sys/bus/media/devices", 1);
+    }
   }
   std::sort(plan.devices.begin(), plan.devices.end());
 }
