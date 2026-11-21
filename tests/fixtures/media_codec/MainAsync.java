@@ -27,6 +27,19 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 public class MainAsync extends Activity {
+    // The rendered frame reaches the ImageReader on the codec's own time, not
+    // within releaseOutputBuffer, so the image is waited for (up to 2 s), as
+    // an app waits for onImageAvailable. Taken at once, it was missed on a
+    // loaded machine.
+    static Image waitForImage(ImageReader r) throws InterruptedException {
+        for (int i = 0; i < 200; i++) {
+            Image img = r.acquireLatestImage();
+            if (img != null) return img;
+            Thread.sleep(10);
+        }
+        return null;
+    }
+
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -66,7 +79,7 @@ public class MainAsync extends Activity {
                 public void onOutputBufferAvailable(MediaCodec mc, int idx, MediaCodec.BufferInfo info) {
                     try {
                         mc.releaseOutputBuffer(idx, true);   // render -> queue_imported into the ImageReader
-                        Image img = r.acquireLatestImage();
+                        Image img = waitForImage(r);
                         if (img != null) {
                             if (!got[0]) {
                                 got[0] = true;

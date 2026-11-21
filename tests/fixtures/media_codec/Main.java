@@ -22,6 +22,19 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 
 public class Main extends Activity {
+    // The rendered frame reaches the ImageReader on the codec's own time, not
+    // within releaseOutputBuffer, so the image is waited for (up to 2 s), as
+    // an app waits for onImageAvailable. Taken at once, it was missed on a
+    // loaded machine.
+    static Image waitForImage(ImageReader r) throws InterruptedException {
+        for (int i = 0; i < 200; i++) {
+            Image img = r.acquireLatestImage();
+            if (img != null) return img;
+            Thread.sleep(10);
+        }
+        return null;
+    }
+
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -68,7 +81,7 @@ public class Main extends Activity {
                             + "," + of.getInteger("crop-right") + "," + of.getInteger("crop-bottom"));
                 } else if (o >= 0) {
                     c.releaseOutputBuffer(o, true);      // render -> queue_imported into the ImageReader
-                    Image img = r.acquireLatestImage();  // the decoded frame flowed to the consumer
+                    Image img = waitForImage(r);  // the decoded frame flowed to the consumer
                     if (img != null) {
                         got = true;
                         Log.i("acl", "MC decode: frame in ImageReader " + img.getWidth() + "x" + img.getHeight());
