@@ -978,7 +978,8 @@ void JNICALL MC_native_queueInputBuffer(JNIEnv* env,
     } else if (index >= 0 &&
                static_cast<std::size_t>(index) < ctx->inbufs.size() &&
                offset >= 0 && size > 0 &&
-               static_cast<std::size_t>(offset + size) <=
+               static_cast<std::size_t>(offset) +
+                       static_cast<std::size_t>(size) <=
                    ctx->inbufs[index].mem.size()) {
       const auto& mem = ctx->inbufs[index].mem;
       // ExoPlayer's samples carry NO in-band SPS/PPS (they're in the
@@ -1003,7 +1004,8 @@ void JNICALL MC_native_queueInputBuffer(JNIEnv* env,
              static_cast<std::size_t>(index) < ctx->inbufs.size()) {
     const auto& b = ctx->inbufs[index];
     if (offset >= 0 && size > 0 &&
-        static_cast<std::size_t>(offset + size) <= b.mem.size()) {
+        static_cast<std::size_t>(offset) + static_cast<std::size_t>(size) <=
+            b.mem.size()) {
       // CODEC_CONFIG (SPS/PPS) buffers are sent too — avcodec parses in-band
       // NAL units harmlessly.
       const int r = ctx->dec->send_packet(

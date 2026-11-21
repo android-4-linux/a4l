@@ -108,6 +108,7 @@ int run_quiet(const std::vector<std::string>& args, std::string* out) {
   posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
   std::vector<std::string> copy = args;
   std::vector<char*> argv;
+  argv.reserve(copy.size() + 1);
   for (std::string& a : copy)
     argv.push_back(a.data());
   argv.push_back(nullptr);
@@ -346,6 +347,7 @@ std::vector<std::string> numbered_nodes(const char* prefix) {
   }
   std::sort(numbers.begin(), numbers.end());
   std::vector<std::string> out;
+  out.reserve(numbers.size());
   for (const int n : numbers)
     out.push_back(std::string("/dev/") + prefix + std::to_string(n));
   return out;
@@ -444,7 +446,7 @@ bool is_video_decoder(const VideoNodeFacts& facts) {
 std::string normalize(std::string_view p) {
   if (p.empty() || p[0] != '/')
     return {};
-  const std::string n = fs::path(p).lexically_normal().string();
+  std::string n = fs::path(p).lexically_normal().string();
   if (n.size() > 1 && n.back() == '/')
     return n.substr(0, n.size() - 1);
   return n;

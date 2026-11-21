@@ -538,7 +538,7 @@ void sm_transfer(std::vector<VType>& locals,
                  std::size_t pc,
                  int ins) {
   const auto L = [&](int reg) { return ins + reg; };
-  const auto set = [&](int slot, VType t) {
+  const auto set = [&](int slot, const VType& t) {
     if (slot >= 0 && slot < static_cast<int>(locals.size()))
       locals[slot] = t;
   };
@@ -1539,7 +1539,7 @@ std::optional<Translated> translate_method(ClassWriter& cw,
   std::map<std::uint32_t, std::vector<VType>> in_state;
   {
     const std::size_t nloc = static_cast<std::size_t>(max_locals);
-    const auto merge1 = [](VType a, VType b) -> VType {
+    const auto merge1 = [](VType a, const VType& b) -> VType {
       if (a == b)
         return a;
       return {VType::Top, {}};  // no supertype lattice: disagreement -> Top
@@ -2249,6 +2249,8 @@ std::optional<Translated> translate_method(ClassWriter& cw,
         break;
       }
       case 0x28: {  // goto +AA (10t)
+        // A signed byte, sign-extended on purpose.
+        // NOLINTNEXTLINE(bugprone-signed-char-misuse)
         const std::int32_t off = static_cast<std::int8_t>((u >> 8) & 0xff);
         branch_to(OP_GOTO, rel_target(off));
         pc += 1;

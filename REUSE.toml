@@ -37,7 +37,7 @@ SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
 path = [".gitignore", "**/.gitignore", "**/.gitkeep", "**.wrap", "**.ini",
-        ".git-blame-ignore-revs", ".clang-format-version"]
+        ".git-blame-ignore-revs", ".clang-format-version", ".clang-tidy"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright 2026 Contributors to a4l"
 SPDX-License-Identifier = "Apache-2.0"

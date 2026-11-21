@@ -113,8 +113,10 @@ bool cut_mp3(const Bytes& d, Stream* out) {
     const int bitrate =
         (version == 3 ? kBitrateV1 : kBitrateV2)[bitrate_index] * 1000;
     const int rate = kRate[version][rate_index];
-    const std::size_t length = static_cast<std::size_t>(
-        (version == 3 ? 144 : 72) * bitrate / rate + padding);
+    const std::size_t length = std::size_t{version == 3 ? 144u : 72u} *
+                                   static_cast<std::size_t>(bitrate) /
+                                   static_cast<std::size_t>(rate) +
+                               static_cast<std::size_t>(padding);
     if (length < 4 || at + length > d.size())
       break;
     out->units.emplace_back(d.begin() + static_cast<long>(at),

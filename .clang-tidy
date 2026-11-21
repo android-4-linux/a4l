@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# clang-tidy for a4l: bugprone, performance and the static analyzer.
+#
+# Off because they flag what a4l does on purpose:
+#   bugprone-easily-swappable-parameters   most two-int signatures
+#   bugprone-reserved-identifier           bionic and NDK shims use __ names
+#   bugprone-macro-parentheses             X-macros over JNI types
+#   bugprone-assignment-in-if-condition    the house style for reads
+#   bugprone-throwing-static-initialization  Catch2's TEST_CASE
+#   performance-enum-size                  enums are int by choice
+#   performance-no-int-to-ptr              JNI handles and trampolines
+#   performance-inefficient-string-concatenation  error text, cold paths
+#   clang-analyzer-optin.*                 enum ranges, padding, taint: noise here
+#   clang-analyzer-security.MmapWriteExec  the bionic loader maps code
+#
+# Not yet: on, each of these has findings to work through first (count on
+# 2026-11-21). Take one off this list with its fixes.
+#   bugprone-implicit-widening-of-multiplication-result  63
+#   bugprone-unchecked-optional-access     52
+#   bugprone-narrowing-conversions         47
+#   bugprone-crtp-constructor-accessibility  37
+#   bugprone-branch-clone                  29
+#   bugprone-unchecked-string-to-number-conversion  28
+#   bugprone-exception-escape              28
+#   bugprone-empty-catch                   11
+#   bugprone-casting-through-void          10
+#   bugprone-switch-missing-default-case   8
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  clang-analyzer-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-reserved-identifier,
+  -bugprone-macro-parentheses,
+  -bugprone-assignment-in-if-condition,
+  -bugprone-throwing-static-initialization,
+  -performance-enum-size,
+  -performance-no-int-to-ptr,
+  -performance-inefficient-string-concatenation,
+  -clang-analyzer-optin.*,
+  -clang-analyzer-security.MmapWriteExec,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-unchecked-optional-access,
+  -bugprone-narrowing-conversions,
+  -bugprone-crtp-constructor-accessibility,
+  -bugprone-branch-clone,
+  -bugprone-unchecked-string-to-number-conversion,
+  -bugprone-exception-escape,
+  -bugprone-empty-catch,
+  -bugprone-casting-through-void,
+  -bugprone-switch-missing-default-case
+# Not analyzed: the files that include drm-cxx's bundled fmt (11.0.2,
+# header-only), which clang 22 does not compile: src/wm/dmabuf_presenter.cpp,
+# drm_scanout_sink.cpp, present_sink.cpp, split_present.cpp,
+# wayland_presenter.cpp. gcc builds them.
+#
+# a4l's own headers only: not the subprojects', nor the system's.
+HeaderFilterRegex: '.*/(src|tests|tools)/.*'
+ExcludeHeaderFilterRegex: '.*/subprojects/.*'

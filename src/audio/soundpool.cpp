@@ -295,7 +295,7 @@ bool decode_pcm(const std::uint8_t* data,
             out.insert(out.end(), s,
                        s + static_cast<std::size_t>(n) * kChannels);
           }
-          g_ff.av_freep(&obuf);
+          g_ff.av_freep(static_cast<void*>(&obuf));
         }
       }
       g_ff.av_packet_unref(pkt);
@@ -309,7 +309,7 @@ bool decode_pcm(const std::uint8_t* data,
         auto* s = reinterpret_cast<std::int16_t*>(obuf);
         out.insert(out.end(), s, s + static_cast<std::size_t>(n) * kChannels);
       }
-      g_ff.av_freep(&obuf);
+      g_ff.av_freep(static_cast<void*>(&obuf));
     }
     ok = !out.empty();
   } while (false);
