@@ -131,6 +131,26 @@ int tagged_fd(const GstVideoMeta* vm) {
 }
 
 #if GST_CHECK_VERSION(1, 24, 0)
+// DRM_FORMAT_MOD_BROADCOM_SAND128 with no column height in it, and P030
+// (10 bits, three samples in 32), which an older drm_fourcc.h lacks.
+constexpr std::uint64_t kSand128 = 0x0700000000000004ull;
+constexpr std::uint32_t kP030 = 0x30333050u;  // 'P030'
+
+// The height in rows of one column of plane `i` of a frame in Broadcom's
+// columns, from the tiled stride GStreamer gives it: (rows of tiles << 16) |
+// columns. A tile is 8 rows of luma or 4 of chroma, at either depth; a Pi 5's
+// buffers are that size (320x240: 92160 and 46080 bytes at 8 bits, 122880
+// and 61440 at 10). 0 when the stride says nothing usable.
+guint sand_rows(guint i, gint stride) {
+  const guint tile_h = i == 0 ? 8 : 4;
+  if (stride <= 0 || GST_VIDEO_TILE_X_TILES(stride) == 0)
+    return 0;
+  const guint y_tiles = GST_VIDEO_TILE_Y_TILES(stride);
+  if (y_tiles == 0 || y_tiles > 16384 / tile_h)
+    return 0;
+  return y_tiles * tile_h;
+}
+
 // A frame whose caps name a DRM format and modifier (GStreamer 1.24's
 // "DMA_DRM"): a hardware decoder's own surface in the layout its driver
 // uses, which may be tiled. Each plane is found in the buffer's memories by
@@ -150,7 +170,10 @@ int drm_frame(GstBuffer* buf,
   if (!gst_video_info_dma_drm_from_caps(&drm, caps))
     return bad("GStreamer: DRM caps do not parse");
   // What the video plane and the converter take; anything else has no path.
-  if (drm.drm_fourcc != DRM_FORMAT_NV12 && drm.drm_fourcc != DRM_FORMAT_P010)
+  // P030 only in Broadcom's columns, where a Pi 5's HEVC decoder puts 10 bits.
+  const bool sand = drm.drm_modifier == kSand128;
+  if (drm.drm_fourcc != DRM_FORMAT_NV12 && drm.drm_fourcc != DRM_FORMAT_P010 &&
+      !(sand && drm.drm_fourcc == kP030))
     return bad("GStreamer: DRM frame is not NV12 or P010");
   const int w = GST_VIDEO_INFO_WIDTH(&drm.vinfo);
   const int h = GST_VIDEO_INFO_HEIGHT(&drm.vinfo);
@@ -205,6 +228,18 @@ int drm_frame(GstBuffer* buf,
     }
     f.planes[i].offset = static_cast<std::uint32_t>(off);
     f.planes[i].stride = static_cast<std::uint32_t>(vm->stride[i]);
+    // Broadcom's columns: GStreamer gives the stride in tiles, (rows of
+    // tiles << 16) | columns; the converter and the video plane take the
+    // height of a column in rows.
+    if (sand) {
+      const guint rows = sand_rows(i, vm->stride[i]);
+      if (rows == 0 ||
+          (size != 0 && off + static_cast<std::uint64_t>(rows) * 128 *
+                                    GST_VIDEO_TILE_X_TILES(vm->stride[i]) >
+                            size))
+        return bad("GStreamer: a plane does not fit its dma-buf");
+      f.planes[i].stride = rows;
+    }
     if (i == 0) {
       f.fd = fd;
       f.mem_size = size;

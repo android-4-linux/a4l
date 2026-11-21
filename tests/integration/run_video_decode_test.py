@@ -131,8 +131,11 @@ def main() -> int:
                 if "fourcc=0x34324258 mod=0 " not in p.stdout:
                     sys.stderr.write("FAIL: the converted frame is not XBGR8888 LINEAR\n" + out)
                     return 1
-                if ten and "fourcc=0x30313050 " not in p.stdout:
-                    sys.stderr.write("FAIL: the 10-bit frame was not decoded as P010\n" + out)
+                # P010, or P030 in Broadcom's columns (a Pi 5's HEVC decoder).
+                deep = r"fourcc=(0x30313050 |0x30333050 .*mod=0x700000000000004 )"
+                if ten and not re.search(deep, p.stdout):
+                    sys.stderr.write("FAIL: the 10-bit frame was not decoded as P010 or P030\n"
+                                     + out)
                     return 1
                 for name, want in colors.items():
                     m = re.search(rf"quadrant {name} = (\d+),(\d+),(\d+)", p.stdout)
