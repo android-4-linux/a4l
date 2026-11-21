@@ -66,7 +66,7 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr,
                  "usage: acl-video-decode-probe <clip> [r,g,b] [--packet] "
-                 "[--convert]\n");
+                 "[--convert] [--no-csd]\n");
     return 2;
   }
   const char* clip = nullptr;
@@ -76,9 +76,14 @@ int main(int argc, char** argv) {
   // --convert: run the frame through gfx::VideoConverter (what a compositor
   // without NV12 is sent) and print the four quadrants' center pixels.
   bool convert_mode = false;
+  // --no-csd: configure the packet path with no codec-specific data, as an
+  // app does that leaves the parameter sets in the stream.
+  bool no_csd = false;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--packet") == 0)
       packet_mode = true;
+    else if (std::strcmp(argv[i], "--no-csd") == 0)
+      no_csd = true;
     else if (std::strcmp(argv[i], "--convert") == 0)
       convert_mode = true;
     else if (argv[i][0] == '-')
@@ -91,7 +96,7 @@ int main(int argc, char** argv) {
   if (clip == nullptr) {
     std::fprintf(stderr,
                  "usage: acl-video-decode-probe <clip> [r,g,b] [--packet] "
-                 "[--convert]\n");
+                 "[--convert] [--no-csd]\n");
     return 2;
   }
 
@@ -114,7 +119,8 @@ int main(int argc, char** argv) {
     W = demux->width();
     H = demux->height();
     cdec = acl::media::CodecDecoder::configure(
-        demux->mime(), demux->extradata(), demux->extradata_size(), W, H, &err);
+        demux->mime(), no_csd ? nullptr : demux->extradata(),
+        no_csd ? 0 : demux->extradata_size(), W, H, &err);
     if (!cdec) {
       std::fprintf(stderr,
                    "video-decode-probe: codec configure failed (%s) — skip\n",

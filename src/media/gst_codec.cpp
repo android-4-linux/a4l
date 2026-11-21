@@ -320,6 +320,25 @@ bool hevc_deep(const std::uint8_t* csd, std::size_t size) {
   return false;
 }
 
+// GStreamer's name for an H.264 profile beyond 8-bit 4:2:0 (as its
+// codec-utils names them), and nullptr for one within it, where the caps are
+// left as they were.
+const char* h264_profile_past_8bit_420(const H264Format& f) {
+  const bool intra = (f.constraint_flags & 0x10) != 0;  // constraint_set3
+  switch (f.profile_idc) {
+    case 110:
+      return intra ? "high-10-intra" : "high-10";
+    case 122:
+      return intra ? "high-4:2:2-intra" : "high-4:2:2";
+    case 244:
+      return intra ? "high-4:4:4-intra" : "high-4:4:4";
+    case 44:
+      return "cavlc-4:4:4-intra";
+    default:
+      return nullptr;
+  }
+}
+
 // Whether a decoder's output can be a picture deeper than 8 bits in a form
 // taken here: P010 or planar 16-bit, or a dma-buf with its DRM format named.
 // Qualcomm's omxh265dec cannot (NV12, or its compressed tiles), and with a
@@ -528,7 +547,9 @@ GstCodec::~GstCodec() = default;
 std::unique_ptr<GstCodec> GstCodec::configure(const std::string& mime,
                                               const std::uint8_t* csd,
                                               std::size_t csd_size,
-                                              std::string* error) {
+                                              std::string* error,
+                                              const std::uint8_t* first,
+                                              std::size_t first_size) {
   auto fail = [&](const std::string& m) -> std::unique_ptr<GstCodec> {
     if (error)
       *error = m;
@@ -552,10 +573,28 @@ std::unique_ptr<GstCodec> GstCodec::configure(const std::string& mime,
   GstElement* parser = pick(
       GST_ELEMENT_FACTORY_TYPE_PARSER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO,
       caps, nullptr);
-  const bool deep = mime == "video/hevc" && hevc_deep(csd, csd_size);
+  // The stream's format, from the csd or else its first access unit. A
+  // decoder is picked by it: one that gives nothing deeper than 8 bits is
+  // passed over for a deeper stream, and for an H.264 profile past 8-bit
+  // 4:2:0 the caps name the profile, which a decoder that lists the
+  // profiles it takes (VA's) is matched against.
+  bool deep = false;
+  GstCaps* dec_caps = gst_caps_copy(caps);
+  if (mime == "video/hevc") {
+    deep = hevc_deep(csd, csd_size) || hevc_deep(first, first_size);
+  } else if (mime == "video/avc") {
+    H264Format f;
+    if (h264_format(csd, csd_size, &f) || h264_format(first, first_size, &f)) {
+      deep = f.deep();
+      if (const char* profile = h264_profile_past_8bit_420(f))
+        gst_caps_set_simple(dec_caps, "profile", G_TYPE_STRING, profile,
+                            nullptr);
+    }
+  }
   GstElement* decoder = pick(
       GST_ELEMENT_FACTORY_TYPE_DECODER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO,
-      caps, &dec_name, deep);
+      dec_caps, &dec_name, deep);
+  gst_caps_unref(dec_caps);
   d->pipeline = gst_pipeline_new(nullptr);
   d->src = gst_element_factory_make("appsrc", nullptr);
   d->sink = gst_element_factory_make("appsink", nullptr);

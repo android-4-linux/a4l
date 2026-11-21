@@ -110,25 +110,48 @@ bool skip_scaling_list(Bits* b, int count) {
   return true;
 }
 
-// seq_parameter_set_data up to the VUI's video_signal_type.
-bool read_sps(const std::vector<std::uint8_t>& rbsp, H264Color* out) {
+// seq_parameter_set_data up to the VUI's video_signal_type. *format is set
+// once the fields it holds are read (`*have_format`); the return value says
+// whether the color was.
+bool read_sps(const std::vector<std::uint8_t>& rbsp,
+              H264Color* out,
+              H264Format* format,
+              bool* have_format) {
+  *have_format = false;
   Bits b(rbsp);
   std::uint32_t profile = 0;
+  std::uint32_t constraints = 0;
   std::uint32_t v = 0;
-  if (!b.bits(8, &profile) || !b.skip(16) ||
-      !b.ue(&v))  // constraints, level, id
+  if (!b.bits(8, &profile) || !b.bits(8, &constraints) || !b.skip(8) ||
+      !b.ue(&v))  // level, id
     return false;
+  H264Format f;
+  f.profile_idc = static_cast<std::uint8_t>(profile);
+  f.constraint_flags = static_cast<std::uint8_t>(constraints);
   if (high_profile(profile)) {
     std::uint32_t chroma = 0;
     if (!b.ue(&chroma) || chroma > 3)
       return false;
     if (chroma == 3 && !b.skip(1))  // separate_colour_plane_flag
       return false;
+    std::uint32_t luma_minus8 = 0;
+    std::uint32_t chroma_minus8 = 0;
+    // 0..6 in every profile (7.4.2.1.1).
+    if (!b.ue(&luma_minus8) || !b.ue(&chroma_minus8) || luma_minus8 > 6 ||
+        chroma_minus8 > 6)
+      return false;
+    f.chroma_format_idc = static_cast<std::uint8_t>(chroma);
+    f.bit_depth_luma = static_cast<std::uint8_t>(luma_minus8 + 8);
+    f.bit_depth_chroma = static_cast<std::uint8_t>(chroma_minus8 + 8);
+  }
+  *format = f;
+  *have_format = true;
+  if (high_profile(profile)) {
     std::uint32_t scaling = 0;
-    if (!b.ue(&v) || !b.ue(&v) || !b.skip(1) || !b.bit(&scaling))
+    if (!b.skip(1) || !b.bit(&scaling))  // qpprime_y_zero_transform_bypass
       return false;
     if (scaling != 0) {
-      const int lists = chroma != 3 ? 8 : 12;
+      const int lists = f.chroma_format_idc != 3 ? 8 : 12;
       for (int i = 0; i < lists; ++i) {
         std::uint32_t present = 0;
         if (!b.bit(&present))
@@ -195,8 +218,13 @@ bool read_sps(const std::vector<std::uint8_t>& rbsp, H264Color* out) {
 
 }  // namespace
 
-bool h264_color(const std::uint8_t* annexb, std::size_t size, H264Color* out) {
-  if (annexb == nullptr || out == nullptr)
+namespace {
+
+// The first SPS ahead of the first coded slice for which `take` says it has
+// what it wants, with the emulation prevention bytes taken out.
+template <typename Take>
+bool find_sps(const std::uint8_t* annexb, std::size_t size, Take take) {
+  if (annexb == nullptr)
     return false;
   std::size_t i = 0;
   while (i + 3 < size) {
@@ -228,14 +256,43 @@ bool h264_color(const std::uint8_t* annexb, std::size_t size, H264Color* out) {
       zeros = c == 0 ? zeros + 1 : 0;
       rbsp.push_back(c);
     }
-    H264Color c;
-    if (read_sps(rbsp, &c)) {
-      *out = c;
+    if (take(rbsp))
       return true;
-    }
     ++i;
   }
   return false;
+}
+
+}  // namespace
+
+bool h264_color(const std::uint8_t* annexb, std::size_t size, H264Color* out) {
+  if (out == nullptr)
+    return false;
+  return find_sps(annexb, size, [&](const std::vector<std::uint8_t>& rbsp) {
+    H264Color c;
+    H264Format f;
+    bool have_format = false;
+    if (!read_sps(rbsp, &c, &f, &have_format))
+      return false;
+    *out = c;
+    return true;
+  });
+}
+
+bool h264_format(const std::uint8_t* annexb,
+                 std::size_t size,
+                 H264Format* out) {
+  if (out == nullptr)
+    return false;
+  return find_sps(annexb, size, [&](const std::vector<std::uint8_t>& rbsp) {
+    H264Color c;
+    H264Format f;
+    bool have_format = false;
+    (void)read_sps(rbsp, &c, &f, &have_format);
+    if (have_format)
+      *out = f;
+    return have_format;
+  });
 }
 
 }  // namespace acl::media
