@@ -1062,8 +1062,19 @@ jint JNICALL MC_native_dequeueOutputBuffer(JNIEnv* env,
     ctx->held = false;
     ctx->held_frame = {};
   } else {
+    // Nothing ready waits out the timeout, as MediaCodec's does: a client
+    // that polls with one counts on the wait for its pacing. Without it a
+    // loop of 200 tries at 20 ms ran out in milliseconds, and on a loaded
+    // machine before the first frame. The engines have nothing to block
+    // on, so the decoder is asked again every 2 ms.
     std::string err;
-    const int r = ctx->dec->receive_frame(&f, &pts, &err);
+    const auto until = std::chrono::steady_clock::now() +
+                       std::chrono::milliseconds(dequeue_wait_ms(timeoutUs));
+    int r = ctx->dec->receive_frame(&f, &pts, &err);
+    while (r == 0 && std::chrono::steady_clock::now() < until) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      r = ctx->dec->receive_frame(&f, &pts, &err);
+    }
     if (r <= 0)
       return INFO_TRY_AGAIN_LATER;  // 0 = feed more input; -1 handled as
                                     // try-again (logged)
