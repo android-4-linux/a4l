@@ -31,9 +31,8 @@
 #include "media/h264_color.h"
 
 #if ACL_HAVE_DMABUF_CODEC
-#include "parse/h265/nal.h"  // dmabuf-codec's H.265 NAL and SPS readers
-#include "parse/h265/sps.h"
-#include "parse/sps_color.h"
+#include "media/dma_codec.h"
+#include "parse/sps_color.h"  // dmabuf-codec's SPS color reader
 #endif
 
 namespace acl::media {
@@ -305,19 +304,12 @@ void limit_threads(GstElement* e) {
 // dmabuf-codec, whose reader this is).
 bool hevc_deep(const std::uint8_t* csd, std::size_t size) {
 #if ACL_HAVE_DMABUF_CODEC
-  if (csd == nullptr || size == 0)
-    return false;
-  for (const auto& n : v4l2wc::h265::ParseAnnexB(csd, size)) {
-    v4l2wc::h265::Sps sps;
-    if (n.type == v4l2wc::h265::NalUnitType::kSpsNut &&
-        v4l2wc::h265::ParseSps(n.rbsp.data(), n.rbsp.size(), &sps))
-      return sps.bit_depth_luma > 8 || sps.bit_depth_chroma > 8;
-  }
+  return DmaCodec::bit_depth("video/hevc", csd, size) > 8;
 #else
   (void)csd;
   (void)size;
-#endif
   return false;
+#endif
 }
 
 // GStreamer's name for an H.264 profile beyond 8-bit 4:2:0 (as its
