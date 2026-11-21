@@ -90,6 +90,7 @@ struct SpsPicture {
   std::uint32_t y = 0;
   std::uint32_t w = 0;
   std::uint32_t h = 0;
+  std::uint32_t coded_h = 0;  // the coded picture's height
 };
 
 // The buffer, and the picture in it. A decoder whose stream crops on the
@@ -108,6 +109,7 @@ struct Picture {
   std::uint32_t y = 0;
   std::uint32_t w = 0;
   std::uint32_t h = 0;
+  bool from_sps = false;  // placed by the stream's SPS, not the decoder
 };
 
 // False where a crop does not fit the buffer. 4:2:0 crops in whole chroma
@@ -131,6 +133,7 @@ bool picture_of(GstBuffer* buf,
       p->y = said->y;
       p->w = said->w;
       p->h = said->h;
+      p->from_sps = true;
     }
     return true;
   }
@@ -495,7 +498,7 @@ struct GstCodec::Impl {
             avc ? v4l2wc::SpsCodec::kH264 : v4l2wc::SpsCodec::kH265, p, n,
             &c)) {
       if (c.width > 0 && c.height > 0) {
-        picture = {c.crop_left, c.crop_top, c.width, c.height};
+        picture = {c.crop_left, c.crop_top, c.width, c.height, c.coded_height};
         picture_said = true;
       }
       // An SPS with no VUI, or a VUI without the video signal type, reads
@@ -932,6 +935,24 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
         sane = false;
       f.planes[i].offset = static_cast<std::uint32_t>(off);
       f.planes[i].stride = static_cast<std::uint32_t>(stride > 0 ? stride : 0);
+    }
+    // gst-omx on Qualcomm's component puts chroma at the stride times the
+    // caps' height rounded up to 32 lines. For a stream cropped on the left
+    // or top, the component's caps are the crop's right and bottom edges,
+    // and chroma is in fact after the coded height rounded up to 32, its
+    // NV12 layout: cropped 16 top and 24 bottom from 400 lines coded,
+    // gst-omx said line 384 and chroma was at 416. Every uncropped size
+    // tried (240, 368, 400, 464, 720 and 1088 lines coded) agreed with it.
+    if (sane && tagged && pic.from_sps && d->said_picture() != nullptr &&
+        d->said_picture()->coded_h > 0) {
+      const std::uint64_t lines =
+          (std::uint64_t{d->said_picture()->coded_h} + 31) / 32 * 32;
+      const std::uint64_t off =
+          f.planes[0].offset + std::uint64_t{f.planes[0].stride} * lines;
+      if (off <= 0xffffffffu)
+        f.planes[1].offset = static_cast<std::uint32_t>(off);
+      else
+        sane = false;
     }
     if (sane) {
       const off_t size = ::lseek(f.fd, 0, SEEK_END);
