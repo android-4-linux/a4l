@@ -79,7 +79,9 @@ public class MainAsync extends Activity {
                 }
                 public void onOutputFormatChanged(MediaCodec mc, MediaFormat fmt) {
                     Log.i("acl", "ASYNC: onOutputFormatChanged " + fmt.getInteger(MediaFormat.KEY_WIDTH)
-                            + "x" + fmt.getInteger(MediaFormat.KEY_HEIGHT));
+                            + "x" + fmt.getInteger(MediaFormat.KEY_HEIGHT)
+                            + " crop " + fmt.getInteger("crop-left") + "," + fmt.getInteger("crop-top")
+                            + "," + fmt.getInteger("crop-right") + "," + fmt.getInteger("crop-bottom"));
                 }
                 public void onError(MediaCodec mc, MediaCodec.CodecException e) { Log.e("acl", "ASYNC onError", e); }
             }, new Handler(ht.getLooper()));

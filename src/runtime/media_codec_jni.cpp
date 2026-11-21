@@ -122,6 +122,24 @@ struct CodecCtx {
     gfx::DmabufFrame frame{};
   };
   std::vector<OutSlot> outslots;
+  // What the video output format says: the buffer, and the picture in it
+  // (MediaFormat's width/height and crop keys). The configured size until a
+  // frame says otherwise; a frame that does is announced as a format change
+  // ahead of it. Written by whichever thread receives frames, read by the
+  // app's getOutputFormat: under fmt_mu.
+  struct Geometry {
+    std::uint32_t buffer_w = 0, buffer_h = 0;
+    std::uint32_t x = 0, y = 0, w = 0, h = 0;
+    bool operator==(const Geometry&) const = default;
+  };
+  std::mutex fmt_mu;
+  Geometry geometry;
+  // Synchronous mode: a frame received with a new geometry waits here while
+  // dequeueOutputBuffer returns INFO_OUTPUT_FORMAT_CHANGED, and is handed
+  // out by the next call.
+  bool held = false;
+  gfx::DmabufFrame held_frame{};
+  std::int64_t held_pts = 0;
   bool format_signaled = false;  // dequeueOutputBuffer returns
                                  // INFO_OUTPUT_FORMAT_CHANGED once first
   bool first_input =
@@ -291,6 +309,28 @@ void append_bytebuffer(JNIEnv* env,
   env->DeleteLocalRef(cls);
 }
 
+// The geometry the video output format says: what a frame said, or the
+// configured size before one has.
+CodecCtx::Geometry output_geometry(CodecCtx* ctx) {
+  std::lock_guard<std::mutex> lk(ctx->fmt_mu);
+  if (ctx->geometry.w != 0)
+    return ctx->geometry;
+  const auto w = static_cast<std::uint32_t>(std::max(ctx->width, 0));
+  const auto h = static_cast<std::uint32_t>(std::max(ctx->height, 0));
+  return {w, h, 0, 0, w, h};
+}
+
+// Takes `f`'s geometry as the output format's. True where that changes what
+// the format says, which the caller announces before handing out `f`.
+bool note_geometry(CodecCtx* ctx, const gfx::DmabufFrame& f) {
+  const CodecCtx::Geometry now{f.buffer_width(), f.buffer_height(), f.crop_x,
+                               f.crop_y,         f.width,           f.height};
+  const CodecCtx::Geometry before = output_geometry(ctx);
+  std::lock_guard<std::mutex> lk(ctx->fmt_mu);
+  ctx->geometry = now;
+  return now != before;
+}
+
 // Build the output MediaFormat as a HashMap<String,Object> —
 // MediaCodec.getOutputFormat wraps it in a MediaFormat. A video renderer
 // (ExoPlayer) reads width/height/crop to size the output Surface.
@@ -326,15 +366,18 @@ jobject build_format_map(JNIEnv* env, CodecCtx* ctx) {
     put_int("pcm-encoding", 2);  // AudioFormat.ENCODING_PCM_16BIT
     return m;
   }
+  // The buffer's size, and the picture in it as an inclusive rectangle, as
+  // MediaFormat has them.
+  const CodecCtx::Geometry g = output_geometry(ctx);
   put_str("mime", "video/raw");
-  put_int("width", ctx->width);
-  put_int("height", ctx->height);
+  put_int("width", static_cast<int>(g.buffer_w));
+  put_int("height", static_cast<int>(g.buffer_h));
   put_int("color-format", 2135033992);  // COLOR_FormatYUV420Flexible (the frame
                                         // is a HW YUV surface)
-  put_int("crop-left", 0);
-  put_int("crop-top", 0);
-  put_int("crop-right", ctx->width > 0 ? ctx->width - 1 : 0);
-  put_int("crop-bottom", ctx->height > 0 ? ctx->height - 1 : 0);
+  put_int("crop-left", static_cast<int>(g.x));
+  put_int("crop-top", static_cast<int>(g.y));
+  put_int("crop-right", g.w > 0 ? static_cast<int>(g.x + g.w - 1) : 0);
+  put_int("crop-bottom", g.h > 0 ? static_cast<int>(g.y + g.h - 1) : 0);
   return m;
 }
 
@@ -436,6 +479,12 @@ void async_driver(CodecCtx* ctx) {
         }
         if (rr <= 0)
           break;
+        if (note_geometry(ctx, f)) {
+          jobject fmt = build_format_map(env, ctx);
+          post(CB_OUTPUT_FORMAT_CHANGE, 0, fmt);
+          if (fmt)
+            env->DeleteLocalRef(fmt);
+        }
         if (diag && (++ctx->tot_recv % 30 == 1)) {
           const auto now = std::chrono::steady_clock::now();
           double fps = 0.0;
@@ -1005,11 +1054,24 @@ jint JNICALL MC_native_dequeueOutputBuffer(JNIEnv* env,
   }
   gfx::DmabufFrame f{};
   std::int64_t pts = 0;
-  std::string err;
-  const int r = ctx->dec->receive_frame(&f, &pts, &err);
-  if (r <= 0)
-    return INFO_TRY_AGAIN_LATER;  // 0 = feed more input; -1 handled as
-                                  // try-again (logged)
+  if (ctx->held) {
+    f = std::move(ctx->held_frame);
+    pts = ctx->held_pts;
+    ctx->held = false;
+    ctx->held_frame = {};
+  } else {
+    std::string err;
+    const int r = ctx->dec->receive_frame(&f, &pts, &err);
+    if (r <= 0)
+      return INFO_TRY_AGAIN_LATER;  // 0 = feed more input; -1 handled as
+                                    // try-again (logged)
+    if (note_geometry(ctx, f)) {
+      ctx->held = true;
+      ctx->held_frame = std::move(f);
+      ctx->held_pts = pts;
+      return INFO_OUTPUT_FORMAT_CHANGED;
+    }
+  }
   // Import the decoded frame zero-copy NOW (dup the fd) so the decoder may
   // reuse its surface; hold it in an output slot until releaseOutputBuffer
   // decides render (queue_imported) or drop (release). A frame for the video
@@ -1142,6 +1204,8 @@ void teardown(CodecCtx* ctx) {
   for (auto& s : ctx->outslots)
     drop_slot(s);
   ctx->outslots.clear();
+  ctx->held = false;
+  ctx->held_frame = {};
   ctx->dec.reset();
   ctx->started = false;
 }
@@ -1179,6 +1243,8 @@ void JNICALL MC_native_flush(JNIEnv* env, jobject thiz) {
       b.free = true;
     for (auto& s : ctx->outslots)
       drop_slot(s);
+    ctx->held = false;
+    ctx->held_frame = {};
     // The decoder keeps its parameter sets across a flush, but they cost
     // nothing to send again with the key frame that follows.
     ctx->first_input = true;
