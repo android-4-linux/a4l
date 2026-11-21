@@ -21,6 +21,9 @@
 //   --planes     ask the decoder for a buffer per plane, where it has the
 //                choice (a4l asks for one). The frame is then the size the
 //                decoder reports, padding included.
+//   --software   decode with FFmpeg in software (media::CodecDecoder with
+//                ACL_HWDEC_DEVICE=none): each frame is copied into a
+//                dma-buf, NV12 or, for 10 bits, P010
 //   --loops N    play the clip N times (3)
 //   --fps N      frames a second (30)
 //   --window HEX the window's fill as ARGB (00000000, so the plane shows;
@@ -50,6 +53,9 @@
 #include "gfx/gfx_vk.h"
 #include "ipc/ipc.h"
 #include "media/dma_codec.h"
+#if ACL_HAVE_FFMPEG && ACL_HAVE_GL
+#include "media/video_decoder.h"
+#endif
 #include "src/dma_decoder_factory.h"
 #include "wm/present.h"
 #include "wm/split_present.h"
@@ -104,7 +110,7 @@ void pump(acl::wm::IPresenter& p, int ms) {
 
 int main(int argc, char** argv) {
   const char* clip = nullptr;
-  bool split = false, planes = false;
+  bool split = false, planes = false, software = false;
   int w = 640, h = 360, loops = 3, fps = 30;
   std::uint32_t window_argb = 0;  // the window's fill; transparent
   for (int i = 1; i < argc; ++i) {
@@ -112,6 +118,8 @@ int main(int argc, char** argv) {
       split = true;
     else if (std::strcmp(argv[i], "--planes") == 0)
       planes = true;
+    else if (std::strcmp(argv[i], "--software") == 0)
+      software = true;
     else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc)
       std::sscanf(argv[++i], "%dx%d", &w, &h);
     else if (std::strcmp(argv[i], "--loops") == 0 && i + 1 < argc)
@@ -127,8 +135,8 @@ int main(int argc, char** argv) {
   if (clip == nullptr || w <= 0 || h <= 0 || fps <= 0) {
     std::fprintf(stderr,
                  "usage: acl-video-plane-probe <clip.h265|clip.h264> "
-                 "[--size WxH] [--split] [--planes] [--loops N] [--fps N] "
-                 "[--window ARGB]\n");
+                 "[--size WxH] [--split] [--planes] [--software] [--loops N] "
+                 "[--fps N] [--window ARGB]\n");
     return 2;
   }
   const std::string name = clip;
@@ -147,7 +155,20 @@ int main(int argc, char** argv) {
 
   std::string err;
   std::unique_ptr<acl::media::DmaCodec> codec;
-  if (planes) {
+#if ACL_HAVE_FFMPEG && ACL_HAVE_GL
+  std::unique_ptr<acl::media::CodecDecoder> sw;
+#endif
+  if (software) {
+#if ACL_HAVE_FFMPEG && ACL_HAVE_GL
+    // A device FFmpeg does not know: it decodes in software, and the other
+    // engines are not tried.
+    ::setenv("ACL_HWDEC_DEVICE", "none", 1);
+    sw = acl::media::CodecDecoder::configure(hevc ? "video/hevc" : "video/avc",
+                                             nullptr, 0, w, h, &err);
+#else
+    err = "built without FFmpeg";
+#endif
+  } else if (planes) {
     const std::uint32_t fourcc = hevc ? V4L2_PIX_FMT_HEVC : V4L2_PIX_FMT_H264;
     codec = acl::media::DmaCodec::with_factory(
         [fourcc, w, h] {
@@ -162,7 +183,27 @@ int main(int argc, char** argv) {
     codec = acl::media::DmaCodec::configure(hevc ? "video/hevc" : "video/avc",
                                             nullptr, 0, w, h, &err);
   }
-  if (!codec) {
+  // The engine either way.
+  const auto send = [&](const std::uint8_t* data, std::size_t size,
+                        std::int64_t pts) {
+#if ACL_HAVE_FFMPEG && ACL_HAVE_GL
+    if (sw)
+      return sw->send_packet(data, size, pts, &err);
+#endif
+    return codec->send_packet(data, size, pts, &err);
+  };
+  const auto receive = [&](acl::gfx::DmabufFrame* f) {
+#if ACL_HAVE_FFMPEG && ACL_HAVE_GL
+    if (sw)
+      return sw->receive_frame(f, nullptr, &err);
+#endif
+    return codec->receive_frame(f, nullptr, &err);
+  };
+  bool have = codec != nullptr;
+#if ACL_HAVE_FFMPEG && ACL_HAVE_GL
+  have = have || sw != nullptr;
+#endif
+  if (!have) {
     std::fprintf(stderr, "video-plane-probe: no decoder (%s)\n", err.c_str());
     return 2;
   }
@@ -252,11 +293,11 @@ int main(int argc, char** argv) {
         const std::uint8_t* data = bytes.data() + units[u];
         const std::size_t size = units[u + 1] - units[u];
         for (int tries = 0; tries < 200; ++tries) {
-          const int sent = codec->send_packet(
-              data, size, static_cast<std::int64_t>(shown) * 33'333, &err);
+          const int sent =
+              send(data, size, static_cast<std::int64_t>(shown) * 33'333);
           acl::gfx::DmabufFrame f{};
           int got;
-          while ((got = codec->receive_frame(&f, nullptr, &err)) == 1) {
+          while ((got = receive(&f)) == 1) {
             show(f);
             f = {};
           }
@@ -272,10 +313,10 @@ int main(int argc, char** argv) {
       }
     }
     // What is still in the decoder.
-    codec->send_packet(nullptr, 0, 0, &err);
+    send(nullptr, 0, 0);
     for (int i = 0; i < 100; ++i) {
       acl::gfx::DmabufFrame f{};
-      if (codec->receive_frame(&f, nullptr, &err) != 1)
+      if (receive(&f) != 1)
         break;
       show(f);
     }
@@ -288,6 +329,9 @@ int main(int argc, char** argv) {
   }
   p.reset();
   codec.reset();
+#if ACL_HAVE_FFMPEG && ACL_HAVE_GL
+  sw.reset();
+#endif
   if (split) {
     pair.first.close();
     broker.join();
