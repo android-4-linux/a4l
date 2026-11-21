@@ -42,6 +42,7 @@ extern "C" {
 
 #include "audio/audio.h"
 #include "log/log.h"
+#include "media/ff_open.h"
 
 namespace acl::audio {
 namespace {
@@ -99,23 +100,18 @@ struct Ff {
 Ff g_ff;
 std::once_flag g_ff_once;
 
-void* ff_open(const char* base, int maj) {
-  // Prefer the runtime soname (always present); fall back to the -dev symlink.
-  char v[64];
-  std::snprintf(v, sizeof(v), "%s.%d", base, maj);
-  if (void* h = ::dlopen(v, RTLD_NOW | RTLD_LOCAL))
-    return h;
-  return ::dlopen(base, RTLD_NOW | RTLD_LOCAL);
-}
-
 void load_ffmpeg() {
   // dlopen in dependency order; RTLD_LOCAL keeps their symbols (and system
   // OpenSSL) private.
   void* h[4] = {
-      ff_open("libavutil.so", LIBAVUTIL_VERSION_MAJOR),
-      ff_open("libswresample.so", LIBSWRESAMPLE_VERSION_MAJOR),
-      ff_open("libavcodec.so", LIBAVCODEC_VERSION_MAJOR),
-      ff_open("libavformat.so", LIBAVFORMAT_VERSION_MAJOR),
+      media::ff_open(kTag, "libavutil.so", LIBAVUTIL_VERSION_MAJOR,
+                     "avutil_version"),
+      media::ff_open(kTag, "libswresample.so", LIBSWRESAMPLE_VERSION_MAJOR,
+                     "swresample_version"),
+      media::ff_open(kTag, "libavcodec.so", LIBAVCODEC_VERSION_MAJOR,
+                     "avcodec_version"),
+      media::ff_open(kTag, "libavformat.so", LIBAVFORMAT_VERSION_MAJOR,
+                     "avformat_version"),
   };
   for (void* x : h)
     if (x == nullptr) {

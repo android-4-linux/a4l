@@ -35,6 +35,7 @@ extern "C" {
 #include "log/log.h"
 #include "media/codec_engine.h"
 #include "media/dma_codec.h"
+#include "media/ff_open.h"
 #include "media/gst_codec.h"
 
 namespace acl::media {
@@ -88,22 +89,16 @@ struct Ff {
 Ff g_ff;
 bool g_ff_tried = false;
 
-void* ff_open(const char* base, int maj) {
-  char v[64];
-  std::snprintf(v, sizeof(v), "%s.%d", base, maj);
-  if (void* h = ::dlopen(v, RTLD_NOW | RTLD_LOCAL))
-    return h;
-  return ::dlopen(base, RTLD_NOW | RTLD_LOCAL);
-}
-
 bool load_ffmpeg() {
   if (g_ff_tried)
     return g_ff.ok;
   g_ff_tried = true;
   void* h[3] = {
-      ff_open("libavutil.so", LIBAVUTIL_VERSION_MAJOR),
-      ff_open("libavcodec.so", LIBAVCODEC_VERSION_MAJOR),
-      ff_open("libavformat.so", LIBAVFORMAT_VERSION_MAJOR),
+      ff_open(kTag, "libavutil.so", LIBAVUTIL_VERSION_MAJOR, "avutil_version"),
+      ff_open(kTag, "libavcodec.so", LIBAVCODEC_VERSION_MAJOR,
+              "avcodec_version"),
+      ff_open(kTag, "libavformat.so", LIBAVFORMAT_VERSION_MAJOR,
+              "avformat_version"),
   };
   for (void* x : h)
     if (x == nullptr) {
