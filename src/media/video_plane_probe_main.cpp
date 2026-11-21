@@ -282,7 +282,8 @@ int main(int argc, char** argv) {
     // The last picture stays up long enough to be looked at.
     for (int i = 0; i < 100; ++i)
       pump(*p, 20);
-    refused = p->video_refused(0x3231564e) || p->video_refused(0x30313050);
+    refused = p->video_refused(0x3231564e) || p->video_refused(0x30313050) ||
+              p->video_refused(0x30333050);
     rc = failed || shown == 0 ? 1 : 0;
   }
   p.reset();

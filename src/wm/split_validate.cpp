@@ -27,6 +27,7 @@ constexpr std::uint64_t kModInvalid = 0x00ffffffffffffffull;
 constexpr std::uint32_t kBytesPerPixel = 4;       // both formats above
 constexpr std::uint32_t kNv12 = 0x3231564eu;      // 'NV12'
 constexpr std::uint32_t kP010 = 0x30313050u;      // 'P010'
+constexpr std::uint32_t kP030 = 0x30333050u;      // 'P030'
 constexpr std::uint32_t kXbgr8888 = 0x34324258u;  // 'XB24'
 // DRM_FORMAT_MOD_BROADCOM_SAND128 with no column height in it.
 constexpr std::uint64_t kSand128 = 0x0700000000000004ull;
@@ -134,7 +135,8 @@ FrameVerdict check_frame(const ipc::PresentFrame& p,
 }
 
 bool video_format_accepted(std::uint32_t drm_format) noexcept {
-  return drm_format == kNv12 || drm_format == kP010 || drm_format == kXbgr8888;
+  return drm_format == kNv12 || drm_format == kP010 || drm_format == kP030 ||
+         drm_format == kXbgr8888;
 }
 
 FrameVerdict check_video_frame(const ipc::VideoFrame& v,
@@ -200,9 +202,16 @@ FrameVerdict check_video_frame(const ipc::VideoFrame& v,
   // Broadcom's column format: the picture in columns 128 bytes wide, each
   // plane's rows for a column one after another, and the stride the height
   // of a column in rows. Each plane's rows fit a column, and its last
-  // column ends inside the buffer.
-  if (v.modifier == kSand128 && v.drm_format == kNv12) {
-    const std::uint64_t columns = (static_cast<std::uint64_t>(v.w) + 127) / 128;
+  // column ends inside the buffer. A row is a byte a sample at 8 bits, and
+  // at 10 (P030) three samples in 4 bytes. P030 has no other layout here.
+  if (v.drm_format == kP030 && v.modifier != kSand128)
+    return FrameVerdict::BadLayout;
+  if (v.modifier == kSand128 &&
+      (v.drm_format == kNv12 || v.drm_format == kP030)) {
+    const std::uint64_t row =
+        v.drm_format == kP030 ? (static_cast<std::uint64_t>(v.w) + 2) / 3 * 4
+                              : v.w;
+    const std::uint64_t columns = (row + 127) / 128;
     for (std::uint32_t i = 0; i < 2; ++i) {
       const std::uint64_t rows =
           i == 0 ? v.h : (static_cast<std::uint64_t>(v.h) + 1) / 2;
