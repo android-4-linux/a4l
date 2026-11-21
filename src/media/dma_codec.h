@@ -47,13 +47,22 @@ class DmaCodec final : public CodecEngine {
 
   // A decoder for `mime` from the engines the device has. `csd` (Annex-B
   // parameter sets) goes ahead of the first access unit and of the first
-  // after a flush. nullptr + *error when the MIME has no engine here.
+  // after a flush. `bit_depth` is the stream's, as bit_depth() reads it, or
+  // 0 where not known; past 8, the engines that give only 8-bit pictures are
+  // not tried. nullptr + *error when no engine here takes the stream.
   static std::unique_ptr<DmaCodec> configure(const std::string& mime,
                                              const std::uint8_t* csd,
                                              std::size_t csd_size,
                                              int width,
                                              int height,
-                                             std::string* error);
+                                             std::string* error,
+                                             std::uint32_t bit_depth = 0);
+  // The deeper of luma and chroma bit depth that the first H.264 or HEVC
+  // sequence parameter set in the Annex-B bytes says, and 0 where there is
+  // none or the MIME is neither.
+  static std::uint32_t bit_depth(const std::string& mime,
+                                 const std::uint8_t* annexb,
+                                 std::size_t size);
   // The same over decoders from `factory`, for tests.
   static std::unique_ptr<DmaCodec> with_factory(Factory factory,
                                                 const std::uint8_t* csd,
