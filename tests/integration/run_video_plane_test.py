@@ -23,10 +23,13 @@
 # that does not say its matrix, made with BT.601, which is what a4l takes a picture of
 # this size for.
 #
-# With "said" as a second argument the clip is 8-bit HEVC made with BT.709 and saying so,
-# and only a compositor that can be told is of use: without the telling, or with the
-# matrix lost on the way across --split, it comes out wrong. A test of its own, so that
-# where no such compositor is installed it shows as a skip.
+# With "said" as a second argument the clips say how they were made, and only a compositor
+# that can be told is of use: without the telling, or with what was said lost on the way
+# across --split, they come out wrong. 8-bit made with BT.709, 10-bit (P010) made with
+# BT.2020, and 8-bit made with BT.601 at full range, each saying so. BT.2020 here is the
+# matrix only, with the SDR transfer: no HDR display is needed, and the compositor is not
+# told the primaries, so it shows the RGB the clip was made from. A test of its own, so
+# that where no such compositor is installed it shows as a skip.
 #
 # With "software" as a second argument the 8-bit and 10-bit clips are decoded by FFmpeg in
 # software (--software), and each frame is copied into a dma-buf: NV12, and P010 with the
@@ -53,6 +56,10 @@ COLORS = {"tl": (0xC0, 0x20, 0x20), "tr": (0x20, 0x20, 0xC0),
           "bl": (0x20, 0xC0, 0x20), "br": (0xE0, 0xE0, 0xE0)}
 W, H = 640, 360
 TOLERANCE = 12
+# BT.2020 and BT.709 are close: these colors made with BT.2020 and shown with BT.709 are
+# off by at most 9, so the BT.2020 clip is held to less. What the compositors show is
+# within 3.
+TOLERANCE_BT2020 = 5
 
 
 def skip(why, out=""):
@@ -273,25 +280,37 @@ def main() -> int:
         # frame, which is what the probe splits on, and no B frames. The colors are
         # made as RGB and converted with the matrix named, so that which one a clip was
         # made with is not ffmpeg's default.
-        # name: (pixel format, matrix made with, whether the stream says so, DRM fourcc)
-        kinds = ({"8-bit BT.709": ("yuv420p", "bt709", True, "0x3231564e")} if said else
-                 {"8-bit": ("yuv420p", "bt601", False, "0x3231564e"),
-                  "10-bit": ("yuv420p10le", "bt601", False, "0x30313050")})
+        # name: (pixel format, matrix made with, range, whether the stream says so,
+        #        DRM fourcc, what the compositor is to be told)
+        kinds = ({"8-bit BT.709": ("yuv420p", "bt709", "tv", True, "0x3231564e",
+                                   "BT.709 limited"),
+                  "10-bit BT.2020": ("yuv420p10le", "bt2020", "tv", True, "0x30313050",
+                                     "BT.2020 limited"),
+                  "8-bit BT.601 full range": ("yuv420p", "bt601", "pc", True, "0x3231564e",
+                                              "BT.601 full")} if said else
+                 {"8-bit": ("yuv420p", "bt601", "tv", False, "0x3231564e", None),
+                  "10-bit": ("yuv420p10le", "bt601", "tv", False, "0x30313050", None)})
+        # What a clip says of itself: ffmpeg's names for the matrix and its primaries and
+        # transfer (BT.2020's 10-bit transfer is BT.709's curve), and the range.
+        says_tags = {"bt709": ("bt709", "bt709", "bt709"),
+                     "bt2020": ("bt2020nc", "bt2020", "bt2020-10"),
+                     "bt601": ("smpte170m", "smpte170m", "smpte170m")}
         clips = {}
-        for kind, (pix, matrix, says, _) in kinds.items():
+        for kind, (pix, matrix, rng, says, _, _) in kinds.items():
             inputs = []
             for name in ("tl", "tr", "bl", "br"):
                 r, g, b = COLORS[name]
                 inputs += ["-f", "lavfi", "-i",
                            f"color=c=0x{r:02X}{g:02X}{b:02X}:s={W // 2}x{H // 2}:r=30,format=gbrp"]
             clip = os.path.join(work, f"clip{len(clips)}.h265")
-            tags = (["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-                     "-color_range", "tv"] if says else [])
+            space, prim, trc = says_tags[matrix]
+            tags = (["-colorspace", space, "-color_primaries", prim, "-color_trc", trc,
+                     "-color_range", rng] if says else [])
             gen = subprocess.run(
                 [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"] + inputs +
                 ["-filter_complex",
                  "[0][1]hstack[t];[2][3]hstack[b];[t][b]vstack,"
-                 f"scale=out_color_matrix={matrix}:out_range=tv,format={pix}",
+                 f"scale=out_color_matrix={matrix}:out_range={rng},format={pix}",
                  "-frames:v", "60", "-c:v", "libx265", "-x265-params",
                  "bframes=0:log-level=error"] + tags +
                 ["-bsf:v", "hevc_metadata=aud=insert", "-f", "hevc", clip],
@@ -308,7 +327,7 @@ def main() -> int:
                 return skip(display)
             env = dict(os.environ, WAYLAND_DISPLAY=display)
             time.sleep(1.5)  # Weston fades its desktop in, and a shot then is dim
-            for kind, (_, _, says, fourcc) in kinds.items():
+            for kind, (_, _, _, says, fourcc, want_told) in kinds.items():
                 for split in (False, True):
                     tag = f"{comp}, {kind}" + (", --split" if split else "")
                     cmd = [probe, clips[kind], "--size", f"{W}x{H}", "--loops", "2"]
@@ -356,16 +375,17 @@ def main() -> int:
                         # way, which is not a4l's to get right.
                         if not told:
                             break  # this compositor is of no use here
-                        if told.group(1) != "BT.709" or told.group(2) != "limited":
+                        if f"{told.group(1)} {told.group(2)}" != want_told:
                             return fail(f"the compositor was told {told.group(1)} "
-                                        f"{told.group(2)}, and the stream says BT.709 limited")
+                                        f"{told.group(2)}, and the stream says {want_told}")
                     if image is None:
                         return fail("no screenshot was taken while the clip played")
                     got, why = quadrants(image)
                     if got is None:
                         return fail(why)
+                    tol = TOLERANCE_BT2020 if "BT.2020" in kind else TOLERANCE
                     for name, want in COLORS.items():
-                        if any(abs(a - b) > TOLERANCE for a, b in zip(got[name], want)):
+                        if any(abs(a - b) > tol for a, b in zip(got[name], want)):
                             return fail(f"quadrant {name} on the screen is {got[name]}, "
                                         f"want {want}")
                     summary.append(f"{tag}: " + " ".join(
