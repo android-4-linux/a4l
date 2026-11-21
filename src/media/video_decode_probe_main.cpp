@@ -270,6 +270,10 @@ int main(int argc, char** argv) {
       "video-decode-probe: decoded %dx%d fourcc=%#x planes=%u mod=%#lx fd=%d\n",
       f.width, f.height, f.drm_format, f.plane_count,
       static_cast<unsigned long>(f.modifier), f.fd);
+  for (std::uint32_t i = 0; i < f.plane_count; ++i)
+    std::printf("video-decode-probe: plane %u offset %u stride %u%s\n", i,
+                f.planes[i].offset, f.planes[i].stride,
+                f.planes[i].fd >= 0 ? " (own dma-buf)" : "");
 
   if (convert_mode) {
     auto conv = acl::gfx::VideoConverter::Create(&err);
