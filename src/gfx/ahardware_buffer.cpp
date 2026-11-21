@@ -162,11 +162,12 @@ void* egl_image_from_ahb(void* dpy,
     if (a[0] == EGL_IMAGE_PRESERVED_KHR)
       preserved = a[1];
 
+  // The whole buffer; a decoder's picture may start inside it.
   std::vector<EGLint> attrs = {
       EGL_WIDTH,
-      static_cast<EGLint>(f.width),
+      static_cast<EGLint>(f.buffer_width()),
       EGL_HEIGHT,
-      static_cast<EGLint>(f.height),
+      static_cast<EGLint>(f.buffer_height()),
       EGL_LINUX_DRM_FOURCC_EXT,
       static_cast<EGLint>(f.drm_format),
   };

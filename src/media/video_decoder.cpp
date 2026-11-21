@@ -53,6 +53,7 @@ struct Ff {
   FF_FN(av_frame_free);
   FF_FN(av_frame_clone);
   FF_FN(av_frame_unref);
+  FF_FN(av_frame_apply_cropping);
   FF_FN(av_packet_alloc);
   FF_FN(av_packet_free);
   FF_FN(av_packet_unref);
@@ -127,6 +128,7 @@ bool load_ffmpeg() {
   FF_BIND(av_frame_free);
   FF_BIND(av_frame_clone);
   FF_BIND(av_frame_unref);
+  FF_BIND(av_frame_apply_cropping);
   FF_BIND(av_packet_alloc);
   FF_BIND(av_packet_free);
   FF_BIND(av_packet_unref);
@@ -369,6 +371,44 @@ void note_color(const AVFrame* f, gfx::DmabufFrame* out) {
   out->yuv_full_range = f->color_range == AVCOL_RANGE_JPEG;
 }
 
+// The decoders are opened with apply_cropping off: FFmpeg's own cropping
+// drops a hardware frame's left and top crop. A software frame is cropped
+// here by moving its data pointers. Unaligned: aligned, FFmpeg rounds the
+// left crop down to keep the pointers aligned, and a picture cropped 16
+// from the left came out 16 wider, from x 0. The pointers go only to
+// sw_to_dmabuf()'s copy, never back to FFmpeg. False where the crop does
+// not fit the frame.
+bool crop_sw_frame(AVFrame* f) {
+  return g_ff.av_frame_apply_cropping(f, AV_FRAME_CROP_UNALIGNED) >= 0;
+}
+
+// The picture in a hardware frame's surface, from its crop: its size and
+// where it starts. Left alone where the frame says no crop (a decoder that
+// fills none in keeps the context's size, as before) or one that does not
+// fit it.
+void crop_hw_frame(const AVFrame* f, gfx::DmabufFrame* out) {
+  if (f->width <= 0 || f->height <= 0 ||
+      (f->crop_left == 0 && f->crop_right == 0 && f->crop_top == 0 &&
+       f->crop_bottom == 0))
+    return;
+  const auto w = static_cast<std::size_t>(f->width);
+  const auto h = static_cast<std::size_t>(f->height);
+  if (f->crop_left >= w || f->crop_right >= w - f->crop_left ||
+      f->crop_top >= h || f->crop_bottom >= h - f->crop_top)
+    return;
+  out->crop_x = static_cast<std::uint32_t>(f->crop_left);
+  out->crop_y = static_cast<std::uint32_t>(f->crop_top);
+  out->width = static_cast<std::uint32_t>(w - f->crop_left - f->crop_right);
+  out->height = static_cast<std::uint32_t>(h - f->crop_top - f->crop_bottom);
+  // The memory the planes span, to the buffer's last row.
+  std::uint64_t total = 0;
+  for (std::uint32_t i = 0; i < out->plane_count; ++i)
+    total = std::max(
+        total, out->planes[i].offset +
+                   std::uint64_t{out->planes[i].stride} * out->buffer_height());
+  out->mem_size = total;
+}
+
 // MediaCodec MIME -> AVCodecID (the video codecs acl targets). AV_CODEC_ID_NONE
 // if unmapped.
 enum AVCodecID codec_id_for_mime(const std::string& mime) {
@@ -483,6 +523,7 @@ std::unique_ptr<VideoDecoder> VideoDecoder::open(const std::string& path,
     return fail("parameters_to_context failed");
   if (!configure_hw_decode(d->codec, codec, &d->hw_device))
     return fail("av_hwdevice_ctx_create failed");
+  d->codec->apply_cropping = 0;  // see crop_sw_frame()
   if (g_ff.avcodec_open2(d->codec, codec, nullptr) < 0)
     return fail("avcodec_open2 failed");
   d->width = static_cast<std::uint32_t>(d->codec->width);
@@ -541,6 +582,8 @@ int VideoDecoder::next_frame(gfx::DmabufFrame* out, std::string* error) {
   }
 
   if (is_sw_frame(d->hw_frame)) {
+    if (!crop_sw_frame(d->hw_frame))
+      return err("a software frame's crop does not fit it");
     if (!sw_to_dmabuf(d->hw_frame, &d->sw_pool, out, error))
       return -1;
     note_color(d->hw_frame, out);
@@ -556,6 +599,7 @@ int VideoDecoder::next_frame(gfx::DmabufFrame* out, std::string* error) {
     return err("multi-object DRM frame (per-plane fds) not yet supported");
   if (rc != 1)
     return err("empty/invalid DRM descriptor");
+  crop_hw_frame(d->hw_frame, out);
   note_color(d->hw_frame, out);
   return 1;
 }
@@ -949,6 +993,7 @@ bool CodecDecoder::start(const std::string& mime,
     // images a consumer has acquired, the plane's in-flight buffers (4).
     return 24;
   }();
+  d->codec->apply_cropping = 0;  // see crop_sw_frame()
   if (g_ff.avcodec_open2(d->codec, codec, nullptr) < 0)
     return fail("avcodec_open2 failed");
   d->width = static_cast<std::uint32_t>(width > 0 ? width : d->codec->width);
@@ -1050,6 +1095,8 @@ int CodecDecoder::receive_frame(gfx::DmabufFrame* out,
   if (is_sw_frame(d->hw_frame)) {
     // The copy owns its buffer (out->hold); the decoder's frame is not needed
     // past this call.
+    if (!crop_sw_frame(d->hw_frame))
+      return err("a software frame's crop does not fit it");
     if (!sw_to_dmabuf(d->hw_frame, &d->sw_pool, out, error))
       return -1;
     note_color(d->hw_frame, out);
@@ -1065,6 +1112,7 @@ int CodecDecoder::receive_frame(gfx::DmabufFrame* out,
     return err("multi-object DRM frame (per-plane fds) not yet supported");
   if (rc != 1)
     return err("invalid DRM descriptor");
+  crop_hw_frame(d->hw_frame, out);
   note_color(d->hw_frame, out);
   if (pts_us)
     *pts_us = d->hw_frame->pts;

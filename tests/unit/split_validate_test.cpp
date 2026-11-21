@@ -389,6 +389,37 @@ TEST_CASE("validate: a well-formed video frame passes", "[split][validate]") {
   CHECK_FALSE(wm::video_format_accepted(0));
 }
 
+TEST_CASE("validate: a video picture may start inside its buffer",
+          "[split][validate]") {
+  using V = FrameVerdict;
+  // 624x344 at 16,16: the picture's far corner is the 640x360 buffer's.
+  ipc::VideoFrame v = good_video();
+  v.w = 624;
+  v.h = 344;
+  v.crop_x = 16;
+  v.crop_y = 16;
+  CHECK(check_video(v) == V::Ok);
+  // Rows and lines are checked to the picture's far corner: 2 more of either
+  // and it is past the buffer.
+  v.crop_y = 18;
+  CHECK(check_video(v) == V::BadLayout);
+  v.crop_y = 16;
+  v.crop_x = 18;
+  CHECK(check_video(v) == V::BadLayout);
+  // 4:2:0 crops in whole chroma samples.
+  v.crop_x = 15;
+  CHECK(check_video(v) == V::BadLayout);
+  v.crop_x = 16;
+  v.crop_y = 15;
+  CHECK(check_video(v) == V::BadLayout);
+  // An origin that would take the buffer past the size limit, or wrap.
+  v.crop_y = 16;
+  v.crop_x = ipc::kMaxSurfaceDim;
+  CHECK(check_video(v) == V::BadSize);
+  v.crop_x = 0xffffffffu;
+  CHECK(check_video(v) == V::BadSize);
+}
+
 TEST_CASE("validate: a converted video frame is one plane of pixels",
           "[split][validate]") {
   // What the child sends a compositor that takes no NV12: XBGR8888, linear.

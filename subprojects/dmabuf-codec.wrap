@@ -8,7 +8,7 @@
 [wrap-git]
 directory = dmabuf-codec
 url = https://github.com/jwinarske/dmabuf-codec.git
-revision = 4b06c5f4aea1851871c81850f375eec101954060
+revision = 7004921272ab809d08e81b59236ad59959c97d26
 depth = 1
 [provide]
 dmabuf-codec = dmabuf_codec_dep

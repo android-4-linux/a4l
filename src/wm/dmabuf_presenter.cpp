@@ -329,8 +329,8 @@ class SubsurfacePlane {
     wl_proxy* braw = wl::construct<
         wl_buffer_traits,
         dmabuf::zwp_linux_buffer_params_v1_traits::Op::CreateImmed>(
-        *params.Get(), static_cast<std::int32_t>(frame.width),
-        static_cast<std::int32_t>(frame.height), frame.drm_format, 0u);
+        *params.Get(), static_cast<std::int32_t>(frame.buffer_width()),
+        static_cast<std::int32_t>(frame.buffer_height()), frame.drm_format, 0u);
     if (braw == nullptr)
       return;
     auto slot = std::make_unique<InFlight>();
@@ -351,8 +351,9 @@ class SubsurfacePlane {
     frame_ready_ = false;
     say_color(frame);
     surface_.Get()->Attach(slot->buf.Get()->GetProxy(), 0, 0);
-    surface_.Get()->DamageBuffer(0, 0, static_cast<std::int32_t>(frame.width),
-                                 static_cast<std::int32_t>(frame.height));
+    surface_.Get()->DamageBuffer(
+        0, 0, static_cast<std::int32_t>(frame.buffer_width()),
+        static_cast<std::int32_t>(frame.buffer_height()));
     surface_.Get()->Commit();
     shown_ = true;
     inflight_.push_back(std::move(slot));
@@ -1165,6 +1166,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     // place_video() also keeps the crop inside the buffer and non-empty:
     // wp_viewport answers anything else with a protocol error, and under
     // --split the rectangle is the app process's.
+    // The source is placed in the picture, which starts at (crop_x, crop_y)
+    // in the buffer.
     const VideoPlacement place =
         place_video(x, y, w, h, w_ > 0 ? w_ : w, h_ > 0 ? h_ : h, frame.width,
                     frame.height);
@@ -1173,10 +1176,13 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       return;
     }
     const int vx = place.x, vy = place.y, vw = place.w, vh = place.h;
-    const double sx = place.sx, sy = place.sy, sw = place.sw, sh = place.sh;
+    const double sx = place.sx + frame.crop_x, sy = place.sy + frame.crop_y;
+    const double sw = place.sw, sh = place.sh;
     placed_ = {x, y, w, h, w_, h_};
     placed_buf_w_ = frame.width;
     placed_buf_h_ = frame.height;
+    placed_crop_x_ = frame.crop_x;
+    placed_crop_y_ = frame.crop_y;
     if (video_diag_) {
       static std::uint64_t gdbg = 0;
       if (gdbg++ % 60 == 0)
@@ -1221,7 +1227,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     if (!place.visible)
       return;
     video_plane_.set_position(place.x, place.y);
-    video_plane_.set_source_dest(place.sx, place.sy, place.sw, place.sh,
+    video_plane_.set_source_dest(place.sx + placed_crop_x_,
+                                 place.sy + placed_crop_y_, place.sw, place.sh,
                                  place.w, place.h);
     set_toplevel_opaque_hole(place.x, place.y, place.w, place.h);
     video_plane_.commit_geometry();
@@ -2260,9 +2267,11 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   int oq_w_ = 0, oq_h_ = 0;      // the surface size that region was built for
   int geom_w_ = 0, geom_h_ = 0;  // the window geometry last set; 0: never
   // What the frame on the video plane was placed by: the app's rectangle and
-  // the window's size, and the frame's own size.
+  // the window's size, and the frame's picture: its size and where it starts
+  // in the buffer.
   std::array<int, 6> placed_{};
   std::uint32_t placed_buf_w_ = 0, placed_buf_h_ = 0;
+  std::uint32_t placed_crop_x_ = 0, placed_crop_y_ = 0;
   bool oq_dirty_ = false;  // opaque region set, awaiting a toplevel commit
   int video_wake_fd_ = ::eventfd(
       0,

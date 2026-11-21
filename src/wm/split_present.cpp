@@ -427,6 +427,8 @@ class SplitPresenter final : public IPresenter {
     }
     v.w = frame.width;
     v.h = frame.height;
+    v.crop_x = frame.crop_x;
+    v.crop_y = frame.crop_y;
     v.drm_format = frame.drm_format;
     v.plane_count = frame.plane_count;
     v.modifier = frame.modifier;
@@ -1129,6 +1131,8 @@ class Broker {
     fr.fd = r.fd0;  // borrowed: the presenter takes its own reference
     fr.width = v.w;
     fr.height = v.h;
+    fr.crop_x = v.crop_x;
+    fr.crop_y = v.crop_y;
     fr.plane_count = v.plane_count;
     for (std::uint32_t i = 0; i < v.plane_count; ++i) {
       fr.planes[i].stride = v.stride[i];

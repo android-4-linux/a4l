@@ -36,8 +36,16 @@ struct DmabufFrame {
   };
   // The dma-buf of plane 0, and of every plane that does not name its own.
   int fd = -1;
+  // The picture's size, and where it starts in the buffer. A decoder's
+  // buffer is the coded picture, which a stream may crop on any side; most
+  // crop only at the right and bottom, leaving crop_x and crop_y 0. The
+  // origin is not folded into the plane offsets: a tiled or column layout
+  // cannot start mid-tile. Whatever imports the buffer takes
+  // buffer_width() x buffer_height(); whatever shows it shows the picture.
   std::uint32_t width = 0;
   std::uint32_t height = 0;
+  std::uint32_t crop_x = 0;
+  std::uint32_t crop_y = 0;
   std::uint32_t plane_count = 1;
   Plane planes[kMaxPlanes]{};
   std::uint64_t modifier = 0;    // DRM format modifier (0 == LINEAR)
@@ -67,6 +75,8 @@ struct DmabufFrame {
   // released) keeps the surface. Empty for a producer that owns its buffers.
   std::shared_ptr<void> hold;
 
+  std::uint32_t buffer_width() const { return crop_x + width; }
+  std::uint32_t buffer_height() const { return crop_y + height; }
   std::uint32_t stride() const {
     return planes[0].stride;
   }  // plane-0 convenience
