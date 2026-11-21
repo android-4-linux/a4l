@@ -384,6 +384,7 @@ TEST_CASE("validate: a well-formed video frame passes", "[split][validate]") {
 
   CHECK(wm::video_format_accepted(kNv12));
   CHECK(wm::video_format_accepted(kP010));
+  CHECK(wm::video_format_accepted(0x30333050u));  // P030
   CHECK_FALSE(wm::video_format_accepted(kAr24));
   CHECK_FALSE(wm::video_format_accepted(0));
 }
@@ -582,6 +583,26 @@ TEST_CASE("validate: a column-format video frame is bounded by its columns",
     ipc::VideoFrame param = one;
     param.modifier = 0x0700000000022804ull;
     CHECK(check(param, whole) == V::BadModifier);
+  }
+  SECTION("10 bits (P030)") {
+    // Three samples in 4 bytes: a 640-sample row is 856 bytes, seven
+    // columns. The decoder's buffer for it, as a Pi 5 gives it, holds them.
+    ipc::VideoFrame deep = one;
+    deep.drm_format = 0x30333050u;
+    const wm::BufferFacts seven[] = {{true, 495616}};
+    CHECK(check(deep, seven) == V::Ok);
+    // Five columns, enough for 8 bits, are two short.
+    CHECK(check(deep, whole) == V::BadLayout);
+    // The exact end of the seventh column's chroma, and one byte short.
+    const std::uint64_t end = 368 * 128 + 6 * 552ull * 128 + 180 * 128;
+    const wm::BufferFacts exact[] = {{true, end}};
+    CHECK(check(deep, exact) == V::Ok);
+    const wm::BufferFacts shy[] = {{true, end - 1}};
+    CHECK(check(deep, shy) == V::BadLayout);
+    // P030 comes only in columns.
+    ipc::VideoFrame flat = deep;
+    flat.modifier = 0;
+    CHECK(check(flat, seven) == V::BadLayout);
   }
 }
 

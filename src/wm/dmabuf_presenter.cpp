@@ -414,10 +414,12 @@ class SubsurfacePlane {
     // A WlPtr's Get() is never null; whether it holds an object is IsNull().
     if (color_manager_ == nullptr || color_manager_->IsNull())
       return;
-    constexpr std::uint32_t kNv12 = 0x3231564e, kP010 = 0x30313050;
+    constexpr std::uint32_t kNv12 = 0x3231564e, kP010 = 0x30313050,
+                            kP030 = 0x30333050;
     std::uint32_t coefficients = 0;  // 0: nothing to say
     std::uint32_t range = 0;
-    if (frame.drm_format == kNv12 || frame.drm_format == kP010) {
+    if (frame.drm_format == kNv12 || frame.drm_format == kP010 ||
+        frame.drm_format == kP030) {
       const gfx::VideoColor c = gfx::video_color(frame);
       using K = cr::WpColorRepresentationSurfaceV1Coefficients;
       using R = cr::WpColorRepresentationSurfaceV1Range;
