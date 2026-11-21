@@ -107,7 +107,8 @@ TEST_CASE("video geometry: extreme rectangles do not overflow", "[video]") {
 
 TEST_CASE("video geometry: no input yields a crop the compositor refuses",
           "[video]") {
-  std::mt19937 rng(20261114);
+  // A fixed seed: the same sequence every run, so a failure repeats.
+  std::mt19937 rng(20261114);  // NOLINT(bugprone-random-generator-seed)
   const auto pick = [&](int lo, int hi) {
     return std::uniform_int_distribution<int>(lo, hi)(rng);
   };

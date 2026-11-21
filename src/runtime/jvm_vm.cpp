@@ -6756,6 +6756,8 @@ class ArtVm final : public JniVm {
         "_ZN7android38register_android_database_SQLiteGlobalEP7_JNIEnv",
         "_ZN7android37register_android_database_SQLiteDebugEP7_JNIEnv",
         "_ZN7android42register_android_database_SQLiteConnectionEP7_JNIEnv",
+        // One symbol, split to fit the line.
+        // NOLINTNEXTLINE(bugprone-suspicious-missing-comma)
         "_ZN7android47register_android_animation_PropertyValuesHolderEP7_"
         "JNIEnv",
     };

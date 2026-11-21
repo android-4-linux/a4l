@@ -77,6 +77,7 @@ void check(const DmabufFrame& f, unsigned shift) {
   REQUIRE(f.plane_count == 2);
   const off_t size = ::lseek(f.fd, 0, SEEK_END);
   REQUIRE(size > 0);
+  // NOLINTNEXTLINE(clang-analyzer-unix.StdCLibraryFunctions): REQUIRE throws
   void* map = ::mmap(nullptr, static_cast<std::size_t>(size), PROT_READ,
                      MAP_SHARED, f.fd, 0);
   if (map == MAP_FAILED) {
@@ -184,6 +185,7 @@ TEST_CASE("SwFramePool: 8-bit planar chroma is interleaved into NV12",
   REQUIRE(f.drm_format == 0x3231564eu);  // NV12
   const off_t size = ::lseek(f.fd, 0, SEEK_END);
   REQUIRE(size > 0);
+  // NOLINTNEXTLINE(clang-analyzer-unix.StdCLibraryFunctions): REQUIRE throws
   void* map = ::mmap(nullptr, static_cast<std::size_t>(size), PROT_READ,
                      MAP_SHARED, f.fd, 0);
   if (map == MAP_FAILED) {

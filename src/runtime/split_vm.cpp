@@ -127,6 +127,7 @@ class SplitVm final : public Vm {
     posix_spawn_file_actions_adddup2(&fa, child_end.native_handle(), 0);
 
     std::vector<char*> argv;
+    argv.reserve(argv_s.size() + 1);
     for (auto& s : argv_s)
       argv.push_back(const_cast<char*>(s.c_str()));
     argv.push_back(nullptr);

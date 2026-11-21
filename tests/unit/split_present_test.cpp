@@ -1652,7 +1652,8 @@ TEST_CASE(
   // messages, with descriptors of several kinds attached. The fake presenter
   // counts any frame that reaches it and should not have; the descriptor
   // count shows whether anything was kept.
-  std::mt19937 rng(0xa41c5);
+  // A fixed seed: the same sequence every run, so a failure repeats.
+  std::mt19937 rng(0xa41c5);  // NOLINT(bugprone-random-generator-seed)
   const auto pick = [&](std::uint32_t n) {
     return std::uniform_int_distribution<std::uint32_t>(0, n - 1)(rng);
   };

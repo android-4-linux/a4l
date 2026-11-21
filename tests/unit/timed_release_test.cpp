@@ -161,6 +161,7 @@ TEST_CASE("timed release: it is used from many threads", "[media][timed]") {
   {
     TimedRelease t;
     std::vector<std::thread> threads;
+    threads.reserve(4);
     for (int k = 0; k < 4; ++k) {
       threads.emplace_back([&t, &ran] {
         for (int i = 0; i < 200; ++i)

@@ -23,7 +23,7 @@ namespace acl::dex {
 class ClassWriter {
  public:
   // Internal ('/'-separated) names, e.g. "com/example/Foo", "java/lang/Object".
-  ClassWriter(std::string this_internal, std::string super_internal);
+  ClassWriter(std::string_view this_internal, std::string_view super_internal);
 
   // Override the class access_flags (default ACC_PUBLIC|ACC_SUPER for a normal
   // class). Interfaces pass ACC_PUBLIC|ACC_INTERFACE|ACC_ABSTRACT (no

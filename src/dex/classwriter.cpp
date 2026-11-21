@@ -169,8 +169,8 @@ std::uint16_t ClassWriter::fieldref(std::string_view cls,
                                      std::string(desc));
 }
 
-ClassWriter::ClassWriter(std::string this_internal,
-                         std::string super_internal) {
+ClassWriter::ClassWriter(std::string_view this_internal,
+                         std::string_view super_internal) {
   this_class_ = class_ref(this_internal);
   super_class_ = class_ref(super_internal);
   code_attr_name_ = utf8("Code");

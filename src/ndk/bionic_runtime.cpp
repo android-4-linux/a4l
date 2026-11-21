@@ -1699,6 +1699,10 @@ bool map_pie(const char* path, Mapped& out) {
   for (int i = 0; i < eh.e_phnum; ++i)
     if (ph[i].p_type == PT_LOAD)
       maxv = std::max<std::uintptr_t>(maxv, ph[i].p_vaddr + ph[i].p_memsz);
+  if (maxv == 0) {  // nothing to load
+    ::close(fd);
+    return false;
+  }
   void* base = ::mmap(nullptr, page_up(maxv), PROT_NONE,
                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (base == MAP_FAILED) {
@@ -2330,7 +2334,8 @@ std::uintptr_t BionicRuntime::attach_current_thread(std::string* error) {
   //    bionic-offsets test); an arm64 port must use
   //    StaticTlsLayout::offset_thread_pointer().
   auto** tcb = reinterpret_cast<void**>(blk + off_tcb);
-  tcb[ACL_BIONIC_TLS_SLOT_SELF_] = tcb;  // x86_64 reads TLS vars through %fs:0
+  tcb[ACL_BIONIC_TLS_SLOT_SELF_] =
+      static_cast<void*>(tcb);  // x86_64 reads TLS vars through %fs:0
   tcb[ACL_BIONIC_TLS_SLOT_THREAD_ID_] = thread;
   tcb[ACL_BIONIC_TLS_SLOT_BIONIC_TLS_] = blk + off_tls;
   // The stack canary is process-wide; take it from the bootstrapping thread's
@@ -3321,7 +3326,8 @@ jint JNICALL w_GetEnv(JavaVM* vm, void** out, jint ver) {
     const jint rc = w->real->functions->GetEnv(
         w->real, reinterpret_cast<void**>(&tmp), ver);
     if (rc != JNI_OK) {
-      *out = nullptr;
+      if (out != nullptr)
+        *out = nullptr;
       return rc;
     }
     // Fill THIS thread's wrap env with the real env just fetched. A thread that
@@ -3339,7 +3345,8 @@ jint JNICALL w_GetEnv(JavaVM* vm, void** out, jint ver) {
     // TLS read under bionic %fs is silently wrong; keep them in here.
     wrapped = reinterpret_cast<JNIEnv*>(&t_wrap_env);
   }
-  *out = wrapped;
+  if (out != nullptr)
+    *out = wrapped;
   return JNI_OK;
 }
 
