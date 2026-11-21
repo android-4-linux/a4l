@@ -22,6 +22,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 
 #if !ACL_HAVE_GL
 int main() {
@@ -223,27 +224,46 @@ int main(int argc, char** argv) {
   int r = 0;
   if (packet_mode) {
     // MediaExtractor -> MediaCodec: pump access units until the first frame
-    // emerges (then drain).
+    // emerges. A unit the decoder did not take (1) is sent again after a
+    // receive. 0 from receive_frame means none is ready yet, not that the
+    // decoder is empty: an asynchronous one (OpenMAX) hands out its first
+    // frame some time after its input, possibly after end of stream. So after
+    // end of stream the probe waits up to 2 s for one before giving up.
     bool eos = false;
+    bool held = false;  // a unit read but not yet taken
+    const std::uint8_t* pd = nullptr;
+    std::size_t ps = 0;
+    std::int64_t pts = 0;
+    std::chrono::steady_clock::time_point give_up{};
     for (int guard = 0; guard < 4000 && r == 0; ++guard) {
+      bool fed = false;
       if (!eos) {
-        const std::uint8_t* pd = nullptr;
-        std::size_t ps = 0;
-        std::int64_t pts = 0;
-        int rs = demux->read_sample(&pd, &ps, &pts, &err);
-        if (rs < 0) {
-          std::fprintf(stderr, "video-decode-probe: read_sample failed (%s)\n",
-                       err.c_str());
-          return 1;
+        if (!held) {
+          const int rs = demux->read_sample(&pd, &ps, &pts, &err);
+          if (rs < 0) {
+            std::fprintf(stderr,
+                         "video-decode-probe: read_sample failed (%s)\n",
+                         err.c_str());
+            return 1;
+          }
+          held = rs != 0;
+          if (!held) {
+            eos = true;
+            cdec->send_packet(nullptr, 0, 0, &err);  // EOS drain
+            give_up =
+                std::chrono::steady_clock::now() + std::chrono::seconds(2);
+          }
         }
-        if (rs == 0) {
-          eos = true;
-          cdec->send_packet(nullptr, 0, 0, &err);
-        }  // EOS drain
-        else if (cdec->send_packet(pd, ps, pts, &err) < 0) {
-          std::fprintf(stderr, "video-decode-probe: send_packet failed (%s)\n",
-                       err.c_str());
-          return 1;
+        if (held) {
+          const int rs = cdec->send_packet(pd, ps, pts, &err);
+          if (rs < 0) {
+            std::fprintf(stderr,
+                         "video-decode-probe: send_packet failed (%s)\n",
+                         err.c_str());
+            return 1;
+          }
+          held = rs == 1;
+          fed = !held;
         }
       }
       r = cdec->receive_frame(&f, nullptr, &err);
@@ -252,8 +272,10 @@ int main(int argc, char** argv) {
                      err.c_str());
         return 1;
       }
-      if (eos && r == 0)
-        break;  // fully drained, no frame
+      if (r == 0 && eos && std::chrono::steady_clock::now() >= give_up)
+        break;  // drained, no frame
+      if (r == 0 && !fed)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
   } else {
     r = fdec->next_frame(&f, &err);
