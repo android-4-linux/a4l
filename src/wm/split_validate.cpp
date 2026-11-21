@@ -151,8 +151,12 @@ FrameVerdict check_video_frame(const ipc::VideoFrame& v,
       return FrameVerdict::NotDmabuf;
   }
 
-  if (v.w == 0 || v.h == 0 || v.w > ipc::kMaxSurfaceDim ||
-      v.h > ipc::kMaxSurfaceDim || !check_video_rect(v.dest))
+  // The surface reaches the picture's bottom right corner: w x h at
+  // (crop_x, crop_y). 64-bit, so a crop cannot wrap the sum.
+  const std::uint64_t bw = std::uint64_t{v.crop_x} + v.w;
+  const std::uint64_t bh = std::uint64_t{v.crop_y} + v.h;
+  if (v.w == 0 || v.h == 0 || bw > ipc::kMaxSurfaceDim ||
+      bh > ipc::kMaxSurfaceDim || !check_video_rect(v.dest))
     return FrameVerdict::BadSize;
 
   // No advertisement for the format at all: the compositor does not take it.
@@ -187,10 +191,9 @@ FrameVerdict check_video_frame(const ipc::VideoFrame& v,
   };
 
   if (converted) {
-    const std::uint64_t row = static_cast<std::uint64_t>(v.w) * kBytesPerPixel;
+    const std::uint64_t row = bw * kBytesPerPixel;
     if (v.stride[0] < row ||
-        v.offset[0] + static_cast<std::uint64_t>(v.stride[0]) * v.h >
-            size_of(0))
+        v.offset[0] + static_cast<std::uint64_t>(v.stride[0]) * bh > size_of(0))
       return FrameVerdict::BadLayout;
     for (std::uint32_t i = 1; i < v.plane_count; ++i) {
       if (v.stride[i] == 0 || v.offset[i] >= size_of(i))
@@ -206,15 +209,15 @@ FrameVerdict check_video_frame(const ipc::VideoFrame& v,
   // at 10 (P030) three samples in 4 bytes. P030 has no other layout here.
   if (v.drm_format == kP030 && v.modifier != kSand128)
     return FrameVerdict::BadLayout;
+  // 4:2:0 crops in whole chroma samples.
+  if (v.crop_x % 2 != 0 || v.crop_y % 2 != 0)
+    return FrameVerdict::BadLayout;
   if (v.modifier == kSand128 &&
       (v.drm_format == kNv12 || v.drm_format == kP030)) {
-    const std::uint64_t row =
-        v.drm_format == kP030 ? (static_cast<std::uint64_t>(v.w) + 2) / 3 * 4
-                              : v.w;
+    const std::uint64_t row = v.drm_format == kP030 ? (bw + 2) / 3 * 4 : bw;
     const std::uint64_t columns = (row + 127) / 128;
     for (std::uint32_t i = 0; i < 2; ++i) {
-      const std::uint64_t rows =
-          i == 0 ? v.h : (static_cast<std::uint64_t>(v.h) + 1) / 2;
+      const std::uint64_t rows = i == 0 ? bh : (bh + 1) / 2;
       if (v.stride[i] < rows)
         return FrameVerdict::BadLayout;
       // 64-bit: at most 2^32 * 128 * 128 before the offset is added.
@@ -233,14 +236,12 @@ FrameVerdict check_video_frame(const ipc::VideoFrame& v,
   // of each ends inside the buffer. 64-bit: stride is 32 bits and the
   // height at most kMaxSurfaceDim, so the products cannot wrap.
   const std::uint64_t sample = v.drm_format == kP010 ? 2 : 1;
-  const std::uint64_t luma_row = static_cast<std::uint64_t>(v.w) * sample;
-  const std::uint64_t chroma_row =
-      (static_cast<std::uint64_t>(v.w) + 1) / 2 * 2 * sample;
-  const std::uint64_t chroma_rows = (static_cast<std::uint64_t>(v.h) + 1) / 2;
+  const std::uint64_t luma_row = bw * sample;
+  const std::uint64_t chroma_row = (bw + 1) / 2 * 2 * sample;
+  const std::uint64_t chroma_rows = (bh + 1) / 2;
   if (v.stride[0] < luma_row || v.stride[1] < chroma_row)
     return FrameVerdict::BadLayout;
-  if (v.offset[0] + static_cast<std::uint64_t>(v.stride[0]) * v.h >
-          size_of(0) ||
+  if (v.offset[0] + static_cast<std::uint64_t>(v.stride[0]) * bh > size_of(0) ||
       v.offset[1] + static_cast<std::uint64_t>(v.stride[1]) * chroma_rows >
           size_of(1))
     return FrameVerdict::BadLayout;

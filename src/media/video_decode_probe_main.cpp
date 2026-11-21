@@ -23,6 +23,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #if !ACL_HAVE_GL
 int main() {
@@ -66,10 +67,12 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr,
                  "usage: acl-video-decode-probe <clip> [r,g,b] [--packet] "
-                 "[--convert] [--no-csd]\n");
+                 "[--convert] [--no-csd] [--dump file.rgba]\n");
     return 2;
   }
   const char* clip = nullptr;
+  // --dump: write the sampled picture, RGBA rows from the top, to a file.
+  const char* dump = nullptr;
   int er = -1, eg = -1, eb = -1;
   bool packet_mode = false;  // --packet: exercise Demuxer -> CodecDecoder
                              // (MediaExtractor -> MediaCodec)
@@ -86,6 +89,8 @@ int main(int argc, char** argv) {
       no_csd = true;
     else if (std::strcmp(argv[i], "--convert") == 0)
       convert_mode = true;
+    else if (std::strcmp(argv[i], "--dump") == 0 && i + 1 < argc)
+      dump = argv[++i];
     else if (argv[i][0] == '-')
       continue;
     else if (clip == nullptr)
@@ -96,7 +101,7 @@ int main(int argc, char** argv) {
   if (clip == nullptr) {
     std::fprintf(stderr,
                  "usage: acl-video-decode-probe <clip> [r,g,b] [--packet] "
-                 "[--convert] [--no-csd]\n");
+                 "[--convert] [--no-csd] [--dump file.rgba]\n");
     return 2;
   }
 
@@ -215,7 +220,9 @@ int main(int argc, char** argv) {
   glUseProgram(prog);
   glUniform1i(glGetUniformLocation(prog, "uTex"), 0);
   glActiveTexture(GL_TEXTURE0);
-  const GLfloat verts[] = {-1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, 1, 1, 1, 1};
+  // Position, then texture coordinate; the texture coordinates are set to
+  // the picture's rectangle once the frame is known.
+  GLfloat verts[] = {-1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, 1, 1, 1, 1};
   glViewport(0, 0, W, H);
   glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), verts);
   glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat),
@@ -381,10 +388,40 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "video-decode-probe: bind OES failed (%#x)\n", e);
     return 1;
   }
+  // The buffer is imported whole; the picture is the part of it that starts
+  // at (crop_x, crop_y).
+  {
+    const float bw = static_cast<float>(f.buffer_width());
+    const float bh = static_cast<float>(f.buffer_height());
+    const float u0 = static_cast<float>(f.crop_x) / bw;
+    const float u1 = static_cast<float>(f.crop_x + f.width) / bw;
+    const float v0 = static_cast<float>(f.crop_y) / bh;
+    const float v1 = static_cast<float>(f.crop_y + f.height) / bh;
+    const GLfloat tc[8] = {u0, v0, u1, v0, u0, v1, u1, v1};
+    for (std::size_t i = 0; i < 4; ++i) {
+      verts[i * 4 + 2] = tc[i * 2];
+      verts[i * 4 + 3] = tc[i * 2 + 1];
+    }
+  }
   glClear(GL_COLOR_BUFFER_BIT);
   glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
   std::uint8_t p[4] = {0, 0, 0, 0};
   glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, p);
+  if (dump != nullptr) {
+    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(W) * H * 4);
+    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    std::FILE* out = std::fopen(dump, "wb");
+    if (out == nullptr ||
+        std::fwrite(rgba.data(), 1, rgba.size(), out) != rgba.size()) {
+      std::fprintf(stderr, "video-decode-probe: cannot write %s\n", dump);
+      if (out != nullptr)
+        std::fclose(out);
+      return 1;
+    }
+    std::fclose(out);
+    std::printf("video-decode-probe: picture %ux%u at %u,%u written to %s\n",
+                f.width, f.height, f.crop_x, f.crop_y, dump);
+  }
   eglDestroyImageKHR(dpy, img);
   acl::gfx::ahb_release(ahb);
   if (GLenum e = glGetError(); e != GL_NO_ERROR) {

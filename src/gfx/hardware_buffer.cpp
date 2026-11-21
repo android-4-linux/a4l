@@ -184,10 +184,13 @@ std::unique_ptr<HardwareBuffer> HardwareBuffer::import(const DmabufFrame& src,
   hb->bo_ = nullptr;  // imported: no gbm_bo (the fd already IS a dma-buf);
                       // ~HardwareBuffer just closes the fds
   hb->frame_ = std::move(owned);
-  // desc_ carries width/height for describe(); format is best-effort (imported
-  // frames may be YUV/NV12, outside HbFormat's RGBA set — the engine's EGLImage
-  // import reads frame_.drm_format directly, not this).
-  hb->desc_ = HbDesc{src.width, src.height, HbFormat::R8G8B8A8_UNORM, 0};
+  // desc_ carries the buffer's width/height for describe(); a decoder's
+  // picture may start inside it (src.crop_x, src.crop_y). The format is
+  // best-effort (imported frames may be YUV/NV12, outside HbFormat's RGBA set
+  // — the engine's EGLImage import reads frame_.drm_format directly, not
+  // this).
+  hb->desc_ = HbDesc{src.buffer_width(), src.buffer_height(),
+                     HbFormat::R8G8B8A8_UNORM, 0};
   log::d(kTag, "import {}x{} fourcc={:#x} mod={:#x} planes={} fd={} (dup {}){}",
          src.width, src.height, src.drm_format, src.modifier, src.plane_count,
          src.fd, hb->frame_.fd, src.one_buffer() ? "" : ", a buffer per plane");

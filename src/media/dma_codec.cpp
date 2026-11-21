@@ -451,10 +451,13 @@ int DmaCodec::receive_frame(gfx::DmabufFrame* out,
     d->rebuilds_without_frame = 0;
 
     // The planes are in one dma-buf or in one each; either way every plane
-    // names a buffer, and has to fit the one it names.
+    // names a buffer, and has to fit the one it names. The buffer reaches the
+    // picture's bottom right corner.
+    const std::uint64_t buffer_w = std::uint64_t{f.crop_x} + f.width;
+    const std::uint64_t buffer_h = std::uint64_t{f.crop_y} + f.height;
     bool sane = f.num_planes >= 1 &&
                 f.num_planes <= gfx::DmabufFrame::kMaxPlanes && f.width > 0 &&
-                f.height > 0 && f.width <= 16384 && f.height <= 16384;
+                f.height > 0 && buffer_w <= 16384 && buffer_h <= 16384;
     std::uint64_t sizes[gfx::DmabufFrame::kMaxPlanes] = {};
     gfx::DmabufFrame borrowed;
     for (std::uint32_t i = 0; sane && i < f.num_planes; ++i) {
@@ -474,9 +477,9 @@ int DmaCodec::receive_frame(gfx::DmabufFrame* out,
     if (sane && f.drm_fourcc == V4L2_PIX_FMT_NV12 && f.modifier == 0) {
       sane = f.num_planes == 2;
       for (std::uint32_t i = 0; sane && i < 2; ++i) {
-        const std::uint64_t rows = i == 0 ? f.height : (f.height + 1) / 2;
+        const std::uint64_t rows = i == 0 ? buffer_h : (buffer_h + 1) / 2;
         sane =
-            f.pitches[i] >= f.width &&
+            f.pitches[i] >= buffer_w &&
             (sizes[i] == 0 || f.offsets[i] + f.pitches[i] * rows <= sizes[i]);
       }
     }
@@ -492,13 +495,17 @@ int DmaCodec::receive_frame(gfx::DmabufFrame* out,
     }
     // An engine that reports its coded size (640x368 for a 640x360
     // picture) would show the padding. Within one coding block of the
-    // configured size, the configured size is the picture.
+    // configured size, the configured size is the picture. One that says
+    // where the picture starts reports the picture.
     constexpr std::uint32_t kBlock = 64;
-    const bool padded = d->width > 0 && d->height > 0 && f.width >= d->width &&
+    const bool padded = f.crop_x == 0 && f.crop_y == 0 && d->width > 0 &&
+                        d->height > 0 && f.width >= d->width &&
                         f.width - d->width < kBlock && f.height >= d->height &&
                         f.height - d->height < kBlock;
     frame.width = padded ? d->width : f.width;
     frame.height = padded ? d->height : f.height;
+    frame.crop_x = f.crop_x;
+    frame.crop_y = f.crop_y;
     frame.drm_format = f.drm_fourcc;
     frame.modifier = f.modifier;
     frame.modifier_tiled = f.modifier != 0;

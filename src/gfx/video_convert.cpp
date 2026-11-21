@@ -29,12 +29,15 @@ constexpr const char* kTag = "acl.gfx.vconv";
 constexpr std::uint64_t kModInvalid = 0x00ffffffffffffffull;
 
 // Drawn into a framebuffer object on the buffer: GL's y = -1 is the buffer's
-// first row, which is the picture's top, the source's t = 0.
+// first row, which is the picture's top, the source's t = 0. The source is
+// imported whole; `picture` is the part of it that is the picture: its
+// origin and size, as fractions of the source.
 constexpr char kVertex[] =
     "attribute vec2 pos;\n"
+    "uniform vec4 picture;\n"
     "varying vec2 uv;\n"
     "void main() {\n"
-    "  uv = pos * 0.5 + 0.5;\n"
+    "  uv = picture.xy + (pos * 0.5 + 0.5) * picture.zw;\n"
     "  gl_Position = vec4(pos, 0.0, 1.0);\n"
     "}\n";
 constexpr char kFragment[] =
@@ -84,6 +87,7 @@ struct VideoConverter::State {
   std::uint32_t pool_w = 0, pool_h = 0;
   GLuint program = 0, texture = 0;
   GLint pos = -1;
+  GLint picture = -1;
   CreateImageFn create_image = nullptr;
   DestroyImageFn destroy_image = nullptr;
   ImageTargetFn image_target = nullptr;
@@ -193,6 +197,7 @@ struct VideoConverter::State {
       return false;
     }
     pos = glGetAttribLocation(program, "pos");
+    picture = glGetUniformLocation(program, "picture");
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, texture);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -286,6 +291,14 @@ bool VideoConverter::convert(const DmabufFrame& in,
                static_cast<GLsizei>(in.height));
     glDisable(GL_BLEND);
     glUseProgram(s.program);
+    // The output is the picture, which starts at (crop_x, crop_y) in the
+    // decoder's buffer.
+    const auto bw = static_cast<GLfloat>(in.buffer_width());
+    const auto bh = static_cast<GLfloat>(in.buffer_height());
+    glUniform4f(s.picture, static_cast<GLfloat>(in.crop_x) / bw,
+                static_cast<GLfloat>(in.crop_y) / bh,
+                static_cast<GLfloat>(in.width) / bw,
+                static_cast<GLfloat>(in.height) / bh);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, s.texture);
     s.image_target(GL_TEXTURE_EXTERNAL_OES, image);

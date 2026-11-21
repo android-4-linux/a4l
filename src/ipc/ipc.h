@@ -63,7 +63,8 @@ enum class MsgType : std::uint32_t {
 // in the datagram (AudioOpen and AudioWrite changed, AudioClose added).
 // 6: AudioLatency. 7: VideoRefused. 8: VideoFrame.buffer. 9: VideoFrame.id
 // and VideoReleased. 10: VideoFrame.yuv_matrix and yuv_full_range.
-inline constexpr std::uint32_t kProtocolVersion = 10;
+// 11: VideoFrame.crop_x and crop_y.
+inline constexpr std::uint32_t kProtocolVersion = 11;
 
 // Bounds both ends enforce on what the other sends.
 inline constexpr std::uint32_t kMaxSurfaceDim = 16384;
@@ -162,6 +163,9 @@ struct VideoFrame {
   // the compositor listed.
   std::uint32_t yuv_matrix;
   std::uint32_t yuv_full_range;
+  // Appended. Where the picture starts in the surface, which is the decoder's
+  // coded picture: w x h at (crop_x, crop_y). 0,0 for most streams.
+  std::uint32_t crop_x, crop_y;
   // the dma-buf fds travel as SCM_RIGHTS ancillary data.
 };
 

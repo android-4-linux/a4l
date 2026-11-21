@@ -68,7 +68,8 @@ bool copy_always() {
 }
 
 // The appsink's answer to a decoder asking what the consumer supports: plane
-// offsets and strides carried on the buffer (GstVideoMeta). A decoder gives
+// offsets and strides carried on the buffer (GstVideoMeta), and where the
+// picture starts in it (GstVideoCropMeta, see picture_of()). A decoder gives
 // out its own buffers only to a consumer that says so: VA will not negotiate
 // dma-bufs at all without it. An appsink says nothing by itself, and the
 // callback that lets it is from GStreamer 1.24, so the query is answered on
@@ -78,7 +79,74 @@ GstPadProbeReturn answer_allocation(GstPad*, GstPadProbeInfo* info, gpointer) {
   if (GST_QUERY_TYPE(query) != GST_QUERY_ALLOCATION)
     return GST_PAD_PROBE_OK;
   gst_query_add_allocation_meta(query, GST_VIDEO_META_API_TYPE, nullptr);
+  gst_query_add_allocation_meta(query, GST_VIDEO_CROP_META_API_TYPE, nullptr);
   return GST_PAD_PROBE_HANDLED;  // answered, and the answer is yes
+}
+
+// The picture the stream's SPS says, where a4l has a reader for it: its
+// size, and where it starts in the coded picture.
+struct SpsPicture {
+  std::uint32_t x = 0;
+  std::uint32_t y = 0;
+  std::uint32_t w = 0;
+  std::uint32_t h = 0;
+};
+
+// The buffer, and the picture in it. A decoder whose stream crops on the
+// left or top says where the picture starts with a GstVideoCropMeta, which
+// it gives only to a consumer that takes one (answer_allocation); the caps
+// are then the picture's size and the video meta the buffer's. VA's
+// decoders, for a 640x360 picture at 16,16: caps 640x360, video meta
+// 672x400, crop 16,16 640x360. Without a crop meta the picture is the caps'
+// size at 0,0, and so is the buffer, unless the stream's SPS (`said`) puts
+// the picture elsewhere in it: gst-omx on Qualcomm's component sends caps
+// of the crop's right and bottom edges, 656x376 for 640x360 at 16,16.
+struct Picture {
+  std::uint32_t buffer_w = 0;
+  std::uint32_t buffer_h = 0;
+  std::uint32_t x = 0;
+  std::uint32_t y = 0;
+  std::uint32_t w = 0;
+  std::uint32_t h = 0;
+};
+
+// False where a crop does not fit the buffer. 4:2:0 crops in whole chroma
+// samples, so an origin is even.
+bool picture_of(GstBuffer* buf,
+                const GstVideoMeta* vm,
+                int w,
+                int h,
+                const SpsPicture* said,
+                Picture* p) {
+  p->buffer_w = p->w = static_cast<std::uint32_t>(w);
+  p->buffer_h = p->h = static_cast<std::uint32_t>(h);
+  p->x = p->y = 0;
+  const GstVideoCropMeta* cm = gst_buffer_get_video_crop_meta(buf);
+  if (cm == nullptr) {
+    if (said != nullptr && (said->x != 0 || said->y != 0) && said->w > 0 &&
+        said->h > 0 && said->x % 2 == 0 && said->y % 2 == 0 &&
+        std::uint64_t{said->x} + said->w <= p->buffer_w &&
+        std::uint64_t{said->y} + said->h <= p->buffer_h) {
+      p->x = said->x;
+      p->y = said->y;
+      p->w = said->w;
+      p->h = said->h;
+    }
+    return true;
+  }
+  if (vm == nullptr || vm->width == 0 || vm->height == 0 || vm->width > 16384 ||
+      vm->height > 16384 || cm->width == 0 || cm->height == 0 ||
+      cm->x % 2 != 0 || cm->y % 2 != 0 ||
+      std::uint64_t{cm->x} + cm->width > vm->width ||
+      std::uint64_t{cm->y} + cm->height > vm->height)
+    return false;
+  p->buffer_w = vm->width;
+  p->buffer_h = vm->height;
+  p->x = cm->x;
+  p->y = cm->y;
+  p->w = cm->width;
+  p->h = cm->height;
+  return true;
 }
 
 // The picture's matrix and range, onto the frame. Where the stream itself
@@ -158,6 +226,7 @@ guint sand_rows(guint i, gint stride) {
 int drm_frame(GstBuffer* buf,
               const GstCaps* caps,
               const H264Color* said,
+              const SpsPicture* said_picture,
               gfx::DmabufFrame* out,
               std::string* why) {
   auto bad = [&](const char* m) {
@@ -182,10 +251,15 @@ int drm_frame(GstBuffer* buf,
   if (vm == nullptr || vm->n_planes < 2 ||
       vm->n_planes > static_cast<guint>(gfx::DmabufFrame::kMaxPlanes))
     return bad("GStreamer: DRM frame without a plane layout");
+  Picture pic;
+  if (!picture_of(buf, vm, w, h, said_picture, &pic))
+    return bad("GStreamer: the picture's crop does not fit its buffer");
 
   gfx::DmabufFrame f{};
-  f.width = static_cast<std::uint32_t>(w);
-  f.height = static_cast<std::uint32_t>(h);
+  f.width = pic.w;
+  f.height = pic.h;
+  f.crop_x = pic.x;
+  f.crop_y = pic.y;
   f.drm_format = drm.drm_fourcc;
   f.modifier = drm.drm_modifier;
   f.modifier_tiled = f.modifier != DRM_FORMAT_MOD_LINEAR &&
@@ -214,13 +288,10 @@ int drm_frame(GstBuffer* buf,
     // Rows are checked where the layout says what a row is: a tiled
     // modifier's stride is the driver's own business.
     if (!f.modifier_tiled && i < 2) {
-      const std::uint64_t row =
-          (i == 0 ? static_cast<std::uint64_t>(w)
-                  : (static_cast<std::uint64_t>(w) + 1) / 2 * 2) *
-          sample;
-      const std::uint64_t rows = i == 0
-                                     ? static_cast<std::uint64_t>(h)
-                                     : (static_cast<std::uint64_t>(h) + 1) / 2;
+      const std::uint64_t bw = pic.buffer_w;
+      const std::uint64_t bh = pic.buffer_h;
+      const std::uint64_t row = (i == 0 ? bw : (bw + 1) / 2 * 2) * sample;
+      const std::uint64_t rows = i == 0 ? bh : (bh + 1) / 2;
       const auto stride = static_cast<std::uint64_t>(vm->stride[i]);
       if (stride < row || (size != 0 && off + stride * rows > size))
         return bad("GStreamer: a plane does not fit its dma-buf");
@@ -407,19 +478,33 @@ struct GstCodec::Impl {
   bool color_said = false;
   H264Color color;
   const H264Color* said() const { return color_said ? &color : nullptr; }
+  // The picture the last SPS said, likewise; see picture_of(). Read with
+  // dmabuf-codec's readers, where a4l is built with them.
+  bool picture_said = false;
+  SpsPicture picture;
+  const SpsPicture* said_picture() const {
+    return picture_said ? &picture : nullptr;
+  }
   void read_color(const std::uint8_t* p, std::size_t n) {
     if (avc && h264_color(p, n, &color))
       color_said = true;
 #if ACL_HAVE_DMABUF_CODEC
     v4l2wc::SpsColor c;
-    // An SPS with no VUI, or a VUI without the video signal type, reads as
-    // matrix 2, limited range: nothing said, and the caps stand.
-    if (hevc && p != nullptr &&
-        v4l2wc::FindSpsColor(v4l2wc::SpsCodec::kH265, p, n, &c) &&
-        (c.matrix_coeffs != 2 || c.video_full_range_flag)) {
-      color.matrix = c.matrix_coeffs;
-      color.full_range = c.video_full_range_flag;
-      color_said = true;
+    if ((avc || hevc) && p != nullptr &&
+        v4l2wc::FindSpsColor(
+            avc ? v4l2wc::SpsCodec::kH264 : v4l2wc::SpsCodec::kH265, p, n,
+            &c)) {
+      if (c.width > 0 && c.height > 0) {
+        picture = {c.crop_left, c.crop_top, c.width, c.height};
+        picture_said = true;
+      }
+      // An SPS with no VUI, or a VUI without the video signal type, reads
+      // as matrix 2, limited range: nothing said, and the caps stand.
+      if (hevc && (c.matrix_coeffs != 2 || c.video_full_range_flag)) {
+        color.matrix = c.matrix_coeffs;
+        color.full_range = c.video_full_range_flag;
+        color_said = true;
+      }
     }
 #endif
   }
@@ -759,7 +844,7 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
     // picture.
     gfx::DmabufFrame f{};
     std::string why;
-    if (drm_frame(buf, caps, d->said(), &f, &why) != 1)
+    if (drm_frame(buf, caps, d->said(), d->said_picture(), &f, &why) != 1)
       return err(why);
     ++d->got;
     d->last_progress_us = g_get_monotonic_time();
@@ -804,6 +889,9 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
   // decoder names beside a mapping of it (tagged_fd).
   GstMemory* mem = gst_buffer_peek_memory(buf, 0);
   const GstVideoMeta* vm = gst_buffer_get_video_meta(buf);
+  Picture pic;
+  if (!picture_of(buf, vm, w, h, d->said_picture(), &pic))
+    return err("GStreamer: the picture's crop does not fit its buffer");
   int fd = -1;
   gsize mem_off = 0;
   bool tagged = false;
@@ -824,8 +912,10 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
   if (!copy_always() && fmt == GST_VIDEO_FORMAT_NV12 && fd >= 0) {
     gfx::DmabufFrame f{};
     f.fd = fd;
-    f.width = static_cast<std::uint32_t>(w);
-    f.height = static_cast<std::uint32_t>(h);
+    f.width = pic.w;
+    f.height = pic.h;
+    f.crop_x = pic.x;
+    f.crop_y = pic.y;
     f.drm_format = DRM_FORMAT_NV12;
     f.modifier = DRM_FORMAT_MOD_LINEAR;
     f.plane_count = 2;
@@ -837,7 +927,8 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
           mem_off;
       const int stride =
           vm != nullptr ? vm->stride[i] : GST_VIDEO_INFO_PLANE_STRIDE(&info, i);
-      if (stride < w || off > 0xffffffffu)
+      if (stride < 0 || static_cast<std::uint32_t>(stride) < pic.buffer_w ||
+          off > 0xffffffffu)
         sane = false;
       f.planes[i].offset = static_cast<std::uint32_t>(off);
       f.planes[i].stride = static_cast<std::uint32_t>(stride > 0 ? stride : 0);
@@ -845,8 +936,8 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
     if (sane) {
       const off_t size = ::lseek(f.fd, 0, SEEK_END);
       const std::uint64_t need =
-          f.planes[1].offset +
-          static_cast<std::uint64_t>(f.planes[1].stride) * ((h + 1) / 2);
+          f.planes[1].offset + static_cast<std::uint64_t>(f.planes[1].stride) *
+                                   ((pic.buffer_h + 1) / 2);
       f.mem_size = size > 0 ? static_cast<std::uint64_t>(size) : need;
       // A descriptor taken from a tag has to show it is a buffer of that
       // size; one that will not say its size is not passed on.
@@ -879,8 +970,8 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
   if (!gst_video_frame_map(&vf, &info, buf, GST_MAP_READ))
     return err("GStreamer: frame cannot be mapped");
   auto pool = d->sw_pool;
-  const auto uw = static_cast<std::uint32_t>(w);
-  const auto uh = static_cast<std::uint32_t>(h);
+  const std::uint32_t uw = pic.w;
+  const std::uint32_t uh = pic.h;
   if (pool == nullptr || pool->width() != uw || pool->height() != uh ||
       pool->deep() != deep) {
     pool = gfx::SwFramePool::create(uw, uh, error, deep);
@@ -897,15 +988,21 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
   if (ok) {
     const bool nv12 =
         fmt == GST_VIDEO_FORMAT_NV12 || fmt == GST_VIDEO_FORMAT_P010_10LE;
-    const std::uint8_t* const planes[3] = {
-        static_cast<const std::uint8_t*>(GST_VIDEO_FRAME_PLANE_DATA(&vf, 0)),
-        static_cast<const std::uint8_t*>(GST_VIDEO_FRAME_PLANE_DATA(&vf, 1)),
-        nv12 ? nullptr
-             : static_cast<const std::uint8_t*>(
-                   GST_VIDEO_FRAME_PLANE_DATA(&vf, 2))};
     const int strides[3] = {GST_VIDEO_FRAME_PLANE_STRIDE(&vf, 0),
                             GST_VIDEO_FRAME_PLANE_STRIDE(&vf, 1),
                             nv12 ? 0 : GST_VIDEO_FRAME_PLANE_STRIDE(&vf, 2)};
+    // Each plane from the picture's top left: the origin is even, so it
+    // falls on a chroma sample (a pair of them in NV12's interleaved plane).
+    const std::size_t sample = deep ? 2 : 1;
+    const auto plane = [&](int i) {
+      const std::size_t x = i == 0 || nv12 ? pic.x : pic.x / 2;
+      const std::size_t y = i == 0 ? pic.y : pic.y / 2;
+      return static_cast<const std::uint8_t*>(
+                 GST_VIDEO_FRAME_PLANE_DATA(&vf, i)) +
+             y * static_cast<std::size_t>(strides[i]) + x * sample;
+    };
+    const std::uint8_t* const planes[3] = {plane(0), plane(1),
+                                           nv12 ? nullptr : plane(2)};
     // Planar 10-bit has its bits at the low end of each 16; P010 at the top.
     ok = deep ? pool->write_420_16(planes, strides, nv12, nv12 ? 0 : 6, out,
                                    error)
