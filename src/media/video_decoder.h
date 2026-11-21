@@ -149,6 +149,17 @@ class CodecDecoder {
 
  private:
   CodecDecoder();
+  // Picks the engine and starts it. `first`: the stream's first access
+  // unit, read for its format where `csd` has no SPS (it is sent later as
+  // any other unit).
+  bool start(const std::string& mime,
+             const std::uint8_t* csd,
+             std::size_t csd_size,
+             const std::uint8_t* first,
+             std::size_t first_size,
+             int width,
+             int height,
+             std::string* error);
   struct CImpl;
   std::unique_ptr<CImpl> d_;
 };

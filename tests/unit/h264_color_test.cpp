@@ -106,3 +106,50 @@ TEST_CASE("h264_color reads nothing past a cut SPS", "[media]") {
   H264Color c;
   CHECK_FALSE(h264_color(zeros.data(), zeros.size(), &c));
 }
+
+TEST_CASE("h264_format reads the profile, chroma format and bit depth",
+          "[media]") {
+  using acl::media::h264_format;
+  using acl::media::H264Format;
+  H264Format f;
+  // Baseline: no chroma format or depth in the SPS, so 4:2:0 at 8 bits.
+  REQUIRE(h264_format(kNoVui.data(), kNoVui.size(), &f));
+  CHECK(f.profile_idc == 66);
+  CHECK(f.chroma_format_idc == 1);
+  CHECK_FALSE(f.deep());
+  // High, 8 bits.
+  REQUIRE(h264_format(kBt709.data(), kBt709.size(), &f));
+  CHECK(f.profile_idc == 100);
+  CHECK(f.bit_depth_luma == 8);
+  CHECK_FALSE(f.deep());
+  // High 10 and High 4:2:2 SPSs from libx264 (64x64).
+  const std::vector<std::uint8_t> high10 = {
+      0x00, 0x00, 0x00, 0x01, 0x67, 0x6e, 0x00, 0x0a, 0xa6, 0xcd, 0x94,
+      0x42, 0x6c, 0x05, 0xa8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x03, 0x00,
+      0x02, 0x00, 0x00, 0x03, 0x00, 0x28, 0x1e, 0x24, 0x4b, 0x2c};
+  REQUIRE(h264_format(high10.data(), high10.size(), &f));
+  CHECK(f.profile_idc == 110);
+  CHECK(f.chroma_format_idc == 1);
+  CHECK(f.bit_depth_luma == 10);
+  CHECK(f.bit_depth_chroma == 10);
+  CHECK(f.deep());
+  const std::vector<std::uint8_t> high422 = {
+      0x00, 0x00, 0x00, 0x01, 0x67, 0x7a, 0x00, 0x0a, 0xbc, 0xd9, 0x44,
+      0x26, 0xc0, 0x5a, 0x80, 0x80, 0x80, 0xa0, 0x00, 0x00, 0x03, 0x00,
+      0x20, 0x00, 0x00, 0x03, 0x02, 0x81, 0xe2, 0x44, 0xb2, 0xc0};
+  REQUIRE(h264_format(high422.data(), high422.size(), &f));
+  CHECK(f.profile_idc == 122);
+  CHECK(f.chroma_format_idc == 2);
+  CHECK_FALSE(f.deep());
+  // Cut after the level, before the depths: nothing said, *out untouched.
+  H264Format untouched;
+  untouched.profile_idc = 7;
+  CHECK_FALSE(h264_format(high10.data(), 8, &untouched));
+  CHECK(untouched.profile_idc == 7);
+  // Behind a coded slice, nothing; null, nothing.
+  std::vector<std::uint8_t> late = {0x00, 0x00, 0x01, 0x65, 0x88};
+  late.insert(late.end(), high10.begin(), high10.end());
+  CHECK_FALSE(h264_format(late.data(), late.size(), &f));
+  CHECK_FALSE(h264_format(nullptr, 0, &f));
+  CHECK_FALSE(h264_format(high10.data(), high10.size(), nullptr));
+}

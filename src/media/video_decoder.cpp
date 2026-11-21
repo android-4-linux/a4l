@@ -37,6 +37,7 @@ extern "C" {
 #include "media/dma_codec.h"
 #include "media/ff_open.h"
 #include "media/gst_codec.h"
+#include "media/h264_color.h"
 
 namespace acl::media {
 namespace {
@@ -731,6 +732,11 @@ struct CodecDecoder::CImpl {
   std::shared_ptr<gfx::SwFramePool> sw_pool;  // software frames only
   // Set: this engine decodes, and nothing above is used.
   std::unique_ptr<CodecEngine> engine;
+  // Set until the first access unit, when the decoder is picked: the csd
+  // held no SPS. What configure() was given, kept for then.
+  bool pending = false;
+  std::string mime;
+  std::vector<std::uint8_t> csd;
   ~CImpl() {
     if (drm_frame)
       g_ff.av_frame_free(&drm_frame);
@@ -749,16 +755,69 @@ struct CodecDecoder::CImpl {
 CodecDecoder::CodecDecoder() : d_(std::make_unique<CImpl>()) {}
 CodecDecoder::~CodecDecoder() = default;
 
+namespace {
+
+// Whether `csd` holds no SPS of an H.264 or HEVC stream: the stream's format
+// is then in its first access unit, and the engine is picked there.
+bool sps_in_stream(const std::string& mime,
+                   const std::uint8_t* csd,
+                   std::size_t csd_size) {
+  if (mime == "video/avc") {
+    H264Format f;
+    return !h264_format(csd, csd_size, &f);
+  }
+  if (mime != "video/hevc")
+    return false;
+  for (std::size_t i = 0; csd != nullptr && i + 3 < csd_size; ++i) {
+    if (csd[i] == 0 && csd[i + 1] == 0 && csd[i + 2] == 1 &&
+        ((csd[i + 3] >> 1) & 0x3f) == 33)  // SPS_NUT
+      return false;
+  }
+  return true;
+}
+
+}  // namespace
+
 std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
                                                       const std::uint8_t* csd,
                                                       std::size_t csd_size,
                                                       int width,
                                                       int height,
                                                       std::string* error) {
-  auto fail = [&](const char* m) -> std::unique_ptr<CodecDecoder> {
+  auto dec = std::unique_ptr<CodecDecoder>(new CodecDecoder());
+  CImpl* d = dec->d_.get();
+  if (sps_in_stream(mime, csd, csd_size)) {
+    // A stream may be 10-bit, or a profile some engine does not take, and
+    // nothing says so until its SPS comes. An engine picked without it may
+    // not refuse the stream until data flows, when there is no other.
+    d->pending = true;
+    d->mime = mime;
+    d->csd.assign(csd, csd + (csd != nullptr ? csd_size : 0));
+    d->width = static_cast<std::uint32_t>(width > 0 ? width : 0);
+    d->height = static_cast<std::uint32_t>(height > 0 ? height : 0);
+    log::i(kTag,
+           "{}: no SPS in the csd; the decoder is picked at the first "
+           "access unit",
+           mime);
+    return dec;
+  }
+  if (!dec->start(mime, csd, csd_size, nullptr, 0, width, height, error))
+    return nullptr;
+  return dec;
+}
+
+bool CodecDecoder::start(const std::string& mime,
+                         const std::uint8_t* csd,
+                         std::size_t csd_size,
+                         const std::uint8_t* first,
+                         std::size_t first_size,
+                         int width,
+                         int height,
+                         std::string* error) {
+  auto fail = [&](const char* m) {
     if (error)
       *error = m;
-    return nullptr;
+    return false;
   };
   // Which engine decodes. FFmpeg with a hardware device (VAAPI, or a named
   // decoder) is used where there is one: that path is zero-copy and the one
@@ -773,12 +832,26 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
   const bool ffmpeg_asked = backend == "ffmpeg" ||
                             std::getenv("ACL_VIDEO_DECODER") != nullptr ||
                             std::getenv("ACL_HWDEC_DEVICE") != nullptr;
-  auto dec = std::unique_ptr<CodecDecoder>(new CodecDecoder());
-  CImpl* d = dec->d_.get();
+  CImpl* d = d_.get();
   d->width = static_cast<std::uint32_t>(width > 0 ? width : 0);
   d->height = static_cast<std::uint32_t>(height > 0 ? height : 0);
+  // What the stream's SPS says of its format, from the csd or, where that
+  // has none, the first access unit.
+  H264Format avc_format;
+  const bool avc_known =
+      mime == "video/avc" && (h264_format(csd, csd_size, &avc_format) ||
+                              h264_format(first, first_size, &avc_format));
   auto try_dma = [&](std::string* why) {
 #if ACL_HAVE_DMABUF_CODEC
+    // None of dmabuf-codec's engines decodes H.264 deeper than 8 bits or
+    // other than 4:2:0 (VA has no profile for it), and one asked to may not
+    // say so until data flows.
+    if (avc_known && (avc_format.deep() || avc_format.chroma_format_idc != 1)) {
+      if (why)
+        *why = "no dmabuf-codec engine for H.264 profile " +
+               std::to_string(avc_format.profile_idc);
+      return false;
+    }
     d->engine = DmaCodec::configure(mime, csd, csd_size, width, height, why);
     return d->engine != nullptr;
 #else
@@ -789,7 +862,8 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
   };
   auto try_gst = [&](std::string* why) {
 #if ACL_HAVE_GST
-    d->engine = GstCodec::configure(mime, csd, csd_size, why);
+    d->engine =
+        GstCodec::configure(mime, csd, csd_size, why, first, first_size);
     return d->engine != nullptr;
 #else
     if (why)
@@ -806,13 +880,13 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
     if (!(backend == "dma" ? try_dma(&why) : try_gst(&why))) {
       if (error)
         *error = why;
-      return nullptr;
+      return false;
     }
-    return dec;
+    return true;
   }
   if (!load_ffmpeg()) {
     if (try_others())
-      return dec;
+      return true;
     return fail("FFmpeg unavailable");
   }
   const enum AVCodecID id = codec_id_for_mime(mime);
@@ -825,7 +899,7 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
   }
   if (codec == nullptr) {
     if (try_others())
-      return dec;
+      return true;
     return fail("no decoder for MIME");
   }
   d->codec = g_ff.avcodec_alloc_context3(codec);
@@ -850,7 +924,7 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
   if (!configure_hw_decode(d->codec, codec, &d->hw_device, &ff_hw))
     return fail("av_hwdevice_ctx_create failed");
   if (!ff_hw && try_others())
-    return dec;  // the unopened FFmpeg context is freed with the decoder
+    return true;  // the unopened FFmpeg context is freed with the decoder
   // Enlarge the HW surface pool: decoded VAAPI surfaces are exported zero-copy
   // and held downstream (the compositor keeps each wl_buffer until
   // wl_buffer.release). With only the decoder's tight default pool, those held
@@ -880,11 +954,13 @@ std::unique_ptr<CodecDecoder> CodecDecoder::configure(const std::string& mime,
     return fail("frame/packet alloc failed");
   log::i(kTag, "MediaCodec decoder configured {} {}x{} ({})", mime, d->width,
          d->height, codec->name);
-  return dec;
+  return true;
 }
 
 void CodecDecoder::flush() {
   CImpl* d = d_.get();
+  if (d->pending)
+    return;
   if (d->engine != nullptr)
     return d->engine->flush();
   g_ff.av_frame_unref(d->drm_frame);
@@ -897,6 +973,16 @@ int CodecDecoder::send_packet(const std::uint8_t* data,
                               std::int64_t pts_us,
                               std::string* error) {
   CImpl* d = d_.get();
+  if (d->pending) {
+    if (data == nullptr || size == 0)
+      return 0;  // the end, with nothing sent: nothing to drain
+    d->pending = false;
+    const std::vector<std::uint8_t> csd = std::move(d->csd);
+    if (!start(d->mime, csd.empty() ? nullptr : csd.data(), csd.size(), data,
+               size, static_cast<int>(d->width), static_cast<int>(d->height),
+               error))
+      return -1;
+  }
   if (d->engine != nullptr)
     return d->engine->send_packet(data, size, pts_us, error);
   if (data == nullptr || size == 0) {  // end-of-stream: drain
@@ -943,6 +1029,8 @@ int CodecDecoder::receive_frame(gfx::DmabufFrame* out,
   if (out == nullptr)
     return err("null out");
   CImpl* d = d_.get();
+  if (d->pending)
+    return 0;
   if (d->engine != nullptr)
     return d->engine->receive_frame(out, pts_us, error);
   g_ff.av_frame_unref(d->drm_frame);

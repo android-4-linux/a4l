@@ -34,13 +34,17 @@ class GstCodec final : public CodecEngine {
  public:
   // An appsrc ! [parser] ! decoder ! appsink pipeline for `mime`, playing.
   // `csd` is the codec-specific data, sent ahead of the first access unit.
-  // nullptr + *error when GStreamer does not start or has no decoder for the
-  // MIME. A decoder that fails once data flows reports it from
-  // send_packet/receive_frame.
-  static std::unique_ptr<GstCodec> configure(const std::string& mime,
-                                             const std::uint8_t* csd,
-                                             std::size_t csd_size,
-                                             std::string* error);
+  // `first`, where given, is the first access unit, read for the stream's
+  // format when `csd` does not say it; it is not sent here. nullptr + *error
+  // when GStreamer does not start or has no decoder for the MIME. A decoder
+  // that fails once data flows reports it from send_packet/receive_frame.
+  static std::unique_ptr<GstCodec> configure(
+      const std::string& mime,
+      const std::uint8_t* csd,
+      std::size_t csd_size,
+      std::string* error,
+      const std::uint8_t* first = nullptr,
+      std::size_t first_size = 0);
   ~GstCodec() override;
   GstCodec(const GstCodec&) = delete;
   GstCodec& operator=(const GstCodec&) = delete;
