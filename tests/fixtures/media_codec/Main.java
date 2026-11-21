@@ -63,7 +63,9 @@ public class Main extends Activity {
                     MediaFormat of = c.getOutputFormat();  // ExoPlayer reads this to size the surface
                     formatSeen = true;
                     Log.i("acl", "MC decode: output format " + of.getInteger(MediaFormat.KEY_WIDTH)
-                            + "x" + of.getInteger(MediaFormat.KEY_HEIGHT));
+                            + "x" + of.getInteger(MediaFormat.KEY_HEIGHT)
+                            + " crop " + of.getInteger("crop-left") + "," + of.getInteger("crop-top")
+                            + "," + of.getInteger("crop-right") + "," + of.getInteger("crop-bottom"));
                 } else if (o >= 0) {
                     c.releaseOutputBuffer(o, true);      // render -> queue_imported into the ImageReader
                     Image img = r.acquireLatestImage();  // the decoded frame flowed to the consumer

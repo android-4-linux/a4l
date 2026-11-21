@@ -385,10 +385,15 @@ jobject JNICALL SI_nativeGetHardwareBuffer(JNIEnv* env, jobject thiz) {
   }
   return hb;
 }
+// An image's size is the picture's, as Android's is its buffer's crop: a
+// decoder's buffer is the coded picture, which may be larger. A buffer with
+// no picture size of its own is all picture.
 jint JNICALL SI_nativeGetWidth(JNIEnv* env, jobject thiz) {
   ::AHardwareBuffer* b = img_buf(env, thiz);
   if (b == nullptr)
     return 0;
+  if (b->buffer && b->buffer->frame().width != 0)
+    return static_cast<jint>(b->buffer->frame().width);
   ::AHardwareBuffer_Desc d{};
   gfx::ahb_describe(b, &d);
   return static_cast<jint>(d.width);
@@ -397,6 +402,8 @@ jint JNICALL SI_nativeGetHeight(JNIEnv* env, jobject thiz) {
   ::AHardwareBuffer* b = img_buf(env, thiz);
   if (b == nullptr)
     return 0;
+  if (b->buffer && b->buffer->frame().height != 0)
+    return static_cast<jint>(b->buffer->frame().height);
   ::AHardwareBuffer_Desc d{};
   gfx::ahb_describe(b, &d);
   return static_cast<jint>(d.height);

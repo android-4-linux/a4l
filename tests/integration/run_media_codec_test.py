@@ -32,6 +32,21 @@ ASYNC_CHECKS = [
     "ASYNC: frame in ImageReader 320x240",   # onOutputBufferAvailable -> releaseOutputBuffer(render)
     "ASYNC test: PASS",
 ]
+# The same app on a stream cropped on every side: a 352x272 picture coded,
+# cropped 16 from each edge, so the picture is 320x240 at 16,16. The output
+# format announces the buffer a4l hands out, which reaches the picture's
+# bottom right corner (336x256), and the picture as the crop keys; the image
+# is the picture's size.
+CROPPED_SYNC_CHECKS = [
+    "MC decode: output format 336x256 crop 16,16,335,255",
+    "MC decode: frame in ImageReader 320x240",
+    "MC decode: PASS",
+]
+CROPPED_ASYNC_CHECKS = [
+    "ASYNC: onOutputFormatChanged 336x256 crop 16,16,335,255",
+    "ASYNC: frame in ImageReader 320x240",
+    "ASYNC test: PASS",
+]
 
 
 def first(*paths):
@@ -86,6 +101,12 @@ def main() -> int:
         os.makedirs(os.path.join(app, "assets"))
         run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", clip, "-c:v", "copy",
              "-bsf:v", "h264_mp4toannexb", "-f", "h264", os.path.join(app, "assets/raw.h264")])
+        cropped = os.path.join(work, "cropped.h264")
+        run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+             "-i", "color=c=0x40A060:s=352x272:d=1:r=10", "-c:v", "libx264",
+             "-pix_fmt", "yuv420p", "-profile:v", "main",
+             "-bsf:v", "h264_metadata=crop_left=16:crop_right=16:crop_top=16:crop_bottom=16",
+             "-f", "h264", cropped])
 
         # 2. Main.java + MainAsync.java -> one classes.dex (same package).
         cls = os.path.join(work, "cls"); os.makedirs(cls)
@@ -111,10 +132,15 @@ def main() -> int:
                                env=env, capture_output=True, text=True, timeout=300)
             return p.returncode, p.stdout + p.stderr
 
-        runs = [("com.acl.mctest.Main", "sync", SYNC_CHECKS),
-                ("com.acl.mctest.MainAsync", "async", ASYNC_CHECKS)]
+        asset = os.path.join(app, "assets/raw.h264")
+        runs = [("com.acl.mctest.Main", "sync", SYNC_CHECKS, None),
+                ("com.acl.mctest.MainAsync", "async", ASYNC_CHECKS, None),
+                ("com.acl.mctest.Main", "sync-cropped", CROPPED_SYNC_CHECKS, cropped),
+                ("com.acl.mctest.MainAsync", "async-cropped", CROPPED_ASYNC_CHECKS, cropped)]
         out = ""
-        for launcher, tag, checks in runs:
+        for launcher, tag, checks, clip_for_run in runs:
+            if clip_for_run is not None:
+                shutil.copyfile(clip_for_run, asset)
             rc, o = build_and_run(launcher, tag)
             out += f"=== {tag} ===\n" + o
             if rc == SKIP:
