@@ -421,9 +421,11 @@ struct SplitOptions {
   // can see: GStreamer rescans a plugin when its file changes, not when what
   // the plugin found does, so a registry made in the old view would keep the
   // old answer. 2: the DRM class entry, without which the VA plugin
-  // registered no decoder.
-  const std::string file = dir + "/registry-2.bin";
+  // registered no decoder. 3: a V4L2 decoder's sysfs entries, without which
+  // the V4L2 stateless plugin registered none.
+  const std::string file = dir + "/registry-3.bin";
   ::unlink((dir + "/registry.bin").c_str());
+  ::unlink((dir + "/registry-2.bin").c_str());
   // The same view as the app process will have, less the app's own
   // directories: nothing an app wrote is read here.
   acl::confine::Plan plan = launch.plan;
