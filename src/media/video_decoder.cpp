@@ -852,7 +852,14 @@ bool CodecDecoder::start(const std::string& mime,
                std::to_string(avc_format.profile_idc);
       return false;
     }
-    d->engine = DmaCodec::configure(mime, csd, csd_size, width, height, why);
+    // The engines that give only 8-bit pictures are passed over for a deeper
+    // stream here, at configure; one may otherwise take it and fail at the
+    // first access unit, or give wrong colors.
+    std::uint32_t depth = DmaCodec::bit_depth(mime, csd, csd_size);
+    if (depth == 0)
+      depth = DmaCodec::bit_depth(mime, first, first_size);
+    d->engine =
+        DmaCodec::configure(mime, csd, csd_size, width, height, why, depth);
     return d->engine != nullptr;
 #else
     if (why)

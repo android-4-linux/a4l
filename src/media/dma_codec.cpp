@@ -22,6 +22,9 @@
 #include <vector>
 
 #include "log/log.h"
+#include "media/h264_color.h"
+#include "parse/h265/nal.h"
+#include "parse/h265/sps.h"
 #include "src/dma_decoder.h"
 #include "src/dma_decoder_factory.h"
 
@@ -281,12 +284,36 @@ std::unique_ptr<DmaCodec> DmaCodec::with_factory(Factory factory,
   return codec;
 }
 
+std::uint32_t DmaCodec::bit_depth(const std::string& mime,
+                                  const std::uint8_t* annexb,
+                                  std::size_t size) {
+  if (annexb == nullptr || size == 0)
+    return 0;
+  if (mime == "video/avc") {
+    H264Format f;
+    if (!h264_format(annexb, size, &f))
+      return 0;
+    return std::max(f.bit_depth_luma, f.bit_depth_chroma);
+  }
+  if (mime == "video/hevc") {
+    for (const auto& n : v4l2wc::h265::ParseAnnexB(annexb, size)) {
+      v4l2wc::h265::Sps sps;
+      if (n.type == v4l2wc::h265::NalUnitType::kSpsNut &&
+          v4l2wc::h265::ParseSps(n.rbsp.data(), n.rbsp.size(), &sps))
+        return std::max<std::uint32_t>(sps.bit_depth_luma,
+                                       sps.bit_depth_chroma);
+    }
+  }
+  return 0;
+}
+
 std::unique_ptr<DmaCodec> DmaCodec::configure(const std::string& mime,
                                               const std::uint8_t* csd,
                                               std::size_t csd_size,
                                               int width,
                                               int height,
-                                              std::string* error) {
+                                              std::string* error,
+                                              std::uint32_t bit_depth) {
   const std::uint32_t fourcc = fourcc_for_mime(mime);
   if (fourcc == 0) {
     if (error)
@@ -308,11 +335,12 @@ std::unique_ptr<DmaCodec> DmaCodec::configure(const std::string& mime,
   const auto w = static_cast<std::uint32_t>(std::clamp(width, 0, 16384));
   const auto h = static_cast<std::uint32_t>(std::clamp(height, 0, 16384));
   auto codec = with_factory(
-      [fourcc, w, h, m2m, stateless] {
+      [fourcc, w, h, m2m, stateless, bit_depth] {
         v4l2wc::DmaDecoderConfig config;
         config.codec_fourcc = fourcc;
         config.coded_width = w;
         config.coded_height = h;
+        config.bit_depth = bit_depth;
         config.v4l2_device = m2m.empty() ? nullptr : m2m.c_str();
         config.v4l2_hevc_device =
             stateless.empty() ? nullptr : stateless.c_str();
@@ -325,7 +353,8 @@ std::unique_ptr<DmaCodec> DmaCodec::configure(const std::string& mime,
   if (codec != nullptr) {
     codec->d_->width = w;
     codec->d_->height = h;
-    log::i(kTag, "decoder configured {} {}x{}", mime, w, h);
+    log::i(kTag, "decoder configured {} {}x{}{}", mime, w, h,
+           bit_depth > 8 ? fmt::format(" {}-bit", bit_depth) : "");
   }
   return codec;
 }
