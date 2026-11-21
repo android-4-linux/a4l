@@ -32,6 +32,7 @@ extern "C" {
 #define ACL_FF_CH_LAYOUT (LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100))
 
 #include "log/log.h"
+#include "media/ff_open.h"
 
 namespace acl::media {
 namespace {
@@ -64,20 +65,14 @@ struct Ff {
   bool ok = false;
 };
 
-void* ff_open(const char* base, int major) {
-  char name[64];
-  std::snprintf(name, sizeof(name), "%s.%d", base, major);
-  if (void* h = ::dlopen(name, RTLD_NOW | RTLD_LOCAL))
-    return h;
-  return ::dlopen(base, RTLD_NOW | RTLD_LOCAL);
-}
-
 const Ff& ffmpeg() {
   static Ff ff;
   static std::once_flag once;
   std::call_once(once, [] {
-    void* libs[2] = {ff_open("libavutil.so", LIBAVUTIL_VERSION_MAJOR),
-                     ff_open("libavcodec.so", LIBAVCODEC_VERSION_MAJOR)};
+    void* libs[2] = {ff_open(kTag, "libavutil.so", LIBAVUTIL_VERSION_MAJOR,
+                             "avutil_version"),
+                     ff_open(kTag, "libavcodec.so", LIBAVCODEC_VERSION_MAJOR,
+                             "avcodec_version")};
     if (libs[0] == nullptr || libs[1] == nullptr) {
       log::w(kTag, "FFmpeg could not be loaded; audio decode is off");
       return;
