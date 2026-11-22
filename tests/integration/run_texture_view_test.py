@@ -2,9 +2,9 @@
 # Provenance: original a4l test harness; FFmpeg CLI for the fixture clip;
 # tests/fixtures/texture_view/Main.java. No GPL-3.0 sources.
 #
-# Video on a TextureView. A fixture app decodes an H.264 clip with MediaCodec onto
+# Video on a TextureView. A fixture app decodes a clip with MediaCodec onto
 # new Surface(surfaceTexture), and the TextureView draws each frame inside the window. The clip
-# is four colored quadrants, 640x360, so its buffer is 640x368 and the picture is cropped. The
+# is four colored quadrants, 640x360; as H.264 its buffer is 640x368 and the picture cropped. The
 # test reads back the last frame a4l rendered (ACL_GPU_DUMP), finds the TextureView in it, and
 # checks each quadrant's color, near the middle and near the bottom edge, where a crop that was
 # not applied would show the buffer's padding. It also checks that the app saw a frame update
@@ -14,12 +14,14 @@
 # Two runs: the frame imported on the present device (Vulkan) and the frame's pixels copied
 # (ACL_SURFACETEXTURE_COPY), the path for a driver that refuses the import.
 #
-# Needs: a host ART build (ACL_ART_HOME), the AOSP toolchain, ffmpeg with libx264, a decoder for
-# H.264 (any of a4l's, software included), a render node, and a Wayland compositor. It starts a
+# Needs: a host ART build (ACL_ART_HOME), the AOSP toolchain, ffmpeg with libx264 (libx265 for
+# HEVC), a decoder for the codec (any of a4l's, software included), a render node, and a Wayland
+# compositor. It starts a
 # headless Weston on its own socket unless ACL_TEST_WAYLAND_DISPLAY names one. Exits 77 (skip)
 # where any of these is missing.
 #
 # ACL_TEST_TEXTURE_KEEP=<dir> keeps the APK, the runs' logs and frames there.
+# ACL_TEST_VIDEO_CODEC picks the clip's codec: h264 (the default), hevc, or hevc10 (HEVC Main 10).
 import glob
 import os
 import re
@@ -36,6 +38,20 @@ LOOPS = 2                # Main.LOOPS
 # Top left, top right, bottom left, bottom right.
 QUADRANTS = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)]
 TOLERANCE = 40           # per channel, for YUV 4:2:0 and back
+
+
+# The clip's codec (ACL_TEST_VIDEO_CODEC): ffmpeg's encoder arguments, the stream's MIME type, the
+# raw format to write and the bitstream filter that sets its cropping.
+CODECS = {
+    "h264": (["-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "main", "-bf", "0",
+              "-g", "30", "-x264-params", "aud=1"], "video/avc", "h264", "h264_metadata"),
+    "hevc": (["-c:v", "libx265", "-pix_fmt", "yuv420p", "-profile:v", "main",
+              "-x265-params", "aud=1:bframes=0:keyint=30:log-level=error"],
+             "video/hevc", "hevc", "hevc_metadata"),
+    "hevc10": (["-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-profile:v", "main10",
+                "-x265-params", "aud=1:bframes=0:keyint=30:log-level=error"],
+               "video/hevc", "hevc", "hevc_metadata"),
+}
 
 
 def first(*paths):
@@ -139,6 +155,10 @@ def main() -> int:
         sys.stderr.write("usage: run_texture_view_test.py <a4l> <android.jar>\n")
         return 2
     acl, android_jar = sys.argv[1], sys.argv[2]
+    codec = os.environ.get("ACL_TEST_VIDEO_CODEC", "h264")
+    if codec not in CODECS:
+        sys.stderr.write(f"ACL_TEST_VIDEO_CODEC={codec}: one of {', '.join(CODECS)}\n")
+        return 2
     src_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     home = os.environ.get("ACL_ART_HOME", "")
     if not home or not os.path.isdir(home):
@@ -170,22 +190,21 @@ def main() -> int:
     try:
         # 1. The clip: four solid quadrants, no B-frames, an access unit delimiter before each
         #    frame so the fixture can cut the stream into frames.
-        clip = os.path.join(work, "clip.mp4")
+        enc, mime, raw, _ = CODECS[codec]
+        app = os.path.join(work, "app")
+        os.makedirs(os.path.join(app, "assets"))
         box = "drawbox=x={}:y={}:w=320:h=180:color={}:t=fill"
         g = subprocess.run(
             [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
              "-i", f"color=c=blue:s={W}x{H}:r=30:d=2," + ",".join(
                  [box.format(0, 0, "red"), box.format(320, 0, "lime"),
-                  box.format(320, 180, "white")]),
-             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "main", "-bf", "0",
-             "-g", "30", "-x264-params", "aud=1", clip],
+                  box.format(320, 180, "white")])]
+            + enc + ["-f", raw, os.path.join(app, "assets/clip")],
             capture_output=True, text=True)
         if g.returncode != 0:
-            return skip("ffmpeg could not encode the fixture clip", g.stderr)
-        app = os.path.join(work, "app")
-        os.makedirs(os.path.join(app, "assets"))
-        run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", clip, "-c:v", "copy",
-             "-bsf:v", "h264_mp4toannexb", "-f", "h264", os.path.join(app, "assets/clip.h264")])
+            return skip(f"ffmpeg could not encode the fixture clip as {codec}", g.stderr)
+        with open(os.path.join(app, "assets/mime"), "w") as fh:
+            fh.write(mime)
 
         # 2. The fixture APK.
         sys.path.insert(0, fixtures)
@@ -206,7 +225,7 @@ def main() -> int:
         apk = os.path.join(work, "texture-view.apk")
         run(["zip", "-X", "-0", "-j", "-q", unaligned,
              os.path.join(app, "AndroidManifest.xml"), os.path.join(app, "classes.dex")])
-        run(["zip", "-X", "-0", "-q", unaligned, "assets/clip.h264"], cwd=app)
+        run(["zip", "-X", "-0", "-q", unaligned, "assets/clip", "assets/mime"], cwd=app)
         run([zipalign, "-f", "4", unaligned, apk])
         if keep:
             os.makedirs(keep, exist_ok=True)
@@ -244,7 +263,7 @@ def main() -> int:
             if p.returncode == SKIP:
                 return skip("run-apk.sh (vendored framework not built)", out[-2000:])
             if "CodecDecoder::configure failed" in out:
-                return skip("no H.264 decoder", out[-2000:])
+                return skip(f"no {codec} decoder", out[-2000:])
             if "frame alpha:" not in out:
                 return skip("this build does not report rendered frames (ACL_GPU_DUMP)",
                             out[-2000:])
@@ -271,7 +290,11 @@ def main() -> int:
                 return fail("no rendered frame was read back")
             wrong = check_frame(frame)
             if wrong:
-                return fail(wrong)
+                # The work directory goes; a frame that failed is kept for a look.
+                kept = os.path.join(tempfile.gettempdir(),
+                                    f"a4l-texture-fail-{os.getpid()}-{tag}.ppm")
+                shutil.copy(frame, kept)
+                return fail(f"{wrong} (frame kept: {kept})")
             notes.append(f"{tag}: {rendered} frames, {updated} updates, picture right")
         sys.stdout.write("OK: " + "; ".join(notes) + "\n")
         return 0
