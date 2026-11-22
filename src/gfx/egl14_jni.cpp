@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <vector>
 #include "log/log.h"
 
@@ -112,37 +113,56 @@ jint JNICALL EGL14_eglGetError(JNIEnv*, jclass) {
   return eglGetError();
 }
 
+// Mesa's surfaceless platform: pbuffers on the render node and no window
+// system. EGL_NO_DISPLAY where this libEGL has none.
+EGLDisplay surfaceless_display() {
+  const char* ext = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
+  if (ext == nullptr ||
+      std::strstr(ext, "EGL_MESA_platform_surfaceless") == nullptr)
+    return EGL_NO_DISPLAY;
+  return eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA,
+                               EGL_DEFAULT_DISPLAY, nullptr);
+}
+
 // The display for EGL_DEFAULT_DISPLAY. Java EGL14 is used here for offscreen
 // work (a player's placeholder surface, a pbuffer context), never for a
-// window. Mesa's default asks the display server named in the environment.
-// A process with none, which is what a --split app process is, gets Mesa's
-// surfaceless platform: pbuffers on the render node and no window system.
-// Without this eglInitialize fails there, and media3 fails to start a video
-// decoder whenever it needs its placeholder surface.
+// window. Mesa's default display is its build's default platform, and
+// eglInitialize fails on it where that platform's server is not running: a
+// --split app process has none at all, and Debian's Mesa defaults to X11,
+// which a board running only a Wayland compositor does not have. media3 then
+// fails to start a video decoder whenever it needs its placeholder surface.
+// Such a process gets the surfaceless platform; any other keeps Mesa's
+// default, the display a GL app's own EGL10 contexts are on. Decided once,
+// on the first call.
 EGLDisplay default_display() {
-  const char* wayland = std::getenv("WAYLAND_DISPLAY");
-  const char* x11 = std::getenv("DISPLAY");
-  const bool server = (wayland != nullptr && *wayland != '\0') ||
-                      (x11 != nullptr && *x11 != '\0');
-  if (!server) {
-    const char* ext = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
-    if (ext != nullptr &&
-        std::strstr(ext, "EGL_MESA_platform_surfaceless") != nullptr) {
-      const EGLDisplay d = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA,
-                                                 EGL_DEFAULT_DISPLAY, nullptr);
-      if (d != EGL_NO_DISPLAY) {
-        static bool once = false;
-        if (!once) {
-          once = true;
-          log::i("acl.gfx.egl14",
-                 "EGL14: no display server in the environment; the default "
-                 "display is Mesa's surfaceless platform");
-        }
-        return d;
+  static std::once_flag once;
+  static EGLDisplay chosen = EGL_NO_DISPLAY;
+  std::call_once(once, [] {
+    const char* wayland = std::getenv("WAYLAND_DISPLAY");
+    const char* x11 = std::getenv("DISPLAY");
+    const bool server = (wayland != nullptr && *wayland != '\0') ||
+                        (x11 != nullptr && *x11 != '\0');
+    if (server) {
+      const EGLDisplay d = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+      EGLint mj = 0, mn = 0;
+      // Left initialized: EGL10 may hold the same display, and terminating
+      // it would end that app's contexts.
+      if (d != EGL_NO_DISPLAY && eglInitialize(d, &mj, &mn) == EGL_TRUE) {
+        chosen = d;
+        return;
       }
     }
-  }
-  return eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    chosen = surfaceless_display();
+    if (chosen != EGL_NO_DISPLAY) {
+      log::i("acl.gfx.egl14",
+             "EGL14: {}; the default display is Mesa's surfaceless platform",
+             server ? "the default platform's display does not initialize"
+                    : "no display server in the environment");
+      return;
+    }
+    chosen = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+  });
+  return chosen;
 }
 
 EGLDisplay display_for(intptr_t id) {
