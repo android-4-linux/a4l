@@ -6,9 +6,12 @@
 // A video sampled in the app's own GL, as a video effect or a 360-degree player does: a
 // MediaCodec decodes assets/clip.h264 onto new Surface(new SurfaceTexture(tex)). On each new
 // frame, the app's GL thread calls updateTexImage and draws the external texture, through
-// getTransformMatrix, into a pbuffer, then reads back the four quadrants and a point near the
-// bottom edge. The clip is four colored quadrants: red, green, blue and white from top left
-// to bottom right. Logs one line at the end with the totals, and exits.
+// getTransformMatrix, into a pbuffer the picture's size, then reads back points in each quadrant:
+// the middle, the corners of the picture and either side of the edges between quadrants. The
+// clip is four colored quadrants, red, green, blue and white from top left to bottom right,
+// inside a border its stream crops away; a crop not applied shows the border at the picture's
+// edges or moves the edges between quadrants. Logs one line at the end with the totals and the
+// matrix, and exits.
 package com.acl.stgl;
 
 import android.app.Activity;
@@ -35,14 +38,13 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 public class Main extends Activity implements SurfaceTexture.OnFrameAvailableListener {
     static final String TAG = "acl";
     static final int W = 640, H = 360, FPS = 30, LOOPS = 2;
-    static final int PW = 320, PH = 180;  // the pbuffer drawn into
+    static final int PW = W, PH = H;  // the pbuffer drawn into: one texel a pixel
 
     static final String VS = "attribute vec4 aPos;\n"
             + "attribute vec4 aTex;\n"
@@ -54,11 +56,16 @@ public class Main extends Activity implements SurfaceTexture.OnFrameAvailableLis
             + "uniform samplerExternalOES uS;\n"
             + "varying vec2 vTex;\n"
             + "void main() { gl_FragColor = texture2D(uS, vTex); }\n";
-    // Expected colors at points of the pbuffer, in GL coordinates (bottom row is 0).
-    static final int[][] PROBES = {
-        {PW / 4, 3 * PH / 4, 255, 0, 0}, {3 * PW / 4, 3 * PH / 4, 0, 255, 0},
-        {PW / 4, PH / 4, 0, 0, 255}, {3 * PW / 4, PH / 4, 255, 255, 255},
-        {PW / 4, 1, 0, 0, 255}, {3 * PW / 4, 1, 255, 255, 255}};
+    static final int[] RED = {255, 0, 0}, GREEN = {0, 255, 0}, BLUE = {0, 0, 255},
+            WHITE = {255, 255, 255};
+    // Expected colors at points of the picture, x right and y down from its top left, the way
+    // the clip was drawn; read back at GL's (x, PH - 1 - y).
+    static final Object[][] PROBES = {
+        {PW / 4, PH / 4, RED}, {3 * PW / 4, PH / 4, GREEN},
+        {PW / 4, 3 * PH / 4, BLUE}, {3 * PW / 4, 3 * PH / 4, WHITE},
+        {1, 1, RED}, {PW - 2, 1, GREEN}, {1, PH - 2, BLUE}, {PW - 2, PH - 2, WHITE},
+        {PW / 2 - 4, PH / 4, RED}, {PW / 2 + 4, PH / 4, GREEN},
+        {PW / 4, PH / 2 - 4, RED}, {PW / 4, PH / 2 + 4, BLUE}};
     static final int TOLERANCE = 40;
 
     private Handler gl;
@@ -169,9 +176,7 @@ public class Main extends Activity implements SurfaceTexture.OnFrameAvailableLis
         st.updateTexImage();
         st.getTransformMatrix(matrix);
         timestamp = st.getTimestamp();
-        matrixSeen = Arrays.equals(matrix, new float[] {1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1})
-                ? "flip" : Arrays.equals(matrix, new float[] {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1})
-                ? "identity" : "other";
+        matrixSeen = matrix[0] + "," + matrix[5] + "," + matrix[12] + "," + matrix[13];
         GLES20.glViewport(0, 0, PW, PH);
         GLES20.glClearColor(0, 0, 0, 1);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
@@ -185,13 +190,17 @@ public class Main extends Activity implements SurfaceTexture.OnFrameAvailableLis
         ByteBuffer px = ByteBuffer.allocateDirect(4);
         StringBuilder got = new StringBuilder();
         boolean ok = true;
-        for (int[] p : PROBES) {
+        for (Object[] p : PROBES) {
+            int x = (Integer) p[0], y = (Integer) p[1];
+            int[] want = (int[]) p[2];
             px.clear();
-            GLES20.glReadPixels(p[0], p[1], 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
+            GLES20.glReadPixels(x, PH - 1 - y, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, px);
             int r = px.get(0) & 0xff, g = px.get(1) & 0xff, bl = px.get(2) & 0xff;
+            boolean hit = Math.abs(r - want[0]) <= TOLERANCE && Math.abs(g - want[1]) <= TOLERANCE
+                    && Math.abs(bl - want[2]) <= TOLERANCE;
+            if (!hit) got.append(x).append(',').append(y).append('=');
             got.append(r).append(',').append(g).append(',').append(bl).append(' ');
-            ok &= Math.abs(r - p[2]) <= TOLERANCE && Math.abs(g - p[3]) <= TOLERANCE
-                    && Math.abs(bl - p[4]) <= TOLERANCE;
+            ok &= hit;
         }
         updated++;
         if (ok) right++;

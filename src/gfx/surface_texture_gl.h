@@ -13,7 +13,39 @@
 
 #include <cstdint>
 
+#include "gfx/dmabuf_frame.h"
+
+// A decoder's frame as it is, for a SurfaceTexture an app samples in its own
+// GL: every plane, uncropped, with the transform its texture coordinates
+// need. The layout graphics_jni takes it in (it keeps a copy of this
+// definition; the two must match). A plane's fd is -1 where it is in fd[0].
+struct AclStYuvFrame {
+  std::uint32_t width, height;   // the picture
+  std::uint32_t crop_x, crop_y;  // where it starts in the buffer
+  std::uint32_t drm_format;
+  std::uint64_t modifier;
+  std::uint32_t plane_count;
+  int fd[4];
+  std::uint32_t offset[4], stride[4];
+  std::uint8_t yuv_matrix;  // H.273 matrix coefficients, as in DmabufFrame
+  std::uint8_t yuv_full_range;
+  float transform[16];  // SurfaceTexture.getTransformMatrix, column-major
+};
+
 namespace acl::gfx {
+
+// The frame described for a SurfaceTexture, with its transform. The fds are
+// the frame's own, not copies.
+AclStYuvFrame st_yuv_frame(const DmabufFrame& frame);
+
+// SurfaceTexture.getTransformMatrix for `frame` bound whole to an external
+// texture, top row first: texture coordinate (0, 0), the bottom left in GL,
+// maps to the picture's bottom left and (1, 1) to its top right. The image
+// ends where the picture does on the right and at the bottom; a picture that
+// starts inside the buffer on the left or at the top is moved in by a further
+// texel there, so linear filtering does not reach the rows and columns
+// outside it.
+void st_transform(const DmabufFrame& frame, float out[16]);
 
 // Bind one plane of a dma-buf (`drm_format`, `modifier`) to the external
 // texture `tex` of the GL context current on the calling thread, through an
@@ -28,6 +60,9 @@ void* st_gl_bind(int tex,
                  std::uint32_t offset,
                  std::uint32_t drm_format,
                  std::uint64_t modifier);
+
+// st_gl_bind for a decoder's frame as it is (st_yuv_frame).
+void* st_gl_bind_yuv(int tex, const AclStYuvFrame* frame);
 
 // Destroy a handle st_gl_bind returned. Any thread.
 void st_gl_unbind(void* handle);

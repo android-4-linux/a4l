@@ -6553,19 +6553,45 @@ struct AclStFrame {
   uint32_t width, height, stride, offset, drm_format;
   uint64_t modifier;
 };
-// Such a frame while graphics_jni holds it. `f.fd` is graphics_jni's own
-// copy. The producer's release runs once, when the last holder lets go, on
-// whatever thread that is.
+// A decoder's frame as it is, for a SurfaceTexture an app samples in its own
+// GL (acl_graphics_surfacetexture_set_yuv_frame): every plane, uncropped,
+// with the transform its texture coordinates need. a4l's
+// gfx/surface_texture_gl.h defines it; the two must match. A plane's fd is
+// -1 where it is in fd[0].
+struct AclStYuvFrame {
+  uint32_t width, height;
+  uint32_t crop_x, crop_y;
+  uint32_t drm_format;
+  uint64_t modifier;
+  uint32_t plane_count;
+  int fd[4];
+  uint32_t offset[4], stride[4];
+  uint8_t yuv_matrix;
+  uint8_t yuv_full_range;
+  float transform[16];
+};
+// Such a frame while graphics_jni holds it: an XBGR8888 one in `f`, or one as
+// it is in `y`. The fds are graphics_jni's own copies. The producer's release
+// runs once, when the last holder lets go, on whatever thread that is.
 struct AclStBuffer {
   AclStFrame f{-1, 0, 0, 0, 0, 0, 0};
+  bool yuv = false;
+  AclStYuvFrame y{};
   void (*release)(void*) = nullptr;
   void* release_ctx = nullptr;
-  AclStBuffer() = default;
+  AclStBuffer() {
+    for (int& fd : y.fd)
+      fd = -1;
+  }
   AclStBuffer(const AclStBuffer&) = delete;
   AclStBuffer& operator=(const AclStBuffer&) = delete;
   ~AclStBuffer() {
     if (f.fd >= 0)
       ::close(f.fd);
+    for (int fd : y.fd) {
+      if (fd >= 0)
+        ::close(fd);
+    }
     if (release != nullptr)
       release(release_ctx);
   }
@@ -6604,6 +6630,9 @@ struct AclSurfaceTexture {
   // app's GL thread, under `mu`.
   std::shared_ptr<AclStBuffer> gl_buf, gl_prev_buf;
   void* gl_image = nullptr;
+  // The app's GL refused a frame as it is: frames come converted from then
+  // on (acl_graphics_surfacetexture_wants_yuv).
+  bool yuv_refused = false;
   bool detached = false;  // detachFromGLContext state
   bool released = false;
   jobject weak_self = nullptr;  // global ref to WeakReference<SurfaceTexture>
@@ -6678,8 +6707,10 @@ using StGlBindFn = void* (*)(int,
                              uint32_t,
                              uint64_t);
 using StGlUnbindFn = void (*)(void*);
+using StGlBindYuvFn = void* (*)(int, const AclStYuvFrame*);
 std::atomic<StGlBindFn> g_st_gl_bind{nullptr};
 std::atomic<StGlUnbindFn> g_st_gl_unbind{nullptr};
+std::atomic<StGlBindYuvFn> g_st_gl_bind_yuv{nullptr};
 
 // Bind the latched decoder frame to the app's external texture, in the GL
 // context current on this thread, unless it is bound already. App's GL
@@ -6699,8 +6730,28 @@ void st_gl_bind_current(AclSurfaceTexture* st) {
     buf = st->current_buf;
     tex = st->tex_name;
   }
-  void* image = bind(tex, buf->f.fd, buf->f.width, buf->f.height, buf->f.stride,
-                     buf->f.offset, buf->f.drm_format, buf->f.modifier);
+  void* image = nullptr;
+  if (buf->yuv) {
+    if (const StGlBindYuvFn bind_yuv =
+            g_st_gl_bind_yuv.load(std::memory_order_acquire))
+      image = bind_yuv(tex, &buf->y);
+    if (image == nullptr) {
+      // The next frames come converted; this one stays unshown.
+      {
+        std::lock_guard<std::mutex> lk(st->mu);
+        st->yuv_refused = true;
+      }
+      std::fprintf(stderr,
+                   "acl-graphics: the app's GL did not take a decoder frame "
+                   "(format 0x%x, modifier 0x%llx); frames are converted\n",
+                   buf->y.drm_format,
+                   static_cast<unsigned long long>(buf->y.modifier));
+      return;
+    }
+  } else {
+    image = bind(tex, buf->f.fd, buf->f.width, buf->f.height, buf->f.stride,
+                 buf->f.offset, buf->f.drm_format, buf->f.modifier);
+  }
   if (image == nullptr) {
     static std::atomic<bool> said{false};
     if (!said.exchange(true))
@@ -6851,6 +6902,10 @@ std::unordered_map<const AclSurfaceTexture*, StFrameImage> g_st_images;
 sk_sp<SkImage> st_frame_image(SkCanvas* c,
                               const AclSurfaceTexture* st,
                               const std::shared_ptr<AclStBuffer>& buf) {
+  // A frame as it is goes only to a SurfaceTexture in an app's GL, which a
+  // TextureView does not draw.
+  if (buf->yuv)
+    return nullptr;
   GrDirectContext* gpu = GrAsDirectContext(c->recordingContext());
   std::lock_guard<std::mutex> lk(g_st_images_mu);
   {
@@ -7016,6 +7071,7 @@ extern "C" void acl_graphics_surfacetexture_set_pixels(jlong st_handle,
   post_frame_available(st);  // -> TextureView.invalidate() -> re-record so the
                              // drawable re-snapshots
 }
+void st_deliver(jlong st_handle, std::shared_ptr<AclStBuffer> buf, jlong ts);
 // A decoder's frame for a SurfaceTexture (a MediaCodec configured with
 // new Surface(SurfaceTexture)): an XBGR8888 dma-buf, already cropped to the
 // picture, top row first. It is pending until the consumer latches it
@@ -7039,6 +7095,54 @@ extern "C" void acl_graphics_surfacetexture_set_frame(jlong st_handle,
   buf->f.fd = ::fcntl(f->fd, F_DUPFD_CLOEXEC, 0);
   if (buf->f.fd < 0)
     return;
+  st_deliver(st_handle, std::move(buf), ts);
+}
+// A decoder's frame as it is, for a SurfaceTexture an app samples in its own
+// GL (acl_graphics_surfacetexture_wants_yuv): delivered like set_frame's, and
+// bound by updateTexImage; getTransformMatrix returns the frame's
+// `transform`. `release(release_ctx)` is called exactly once.
+extern "C" void acl_graphics_surfacetexture_set_yuv_frame(
+    jlong st_handle,
+    const AclStYuvFrame* f,
+    jlong ts,
+    void (*release)(void*),
+    void* release_ctx) {
+  auto buf = std::make_shared<AclStBuffer>();
+  buf->release = release;
+  buf->release_ctx = release_ctx;
+  if (f == nullptr || f->fd[0] < 0 || f->width == 0 || f->height == 0 ||
+      f->plane_count == 0 || f->plane_count > 4)
+    return;
+  buf->yuv = true;
+  buf->y = *f;
+  for (int& fd : buf->y.fd)
+    fd = -1;
+  for (uint32_t i = 0; i < f->plane_count; ++i) {
+    if (f->fd[i] < 0)
+      continue;
+    buf->y.fd[i] = ::fcntl(f->fd[i], F_DUPFD_CLOEXEC, 0);
+    if (buf->y.fd[i] < 0)
+      return;
+  }
+  st_deliver(st_handle, std::move(buf), ts);
+}
+// Whether a SurfaceTexture takes a decoder's frame as it is: while an app's
+// GL context holds it, unless that GL has refused one. a4l asks per frame.
+extern "C" bool acl_graphics_surfacetexture_wants_yuv(jlong st_handle) {
+  std::lock_guard<std::mutex> live(g_st_live_mu);
+  auto* st = reinterpret_cast<AclSurfaceTexture*>(st_handle);
+  if (g_st_live.count(st) == 0 ||
+      g_st_gl_bind_yuv.load(std::memory_order_acquire) == nullptr)
+    return false;
+  std::lock_guard<std::mutex> lk(st->mu);
+  return !st->released && !st->detached && st->tex_name > 0 && !st->yuv_refused;
+}
+// a4l's EGL hook for binding a decoder's frame as it is.
+extern "C" void acl_graphics_set_st_gl_yuv_hook(StGlBindYuvFn bind) {
+  g_st_gl_bind_yuv.store(bind, std::memory_order_release);
+}
+// Make `buf` the SurfaceTexture's pending frame and tell its listener.
+void st_deliver(jlong st_handle, std::shared_ptr<AclStBuffer> buf, jlong ts) {
   std::shared_ptr<AclStBuffer> old;  // let go of outside the locks
   jobject weak = nullptr;
   JNIEnv* env = st_post_env();
@@ -7153,19 +7257,23 @@ void SurfaceTexture_nativeGetTransformMatrix(JNIEnv* env,
                                              jobject thiz,
                                              jfloatArray mtx) {
   // Column-major 4x4s that apps multiply into their texture coordinates. A
-  // decoder frame is bound to the app's external texture top row first and
-  // already cropped, so the matrix is Android's Y flip: texture coordinate
-  // (0, 0), the bottom left in GL, samples the picture's bottom left. A
-  // produced image (a GL producer's readback) is drawn by acl's TextureView
-  // layer, not sampled by the app, and keeps the identity.
+  // decoder frame is bound to the app's external texture top row first, so
+  // the matrix holds Android's Y flip: texture coordinate (0, 0), the bottom
+  // left in GL, samples the picture's bottom left. A converted frame is
+  // already cropped; a frame as it is carries its own matrix, which crops it
+  // too. A produced image (a GL producer's readback) is drawn by acl's
+  // TextureView layer, not sampled by the app, and keeps the identity.
   static const float ident[16] = {1, 0, 0, 0, 0, 1, 0, 0,
                                   0, 0, 1, 0, 0, 0, 0, 1};
   static const float flip[16] = {1, 0, 0, 0, 0, -1, 0, 0,
                                  0, 0, 1, 0, 0, 1,  0, 1};
   auto* st = st_from(env, thiz);
-  const bool decoded = st != nullptr && st->snapshot_buf() != nullptr;
+  const std::shared_ptr<AclStBuffer> buf =
+      st != nullptr ? st->snapshot_buf() : nullptr;
+  // A frame as it is carries its own: the flip, and its crop.
+  const float* m = buf == nullptr ? ident : buf->yuv ? buf->y.transform : flip;
   if (mtx != nullptr && env->GetArrayLength(mtx) >= 16)
-    env->SetFloatArrayRegion(mtx, 0, 16, decoded ? flip : ident);
+    env->SetFloatArrayRegion(mtx, 0, 16, m);
 }
 jlong SurfaceTexture_nativeGetTimestamp(JNIEnv* env, jobject thiz) {
   auto* st = st_from(env, thiz);
