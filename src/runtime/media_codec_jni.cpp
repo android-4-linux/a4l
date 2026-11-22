@@ -39,6 +39,7 @@
 
 #include "gfx/ahardware_buffer.h"
 #include "gfx/buffer_queue.h"
+#include "gfx/surface_texture_gl.h"
 #include "gfx/video_convert.h"
 #include "log/log.h"
 #include "media/audio_codec.h"
@@ -93,7 +94,8 @@ struct TextureSink {
   std::mutex mu;
   std::unique_ptr<gfx::VideoConverter> converter;
   bool tried = false;
-  bool said = false;  // a failed frame was logged
+  bool said = false;      // a failed frame was logged
+  bool said_yuv = false;  // frames going as they are was logged
 };
 
 // One MediaCodec instance's decode state.
@@ -262,12 +264,58 @@ StSetFrameFn st_set_frame() {
   return f;
 }
 
+// The feed for a decoder's frame as it is, and whether a SurfaceTexture
+// wants one: it does while an app's GL context holds it (the app samples it
+// through an external texture, which takes YUV), until its driver refuses one.
+using StSetYuvFrameFn =
+    void (*)(jlong, const AclStYuvFrame*, jlong, void (*)(void*), void*);
+using StWantsYuvFn = bool (*)(jlong);
+StSetYuvFrameFn st_set_yuv_frame() {
+  static const auto f = reinterpret_cast<StSetYuvFrameFn>(
+      ::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_set_yuv_frame"));
+  return f;
+}
+StWantsYuvFn st_wants_yuv() {
+  static const auto f = reinterpret_cast<StWantsYuvFn>(
+      ::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_wants_yuv"));
+  return f;
+}
+
 // Hand a decoded frame to a SurfaceTexture, at `ts_ns`, its timestamp.
-// Timed-release thread. The SurfaceTexture keeps the converted frame (and so
-// one of the converter's buffers) until a newer one replaces it.
+// Timed-release thread. A SurfaceTexture an app samples in its own GL gets
+// the frame as it is, holding the decoder's surface; any other gets it
+// converted to XBGR8888, holding one of the converter's buffers. Either is
+// kept until a newer frame replaces it.
 void show_on_texture(TextureSink& sink,
                      const gfx::DmabufFrame& frame,
                      std::int64_t ts_ns) {
+  // ACL_SURFACETEXTURE_CONVERT: convert for an app's GL too, to try the
+  // path a driver that refuses the decoder's frame takes.
+  static const bool convert =
+      std::getenv("ACL_SURFACETEXTURE_CONVERT") != nullptr;
+  const StSetYuvFrameFn set_yuv = st_set_yuv_frame();
+  const StWantsYuvFn wants_yuv = st_wants_yuv();
+  if (!convert && set_yuv != nullptr && wants_yuv != nullptr &&
+      wants_yuv(sink.st)) {
+    {
+      std::lock_guard<std::mutex> lk(sink.mu);
+      if (!sink.said_yuv) {
+        sink.said_yuv = true;
+        log::i(kTag,
+               "video: frames go to a SurfaceTexture in an app's GL as they "
+               "are (format 0x{:x})",
+               frame.drm_format);
+      }
+    }
+    const AclStYuvFrame y = gfx::st_yuv_frame(frame);
+    // The frame, and with it the decoder's surface, is kept until
+    // graphics_jni lets go of it, which it does on every path.
+    auto* keep = new gfx::DmabufFrame(frame);
+    set_yuv(
+        sink.st, &y, static_cast<jlong>(ts_ns),
+        [](void* p) { delete static_cast<gfx::DmabufFrame*>(p); }, keep);
+    return;
+  }
   StSetFrameFn set = st_set_frame();
   std::lock_guard<std::mutex> lk(sink.mu);
   if (!sink.tried) {

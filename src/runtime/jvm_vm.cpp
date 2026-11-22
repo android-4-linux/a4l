@@ -7505,6 +7505,11 @@ class ArtVm final : public JniVm {
     if (auto set_hooks = reinterpret_cast<void (*)(StGlBindFn, StGlUnbindFn)>(
             ::dlsym(h, "acl_graphics_set_st_gl_hooks")))
       set_hooks(&gfx::st_gl_bind, &gfx::st_gl_unbind);
+    // The same for a decoder's frame as it is (YUV, every plane).
+    if (auto set_yuv =
+            reinterpret_cast<void (*)(void* (*)(int, const AclStYuvFrame*))>(
+                ::dlsym(h, "acl_graphics_set_st_gl_yuv_hook")))
+      set_yuv(&gfx::st_gl_bind_yuv);
 #endif
     // AssetManager.openFd: the host/layoutlib libandroid_runtime stubs
     // nativeOpenAssetFd/ nativeOpenNonAssetFd ("Implement me"). Override them
