@@ -68,6 +68,7 @@
 #include "gfx/egl14_jni.h"  // android.opengl.EGL14 natives (ExoPlayer PlaceholderSurface / video)
 #include "gfx/egl_blit.h"  // ACL_PRESENT_EGL: an EGL window the frame is drawn to
 #include "gfx/gl_egl.h"  // GLSurfaceView: host GL device (EGLImpl get_display)
+#include "gfx/surface_texture_gl.h"  // SurfaceTexture frames in the app's GL
 #endif
 #include "log/log.h"
 #include "ndk/bionic_runtime.h"
@@ -7493,6 +7494,18 @@ class ArtVm final : public JniVm {
            "acl graphics: android.graphics natives registered on Android host "
            "Skia "
            "(Bitmap/Canvas/Paint)");
+#if ACL_HAVE_GL
+    // A SurfaceTexture's frame in the app's own GL (updateTexImage binds it
+    // to the app's external texture): graphics_jni holds the frame, a4l has
+    // the EGL to bind it with.
+    using StGlBindFn =
+        void* (*)(int, int, std::uint32_t, std::uint32_t, std::uint32_t,
+                  std::uint32_t, std::uint32_t, std::uint64_t);
+    using StGlUnbindFn = void (*)(void*);
+    if (auto set_hooks = reinterpret_cast<void (*)(StGlBindFn, StGlUnbindFn)>(
+            ::dlsym(h, "acl_graphics_set_st_gl_hooks")))
+      set_hooks(&gfx::st_gl_bind, &gfx::st_gl_unbind);
+#endif
     // AssetManager.openFd: the host/layoutlib libandroid_runtime stubs
     // nativeOpenAssetFd/ nativeOpenNonAssetFd ("Implement me"). Override them
     // with acl's real impl (same libandroidfw this lib links) so openFd returns
