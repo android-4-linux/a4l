@@ -39,6 +39,8 @@ if have_gl
   # AHardwareBuffer representation + the EGL_NATIVE_BUFFER_ANDROID -> EGL_LINUX_DMA_BUF_EXT
   # translation the engine's texture import needs (M2).
   gfx_sources += files('ahardware_buffer.cpp')
+  # A SurfaceTexture's frame bound to the app's own external texture (updateTexImage).
+  gfx_sources += files('surface_texture_gl.cpp')
   # BufferQueue: the dma-buf pool under acl's real android.media.ImageReader (M3c).
   gfx_sources += files('buffer_queue.cpp')
   gfx_deps += [egl_dep, glesv2_dep, gbm_dep, gl_libdrm_dep, wl_egl_dep]

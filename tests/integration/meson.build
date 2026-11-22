@@ -338,6 +338,18 @@ if py3.found() and have_gl and have_ffmpeg
       depends : [acl_exe],
       timeout : 300,
     )
+    # Video sampled in the app's own GL: a fixture decodes an H.264 clip onto
+    # new Surface(new SurfaceTexture(tex)), calls updateTexImage on each frame and draws the
+    # external texture through getTransformMatrix, then reads the picture back. Needs host ART,
+    # ffmpeg and a render node; SKIPs otherwise, which includes CI.
+    test(
+      'surface-texture-gl',
+      py3,
+      args : [files('run_surface_texture_gl_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+      is_parallel : false,
+    )
     # Video on a TextureView: a fixture app decodes an H.264 clip onto
     # new Surface(surfaceTexture), and the test reads back the frame a4l rendered and checks the
     # picture inside the TextureView, with the frame imported on the GPU and with its pixels

@@ -6597,8 +6597,13 @@ struct AclSurfaceTexture {
   jlong pending_ts = 0;
   int def_w = 0, def_h = 0;  // setDefaultBufferSize
   jlong timestamp = 0;       // ns of the latched frame
-  int tex_name =
-      0;  // GL texture name (nativeInit/attachToGLContext; GL path staged)
+  int tex_name = 0;          // GL texture name (nativeInit/attachToGLContext)
+  // The decoder frame bound to `tex_name` in the app's GL (updateTexImage),
+  // the a4l handle that keeps its EGLImage, and the frame bound before it,
+  // kept one frame longer: GPU work the app issued may still read it. The
+  // app's GL thread, under `mu`.
+  std::shared_ptr<AclStBuffer> gl_buf, gl_prev_buf;
+  void* gl_image = nullptr;
   bool detached = false;  // detachFromGLContext state
   bool released = false;
   jobject weak_self = nullptr;  // global ref to WeakReference<SurfaceTexture>
@@ -6660,6 +6665,81 @@ inline AclSurfaceTexture* stex(jlong h) {
 }
 inline AclTextureLayer* tlayer(jlong h) {
   return reinterpret_cast<AclTextureLayer*>(h);
+}
+
+// a4l's EGL for a decoder frame in the app's own GL
+// (acl_graphics_set_st_gl_hooks).
+using StGlBindFn = void* (*)(int,
+                             int,
+                             uint32_t,
+                             uint32_t,
+                             uint32_t,
+                             uint32_t,
+                             uint32_t,
+                             uint64_t);
+using StGlUnbindFn = void (*)(void*);
+std::atomic<StGlBindFn> g_st_gl_bind{nullptr};
+std::atomic<StGlUnbindFn> g_st_gl_unbind{nullptr};
+
+// Bind the latched decoder frame to the app's external texture, in the GL
+// context current on this thread, unless it is bound already. App's GL
+// thread (updateTexImage, attachToGLContext).
+void st_gl_bind_current(AclSurfaceTexture* st) {
+  const StGlBindFn bind = g_st_gl_bind.load(std::memory_order_acquire);
+  const StGlUnbindFn unbind = g_st_gl_unbind.load(std::memory_order_acquire);
+  if (bind == nullptr || unbind == nullptr)
+    return;
+  std::shared_ptr<AclStBuffer> buf;
+  int tex = 0;
+  {
+    std::lock_guard<std::mutex> lk(st->mu);
+    if (st->detached || st->released || st->tex_name <= 0 || !st->current_buf ||
+        st->current_buf == st->gl_buf)
+      return;
+    buf = st->current_buf;
+    tex = st->tex_name;
+  }
+  void* image = bind(tex, buf->f.fd, buf->f.width, buf->f.height, buf->f.stride,
+                     buf->f.offset, buf->f.drm_format, buf->f.modifier);
+  if (image == nullptr) {
+    static std::atomic<bool> said{false};
+    if (!said.exchange(true))
+      std::fprintf(stderr,
+                   "acl-graphics: a SurfaceTexture frame was not bound to the "
+                   "app's GL texture\n");
+    return;
+  }
+  void* old_image = nullptr;
+  std::shared_ptr<AclStBuffer> old;  // let go of outside the lock
+  {
+    std::lock_guard<std::mutex> lk(st->mu);
+    old_image = st->gl_image;
+    old = std::move(st->gl_prev_buf);
+    st->gl_prev_buf = std::move(st->gl_buf);
+    st->gl_buf = std::move(buf);
+    st->gl_image = image;
+  }
+  if (old_image != nullptr)
+    unbind(old_image);
+}
+
+// Let go of what is bound in the app's GL: the image and both frames. Any
+// thread; the texture keeps its last contents until it is bound again.
+void st_gl_drop(AclSurfaceTexture* st) {
+  void* image = nullptr;
+  std::shared_ptr<AclStBuffer> a, b;  // let go of outside the lock
+  {
+    std::lock_guard<std::mutex> lk(st->mu);
+    image = st->gl_image;
+    st->gl_image = nullptr;
+    a = std::move(st->gl_buf);
+    b = std::move(st->gl_prev_buf);
+  }
+  if (image != nullptr) {
+    if (const StGlUnbindFn unbind =
+            g_st_gl_unbind.load(std::memory_order_acquire))
+      unbind(image);
+  }
 }
 
 // SurfaceTexture.mSurfaceTexture (long) — where nativeInit stashes the
@@ -6938,9 +7018,9 @@ extern "C" void acl_graphics_surfacetexture_set_pixels(jlong st_handle,
 }
 // A decoder's frame for a SurfaceTexture (a MediaCodec configured with
 // new Surface(SurfaceTexture)): an XBGR8888 dma-buf, already cropped to the
-// picture and upright, so the identity transform stays right. It is pending
-// until the consumer latches it (TextureView's layer update, or the app's
-// updateTexImage) and drawn from its dma-buf. `release(release_ctx)` is
+// picture, top row first. It is pending until the consumer latches it
+// (TextureView's layer update, or the app's updateTexImage), then drawn from
+// its dma-buf or bound to the app's external texture. `release(release_ctx)` is
 // called exactly once, when graphics_jni lets go of the frame, whether it
 // was taken or not. `st_handle` may name a SurfaceTexture already finalized;
 // the frame is then dropped. Called from acl runtime via dlsym, on the
@@ -6987,6 +7067,13 @@ extern "C" void acl_graphics_surfacetexture_set_frame(jlong st_handle,
       env->ExceptionClear();
     env->DeleteGlobalRef(weak);
   }
+}
+// a4l's EGL hooks for binding a decoder frame to an app's external texture
+// (updateTexImage). Called once by acl runtime after loading this library.
+extern "C" void acl_graphics_set_st_gl_hooks(StGlBindFn bind,
+                                             StGlUnbindFn unbind) {
+  g_st_gl_unbind.store(unbind, std::memory_order_release);
+  g_st_gl_bind.store(bind, std::memory_order_release);
 }
 // A monotonically increasing count of produced SurfaceTexture frames. The
 // present loop force-records the frame after any TextureView produced, so
@@ -7055,6 +7142,7 @@ void SurfaceTexture_nativeFinalize(JNIEnv* env, jobject thiz) {
     std::lock_guard<std::mutex> live(g_st_live_mu);
     g_st_live.erase(st);
   }  // no frame is sent to it from here on
+  st_gl_drop(st);
   if (st->weak_self != nullptr)
     env->DeleteGlobalRef(st->weak_self);
   delete st;
@@ -7062,15 +7150,22 @@ void SurfaceTexture_nativeFinalize(JNIEnv* env, jobject thiz) {
     env->SetLongField(thiz, g_st_field, 0);
 }
 void SurfaceTexture_nativeGetTransformMatrix(JNIEnv* env,
-                                             jobject,
+                                             jobject thiz,
                                              jfloatArray mtx) {
-  // Identity 4x4 (column-major): acl's SkImage frame is already upright —
-  // unlike a GL BufferQueue, whose OES transform flips Y and crops. Apps
-  // multiply this into their texture coords.
+  // Column-major 4x4s that apps multiply into their texture coordinates. A
+  // decoder frame is bound to the app's external texture top row first and
+  // already cropped, so the matrix is Android's Y flip: texture coordinate
+  // (0, 0), the bottom left in GL, samples the picture's bottom left. A
+  // produced image (a GL producer's readback) is drawn by acl's TextureView
+  // layer, not sampled by the app, and keeps the identity.
   static const float ident[16] = {1, 0, 0, 0, 0, 1, 0, 0,
                                   0, 0, 1, 0, 0, 0, 0, 1};
+  static const float flip[16] = {1, 0, 0, 0, 0, -1, 0, 0,
+                                 0, 0, 1, 0, 0, 1,  0, 1};
+  auto* st = st_from(env, thiz);
+  const bool decoded = st != nullptr && st->snapshot_buf() != nullptr;
   if (mtx != nullptr && env->GetArrayLength(mtx) >= 16)
-    env->SetFloatArrayRegion(mtx, 0, 16, ident);
+    env->SetFloatArrayRegion(mtx, 0, 16, decoded ? flip : ident);
 }
 jlong SurfaceTexture_nativeGetTimestamp(JNIEnv* env, jobject thiz) {
   auto* st = st_from(env, thiz);
@@ -7091,14 +7186,21 @@ void SurfaceTexture_nativeSetDefaultBufferSize(JNIEnv* env,
 }
 void SurfaceTexture_nativeUpdateTexImage(JNIEnv* env, jobject thiz) {
   auto* st = st_from(env, thiz);
-  if (st != nullptr)
-    st->latch();
+  if (st == nullptr)
+    return;
+  st->latch();
+  st_gl_bind_current(st);  // the app's own GL, when it is attached to one
 }
 void SurfaceTexture_nativeReleaseTexImage(JNIEnv*, jobject) {}
 jint SurfaceTexture_nativeDetachFromGLContext(JNIEnv* env, jobject thiz) {
   auto* st = st_from(env, thiz);
-  if (st != nullptr)
-    st->detached = true;
+  if (st != nullptr) {
+    {
+      std::lock_guard<std::mutex> lk(st->mu);
+      st->detached = true;
+    }
+    st_gl_drop(st);
+  }
   return 0;  // NO_ERROR
 }
 jint SurfaceTexture_nativeAttachToGLContext(JNIEnv* env,
@@ -7106,8 +7208,14 @@ jint SurfaceTexture_nativeAttachToGLContext(JNIEnv* env,
                                             jint texName) {
   auto* st = st_from(env, thiz);
   if (st != nullptr) {
-    st->detached = false;
-    st->tex_name = texName;
+    {
+      std::lock_guard<std::mutex> lk(st->mu);
+      st->detached = false;
+      st->tex_name = texName;
+    }
+    // The new context's texture shows the latched frame at once, as on
+    // Android.
+    st_gl_bind_current(st);
   }
   return 0;
 }
@@ -7115,6 +7223,7 @@ void SurfaceTexture_nativeRelease(JNIEnv* env, jobject thiz) {
   auto* st = st_from(env, thiz);
   if (st == nullptr)
     return;
+  st_gl_drop(st);
   std::shared_ptr<AclStBuffer> pending_buf, current_buf;  // let go of after
   std::lock_guard<std::mutex> lk(st->mu);
   st->released = true;
