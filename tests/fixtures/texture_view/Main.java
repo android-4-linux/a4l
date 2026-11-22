@@ -3,10 +3,10 @@
 // mode, android.view.TextureView, android.graphics.SurfaceTexture, Surface(SurfaceTexture)). No
 // GPL-3.0 sources.
 //
-// A video on a TextureView, the way a player app shows one there: a MediaCodec decodes an H.264
-// stream onto new Surface(surfaceTexture), and the TextureView draws each frame inside the
-// window. The stream is assets/clip.h264, Annex B with an access unit delimiter before every
-// frame, played LOOPS times; the process then exits so a test can read the totals and the last
+// A video on a TextureView, the way a player app shows one there: a MediaCodec decodes a stream
+// onto new Surface(surfaceTexture), and the TextureView draws each frame inside the window. The
+// stream is assets/clip, H.264 or HEVC (the MIME type in assets/mime; H.264 without it), Annex B
+// with an access unit delimiter before every frame, played LOOPS times; the process then exits so a test can read the totals and the last
 // frame a4l rendered. Each frame is released at the time it is due, with that time, as a player
 // does.
 package com.acl.textureview;
@@ -74,8 +74,22 @@ public class Main extends Activity {
         setContentView(root);
     }
 
-    // The offsets at which access units start: every access unit delimiter (NAL type 9).
-    static ArrayList<Integer> accessUnits(byte[] d) {
+    // The stream's MIME type: assets/mime, or H.264 where there is none.
+    String mime() {
+        try {
+            InputStream m = getAssets().open("mime");
+            byte[] b = new byte[64];
+            int n = m.read(b);
+            m.close();
+            return n > 0 ? new String(b, 0, n, "US-ASCII").trim() : "video/avc";
+        } catch (java.io.IOException e) {
+            return "video/avc";
+        }
+    }
+
+    // The offsets at which access units start: every access unit delimiter (H.264 NAL type 9,
+    // HEVC NAL type 35).
+    static ArrayList<Integer> accessUnits(byte[] d, boolean hevc) {
         ArrayList<Integer> at = new ArrayList<>();
         for (int i = 0; i + 3 < d.length; i++) {
             if (d[i] != 0 || d[i + 1] != 0) continue;
@@ -83,26 +97,28 @@ public class Main extends Activity {
             if (d[i + 2] == 1) nal = i + 3;
             else if (d[i + 2] == 0 && i + 4 < d.length && d[i + 3] == 1) nal = i + 4;
             else continue;
-            if ((d[nal] & 0x1f) == 9) at.add(i);
+            int type = hevc ? (d[nal] >> 1) & 0x3f : d[nal] & 0x1f;
+            if (type == (hevc ? 35 : 9)) at.add(i);
             i = nal;
         }
         return at;
     }
 
     private void play(Surface surface) throws Exception {
-        InputStream is = getAssets().open("clip.h264");
+        InputStream is = getAssets().open("clip");
         ByteArrayOutputStream bo = new ByteArrayOutputStream();
         byte[] t = new byte[8192];
         int n;
         while ((n = is.read(t)) > 0) bo.write(t, 0, n);
         is.close();
         final byte[] data = bo.toByteArray();
-        final ArrayList<Integer> au = accessUnits(data);
+        final String mime = mime();
+        final ArrayList<Integer> au = accessUnits(data, mime.equals("video/hevc"));
         final int total = au.size() * LOOPS;
         Log.i(TAG, "TEXTURE: " + au.size() + " access unit(s), playing " + total);
-        if (au.isEmpty()) throw new IllegalStateException("no access units in clip.h264");
+        if (au.isEmpty()) throw new IllegalStateException("no access units in the clip");
 
-        MediaFormat f = MediaFormat.createVideoFormat("video/avc", W, H);
+        MediaFormat f = MediaFormat.createVideoFormat(mime, W, H);
         String name = new MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(f);
         final MediaCodec c = MediaCodec.createByCodecName(name);
         final HandlerThread ht = new HandlerThread("video-cb");

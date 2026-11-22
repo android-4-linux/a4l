@@ -350,6 +350,17 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 300,
       is_parallel : false,
     )
+    # The same with an HEVC Main 10 clip: the decoder's 10-bit frames (P010, or P030 on a Pi 5)
+    # bound to the app's texture as they are.
+    test(
+      'surface-texture-gl-hevc10',
+      py3,
+      args : [files('run_surface_texture_gl_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      env : ['ACL_TEST_VIDEO_CODEC=hevc10'],
+      timeout : 300,
+      is_parallel : false,
+    )
     # Video on a TextureView: a fixture app decodes an H.264 clip onto
     # new Surface(surfaceTexture), and the test reads back the frame a4l rendered and checks the
     # picture inside the TextureView, with the frame imported on the GPU and with its pixels
@@ -360,6 +371,16 @@ if py3.found() and have_gl and have_ffmpeg
       py3,
       args : [files('run_texture_view_test.py'), acl_exe, framework_android_jar],
       depends : [acl_exe],
+      timeout : 300,
+      is_parallel : false,
+    )
+    # The same with an HEVC Main 10 clip, converted from the decoder's 10-bit frames.
+    test(
+      'texture-view-video-hevc10',
+      py3,
+      args : [files('run_texture_view_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      env : ['ACL_TEST_VIDEO_CODEC=hevc10'],
       timeout : 300,
       is_parallel : false,
     )
