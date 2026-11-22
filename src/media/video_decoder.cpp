@@ -317,27 +317,90 @@ bool is_sw_frame(const AVFrame* f) {
   return f->format != AV_PIX_FMT_DRM_PRIME && f->hw_frames_ctx == nullptr;
 }
 
+// How a software frame's samples are laid out, for the copy.
+enum class Chroma { k420, k422, k444 };
+struct SwLayout {
+  bool ok = false;
+  bool deep = false;   // 16 bits a sample: copied into P010
+  bool nv = false;     // Cb,Cr interleaved in plane 1 (NV12, P010)
+  unsigned shift = 0;  // how far a sample is below the top of its 16 bits
+  Chroma chroma = Chroma::k420;
+};
+
+// The layouts a software decoder gives: planar 4:2:0, 4:2:2 and 4:4:4, 8 to
+// 16 bits (more than 8 kept in the low bits of each 16), and NV12 and P010.
+SwLayout sw_layout(int format) {
+  const auto planar = [](unsigned bits, Chroma c) {
+    return SwLayout{true, bits > 8, false, bits > 8 ? 16 - bits : 0, c};
+  };
+  switch (format) {
+    case AV_PIX_FMT_NV12:
+      return {true, false, true, 0, Chroma::k420};
+    case AV_PIX_FMT_P010LE:
+      return {true, true, true, 0, Chroma::k420};
+    case AV_PIX_FMT_YUV420P:
+    case AV_PIX_FMT_YUVJ420P:
+      return planar(8, Chroma::k420);
+    case AV_PIX_FMT_YUV420P9LE:
+      return planar(9, Chroma::k420);
+    case AV_PIX_FMT_YUV420P10LE:
+      return planar(10, Chroma::k420);
+    case AV_PIX_FMT_YUV420P12LE:
+      return planar(12, Chroma::k420);
+    case AV_PIX_FMT_YUV420P14LE:
+      return planar(14, Chroma::k420);
+    case AV_PIX_FMT_YUV420P16LE:
+      return planar(16, Chroma::k420);
+    case AV_PIX_FMT_YUV422P:
+    case AV_PIX_FMT_YUVJ422P:
+      return planar(8, Chroma::k422);
+    case AV_PIX_FMT_YUV422P9LE:
+      return planar(9, Chroma::k422);
+    case AV_PIX_FMT_YUV422P10LE:
+      return planar(10, Chroma::k422);
+    case AV_PIX_FMT_YUV422P12LE:
+      return planar(12, Chroma::k422);
+    case AV_PIX_FMT_YUV422P14LE:
+      return planar(14, Chroma::k422);
+    case AV_PIX_FMT_YUV422P16LE:
+      return planar(16, Chroma::k422);
+    case AV_PIX_FMT_YUV444P:
+    case AV_PIX_FMT_YUVJ444P:
+      return planar(8, Chroma::k444);
+    case AV_PIX_FMT_YUV444P9LE:
+      return planar(9, Chroma::k444);
+    case AV_PIX_FMT_YUV444P10LE:
+      return planar(10, Chroma::k444);
+    case AV_PIX_FMT_YUV444P12LE:
+      return planar(12, Chroma::k444);
+    case AV_PIX_FMT_YUV444P14LE:
+      return planar(14, Chroma::k444);
+    case AV_PIX_FMT_YUV444P16LE:
+      return planar(16, Chroma::k444);
+    default:
+      return {};
+  }
+}
+
 // Copies a system-memory frame into a dma-buf from *pool (made on first use,
 // and again when the picture's size or depth changes), so it goes down the
-// same path as a hardware surface at the cost of one copy. 4:2:0 only: 8-bit
-// into NV12, 10-bit into P010.
+// same path as a hardware surface at the cost of one copy: 8 bits into NV12,
+// more into P010, with the sample at the top of its 16 bits. 4:2:2 and 4:4:4
+// are made 4:2:0 on the way.
 bool sw_to_dmabuf(const AVFrame* f,
                   std::shared_ptr<gfx::SwFramePool>* pool,
                   gfx::DmabufFrame* out,
                   std::string* error) {
-  const bool planar8 =
-      f->format == AV_PIX_FMT_YUV420P || f->format == AV_PIX_FMT_YUVJ420P;
-  const bool planar10 = f->format == AV_PIX_FMT_YUV420P10LE;
-  const bool deep = planar10 || f->format == AV_PIX_FMT_P010LE;
-  const bool planar = planar8 || planar10;
-  if (!planar && !deep && f->format != AV_PIX_FMT_NV12) {
+  const SwLayout l = sw_layout(f->format);
+  if (!l.ok) {
     if (error)
-      *error = "software frame is not 8-bit or 10-bit 4:2:0 (pixel format " +
-               std::to_string(f->format) + ")";
+      *error =
+          "software frame is not YUV 4:2:0, 4:2:2 or 4:4:4 (pixel format " +
+          std::to_string(f->format) + ")";
     return false;
   }
   if (f->width <= 0 || f->height <= 0 || f->data[0] == nullptr ||
-      f->data[1] == nullptr || (planar && f->data[2] == nullptr) ||
+      f->data[1] == nullptr || (!l.nv && f->data[2] == nullptr) ||
       f->linesize[0] < f->width) {
     if (error)
       *error = "malformed software frame";
@@ -346,22 +409,24 @@ bool sw_to_dmabuf(const AVFrame* f,
   const auto w = static_cast<std::uint32_t>(f->width);
   const auto h = static_cast<std::uint32_t>(f->height);
   if (*pool == nullptr || (*pool)->width() != w || (*pool)->height() != h ||
-      (*pool)->deep() != deep) {
-    *pool = gfx::SwFramePool::create(w, h, error, deep);
+      (*pool)->deep() != l.deep) {
+    *pool = gfx::SwFramePool::create(w, h, error, l.deep);
     if (*pool == nullptr)
       return false;
-    log::i(kTag, "software frames {}x{}: copied to {} dma-bufs", w, h,
-           deep ? "P010" : "NV12");
+    log::i(kTag, "software frames {}x{}: copied to {} dma-bufs{}", w, h,
+           l.deep ? "P010" : "NV12",
+           l.chroma == Chroma::k420 ? "" : ", chroma made 4:2:0");
   }
   const std::uint8_t* const planes[3] = {f->data[0], f->data[1],
-                                         planar ? f->data[2] : nullptr};
+                                         l.nv ? nullptr : f->data[2]};
   const int strides[3] = {f->linesize[0], f->linesize[1],
-                          planar ? f->linesize[2] : 0};
-  // A software decoder keeps 10 bits in the low end of each 16; P010 has
-  // them at the top.
-  return deep ? (*pool)->write_420_16(planes, strides, !planar,
-                                      planar10 ? 6 : 0, out, error)
-              : (*pool)->write_420(planes, strides, !planar, out, error);
+                          l.nv ? 0 : f->linesize[2]};
+  if (l.chroma != Chroma::k420)
+    return (*pool)->write_down_420(planes, strides, l.chroma == Chroma::k444,
+                                   l.shift, out, error);
+  return l.deep
+             ? (*pool)->write_420_16(planes, strides, l.nv, l.shift, out, error)
+             : (*pool)->write_420(planes, strides, l.nv, out, error);
 }
 
 // What the stream said of its matrix and range, onto the frame made of `f`.
@@ -902,6 +967,22 @@ bool CodecDecoder::start(const std::string& mime,
     std::uint32_t depth = DmaCodec::bit_depth(mime, csd, csd_size);
     if (depth == 0)
       depth = DmaCodec::bit_depth(mime, first, first_size);
+    // HEVC past 10-bit 4:2:0 likewise: the V4L2 and OpenMAX engines do not
+    // decode it, and say so only at the first access unit (rpi-hevc-dec:
+    // "only 8/10-bit 4:2:0 configured"), by when no other engine is tried.
+    // VA, the last engine, decodes 8- and 10-bit 4:2:2 and 4:4:4 where the
+    // GPU has the profile; it is passed over with them, and the stream goes
+    // to GStreamer or FFmpeg.
+    if (mime == "video/hevc") {
+      int chroma = DmaCodec::chroma_format(mime, csd, csd_size);
+      if (chroma < 0)
+        chroma = DmaCodec::chroma_format(mime, first, first_size);
+      if (depth > 10 || (chroma >= 0 && chroma != 1)) {
+        if (why)
+          *why = "no dmabuf-codec engine for HEVC past 10-bit 4:2:0";
+        return false;
+      }
+    }
     d->engine =
         DmaCodec::configure(mime, csd, csd_size, width, height, why, depth);
     return d->engine != nullptr;

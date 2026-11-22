@@ -105,6 +105,83 @@ void interleave_row8(std::uint8_t* dst,
   }
 }
 
+// `n` samples of a row from sample `first`: bytes, or 16-bit little-endian.
+template <typename T>
+void load(T* dst,
+          const std::uint8_t* row,
+          std::uint32_t first,
+          std::uint32_t n) {
+  std::memcpy(dst, row + sizeof(T) * first, sizeof(T) * n);
+  if constexpr (sizeof(T) == 2)
+    for (std::uint32_t i = 0; i < n; ++i)
+      dst[i] = le16(dst[i]);
+}
+
+// `n` Cb,Cr pairs into `dst`, 4:2:0 chroma made from rows u[0], u[1] of Cb
+// and v[0], v[1] of Cr, 4:2:2 or (kFullX) 4:4:4; `last` is the index of a
+// row's last sample. Each is the rounded mean of the two rows, and across a
+// 4:4:4 row [1 2 1] at every second sample, where 4:2:0 puts it; then moved
+// up by `shift` bits. A chunk at a time: the two rows' samples into arrays,
+// the sums there, where the loops vectorize.
+template <typename T, bool kFullX>
+void down_row(std::uint8_t* dst,
+              const std::uint8_t* const u[2],
+              const std::uint8_t* const v[2],
+              std::uint32_t n,
+              std::uint32_t last,
+              unsigned shift) {
+  // In 4:4:4, a[j] is sample 2 * at - 1 + j of the row: the one left of the
+  // chunk's first, then two for each output sample.
+  constexpr std::uint32_t kSpan = kFullX ? 2 * kChunk + 1 : kChunk;
+  T a[kSpan], b[kSpan];
+  std::uint32_t c[2][kChunk];
+  T pairs[2 * kChunk];
+  for (std::uint32_t at = 0; at < n; at += kChunk) {
+    const std::uint32_t k = std::min(kChunk, n - at);
+    for (int p = 0; p < 2; ++p) {
+      const std::uint8_t* const* rows = p == 0 ? u : v;
+      std::uint32_t* out = c[p];
+      if constexpr (kFullX) {
+        // 2 * at <= last: `at` is a 4:2:0 sample of the row.
+        const std::uint32_t have = std::min(2 * k, last + 1 - 2 * at);
+        load(a + 1, rows[0], 2 * at, have);
+        load(b + 1, rows[1], 2 * at, have);
+        for (std::uint32_t j = have + 1; j <= 2 * k; ++j) {
+          a[j] = a[have];
+          b[j] = b[have];
+        }
+        if (at > 0) {
+          load(a, rows[0], 2 * at - 1, 1);
+          load(b, rows[1], 2 * at - 1, 1);
+        } else {
+          a[0] = a[1];
+          b[0] = b[1];
+        }
+        for (std::uint32_t i = 0; i < k; ++i) {
+          const std::uint32_t s =
+              std::uint32_t{a[2 * i]} + b[2 * i] +
+              2 * (std::uint32_t{a[2 * i + 1]} + b[2 * i + 1]) + a[2 * i + 2] +
+              b[2 * i + 2];
+          out[i] = (s + 4) >> 3;
+        }
+      } else {
+        load(a, rows[0], at, k);
+        load(b, rows[1], at, k);
+        for (std::uint32_t i = 0; i < k; ++i)
+          out[i] = (std::uint32_t{a[i]} + b[i] + 1) >> 1;
+      }
+    }
+    for (std::uint32_t i = 0; i < k; ++i) {
+      pairs[2 * i] = static_cast<T>(c[0][i] << shift);
+      pairs[2 * i + 1] = static_cast<T>(c[1][i] << shift);
+    }
+    if constexpr (sizeof(T) == 2)
+      for (std::uint32_t i = 0; i < 2 * k; ++i)
+        pairs[i] = le16(pairs[i]);
+    std::memcpy(dst + 2 * sizeof(T) * at, pairs, 2 * sizeof(T) * k);
+  }
+}
+
 // Brackets CPU access to a mapped dma-buf, which is what makes the exporter
 // flush caches for the device that reads the buffer next.
 void dmabuf_sync(int fd, std::uint64_t flags) {
@@ -406,6 +483,61 @@ bool SwFramePool::write_420_16(const std::uint8_t* const planes[3],
           interleave_row(
               dst, u, planes[2] + static_cast<std::ptrdiff_t>(y) * strides[2],
               cw, shift);
+        }
+      },
+      out, error);
+}
+
+bool SwFramePool::write_down_420(const std::uint8_t* const planes[3],
+                                 const int strides[3],
+                                 bool full_x,
+                                 unsigned shift,
+                                 DmabufFrame* out,
+                                 std::string* error) {
+  const std::uint32_t w = width_;
+  const std::uint32_t h = height_;
+  const std::uint32_t cw = (w + 1) / 2;      // 4:2:0 chroma samples per row
+  const std::uint32_t ch = (h + 1) / 2;      // 4:2:0 chroma rows
+  const std::uint32_t sw = full_x ? w : cw;  // the picture's chroma per row
+  const std::int64_t bytes = deep_ ? 2 : 1;
+  const bool ok = (deep_ ? shift <= 8 : shift == 0) && planes[0] != nullptr &&
+                  planes[1] != nullptr && planes[2] != nullptr &&
+                  strides[0] >= bytes * w && strides[1] >= bytes * sw &&
+                  strides[2] >= bytes * sw;
+  if (!ok) {
+    if (error)
+      *error = "malformed software frame";
+    return false;
+  }
+  using Row = void (*)(std::uint8_t*, const std::uint8_t* const[2],
+                       const std::uint8_t* const[2], std::uint32_t,
+                       std::uint32_t, unsigned);
+  const Row row = deep_ ? (full_x ? down_row<std::uint16_t, true>
+                                  : down_row<std::uint16_t, false>)
+                        : (full_x ? down_row<std::uint8_t, true>
+                                  : down_row<std::uint8_t, false>);
+  return write(
+      [&](const Mapped& m) {
+        for (std::uint32_t y = 0; y < h; ++y) {
+          std::uint8_t* dst = m.y + static_cast<std::size_t>(y) * m.y_stride;
+          const std::uint8_t* src =
+              planes[0] + static_cast<std::ptrdiff_t>(y) * strides[0];
+          if (deep_)
+            shift_row(dst, src, w, shift);
+          else
+            std::memcpy(dst, src, w);
+        }
+        for (std::uint32_t y = 0; y < ch; ++y) {
+          // The two rows this one sits between; an odd height's last row
+          // stands alone.
+          const std::ptrdiff_t r0 = 2 * static_cast<std::ptrdiff_t>(y);
+          const std::ptrdiff_t r1 = std::min<std::ptrdiff_t>(r0 + 1, h - 1);
+          const std::uint8_t* const u[2] = {planes[1] + r0 * strides[1],
+                                            planes[1] + r1 * strides[1]};
+          const std::uint8_t* const v[2] = {planes[2] + r0 * strides[2],
+                                            planes[2] + r1 * strides[2]};
+          row(m.uv + static_cast<std::size_t>(y) * m.uv_stride, u, v, cw,
+              sw - 1, shift);
         }
       },
       out, error);

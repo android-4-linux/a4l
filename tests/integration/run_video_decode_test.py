@@ -20,6 +20,10 @@
 # driver takes its own (Mesa: BT.601 narrow) and both come out wrong. Each engine has to
 # find out what the stream says; GStreamer's h264parse gives no range for H.264.
 #
+# With "chroma" as the second argument the clips are 12-bit, 4:2:2 and 4:4:4, HEVC and
+# H.264, for a software decoder: each frame is copied into NV12 or P010, its chroma made
+# 4:2:0 on the way, and every quadrant must read back right through the converter.
+#
 # The file decoder is always FFmpeg's. The packet runs go through the engine
 # ACL_VIDEO_BACKEND names (dma, gst, ffmpeg), or the one a4l picks.
 import os
@@ -34,9 +38,9 @@ SKIP = 77
 
 def main() -> int:
     mode = sys.argv[2] if len(sys.argv) == 3 else ""
-    if len(sys.argv) not in (2, 3) or mode not in ("", "10bit", "said"):
+    if len(sys.argv) not in (2, 3) or mode not in ("", "10bit", "said", "chroma"):
         sys.stderr.write("usage: run_video_decode_test.py <acl-video-decode-probe> "
-                         "[10bit|said]\n")
+                         "[10bit|said|chroma]\n")
         return 2
     ten = mode == "10bit"
     probe = sys.argv[1]
@@ -44,7 +48,8 @@ def main() -> int:
     x265 = ["-c:v", "libx265", "-x265-params", "log-level=error", "-tag:v", "hvc1"]
     h264 = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "main"]
     codec = (x265 + ["-pix_fmt", "yuv420p10le"] if ten else
-             x265 + ["-pix_fmt", "yuv420p"] if mode == "said" else h264)
+             x265 + ["-pix_fmt", "yuv420p"] if mode == "said" else
+             x265 + ["-pix_fmt", "yuv444p12le"] if mode == "chroma" else h264)
     # The four-color clips: a name, how the RGB is made YUV (empty: the encoder's own
     # way), what the stream says of it, and the encoder.
     said = [("BT.709 narrow", "scale=out_color_matrix=bt709:out_range=tv",
@@ -52,10 +57,20 @@ def main() -> int:
               "-color_range", "tv"]),
             ("BT.601 full", "scale=out_color_matrix=bt601:out_range=pc",
              ["-colorspace", "smpte170m", "-color_range", "pc"])]
-    quads = ([(f"{name}, {kind}", made, says, enc)
+    # The chroma clips: a name, the encoder, and whether the frame is P010.
+    x264 = ["-c:v", "libx264"]
+    chroma = [("HEVC 4:2:0 12-bit", x265 + ["-pix_fmt", "yuv420p12le"], True),
+              ("HEVC 4:2:2 10-bit", x265 + ["-pix_fmt", "yuv422p10le"], True),
+              ("HEVC 4:4:4 8-bit", x265 + ["-pix_fmt", "yuv444p"], False),
+              ("HEVC 4:4:4 12-bit", x265 + ["-pix_fmt", "yuv444p12le"], True),
+              ("H.264 4:2:2 8-bit", x264 + ["-pix_fmt", "yuv422p"], False),
+              ("H.264 4:4:4 10-bit", x264 + ["-pix_fmt", "yuv444p10le"], True)]
+    quads = ([(f"{name}, {kind}", made, says, enc, False)
               for kind, enc in (("HEVC", codec), ("H.264", h264))
               for name, made, says in said]
-             if mode == "said" else [("", "", [], codec)])
+             if mode == "said" else
+             [(name, "", [], enc, deep) for name, enc, deep in chroma]
+             if mode == "chroma" else [("", "", [], codec, ten)])
     if not os.access(probe, os.X_OK):
         sys.stdout.write("SKIP: probe not built\n")
         return SKIP
@@ -96,7 +111,7 @@ def main() -> int:
         # mirrored picture and a wrong color matrix both show.
         colors = {"tl": (0xC0, 0x20, 0x20), "tr": (0x20, 0x20, 0xC0),
                   "bl": (0x20, 0xC0, 0x20), "br": (0xE0, 0xE0, 0xE0)}
-        for qname, made, says, enc in quads:
+        for qname, made, says, enc, deep_want in quads:
             quad = os.path.join(work, "quad.mp4")
             inputs = []
             for name in ("tl", "tr", "bl", "br"):
@@ -133,8 +148,8 @@ def main() -> int:
                     return 1
                 # P010, or P030 in Broadcom's columns (a Pi 5's HEVC decoder).
                 deep = r"fourcc=(0x30313050 |0x30333050 .*mod=0x700000000000004 )"
-                if ten and not re.search(deep, p.stdout):
-                    sys.stderr.write("FAIL: the 10-bit frame was not decoded as P010 or P030\n"
+                if deep_want and not re.search(deep, p.stdout):
+                    sys.stderr.write("FAIL: the deep frame was not decoded as P010 or P030\n"
                                      + out)
                     return 1
                 for name, want in colors.items():

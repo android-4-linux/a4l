@@ -63,6 +63,11 @@ class DmaCodec final : public CodecEngine {
   static std::uint32_t bit_depth(const std::string& mime,
                                  const std::uint8_t* annexb,
                                  std::size_t size);
+  // The chroma_format_idc of that parameter set (0 4:0:0, 1 4:2:0, 2 4:2:2,
+  // 3 4:4:4), and -1 where there is none.
+  static int chroma_format(const std::string& mime,
+                           const std::uint8_t* annexb,
+                           std::size_t size);
   // The same over decoders from `factory`, for tests.
   static std::unique_ptr<DmaCodec> with_factory(Factory factory,
                                                 const std::uint8_t* csd,

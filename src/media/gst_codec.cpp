@@ -386,6 +386,37 @@ bool hevc_deep(const std::uint8_t* csd, std::size_t size) {
 #endif
 }
 
+// GStreamer's name for the HEVC range-extension profile that a stream's SPS
+// needs (its chroma_format_idc and bit depth, as codec-utils names them), and
+// nullptr for one within Main 10 or one not known, where the caps are left as
+// they were.
+const char* hevc_profile_past_main10(const std::uint8_t* data,
+                                     std::size_t size) {
+#if ACL_HAVE_DMABUF_CODEC
+  const int chroma = DmaCodec::chroma_format("video/hevc", data, size);
+  const std::uint32_t depth = DmaCodec::bit_depth("video/hevc", data, size);
+  switch (chroma) {
+    case 1:
+      return depth > 10 && depth <= 12 ? "main-12" : nullptr;
+    case 2:
+      return depth <= 10   ? "main-422-10"
+             : depth <= 12 ? "main-422-12"
+                           : nullptr;
+    case 3:
+      return depth <= 8    ? "main-444"
+             : depth <= 10 ? "main-444-10"
+             : depth <= 12 ? "main-444-12"
+                           : nullptr;
+    default:
+      return nullptr;
+  }
+#else
+  (void)data;
+  (void)size;
+  return nullptr;
+#endif
+}
+
 // GStreamer's name for an H.264 profile beyond 8-bit 4:2:0 (as its
 // codec-utils names them), and nullptr for one within it, where the caps are
 // left as they were.
@@ -405,6 +436,54 @@ const char* h264_profile_past_8bit_420(const H264Format& f) {
   }
 }
 
+// The raw formats a frame is copied from (receive_frame): planar YUV 4:2:0,
+// 4:2:2 and 4:4:4 of 8, 10 and 12 bits, and NV12 and P010.
+#define ACL_GST_COPY_FORMATS                                           \
+  "{NV12,I420,P010_10LE,I420_10LE,I420_12LE,Y42B,I422_10LE,I422_12LE," \
+  "Y444,Y444_10LE,Y444_12LE}"
+
+// How one of those lays out its samples, for the copy.
+enum class Chroma { k420, k422, k444 };
+struct SwLayout {
+  bool ok = false;
+  bool deep = false;   // 16 bits a sample: copied into P010
+  bool nv = false;     // Cb,Cr interleaved in plane 1 (NV12, P010)
+  unsigned shift = 0;  // how far a sample is below the top of its 16 bits
+  Chroma chroma = Chroma::k420;
+};
+
+SwLayout sw_layout(GstVideoFormat fmt) {
+  const auto planar = [](unsigned bits, Chroma c) {
+    return SwLayout{true, bits > 8, false, bits > 8 ? 16 - bits : 0, c};
+  };
+  switch (fmt) {
+    case GST_VIDEO_FORMAT_NV12:
+      return {true, false, true, 0, Chroma::k420};
+    case GST_VIDEO_FORMAT_P010_10LE:
+      return {true, true, true, 0, Chroma::k420};
+    case GST_VIDEO_FORMAT_I420:
+      return planar(8, Chroma::k420);
+    case GST_VIDEO_FORMAT_I420_10LE:
+      return planar(10, Chroma::k420);
+    case GST_VIDEO_FORMAT_I420_12LE:
+      return planar(12, Chroma::k420);
+    case GST_VIDEO_FORMAT_Y42B:
+      return planar(8, Chroma::k422);
+    case GST_VIDEO_FORMAT_I422_10LE:
+      return planar(10, Chroma::k422);
+    case GST_VIDEO_FORMAT_I422_12LE:
+      return planar(12, Chroma::k422);
+    case GST_VIDEO_FORMAT_Y444:
+      return planar(8, Chroma::k444);
+    case GST_VIDEO_FORMAT_Y444_10LE:
+      return planar(10, Chroma::k444);
+    case GST_VIDEO_FORMAT_Y444_12LE:
+      return planar(12, Chroma::k444);
+    default:
+      return {};
+  }
+}
+
 // Whether a decoder's output can be a picture deeper than 8 bits in a form
 // taken here: P010 or planar 16-bit, or a dma-buf with its DRM format named.
 // Qualcomm's omxh265dec cannot (NV12, or its compressed tiles), and with a
@@ -412,7 +491,8 @@ const char* h264_profile_past_8bit_420(const H264Format& f) {
 // library"); a decoder further down the list is wanted instead.
 bool gives_deep(GstElementFactory* f) {
   GstCaps* deep = gst_caps_from_string(
-      "video/x-raw,format=(string){P010_10LE,I420_10LE}; "
+      "video/x-raw,format=(string){P010_10LE,I420_10LE,I420_12LE,I422_10LE,"
+      "I422_12LE,Y444_10LE,Y444_12LE}; "
       "video/x-raw(memory:DMABuf),format=(string)DMA_DRM");
   bool yes = false;
   for (const GList* l = gst_element_factory_get_static_pad_templates(f);
@@ -428,14 +508,43 @@ bool gives_deep(GstElementFactory* f) {
   return yes;
 }
 
+bool is_hardware(GstElementFactory* f) {
+  const char* klass =
+      gst_element_factory_get_metadata(f, GST_ELEMENT_METADATA_KLASS);
+  return klass != nullptr && std::strstr(klass, "Hardware") != nullptr;
+}
+
+// Whether a factory's sink caps name the profiles it takes.
+bool names_profiles(GstElementFactory* f) {
+  bool yes = false;
+  for (const GList* l = gst_element_factory_get_static_pad_templates(f);
+       l != nullptr && !yes; l = l->next) {
+    auto* t = static_cast<GstStaticPadTemplate*>(l->data);
+    if (t->direction != GST_PAD_SINK)
+      continue;
+    GstCaps* c = gst_static_pad_template_get_caps(t);
+    for (guint i = 0; i < gst_caps_get_size(c) && !yes; ++i)
+      yes = gst_structure_has_field(gst_caps_get_structure(c, i), "profile");
+    gst_caps_unref(c);
+  }
+  return yes;
+}
+
 // The highest-ranked installed element of `type` that takes `caps`, as an
 // autoplugger would choose, and for a `deep` stream one that gives_deep().
-// nullptr if there is none. *name gets its factory name, with "(hardware)"
-// when it says it is one.
+// Where `caps` name a profile (one past Main 10 or 8-bit 4:2:0), a hardware
+// decoder that does not say which profiles it takes is passed over:
+// GStreamer's V4L2 stateless HEVC decoder takes a 4:4:4 stream and fails at
+// the first frame ("Driver does not support the selected stream"). nullptr
+// if there is none. *name gets its factory name, with "(hardware)" when it
+// says it is one.
 GstElement* pick(GstElementFactoryListType type,
                  const GstCaps* caps,
                  std::string* name,
                  bool deep = false) {
+  const bool profiled =
+      gst_caps_get_size(caps) > 0 &&
+      gst_structure_has_field(gst_caps_get_structure(caps, 0), "profile");
   GList* all = gst_element_factory_list_get_elements(type, GST_RANK_MARGINAL);
   GList* fit = gst_element_factory_list_filter(all, caps, GST_PAD_SINK, FALSE);
   GstElement* e = nullptr;
@@ -446,12 +555,15 @@ GstElement* pick(GstElementFactoryListType type,
              GST_OBJECT_NAME(f));
       continue;
     }
+    if (profiled && is_hardware(f) && !names_profiles(f)) {
+      log::i(kTag, "{} passed over: it does not say it takes the profile",
+             GST_OBJECT_NAME(f));
+      continue;
+    }
     e = gst_element_factory_create(f, nullptr);
     if (e != nullptr && name != nullptr) {
       *name = GST_OBJECT_NAME(f);
-      const char* klass =
-          gst_element_factory_get_metadata(f, GST_ELEMENT_METADATA_KLASS);
-      if (klass != nullptr && std::strstr(klass, "Hardware") != nullptr)
+      if (is_hardware(f))
         *name += " (hardware)";
     }
   }
@@ -662,6 +774,11 @@ std::unique_ptr<GstCodec> GstCodec::configure(const std::string& mime,
   GstCaps* dec_caps = gst_caps_copy(caps);
   if (mime == "video/hevc") {
     deep = hevc_deep(csd, csd_size) || hevc_deep(first, first_size);
+    const char* profile = hevc_profile_past_main10(csd, csd_size);
+    if (profile == nullptr)
+      profile = hevc_profile_past_main10(first, first_size);
+    if (profile != nullptr)
+      gst_caps_set_simple(dec_caps, "profile", G_TYPE_STRING, profile, nullptr);
   } else if (mime == "video/avc") {
     H264Format f;
     if (h264_format(csd, csd_size, &f) || h264_format(first, first_size, &f)) {
@@ -701,19 +818,19 @@ std::unique_ptr<GstCodec> GstCodec::configure(const std::string& mime,
   g_object_set(d->src, "caps", caps, "format", GST_FORMAT_TIME, "block", FALSE,
                "max-bytes", static_cast<guint64>(0), nullptr);
   gst_caps_unref(caps);
-  // NV12 or I420 in whatever memory the decoder has: a dma-buf is passed on
-  // as it is and anything else is copied. Ahead of those, where GStreamer can
+  // NV12 or a format the copy takes (ACL_GST_COPY_FORMATS), in whatever
+  // memory the decoder has: an NV12 dma-buf is passed on as it is and
+  // anything else is copied. Ahead of those, where GStreamer can
   // say it (1.24), the decoder's own surface with its DRM format and
   // modifier: a decoder whose surfaces are tiled (VA on most GPUs) has no
   // linear dma-buf to give and would otherwise copy every frame out itself.
   // The compositor is asked about the modifier where the frame is shown.
-  const char* out_caps =
-      "video/x-raw,format=(string){NV12,I420,P010_10LE,I420_10LE}";
+  const char* out_caps = "video/x-raw,format=(string)" ACL_GST_COPY_FORMATS;
 #if GST_CHECK_VERSION(1, 24, 0)
   if (!copy_always())
     out_caps =
         "video/x-raw(memory:DMABuf),format=(string)DMA_DRM; "
-        "video/x-raw,format=(string){NV12,I420,P010_10LE,I420_10LE}";
+        "video/x-raw,format=(string)" ACL_GST_COPY_FORMATS;
 #endif
   if (GstPad* pad = gst_element_get_static_pad(d->sink, "sink")) {
     gst_pad_add_probe(
@@ -870,11 +987,10 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
   if (!gst_video_info_from_caps(&info, caps))
     return err("GStreamer: sample without video caps");
   const GstVideoFormat fmt = GST_VIDEO_INFO_FORMAT(&info);
-  // 10 bits: P010 as it is, or planar with the bits at the low end.
-  const bool deep =
-      fmt == GST_VIDEO_FORMAT_P010_10LE || fmt == GST_VIDEO_FORMAT_I420_10LE;
-  if (fmt != GST_VIDEO_FORMAT_NV12 && fmt != GST_VIDEO_FORMAT_I420 && !deep)
-    return err("GStreamer: frame is not 8-bit or 10-bit 4:2:0");
+  const SwLayout layout = sw_layout(fmt);
+  if (!layout.ok)
+    return err("GStreamer: frame is not YUV 4:2:0, 4:2:2 or 4:4:4");
+  const bool deep = layout.deep;
   const int w = GST_VIDEO_INFO_WIDTH(&info);
   const int h = GST_VIDEO_INFO_HEIGHT(&info);
   if (w <= 0 || h <= 0 || w > 16384 || h > 16384)
@@ -997,8 +1113,9 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
       pool->deep() != deep) {
     pool = gfx::SwFramePool::create(uw, uh, error, deep);
     if (pool != nullptr)
-      log::i(kTag, "frames {}x{}: copied to {} dma-bufs (from {} memory)", w, h,
-             deep ? "P010" : "NV12",
+      log::i(kTag, "frames {}x{}: copied to {} dma-bufs{} (from {} memory)", w,
+             h, deep ? "P010" : "NV12",
+             layout.chroma == Chroma::k420 ? "" : ", chroma made 4:2:0",
              mem != nullptr && mem->allocator != nullptr &&
                      mem->allocator->mem_type != nullptr
                  ? mem->allocator->mem_type
@@ -1007,8 +1124,9 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
   }
   bool ok = pool != nullptr;
   if (ok) {
-    const bool nv12 =
-        fmt == GST_VIDEO_FORMAT_NV12 || fmt == GST_VIDEO_FORMAT_P010_10LE;
+    const bool nv12 = layout.nv;
+    const bool full_x = layout.chroma == Chroma::k444;
+    const bool full_y = layout.chroma != Chroma::k420;
     const int strides[3] = {GST_VIDEO_FRAME_PLANE_STRIDE(&vf, 0),
                             GST_VIDEO_FRAME_PLANE_STRIDE(&vf, 1),
                             nv12 ? 0 : GST_VIDEO_FRAME_PLANE_STRIDE(&vf, 2)};
@@ -1016,18 +1134,21 @@ int GstCodec::receive_frame(gfx::DmabufFrame* out,
     // falls on a chroma sample (a pair of them in NV12's interleaved plane).
     const std::size_t sample = deep ? 2 : 1;
     const auto plane = [&](int i) {
-      const std::size_t x = i == 0 || nv12 ? pic.x : pic.x / 2;
-      const std::size_t y = i == 0 ? pic.y : pic.y / 2;
+      const std::size_t x = i == 0 || nv12 || full_x ? pic.x : pic.x / 2;
+      const std::size_t y = i == 0 || full_y ? pic.y : pic.y / 2;
       return static_cast<const std::uint8_t*>(
                  GST_VIDEO_FRAME_PLANE_DATA(&vf, i)) +
              y * static_cast<std::size_t>(strides[i]) + x * sample;
     };
     const std::uint8_t* const planes[3] = {plane(0), plane(1),
                                            nv12 ? nullptr : plane(2)};
-    // Planar 10-bit has its bits at the low end of each 16; P010 at the top.
-    ok = deep ? pool->write_420_16(planes, strides, nv12, nv12 ? 0 : 6, out,
-                                   error)
-              : pool->write_420(planes, strides, nv12, out, error);
+    if (full_y)
+      ok = pool->write_down_420(planes, strides, full_x, layout.shift, out,
+                                error);
+    else if (deep)
+      ok = pool->write_420_16(planes, strides, nv12, layout.shift, out, error);
+    else
+      ok = pool->write_420(planes, strides, nv12, out, error);
   }
   gst_video_frame_unmap(&vf);
   if (ok)

@@ -284,27 +284,54 @@ std::unique_ptr<DmaCodec> DmaCodec::with_factory(Factory factory,
   return codec;
 }
 
-std::uint32_t DmaCodec::bit_depth(const std::string& mime,
-                                  const std::uint8_t* annexb,
-                                  std::size_t size) {
+namespace {
+// The deeper of luma and chroma bit depth and the chroma_format_idc of the
+// first H.264 or HEVC SPS in the Annex-B bytes. False where there is none.
+bool sps_format(const std::string& mime,
+                const std::uint8_t* annexb,
+                std::size_t size,
+                std::uint32_t* depth,
+                std::uint32_t* chroma) {
   if (annexb == nullptr || size == 0)
-    return 0;
+    return false;
   if (mime == "video/avc") {
     H264Format f;
     if (!h264_format(annexb, size, &f))
-      return 0;
-    return std::max(f.bit_depth_luma, f.bit_depth_chroma);
+      return false;
+    *depth = std::max(f.bit_depth_luma, f.bit_depth_chroma);
+    *chroma = f.chroma_format_idc;
+    return true;
   }
   if (mime == "video/hevc") {
     for (const auto& n : v4l2wc::h265::ParseAnnexB(annexb, size)) {
       v4l2wc::h265::Sps sps;
       if (n.type == v4l2wc::h265::NalUnitType::kSpsNut &&
-          v4l2wc::h265::ParseSps(n.rbsp.data(), n.rbsp.size(), &sps))
-        return std::max<std::uint32_t>(sps.bit_depth_luma,
-                                       sps.bit_depth_chroma);
+          v4l2wc::h265::ParseSps(n.rbsp.data(), n.rbsp.size(), &sps)) {
+        *depth =
+            std::max<std::uint32_t>(sps.bit_depth_luma, sps.bit_depth_chroma);
+        *chroma = sps.chroma_format_idc;
+        return true;
+      }
     }
   }
-  return 0;
+  return false;
+}
+}  // namespace
+
+std::uint32_t DmaCodec::bit_depth(const std::string& mime,
+                                  const std::uint8_t* annexb,
+                                  std::size_t size) {
+  std::uint32_t depth = 0, chroma = 0;
+  return sps_format(mime, annexb, size, &depth, &chroma) ? depth : 0;
+}
+
+int DmaCodec::chroma_format(const std::string& mime,
+                            const std::uint8_t* annexb,
+                            std::size_t size) {
+  std::uint32_t depth = 0, chroma = 0;
+  return sps_format(mime, annexb, size, &depth, &chroma)
+             ? static_cast<int>(chroma)
+             : -1;
 }
 
 std::unique_ptr<DmaCodec> DmaCodec::configure(const std::string& mime,

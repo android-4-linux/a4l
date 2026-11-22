@@ -3,7 +3,8 @@
 //
 // gfx::SwFramePool's copies: every sample lands where P010 (write_420_16) or
 // NV12 (write_420) puts it, from rows wider than the copy's chunk and, for
-// 16 bits, not 16-bit aligned. Needs a gbm device and a buffer the CPU can
+// 16 bits, not 16-bit aligned; 4:2:2 and 4:4:4 chroma (write_down_420) is
+// filtered to 4:2:0 as specified. Needs a gbm device and a buffer the CPU can
 // map; SKIPs (with a note) where there is none.
 
 #include <catch2/catch_test_macros.hpp>
@@ -15,6 +16,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -207,6 +209,113 @@ TEST_CASE("SwFramePool: 8-bit planar chroma is interleaved into NV12",
     }
   ::munmap(map, static_cast<std::size_t>(size));
   CHECK(bad == 0);
+}
+
+// The 4:2:0 sample write_down_420() makes at (x, y) from 4:2:2 or 4:4:4
+// chroma `c` of a kW x kH picture: the mean of rows 2y and 2y + 1 (the last
+// row alone where there is none), and across a 4:4:4 row [1 2 1] at 2x.
+unsigned want_down(unsigned (*c)(std::uint32_t, std::uint32_t),
+                   bool full_x,
+                   unsigned mask,
+                   std::uint32_t x,
+                   std::uint32_t y) {
+  const std::uint32_t r1 = std::min(2 * y + 1, kH - 1);
+  const auto col = [&](std::uint32_t i) {
+    return (c(i, 2 * y) & mask) + (c(i, r1) & mask);
+  };
+  if (!full_x)
+    return (col(x) + 1) / 2;
+  const std::uint32_t m = 2 * x;
+  return (col(m > 0 ? m - 1 : 0) + 2 * col(m) + col(std::min(m + 1, kW - 1)) +
+          4) /
+         8;
+}
+
+TEST_CASE("SwFramePool: 4:2:2 and 4:4:4 chroma is made 4:2:0",
+          "[gfx][swpool]") {
+  std::string err;
+  for (const bool deep : {false, true})
+    for (const bool full_x : {false, true}) {
+      INFO("deep " << deep << ", 4:4:" << (full_x ? 4 : 2));
+      auto pool = SwFramePool::create(kW, kH, &err, deep);
+      if (!pool) {
+        WARN("no gbm device (skipping): " + err);
+        SUCCEED();
+        return;
+      }
+      // 12 bits at the low end, as a software decoder leaves them, or bytes.
+      const unsigned mask = deep ? 0xfff : 0xff;
+      const unsigned shift = deep ? 4 : 0;
+      const std::uint32_t sw = full_x ? kW : kCw;
+      Plane y(kW, kH), u(sw, kH), v(sw, kH);
+      const auto put = [&](Plane& p, std::uint32_t i, std::uint32_t r,
+                           unsigned val) {
+        if (deep) {
+          p.put(i, r, val & mask);
+          return;
+        }
+        p.bytes[1 + static_cast<std::size_t>(r) * p.stride + i] =
+            static_cast<std::uint8_t>(val);
+      };
+      for (std::uint32_t r = 0; r < kH; ++r) {
+        for (std::uint32_t x = 0; x < kW; ++x)
+          put(y, x, r, luma(x, r) * 3);
+        for (std::uint32_t x = 0; x < sw; ++x) {
+          put(u, x, r, cb(x, r) * 3);
+          put(v, x, r, cr(x, r) * 3);
+        }
+      }
+      const std::uint8_t* planes[3] = {y.data(), u.data(), v.data()};
+      const int strides[3] = {y.stride, u.stride, v.stride};
+      DmabufFrame f;
+      if (!pool->write_down_420(planes, strides, full_x, shift, &f, &err)) {
+        WARN("no buffer here (skipping): " + err);
+        SUCCEED();
+        return;
+      }
+      const off_t size = ::lseek(f.fd, 0, SEEK_END);
+      REQUIRE(size > 0);
+      // NOLINTNEXTLINE(clang-analyzer-unix.StdCLibraryFunctions): REQUIRE
+      // throws
+      void* map = ::mmap(nullptr, static_cast<std::size_t>(size), PROT_READ,
+                         MAP_SHARED, f.fd, 0);
+      if (map == MAP_FAILED) {
+        WARN("the buffer cannot be mapped to read back (skipping)");
+        return;
+      }
+      const auto* base = static_cast<const std::uint8_t*>(map);
+      const auto got = [&](int plane, std::uint32_t i, std::uint32_t r) {
+        return deep ? at(base, f, plane, i, r)
+                    : unsigned{base[f.planes[plane].offset +
+                                    static_cast<std::size_t>(r) *
+                                        f.planes[plane].stride +
+                                    i]};
+      };
+      const auto cb3 = [](std::uint32_t x, std::uint32_t r) {
+        return cb(x, r) * 3;
+      };
+      const auto cr3 = [](std::uint32_t x, std::uint32_t r) {
+        return cr(x, r) * 3;
+      };
+      int bad = 0;
+      for (std::uint32_t r = 0; r < kH; ++r)
+        for (std::uint32_t x = 0; x < kW; ++x)
+          bad += got(0, x, r) != (((luma(x, r) * 3) & mask) << shift);
+      for (std::uint32_t r = 0; r < kCh; ++r)
+        for (std::uint32_t x = 0; x < kCw; ++x) {
+          bad +=
+              got(1, 2 * x, r) != (want_down(cb3, full_x, mask, x, r) << shift);
+          bad += got(1, 2 * x + 1, r) !=
+                 (want_down(cr3, full_x, mask, x, r) << shift);
+        }
+      ::munmap(map, static_cast<std::size_t>(size));
+      CHECK(bad == 0);
+      // A chroma stride short of its row is refused.
+      const int short_rows[3] = {
+          y.stride, (deep ? 2 : 1) * static_cast<int>(sw) - 1, v.stride};
+      CHECK_FALSE(
+          pool->write_down_420(planes, short_rows, full_x, shift, &f, &err));
+    }
 }
 
 #endif  // ACL_HAVE_GL
