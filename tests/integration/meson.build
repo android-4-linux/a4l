@@ -327,6 +327,17 @@ if py3.found() and have_gl and have_ffmpeg
         timeout : 300,
       )
     endif
+    # Offscreen GL through android.opengl.EGL14 on the default display, as a player's
+    # placeholder surface sets it up, where Mesa's default platform has no server running and
+    # where there is no display server at all. Needs host ART, Mesa and a render node; SKIPs
+    # otherwise, which includes CI.
+    test(
+      'egl14-offscreen',
+      py3,
+      args : [files('run_egl14_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+    )
     # Video on a TextureView: a fixture app decodes an H.264 clip onto
     # new Surface(surfaceTexture), and the test reads back the frame a4l rendered and checks the
     # picture inside the TextureView, with the frame imported on the GPU and with its pixels
