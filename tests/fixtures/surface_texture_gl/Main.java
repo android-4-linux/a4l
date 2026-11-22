@@ -4,14 +4,15 @@
 // mode). No GPL-3.0 sources.
 //
 // A video sampled in the app's own GL, as a video effect or a 360-degree player does: a
-// MediaCodec decodes assets/clip.h264 onto new Surface(new SurfaceTexture(tex)). On each new
-// frame, the app's GL thread calls updateTexImage and draws the external texture, through
-// getTransformMatrix, into a pbuffer the picture's size, then reads back points in each quadrant:
-// the middle, the corners of the picture and either side of the edges between quadrants. The
-// clip is four colored quadrants, red, green, blue and white from top left to bottom right,
-// inside a border its stream crops away; a crop not applied shows the border at the picture's
-// edges or moves the edges between quadrants. Logs one line at the end with the totals and the
-// matrix, and exits.
+// MediaCodec decodes assets/clip onto new Surface(new SurfaceTexture(tex)). The clip is H.264 or
+// HEVC (the MIME type in assets/mime; H.264 without it), Annex B with an access unit delimiter
+// before every frame. On each new frame, the app's GL thread calls updateTexImage and draws the
+// external texture, through getTransformMatrix, into a pbuffer the picture's size, then reads
+// back points in each quadrant: the middle, the corners of the picture and either side of the
+// edges between quadrants. The clip is four colored quadrants, red, green, blue and white from
+// top left to bottom right, inside a border its stream crops away; a crop not applied shows the
+// border at the picture's edges or moves the edges between quadrants. Logs one line at the end
+// with the totals and the matrix, and exits.
 package com.acl.stgl;
 
 import android.app.Activity;
@@ -207,8 +208,22 @@ public class Main extends Activity implements SurfaceTexture.OnFrameAvailableLis
         last = got.toString().trim();
     }
 
-    // The offsets at which access units start: every access unit delimiter (NAL type 9).
-    static ArrayList<Integer> accessUnits(byte[] d) {
+    // The stream's MIME type: assets/mime, or H.264 where there is none.
+    String mime() {
+        try {
+            InputStream m = getAssets().open("mime");
+            byte[] b = new byte[64];
+            int n = m.read(b);
+            m.close();
+            return n > 0 ? new String(b, 0, n, "US-ASCII").trim() : "video/avc";
+        } catch (java.io.IOException e) {
+            return "video/avc";
+        }
+    }
+
+    // The offsets at which access units start: every access unit delimiter (H.264 NAL type 9,
+    // HEVC NAL type 35).
+    static ArrayList<Integer> accessUnits(byte[] d, boolean hevc) {
         ArrayList<Integer> at = new ArrayList<>();
         for (int i = 0; i + 3 < d.length; i++) {
             if (d[i] != 0 || d[i + 1] != 0) continue;
@@ -216,25 +231,27 @@ public class Main extends Activity implements SurfaceTexture.OnFrameAvailableLis
             if (d[i + 2] == 1) nal = i + 3;
             else if (d[i + 2] == 0 && i + 4 < d.length && d[i + 3] == 1) nal = i + 4;
             else continue;
-            if ((d[nal] & 0x1f) == 9) at.add(i);
+            int type = hevc ? (d[nal] >> 1) & 0x3f : d[nal] & 0x1f;
+            if (type == (hevc ? 35 : 9)) at.add(i);
             i = nal;
         }
         return at;
     }
 
     private void play(Surface surface) throws Exception {
-        InputStream is = getAssets().open("clip.h264");
+        InputStream is = getAssets().open("clip");
         ByteArrayOutputStream bo = new ByteArrayOutputStream();
         byte[] t = new byte[8192];
         int n;
         while ((n = is.read(t)) > 0) bo.write(t, 0, n);
         is.close();
         final byte[] data = bo.toByteArray();
-        final ArrayList<Integer> au = accessUnits(data);
+        final String mime = mime();
+        final ArrayList<Integer> au = accessUnits(data, mime.equals("video/hevc"));
         final int total = au.size() * LOOPS;
-        if (au.isEmpty()) throw new IllegalStateException("no access units in clip.h264");
+        if (au.isEmpty()) throw new IllegalStateException("no access units in the clip");
 
-        MediaFormat f = MediaFormat.createVideoFormat("video/avc", W, H);
+        MediaFormat f = MediaFormat.createVideoFormat(mime, W, H);
         String name = new MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(f);
         final MediaCodec c = MediaCodec.createByCodecName(name);
         final HandlerThread ht = new HandlerThread("video-cb");
