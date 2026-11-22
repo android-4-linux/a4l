@@ -33,14 +33,20 @@ gfx::BufferQueue* image_reader_queue_from_surface(JNIEnv* env, jobject surface);
 
 // Create a bare producer context (a ReaderCtx over a fresh BufferQueue,
 // registered like an ImageReader's so image_reader_queue_from_surface accepts
-// it) and return it as the native handle for a Surface.mNativeObject. Used by
-// Surface.nativeCreateFromSurfaceTexture so MediaCodec has a valid, decodable
-// output surface — ExoPlayer's PlaceholderSurface (a throwaway SurfaceTexture)
-// needs this to initialize its video renderer. Decoded frames are queued
-// (queue_imported, any size) and, with no consumer attached, auto-dropped;
-// feeding them to the SurfaceTexture for display is a follow-on. Returns 0 on
-// failure.
-jlong image_reader_make_producer(JNIEnv* env, int w, int h);
+// it) and return it as the native handle for a Surface.mNativeObject. Used for
+// a SurfaceView's video surface and by Surface.nativeCreateFromSurfaceTexture,
+// so MediaCodec has a valid, decodable output surface. `surface_texture` is
+// the SurfaceTexture's AclSurfaceTexture handle for the latter, 0 for the
+// former. Returns 0 on failure.
+jlong image_reader_make_producer(JNIEnv* env,
+                                 int w,
+                                 int h,
+                                 jlong surface_texture = 0);
+
+// The AclSurfaceTexture handle of the SurfaceTexture `surface` was made from
+// (new Surface(SurfaceTexture)), or 0 for any other surface. A decoder writing
+// to such a surface sends its frames to that SurfaceTexture.
+jlong image_reader_texture_from_surface(JNIEnv* env, jobject surface);
 #endif
 
 }  // namespace acl::runtime

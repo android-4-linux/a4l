@@ -32,8 +32,9 @@ class VideoConverter {
   VideoConverter(const VideoConverter&) = delete;
   VideoConverter& operator=(const VideoConverter&) = delete;
 
-  // Draw `in` into a buffer of the same size and fill `*out` with it:
-  // DRM_FORMAT_XBGR8888, LINEAR. `out->fd` belongs to the converter and
+  // Draw `in` into a buffer and fill `*out` with it: the picture's size,
+  // DRM_FORMAT_XBGR8888, LINEAR. The buffer has unused rows below the
+  // picture. `out->fd` belongs to the converter and
   // `out->hold` keeps the buffer from being drawn into again: whoever keeps
   // the frame keeps the hold, as for a decoder's surface. False, with
   // `error`, when the frame cannot be imported or every buffer is still

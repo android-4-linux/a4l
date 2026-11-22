@@ -31,8 +31,10 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
+#include <dlfcn.h>
 #include <unistd.h>  // dup/close for the HW-plane holding queue
 
 #include "gfx/ahardware_buffer.h"
@@ -77,6 +79,23 @@ jmethodID g_post_event =
 jclass g_bufinfo_cls = nullptr;
 jmethodID g_bufinfo_ctor = nullptr;  // MediaCodec$BufferInfo()
 
+// A SurfaceTexture a codec draws into (new Surface(SurfaceTexture)), as a
+// player showing video on a TextureView does. Its consumer draws an image and
+// a decoder's frame is YUV, so each frame is converted to XBGR8888 on the GPU
+// first, by a converter of the sink's own: one converter keeps buffers of one
+// picture size, and the video plane's has the size of its own video. Frames
+// on their way to the SurfaceTexture share the sink, so a surface change
+// leaves them one to finish on. The converter is made on the first frame and
+// used by the codec's timed-release thread.
+struct TextureSink {
+  explicit TextureSink(jlong handle) : st(handle) {}
+  const jlong st;  // the AclSurfaceTexture handle
+  std::mutex mu;
+  std::unique_ptr<gfx::VideoConverter> converter;
+  bool tried = false;
+  bool said = false;  // a failed frame was logged
+};
+
 // One MediaCodec instance's decode state.
 struct CodecCtx {
   std::string name;  // codec name or MIME (native_setup)
@@ -101,6 +120,11 @@ struct CodecCtx {
   std::mutex dmu;
   gfx::BufferQueue* out_queue =
       nullptr;  // the configured Surface's ImageReader BufferQueue (or null)
+  // Set when that Surface was made from a SurfaceTexture. The app's thread
+  // sets it (configure, setOutputSurface) and the driver reads it: under
+  // sink_mu.
+  std::mutex sink_mu;
+  std::shared_ptr<TextureSink> sink;
   bool started = false;
 
   struct InBuf {
@@ -115,9 +139,10 @@ struct CodecCtx {
         nullptr;  // an imported decoded frame, awaiting releaseOutputBuffer
     bool used = false;
     std::int64_t pts = 0;
-    // A frame for the video plane (a SurfaceView's video): kept as it came
-    // from the decoder, with its hold on the decoder's surface, and shown
-    // when the app releases it. `ahb` is then null.
+    // A frame for the video plane (a SurfaceView's video) or a
+    // SurfaceTexture: kept as it came from the decoder, with its hold on the
+    // decoder's surface, and shown when the app releases it. `ahb` is then
+    // null.
     bool plane = false;
     gfx::DmabufFrame frame{};
   };
@@ -193,6 +218,95 @@ constexpr std::size_t kMaxPendingPackets = 16;
 wm::IPresenter* video_plane_for(const CodecCtx* ctx) {
   return ctx->mime.rfind("video/", 0) == 0 ? wm::active_video_presenter()
                                            : nullptr;
+}
+
+// The SurfaceTexture this codec's frames go to, if its Surface came from one.
+std::shared_ptr<TextureSink> texture_sink(CodecCtx* ctx) {
+  std::lock_guard<std::mutex> lk(ctx->sink_mu);
+  return ctx->sink;
+}
+
+// Point the codec at `surface`: its ImageReader queue, and its SurfaceTexture
+// when it was made from one. App's thread.
+void set_output(JNIEnv* env, CodecCtx* ctx, jobject surface) {
+  ctx->out_queue = surface != nullptr
+                       ? image_reader_queue_from_surface(env, surface)
+                       : nullptr;
+  const jlong st =
+      surface != nullptr ? image_reader_texture_from_surface(env, surface) : 0;
+  std::lock_guard<std::mutex> lk(ctx->sink_mu);
+  if (st == 0)
+    ctx->sink.reset();
+  else if (ctx->sink == nullptr || ctx->sink->st != st)
+    ctx->sink = std::make_shared<TextureSink>(st);
+}
+
+// Whether the codec keeps each decoded frame as it is, for the video plane or
+// a SurfaceTexture, instead of importing it for an ImageReader.
+bool keeps_frames(CodecCtx* ctx) {
+  return texture_sink(ctx) != nullptr || video_plane_for(ctx) != nullptr;
+}
+
+// What graphics_jni takes a frame for a SurfaceTexture as (the
+// AclSurfaceTexture feed, acl_graphics_surfacetexture_set_frame): one plane.
+struct AclStFrame {
+  int fd;
+  std::uint32_t width, height, stride, offset, drm_format;
+  std::uint64_t modifier;
+};
+using StSetFrameFn =
+    void (*)(jlong, const AclStFrame*, jlong, void (*)(void*), void*);
+StSetFrameFn st_set_frame() {
+  static const auto f = reinterpret_cast<StSetFrameFn>(
+      ::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_set_frame"));
+  return f;
+}
+
+// Hand a decoded frame to a SurfaceTexture, at `ts_ns`, its timestamp.
+// Timed-release thread. The SurfaceTexture keeps the converted frame (and so
+// one of the converter's buffers) until a newer one replaces it.
+void show_on_texture(TextureSink& sink,
+                     const gfx::DmabufFrame& frame,
+                     std::int64_t ts_ns) {
+  StSetFrameFn set = st_set_frame();
+  std::lock_guard<std::mutex> lk(sink.mu);
+  if (!sink.tried) {
+    sink.tried = true;
+    std::string err;
+    if (set == nullptr)
+      log::w(kTag,
+             "video: no SurfaceTexture feed in the graphics library; no "
+             "picture");
+    else if (sink.converter = gfx::VideoConverter::Create(&err); sink.converter)
+      log::i(kTag,
+             "video: frames go to a SurfaceTexture, converted to XBGR8888 on "
+             "the GPU");
+    else
+      log::w(kTag, "video: no converter for a SurfaceTexture ({}); no picture",
+             err);
+  }
+  if (set == nullptr || !sink.converter)
+    return;
+  std::string err;
+  gfx::DmabufFrame rgb{};
+  if (!sink.converter->convert(frame, &rgb, &err)) {
+    if (!sink.said) {
+      sink.said = true;
+      log::w(kTag,
+             "video: a frame for a SurfaceTexture was not converted ({}); "
+             "dropped",
+             err);
+    }
+    return;
+  }
+  const AclStFrame f{rgb.fd,       rgb.width,      rgb.height,  rgb.stride(),
+                     rgb.offset(), rgb.drm_format, rgb.modifier};
+  // The converted frame, and with it the converter's buffer, is kept until
+  // graphics_jni lets go of it, which it does on every path.
+  auto* keep = new gfx::DmabufFrame(std::move(rgb));
+  set(
+      sink.st, &f, static_cast<jlong>(ts_ns),
+      [](void* p) { delete static_cast<gfx::DmabufFrame*>(p); }, keep);
 }
 
 // Put a decoded frame on the video plane. A compositor that has turned the
@@ -449,7 +563,7 @@ void async_driver(CodecCtx* ctx) {
         // pool BEFORE decoding; if none, stop until a release frees one. This
         // is also what paces a paused player: it stops releasing, the pool
         // fills, and the decoder waits.
-        wm::IPresenter* vpr = video_plane_for(ctx);
+        const bool keep = keeps_frames(ctx);
         int slot = -1;
         {
           std::lock_guard<std::mutex> lk(ctx->amu);
@@ -504,10 +618,10 @@ void async_driver(CodecCtx* ctx) {
           ctx->recv_ms_sum = 0.0;
           ctx->ahb_ms_sum = 0.0;
         }
-        if (vpr != nullptr) {
-          // The video plane: the frame waits in its slot, holding its decoder
-          // surface, and goes to the plane when the app releases it, at the
-          // time the app gives (MC_releaseOutputBuffer).
+        if (keep) {
+          // The video plane or a SurfaceTexture: the frame waits in its slot,
+          // holding its decoder surface, and goes on when the app releases
+          // it, at the time the app gives (MC_releaseOutputBuffer).
           {
             std::lock_guard<std::mutex> lk(ctx->amu);
             CodecCtx::OutSlot& s = ctx->outslots[slot];
@@ -794,14 +908,14 @@ void JNICALL MC_native_configure(JNIEnv* env,
   // Resolve the output Surface -> its ImageReader BufferQueue (zero-copy sink).
   // null = no surface (buffer-mode decode, not supported for the zero-copy path
   // yet).
-  ctx->out_queue = surface != nullptr
-                       ? image_reader_queue_from_surface(env, surface)
-                       : nullptr;
+  set_output(env, ctx, surface);
   if (ctx->mime.empty() && ctx->name_is_type)
     ctx->mime = ctx->name;  // createDecoderByType(mime)
-  log::i(kTag, "native_configure mime='{}' {}x{} csd={}B surface_queue={}",
+  log::i(kTag,
+         "native_configure mime='{}' {}x{} csd={}B surface_queue={} "
+         "surface_texture={}",
          ctx->mime, ctx->width, ctx->height, ctx->csd.size(),
-         ctx->out_queue != nullptr);
+         ctx->out_queue != nullptr, texture_sink(ctx) != nullptr);
 }
 
 void JNICALL MC_native_start(JNIEnv* env, jobject thiz) {
@@ -1088,8 +1202,8 @@ jint JNICALL MC_native_dequeueOutputBuffer(JNIEnv* env,
   // Import the decoded frame zero-copy NOW (dup the fd) so the decoder may
   // reuse its surface; hold it in an output slot until releaseOutputBuffer
   // decides render (queue_imported) or drop (release). A frame for the video
-  // plane is kept as it is instead.
-  const bool plane = video_plane_for(ctx) != nullptr;
+  // plane or a SurfaceTexture is kept as it is instead.
+  const bool plane = keeps_frames(ctx);
   ::AHardwareBuffer* ahb = plane ? nullptr : gfx::ahb_import(f);
   if (!plane && ahb == nullptr) {
     log::w(kTag, "dequeueOutputBuffer: ahb_import failed");
@@ -1122,7 +1236,7 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env,
                                     jobject thiz,
                                     jint index,
                                     jboolean render,
-                                    jboolean /*updatePTS*/,
+                                    jboolean updatePTS,
                                     jlong timeNs) {
   CodecCtx* ctx = ctx_of(env, thiz);
   if (ctx == nullptr || index < 0)
@@ -1167,7 +1281,20 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env,
                          std::chrono::steady_clock::now().time_since_epoch())
                          .count()) /
                1000);
-  if (plane) {
+  std::shared_ptr<TextureSink> sink =
+      plane && render == JNI_TRUE ? texture_sink(ctx) : nullptr;
+  if (sink != nullptr) {
+    // A SurfaceTexture, at the time the app asked for. Its timestamp is that
+    // time when the app gave one, and the frame's presentation time
+    // otherwise, as on Android.
+    static const bool now = std::getenv("ACL_VIDEO_RELEASE_NOW") != nullptr;
+    const std::int64_t ts = updatePTS == JNI_TRUE ? timeNs : rel_pts * 1000;
+    ctx->present.at(now ? 0 : timeNs,
+                    [sink = std::move(sink), plane_frame, ts](bool due) {
+                      if (due)
+                        show_on_texture(*sink, plane_frame, ts);
+                    });
+  } else if (plane) {
     // The video plane, at the time the app asked for, like the queue below.
     // The frame carries its hold on the decoder's surface until it has been
     // shown or dropped. A frame not rendered just lets go of it.
@@ -1289,9 +1416,7 @@ void JNICALL MC_native_setSurface(JNIEnv* env, jobject thiz, jobject surface) {
   if (ctx != nullptr)
     ctx->present.cancel_all();  // they were for the old surface
   if (ctx != nullptr)
-    ctx->out_queue = surface != nullptr
-                         ? image_reader_queue_from_surface(env, surface)
-                         : nullptr;
+    set_output(env, ctx, surface);
 }
 jobject JNICALL MC_getImage(JNIEnv*, jobject, jboolean, jint) {
   return nullptr;

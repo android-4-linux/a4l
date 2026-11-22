@@ -131,9 +131,15 @@ struct VideoConverter::State {
         *error = "every converted buffer is still held";
       return nullptr;
     }
+    // A page of rows past the picture, unused. A SurfaceTexture's frame is
+    // imported into Vulkan, and Mesa 25.0's v3dv (a Raspberry Pi 4's) pads
+    // an imported allocation by 64 bytes and then refuses a dma-buf that
+    // ends where the image does, as one a whole number of pages in size
+    // does.
+    const std::uint32_t slack = (4096 + w * 4 - 1) / (w * 4);
     Slot slot;
-    slot.buffer =
-        HardwareBuffer::allocate(w, h, HbFormat::R8G8B8X8_UNORM, 0, error);
+    slot.buffer = HardwareBuffer::allocate(w, h + slack,
+                                           HbFormat::R8G8B8X8_UNORM, 0, error);
     if (!slot.buffer)
       return nullptr;
     AHardwareBuffer* ahb = ahb_create(slot.buffer);
@@ -319,6 +325,8 @@ bool VideoConverter::convert(const DmabufFrame& in,
     }
     slot->busy->store(true, std::memory_order_release);
     *out = slot->buffer->frame();
+    out->width = in.width;  // the picture, without the slack rows below it
+    out->height = in.height;
     // The buffer was allocated linear (GBM_BO_USE_LINEAR). A driver that
     // reports no modifier for such a buffer still laid it out that way, and
     // the compositor is told the layout, not "unknown".
