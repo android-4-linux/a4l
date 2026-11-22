@@ -62,6 +62,9 @@ struct ReaderCtx {
   std::atomic<bool> stop{false};
   ::AHardwareBuffer* anw_pending =
       nullptr;  // dequeued+locked by ANativeWindow_lock, until unlockAndPost
+  // The SurfaceTexture this producer was made from (new
+  // Surface(SurfaceTexture)): its AclSurfaceTexture handle, 0 otherwise.
+  jlong surface_texture = 0;
 };
 
 // Live ImageReader contexts, so an ANativeWindow producer can validate that a
@@ -593,7 +596,22 @@ gfx::BufferQueue* image_reader_queue_from_surface(JNIEnv* env,
   return reader_live(ctx) ? ctx->queue.get() : nullptr;
 }
 
-jlong image_reader_make_producer(JNIEnv* env, int w, int h) {
+jlong image_reader_texture_from_surface(JNIEnv* env, jobject surface) {
+  if (env == nullptr || surface == nullptr || g_surface_ctx_fid == nullptr)
+    return 0;
+  const jlong no = env->GetLongField(surface, g_surface_ctx_fid);
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    return 0;
+  }
+  auto* ctx = reinterpret_cast<ReaderCtx*>(no);
+  return reader_live(ctx) ? ctx->surface_texture : 0;
+}
+
+jlong image_reader_make_producer(JNIEnv* env,
+                                 int w,
+                                 int h,
+                                 jlong surface_texture) {
   if (env == nullptr)
     return 0;
   if (w <= 0)
@@ -615,15 +633,15 @@ jlong image_reader_make_producer(JNIEnv* env, int w, int h) {
   }
   auto* ctx = new ReaderCtx();
   ctx->queue = std::move(q);
+  ctx->surface_texture = surface_texture;
   env->GetJavaVM(&ctx->vm);
   {
     std::lock_guard<std::mutex> lk(g_readers_mu);
     g_readers.insert(ctx);
   }
   log::i(kTag,
-         "make_producer {}x{} -> ReaderCtx (MediaCodec-decodable Surface; no "
-         "consumer yet)",
-         w, h);
+         "make_producer {}x{} -> ReaderCtx (MediaCodec-decodable Surface{})", w,
+         h, surface_texture != 0 ? ", for a SurfaceTexture" : "");
   return reinterpret_cast<jlong>(ctx);
 }
 

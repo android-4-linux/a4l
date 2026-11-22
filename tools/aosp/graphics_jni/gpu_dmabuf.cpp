@@ -23,6 +23,7 @@
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -30,6 +31,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <unordered_set>
 #include <vector>
@@ -42,6 +44,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include "SkCanvas.h"
 #include "SkColor.h"
 #include "SkColorSpace.h"
+#include "SkImage.h"
 #include "SkImageInfo.h"
 #include "SkPaint.h"
 #include "SkRect.h"
@@ -683,7 +686,12 @@ bool ensure_ready(int w, int h) {
       return VKD.vkGetDeviceProcAddr(dev, name);
     return VKD.vkGetInstanceProcAddr(inst, name);
   };
-  g.ext.init(gp, g.instance, g.phys, 0, nullptr, 0, nullptr);
+  // Skia is told of one device extension, the DRM format modifier one: it
+  // wraps an image made with a modifier (an imported decoder frame) only
+  // when it knows the device has it.
+  static const char* const kSkiaDeviceExts[] = {
+      VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME};
+  g.ext.init(gp, g.instance, g.phys, 0, nullptr, 1, kSkiaDeviceExts);
   GrVkBackendContext bc{};
   bc.fInstance = g.instance;
   bc.fPhysicalDevice = g.phys;
@@ -692,6 +700,10 @@ bool ensure_ready(int w, int h) {
   bc.fGraphicsQueueIndex = g.qfam;
   bc.fMaxAPIVersion = VK_API_VERSION_1_1;
   bc.fVkExtensions = &g.ext;
+  // Skia builds its caps from that list only when it is also given the
+  // device's features; the device is made with none of the core ones.
+  static const VkPhysicalDeviceFeatures kNoFeatures{};
+  bc.fDeviceFeatures = &kNoFeatures;
   bc.fGetProc = gp;
   g.gr = GrDirectContext::MakeVulkan(bc);
   if (!g.gr) {
@@ -1192,4 +1204,129 @@ extern "C" bool acl_graphics_gpu_end_frame(int buffer_index, AclDmabuf* out) {
     return false;
   *out = t.info;
   return out->fd >= 0;
+}
+
+// A decoder's frame for a SurfaceTexture (graphics_jni.cpp), drawn by the
+// present device with no copy: the frame's XBGR8888 dma-buf is imported as a
+// VkImage and wrapped as a texture image. The image and its memory go when
+// Skia has finished with the texture, and `keep`, which holds the frame's
+// buffer, with them. Null when `ctx` is not the present context, the format
+// is not one this takes, or the driver refuses the import; the caller then
+// copies the pixels. Present thread.
+sk_sp<SkImage> acl_gpu_import_frame(GrDirectContext* ctx,
+                                    int fd,
+                                    uint32_t width,
+                                    uint32_t height,
+                                    uint32_t stride,
+                                    uint32_t offset,
+                                    uint32_t drm_format,
+                                    uint64_t modifier,
+                                    std::shared_ptr<void> keep) {
+  if (ctx == nullptr || ctx != g.gr.get() || g.device == VK_NULL_HANDLE ||
+      fd < 0 || width == 0 || height == 0)
+    return nullptr;
+  // Byte order R, G, B, X in memory either way; the fourth byte is unused.
+  if (drm_format != DRM_FORMAT_XBGR8888 && drm_format != DRM_FORMAT_ABGR8888)
+    return nullptr;
+  VkSubresourceLayout plane{};
+  plane.offset = offset;
+  plane.rowPitch = stride;
+  VkImageDrmFormatModifierExplicitCreateInfoEXT modci{
+      VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT};
+  modci.drmFormatModifier = modifier;
+  modci.drmFormatModifierPlaneCount = 1;
+  modci.pPlaneLayouts = &plane;
+  VkExternalMemoryImageCreateInfo extci{
+      VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO, &modci,
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
+  VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &extci};
+  ci.imageType = VK_IMAGE_TYPE_2D;
+  ci.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ci.extent = {width, height, 1};
+  ci.mipLevels = 1;
+  ci.arrayLayers = 1;
+  ci.samples = VK_SAMPLE_COUNT_1_BIT;
+  ci.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+  // Skia wraps only images made with both transfer bits.
+  ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+             VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkImage image = VK_NULL_HANDLE;
+  if (VKD.vkCreateImage(g.device, &ci, nullptr, &image) != VK_SUCCESS)
+    return nullptr;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  const auto fail = [&] {
+    if (memory != VK_NULL_HANDLE)
+      VKD.vkFreeMemory(g.device, memory, nullptr);
+    VKD.vkDestroyImage(g.device, image, nullptr);
+    return nullptr;
+  };
+  // Vulkan owns the descriptor it imports, so it gets a copy of its own.
+  const int own = ::fcntl(fd, F_DUPFD_CLOEXEC, 0);
+  if (own < 0)
+    return fail();
+  VkMemoryFdPropertiesKHR fdp{VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
+  VkMemoryRequirements reqs{};
+  VKD.vkGetImageMemoryRequirements(g.device, image, &reqs);
+  uint32_t types = reqs.memoryTypeBits;
+  if (VKD.vkGetMemoryFdPropertiesKHR(
+          g.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, own,
+          &fdp) == VK_SUCCESS)
+    types &= fdp.memoryTypeBits;
+  if (types == 0) {
+    ::close(own);
+    return fail();
+  }
+  VkMemoryDedicatedAllocateInfo ded{
+      VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+  ded.image = image;
+  VkImportMemoryFdInfoKHR imp{VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, &ded,
+                              VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+                              own};
+  VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &imp,
+                           reqs.size,
+                           static_cast<uint32_t>(__builtin_ctz(types))};
+  if (VKD.vkAllocateMemory(g.device, &mai, nullptr, &memory) != VK_SUCCESS) {
+    ::close(own);  // not taken on failure
+    return fail();
+  }
+  if (VKD.vkBindImageMemory(g.device, image, memory, 0) != VK_SUCCESS)
+    return fail();
+
+  GrVkImageInfo info{};
+  info.fImage = image;
+  info.fAlloc.fMemory = memory;
+  info.fAlloc.fOffset = 0;
+  info.fAlloc.fSize = reqs.size;
+  info.fImageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+  // Written outside Vulkan: Skia takes it from the external queue family, in
+  // a layout that keeps what is in it.
+  info.fImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  info.fFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  info.fImageUsageFlags = ci.usage;
+  info.fSampleCount = 1;
+  info.fLevelCount = 1;
+  info.fCurrentQueueFamily = VK_QUEUE_FAMILY_EXTERNAL;
+  info.fSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  struct Imported {
+    VkImage image;
+    VkDeviceMemory memory;
+    std::shared_ptr<void> keep;
+  };
+  auto* held = new Imported{image, memory, std::move(keep)};
+  const GrBackendTexture bt(static_cast<int>(width), static_cast<int>(height),
+                            info);
+  sk_sp<SkImage> img = SkImage::MakeFromTexture(
+      ctx, bt, kTopLeft_GrSurfaceOrigin, kRGB_888x_SkColorType,
+      kOpaque_SkAlphaType, nullptr,
+      [](SkImage::ReleaseContext p) {
+        auto* h = static_cast<Imported*>(p);
+        VKD.vkDestroyImage(g.device, h->image, nullptr);
+        VKD.vkFreeMemory(g.device, h->memory, nullptr);
+        delete h;
+      },
+      held);
+  // A null image has already called the release proc.
+  return img;
 }

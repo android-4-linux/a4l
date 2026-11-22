@@ -13,7 +13,11 @@
 // libskia. Registered by acl (register_acl_graphics) after dlopen; the Canvas's
 // SkBitmap is later backed by acl's dma-buf VkImage for GPU present (S3/S4).
 
+#include <fcntl.h>
 #include <jni.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include <cstdint>
 
@@ -29,10 +33,13 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <androidfw/Asset.h>  // android::Asset (ImageDecoder resource decode)
 #include <androidfw/ResourceTypes.h>  // android::Res_png_9patch (nine-patch npTc chunk)
+#include "GrDirectContext.h"
 #include "SkBitmap.h"
 #include "SkCanvas.h"
 #include "SkClipOp.h"
@@ -6538,6 +6545,32 @@ void draw_rendernode(SkCanvas* c, AclRenderNode* n) {
   }
 }
 
+// A decoder's frame sent to a SurfaceTexture
+// (acl_graphics_surfacetexture_set_frame): one XBGR8888 dma-buf plane, as
+// a4l's media_codec_jni.cpp describes it. Must match that definition.
+struct AclStFrame {
+  int fd;
+  uint32_t width, height, stride, offset, drm_format;
+  uint64_t modifier;
+};
+// Such a frame while graphics_jni holds it. `f.fd` is graphics_jni's own
+// copy. The producer's release runs once, when the last holder lets go, on
+// whatever thread that is.
+struct AclStBuffer {
+  AclStFrame f{-1, 0, 0, 0, 0, 0, 0};
+  void (*release)(void*) = nullptr;
+  void* release_ctx = nullptr;
+  AclStBuffer() = default;
+  AclStBuffer(const AclStBuffer&) = delete;
+  AclStBuffer& operator=(const AclStBuffer&) = delete;
+  ~AclStBuffer() {
+    if (f.fd >= 0)
+      ::close(f.fd);
+    if (release != nullptr)
+      release(release_ctx);
+  }
+};
+
 // ── SurfaceTexture + TextureView hardware layer (ADR-4: hwui dropped, render
 // stack re-owned) ───── android.graphics.SurfaceTexture is a producer/consumer
 // image stream; a TextureView composites its latest frame through a "texture
@@ -6557,6 +6590,11 @@ struct AclSurfaceTexture {
   sk_sp<SkImage>
       pending;  // most-recent produced frame (producer thread; Stage 2 seam)
   sk_sp<SkImage> current;  // latched frame (updateTexImage: pending -> current)
+  // A decoder's frame, in place of an image: drawn from its dma-buf
+  // (draw_texture_layer_immediate). Latched like `pending`; at most one of
+  // `current` and `current_buf` is set.
+  std::shared_ptr<AclStBuffer> pending_buf, current_buf;
+  jlong pending_ts = 0;
   int def_w = 0, def_h = 0;  // setDefaultBufferSize
   jlong timestamp = 0;       // ns of the latched frame
   int tex_name =
@@ -6568,23 +6606,42 @@ struct AclSurfaceTexture {
 
   // Producer seam (Stage 2): hand the stream a freshly produced frame.
   void set_frame(sk_sp<SkImage> img, jlong ts) {
+    std::shared_ptr<AclStBuffer> old;  // let go of outside the lock
     std::lock_guard<std::mutex> lk(mu);
     pending = std::move(img);
+    old = std::move(pending_buf);
     timestamp = ts;
   }
   // Consumer: latch the newest produced frame (updateTexImage /
-  // TextureLayer.update).
+  // TextureLayer.update). A decoder's frame is latched once; the next
+  // replaces it.
   void latch() {
+    std::shared_ptr<AclStBuffer> old;  // let go of outside the lock
     std::lock_guard<std::mutex> lk(mu);
-    if (pending) {
+    if (pending_buf) {
+      old = std::move(current_buf);
+      current_buf = std::move(pending_buf);
+      current = nullptr;
+      timestamp = pending_ts;
+    } else if (pending) {
       current = pending;
+      old = std::move(current_buf);
     }
   }
   sk_sp<SkImage> snapshot() {
     std::lock_guard<std::mutex> lk(mu);
     return current;
   }
+  std::shared_ptr<AclStBuffer> snapshot_buf() {
+    std::lock_guard<std::mutex> lk(mu);
+    return current_buf;
+  }
 };
+
+// The SurfaceTextures that exist (nativeInit to nativeFinalize), so a frame
+// sent from a4l by handle is never given to one that is gone.
+std::mutex g_st_live_mu;
+std::unordered_set<AclSurfaceTexture*> g_st_live;
 
 // A TextureView's hardware layer: binds a SurfaceTexture + the layer's
 // size/alpha. Java wraps the handle in a VirtualRefBasePtr (inc/decStrong), so
@@ -6631,20 +6688,129 @@ std::atomic<std::uint64_t> g_st_produced{
 JavaVM* g_st_vm = nullptr;
 jclass g_st_class = nullptr;    // global ref to android.graphics.SurfaceTexture
 jmethodID g_st_post = nullptr;  // static postEventFromNative(WeakReference)
-void post_frame_available(AclSurfaceTexture* st) {
-  if (g_st_vm == nullptr || g_st_post == nullptr || st == nullptr ||
-      st->weak_self == nullptr)
-    return;
+JNIEnv* st_post_env() {
+  if (g_st_vm == nullptr || g_st_post == nullptr)
+    return nullptr;
   JNIEnv* env = nullptr;
   if (g_st_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) !=
       JNI_OK) {
     if (g_st_vm->AttachCurrentThreadAsDaemon(&env, nullptr) != JNI_OK)
-      return;  // stays attached (pooled producer/donor thread) — cheap on later
-               // frames
+      return nullptr;  // stays attached (pooled producer/donor thread) — cheap
+                       // on later frames
   }
+  return env;
+}
+void post_frame_available(AclSurfaceTexture* st) {
+  if (st == nullptr || st->weak_self == nullptr)
+    return;
+  JNIEnv* env = st_post_env();
+  if (env == nullptr)
+    return;
   env->CallStaticVoidMethod(g_st_class, g_st_post, st->weak_self);
   if (env->ExceptionCheck())
     env->ExceptionClear();
+}
+
+}  // namespace
+// The present device's import of a decoder's frame (gpu_dmabuf.cpp).
+sk_sp<SkImage> acl_gpu_import_frame(GrDirectContext* ctx,
+                                    int fd,
+                                    uint32_t width,
+                                    uint32_t height,
+                                    uint32_t stride,
+                                    uint32_t offset,
+                                    uint32_t drm_format,
+                                    uint64_t modifier,
+                                    std::shared_ptr<void> keep);
+namespace {
+
+// A decoder's frame as pixels: the dma-buf mapped and copied, for a canvas
+// that is not the present device's (software present, or a GPU import the
+// driver refused). Null if it cannot be mapped.
+sk_sp<SkImage> st_frame_raster(const AclStFrame& f) {
+  // Linear only: the CPU cannot read a tiled layout.
+  if (f.modifier != 0 || f.stride < f.width * 4)
+    return nullptr;
+  const size_t len =
+      static_cast<size_t>(f.offset) + static_cast<size_t>(f.stride) * f.height;
+  void* map = ::mmap(nullptr, len, PROT_READ, MAP_SHARED, f.fd, 0);
+  if (map == MAP_FAILED)
+    return nullptr;
+  // DMA_BUF_IOCTL_SYNC (linux/dma-buf.h), around the read.
+  struct Sync {
+    uint64_t flags;
+  };
+  constexpr unsigned long kSync = _IOW('b', 0, Sync);
+  constexpr uint64_t kRead = 1, kStart = 0, kEnd = 4;
+  Sync sync{kStart | kRead};
+  ::ioctl(f.fd, kSync, &sync);
+  const SkImageInfo info =
+      SkImageInfo::Make(static_cast<int>(f.width), static_cast<int>(f.height),
+                        kRGB_888x_SkColorType, kOpaque_SkAlphaType);
+  sk_sp<SkImage> img = SkImage::MakeRasterCopy(
+      SkPixmap(info, static_cast<const uint8_t*>(map) + f.offset, f.stride));
+  sync.flags = kEnd | kRead;
+  ::ioctl(f.fd, kSync, &sync);
+  ::munmap(map, len);
+  return img;
+}
+
+// The image made of each SurfaceTexture's latched decoder frame, so a frame
+// drawn again is not imported or copied again. A texture image belongs to the
+// present thread: one is only made, replaced or dropped there, when the
+// canvas is the present device's. An entry outlives its SurfaceTexture until
+// the next such draw.
+struct StFrameImage {
+  std::shared_ptr<AclStBuffer> buf;
+  sk_sp<SkImage> img;
+  GrDirectContext* ctx = nullptr;  // null: a pixel copy
+};
+std::mutex g_st_images_mu;
+std::unordered_map<const AclSurfaceTexture*, StFrameImage> g_st_images;
+
+sk_sp<SkImage> st_frame_image(SkCanvas* c,
+                              const AclSurfaceTexture* st,
+                              const std::shared_ptr<AclStBuffer>& buf) {
+  GrDirectContext* gpu = GrAsDirectContext(c->recordingContext());
+  std::lock_guard<std::mutex> lk(g_st_images_mu);
+  {
+    // Entries of SurfaceTextures that are gone, those this thread may drop.
+    std::lock_guard<std::mutex> live(g_st_live_mu);
+    for (auto it = g_st_images.begin(); it != g_st_images.end();) {
+      if ((it->second.ctx == nullptr || it->second.ctx == gpu) &&
+          g_st_live.count(const_cast<AclSurfaceTexture*>(it->first)) == 0)
+        it = g_st_images.erase(it);
+      else
+        ++it;
+    }
+  }
+  // A pixel copy draws on any canvas, so a frame the import failed for is
+  // not imported again on every draw.
+  StFrameImage& e = g_st_images[st];
+  if (e.buf == buf && e.img && (e.ctx == gpu || e.ctx == nullptr))
+    return e.img;
+  // ACL_SURFACETEXTURE_COPY: copy the pixels on the present device too, to
+  // try the copy where the import works.
+  static const bool copy = std::getenv("ACL_SURFACETEXTURE_COPY") != nullptr;
+  sk_sp<SkImage> img;
+  if (gpu != nullptr && !copy)
+    img = acl_gpu_import_frame(gpu, buf->f.fd, buf->f.width, buf->f.height,
+                               buf->f.stride, buf->f.offset, buf->f.drm_format,
+                               buf->f.modifier, buf);
+  static std::atomic<bool> said{false};
+  if (gpu != nullptr && !copy && !img && !said.exchange(true))
+    std::fprintf(stderr,
+                 "acl-graphics: a SurfaceTexture frame was not imported on "
+                 "the GPU; its pixels are copied\n");
+  GrDirectContext* made_on = img ? gpu : nullptr;
+  if (!img)
+    img = st_frame_raster(buf->f);
+  // A texture image held for another canvas stays where it is: it may only
+  // be dropped on the present thread. This one is not kept.
+  if (e.ctx != nullptr && made_on != e.ctx)
+    return img;
+  e = StFrameImage{buf, img, made_on};
+  return img;
 }
 
 // Draw a texture layer's latest frame at the canvas origin, scaled to the
@@ -6662,6 +6828,10 @@ void draw_texture_layer_immediate(SkCanvas* c, AclTextureLayer* l) {
     return;
   }
   sk_sp<SkImage> img = l->st->snapshot();
+  if (!img) {
+    if (std::shared_ptr<AclStBuffer> buf = l->st->snapshot_buf())
+      img = st_frame_image(c, l->st, buf);
+  }
   if (dbg)
     std::fprintf(stderr, "[acl.walk] layer draw l=%p wh=%dx%d img=%p %dx%d\n",
                  static_cast<void*>(l), l->width, l->height,
@@ -6754,15 +6924,69 @@ extern "C" void acl_graphics_surfacetexture_set_pixels(jlong st_handle,
   sk_sp<SkImage> img = SkImage::MakeRasterCopy(pm);
   if (!img)
     return;
+  std::shared_ptr<AclStBuffer> old;  // let go of outside the lock
   {
     std::lock_guard<std::mutex> lk(st->mu);
     st->current = std::move(img);
+    old = std::move(st->current_buf);
   }  // present reads via snapshot()
   g_st_produced.fetch_add(
       1, std::memory_order_relaxed);  // signal the present loop to re-record
   bump_scene();  // a TextureView produced a new frame -> the scene changed
   post_frame_available(st);  // -> TextureView.invalidate() -> re-record so the
                              // drawable re-snapshots
+}
+// A decoder's frame for a SurfaceTexture (a MediaCodec configured with
+// new Surface(SurfaceTexture)): an XBGR8888 dma-buf, already cropped to the
+// picture and upright, so the identity transform stays right. It is pending
+// until the consumer latches it (TextureView's layer update, or the app's
+// updateTexImage) and drawn from its dma-buf. `release(release_ctx)` is
+// called exactly once, when graphics_jni lets go of the frame, whether it
+// was taken or not. `st_handle` may name a SurfaceTexture already finalized;
+// the frame is then dropped. Called from acl runtime via dlsym, on the
+// codec's timed-release thread.
+extern "C" void acl_graphics_surfacetexture_set_frame(jlong st_handle,
+                                                      const AclStFrame* f,
+                                                      jlong ts,
+                                                      void (*release)(void*),
+                                                      void* release_ctx) {
+  auto buf = std::make_shared<AclStBuffer>();
+  buf->release = release;
+  buf->release_ctx = release_ctx;
+  if (f == nullptr || f->fd < 0 || f->width == 0 || f->height == 0)
+    return;
+  buf->f = *f;
+  buf->f.fd = ::fcntl(f->fd, F_DUPFD_CLOEXEC, 0);
+  if (buf->f.fd < 0)
+    return;
+  std::shared_ptr<AclStBuffer> old;  // let go of outside the locks
+  jobject weak = nullptr;
+  JNIEnv* env = st_post_env();
+  {
+    std::lock_guard<std::mutex> live(g_st_live_mu);
+    auto* st = reinterpret_cast<AclSurfaceTexture*>(st_handle);
+    if (g_st_live.count(st) == 0)
+      return;
+    std::lock_guard<std::mutex> lk(st->mu);
+    if (st->released)
+      return;
+    old = std::move(st->pending_buf);
+    st->pending_buf = std::move(buf);
+    st->pending = nullptr;
+    st->pending_ts = ts;
+    // The weak reference goes with nativeFinalize; post through a ref of
+    // this thread's own, once the locks are let go.
+    if (env != nullptr && st->weak_self != nullptr)
+      weak = env->NewGlobalRef(st->weak_self);
+  }
+  g_st_produced.fetch_add(1, std::memory_order_relaxed);
+  bump_scene();
+  if (weak != nullptr) {
+    env->CallStaticVoidMethod(g_st_class, g_st_post, weak);
+    if (env->ExceptionCheck())
+      env->ExceptionClear();
+    env->DeleteGlobalRef(weak);
+  }
 }
 // A monotonically increasing count of produced SurfaceTexture frames. The
 // present loop force-records the frame after any TextureView produced, so
@@ -6807,6 +7031,10 @@ void SurfaceTexture_nativeInit(JNIEnv* env,
   st->weak_self = weakSelf != nullptr ? env->NewGlobalRef(weakSelf) : nullptr;
   if (g_st_field != nullptr)
     env->SetLongField(thiz, g_st_field, reinterpret_cast<jlong>(st));
+  {
+    std::lock_guard<std::mutex> live(g_st_live_mu);
+    g_st_live.insert(st);
+  }
   if (g_st_post == nullptr) {  // cache the frame-available notify seam once
     env->GetJavaVM(&g_st_vm);
     jclass c = env->GetObjectClass(thiz);
@@ -6823,6 +7051,10 @@ void SurfaceTexture_nativeFinalize(JNIEnv* env, jobject thiz) {
   auto* st = st_from(env, thiz);
   if (st == nullptr)
     return;
+  {
+    std::lock_guard<std::mutex> live(g_st_live_mu);
+    g_st_live.erase(st);
+  }  // no frame is sent to it from here on
   if (st->weak_self != nullptr)
     env->DeleteGlobalRef(st->weak_self);
   delete st;
@@ -6883,10 +7115,13 @@ void SurfaceTexture_nativeRelease(JNIEnv* env, jobject thiz) {
   auto* st = st_from(env, thiz);
   if (st == nullptr)
     return;
+  std::shared_ptr<AclStBuffer> pending_buf, current_buf;  // let go of after
   std::lock_guard<std::mutex> lk(st->mu);
   st->released = true;
   st->pending = nullptr;
   st->current = nullptr;
+  pending_buf = std::move(st->pending_buf);
+  current_buf = std::move(st->current_buf);
 }
 jboolean SurfaceTexture_nativeIsReleased(JNIEnv* env, jobject thiz) {
   auto* st = st_from(env, thiz);
