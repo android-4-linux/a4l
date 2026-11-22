@@ -7,7 +7,8 @@
 // that has its pixels in system memory: a software video decoder. The producer
 // writes a frame into a buffer and gets a gfx::DmabufFrame, which goes down the
 // same path as a hardware decoder's surface. One copy per frame; the hardware
-// path has none.
+// path has none. A 4:2:2 or 4:4:4 picture is made 4:2:0 in the copy: those
+// are the layouts every compositor here imports.
 
 #ifndef ACL_GFX_SW_FRAME_POOL_H
 #define ACL_GFX_SW_FRAME_POOL_H
@@ -87,6 +88,20 @@ class SwFramePool : public std::enable_shared_from_this<SwFramePool> {
                     unsigned shift,
                     DmabufFrame* out,
                     std::string* error);
+
+  // write() for a planar 4:2:2 picture (`full_x` false) or a 4:4:4 one
+  // (true), made 4:2:0. A chroma sample is the mean of the two rows it sits
+  // between; across a 4:4:4 row it is a [1 2 1] filter on every second
+  // sample, where 4:2:0 puts it. Samples are bytes in an 8-bit pool, and in
+  // a deep one 16-bit little-endian, moved up by `shift` as in
+  // write_420_16(). False + *error as write_420_16(), and on a shift in an
+  // 8-bit pool.
+  bool write_down_420(const std::uint8_t* const planes[3],
+                      const int strides[3],
+                      bool full_x,
+                      unsigned shift,
+                      DmabufFrame* out,
+                      std::string* error);
 
  private:
   SwFramePool() = default;

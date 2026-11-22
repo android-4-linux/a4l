@@ -221,6 +221,16 @@ if py3.found() and have_gl and have_ffmpeg
     env : ['ACL_HWDEC_DEVICE=none'],
     timeout : 120,
   )
+  # 12-bit, 4:2:2 and 4:4:4 in software: each frame is copied into NV12 or P010 with its
+  # chroma made 4:2:0. Needs libx265 and libx264 in ffmpeg.
+  test(
+    'video-decode-chroma-software',
+    py3,
+    args : [files('run_video_decode_test.py'), video_decode_probe, 'chroma'],
+    depends : [video_decode_probe],
+    env : ['ACL_HWDEC_DEVICE=none'],
+    timeout : 180,
+  )
   # Both depths with GStreamer's installed decoder as the packet engine.
   if have_gst
     test(
@@ -256,6 +266,16 @@ if py3.found() and have_gl and have_ffmpeg
       depends : [video_decode_probe],
       env : ['ACL_VIDEO_BACKEND=gst', 'GST_PLUGIN_FEATURE_RANK=vah265dec:NONE,vah264dec:NONE'],
       timeout : 120,
+    )
+    # The same through GStreamer's software decoder (gst-libav's).
+    test(
+      'video-decode-chroma-gst-software',
+      py3,
+      args : [files('run_video_decode_test.py'), video_decode_probe, 'chroma'],
+      depends : [video_decode_probe],
+      env : ['ACL_VIDEO_BACKEND=gst', 'ACL_HWDEC_DEVICE=none',
+             'GST_PLUGIN_FEATURE_RANK=vah265dec:NONE,vah264dec:NONE'],
+      timeout : 180,
     )
   endif
   # The same checks with no hardware device, so the decoder returns frames in system memory
