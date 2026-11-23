@@ -6,9 +6,10 @@
 // A video on a TextureView, the way a player app shows one there: a MediaCodec decodes a stream
 // onto new Surface(surfaceTexture), and the TextureView draws each frame inside the window. The
 // stream is assets/clip, H.264 or HEVC (the MIME type in assets/mime; H.264 without it), Annex B
-// with an access unit delimiter before every frame, played LOOPS times; the process then exits so a test can read the totals and the last
-// frame a4l rendered. Each frame is released at the time it is due, with that time, as a player
-// does.
+// with an access unit delimiter before every frame, played LOOPS times, each on a codec of its
+// own on the same Surface, as a player makes a new codec when it seeks. The process then exits so
+// a test can read the totals and the last frame a4l rendered. Each frame is released at the time
+// it is due, with that time, as a player does.
 package com.acl.textureview;
 
 import android.app.Activity;
@@ -104,6 +105,14 @@ public class Main extends Activity {
         return at;
     }
 
+    private byte[] data;
+    private ArrayList<Integer> au;
+    private String mime;
+    private Handler handler;
+    private int fed, out;             // across every codec
+    private long lastDue;             // the time the last frame was released for
+    private boolean done;
+
     private void play(Surface surface) throws Exception {
         InputStream is = getAssets().open("clip");
         ByteArrayOutputStream bo = new ByteArrayOutputStream();
@@ -111,51 +120,61 @@ public class Main extends Activity {
         int n;
         while ((n = is.read(t)) > 0) bo.write(t, 0, n);
         is.close();
-        final byte[] data = bo.toByteArray();
-        final String mime = mime();
-        final ArrayList<Integer> au = accessUnits(data, mime.equals("video/hevc"));
+        data = bo.toByteArray();
+        mime = mime();
+        au = accessUnits(data, mime.equals("video/hevc"));
         final int total = au.size() * LOOPS;
         Log.i(TAG, "TEXTURE: " + au.size() + " access unit(s), playing " + total);
         if (au.isEmpty()) throw new IllegalStateException("no access units in the clip");
+        HandlerThread ht = new HandlerThread("video-cb");
+        ht.start();
+        handler = new Handler(ht.getLooper());
+        // A stream that never drains must not hang the run.
+        handler.postDelayed(new Runnable() {
+            public void run() {
+                report();
+            }
+        }, (total * 1000L / FPS) + 15000);
+        playLoop(surface, 0);
+    }
 
+    private void report() {
+        if (done) return;
+        done = true;
+        Log.i(TAG, "TEXTURE: fed " + fed + " rendered " + out + " updated " + updated
+                + " timestamp " + (timestamp == lastDue ? "matches" : "differs"));
+        System.exit(0);
+    }
+
+    // One loop of the clip on a codec of its own, released when it is done, the way a player
+    // makes a new codec when it seeks: the next loop makes another on the same Surface.
+    private void playLoop(final Surface surface, final int loop) throws Exception {
         MediaFormat f = MediaFormat.createVideoFormat(mime, W, H);
         String name = new MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(f);
         final MediaCodec c = MediaCodec.createByCodecName(name);
-        final HandlerThread ht = new HandlerThread("video-cb");
-        ht.start();
-        final Handler handler = new Handler(ht.getLooper());
-        final int[] fed = {0};
-        final int[] out = {0};
-        final long[] base = {0};      // System.nanoTime() at which pts 0 is due
-        final long[] lastDue = {0};   // the time the last frame was released for
-        final boolean[] done = {false};
-        final Runnable finish = new Runnable() {
-            public void run() {
-                if (done[0]) return;
-                done[0] = true;
-                Log.i(TAG, "TEXTURE: fed " + fed[0] + " rendered " + out[0] + " updated "
-                        + updated + " timestamp " + (timestamp == lastDue[0] ? "matches" : "differs"));
-                System.exit(0);
-            }
-        };
+        final int frames = au.size();
+        final int[] loopFed = {0};
+        final int[] loopOut = {0};
+        final long[] base = {0};  // System.nanoTime() at which pts 0 is due
         c.setCallback(new MediaCodec.Callback() {
             public void onInputBufferAvailable(MediaCodec mc, int idx) {
                 try {
-                    if (fed[0] >= total) {
-                        if (fed[0] == total) {
+                    if (loopFed[0] >= frames) {
+                        if (loopFed[0] == frames) {
                             mc.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                            fed[0]++;
+                            loopFed[0]++;
                         }
                         return;
                     }
-                    int i = fed[0] % au.size();
+                    int i = loopFed[0];
                     int from = au.get(i);
                     int to = i + 1 < au.size() ? au.get(i + 1) : data.length;
                     ByteBuffer ib = mc.getInputBuffer(idx);
                     ib.clear();
                     ib.put(data, from, to - from);
-                    mc.queueInputBuffer(idx, 0, to - from, fed[0] * 1000000L / FPS, 0);
-                    fed[0]++;
+                    mc.queueInputBuffer(idx, 0, to - from, i * 1000000L / FPS, 0);
+                    loopFed[0]++;
+                    fed++;
                 } catch (Throwable e) {
                     Log.e(TAG, "TEXTURE: onInput", e);
                 }
@@ -168,9 +187,9 @@ public class Main extends Activity {
                     public void run() {
                         try {
                             mc.releaseOutputBuffer(idx, due);
-                            lastDue[0] = due;
-                            // Give the last frame time to reach the screen.
-                            if (++out[0] == total) handler.postDelayed(finish, 700);
+                            lastDue = due;
+                            out++;
+                            if (++loopOut[0] == frames) next(mc);
                         } catch (Throwable e) {
                             Log.e(TAG, "TEXTURE: onOutput", e);
                         }
@@ -179,6 +198,32 @@ public class Main extends Activity {
                 long waitMs = (due - System.nanoTime()) / 1000000L - 20;
                 if (waitMs > 0) handler.postDelayed(release, waitMs);
                 else release.run();
+            }
+            // This codec's loop is out: let it go once its last frame is due, then the next
+            // loop, or the end. (a4l drops a frame still waiting for its time when its codec is
+            // stopped.)
+            private void next(final MediaCodec mc) {
+                handler.postDelayed(new Runnable() {
+                    public void run() {
+                        mc.stop();
+                        mc.release();
+                        try {
+                            if (loop + 1 < LOOPS) {
+                                playLoop(surface, loop + 1);
+                            } else {
+                                // Give the last frame time to reach the screen.
+                                handler.postDelayed(new Runnable() {
+                                    public void run() {
+                                        report();
+                                    }
+                                }, 700);
+                            }
+                        } catch (Throwable e) {
+                            Log.e(TAG, "TEXTURE: FAILED", e);
+                            System.exit(3);
+                        }
+                    }
+                }, 100);
             }
             public void onOutputFormatChanged(MediaCodec mc, MediaFormat fmt) {
                 Log.i(TAG, "TEXTURE: format " + fmt.getInteger(MediaFormat.KEY_WIDTH) + "x"
@@ -190,7 +235,5 @@ public class Main extends Activity {
         }, handler);
         c.configure(f, surface, null, 0);
         c.start();
-        // A stream that never drains must not hang the run.
-        handler.postDelayed(finish, (total * 1000L / FPS) + 15000);
     }
 }

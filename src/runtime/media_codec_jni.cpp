@@ -80,19 +80,75 @@ jmethodID g_post_event =
 jclass g_bufinfo_cls = nullptr;
 jmethodID g_bufinfo_ctor = nullptr;  // MediaCodec$BufferInfo()
 
+// A converter for frames going to SurfaceTextures, shared by every codec
+// that sends them: making one sets up a GL device and context, which a
+// player that makes a new codec when it seeks would otherwise pay each time.
+// A converter keeps buffers of one picture size, so there is one a size in
+// use (the video plane's is its own). One at a time converts.
+struct SharedConverter {
+  std::uint32_t w = 0, h = 0;
+  std::mutex mu;
+  std::unique_ptr<gfx::VideoConverter> converter;
+};
+
+// The converter for w x h, made on first use. Null where none can be made,
+// which is logged once. Two sizes are kept; a third goes in place of one no
+// codec holds.
+std::shared_ptr<SharedConverter> st_converter(std::uint32_t w,
+                                              std::uint32_t h) {
+  constexpr std::size_t kKept = 2;
+  static std::mutex mu;
+  static std::vector<std::shared_ptr<SharedConverter>> kept;
+  static bool none = false;  // none could be made: no GL here
+  std::lock_guard<std::mutex> lk(mu);
+  for (const auto& c : kept) {
+    if (c->w == w && c->h == h)
+      return c;
+  }
+  if (none)
+    return nullptr;
+  const auto t0 = std::chrono::steady_clock::now();
+  std::string err;
+  auto c = std::make_shared<SharedConverter>();
+  c->w = w;
+  c->h = h;
+  c->converter = gfx::VideoConverter::Create(&err);
+  if (!c->converter) {
+    none = true;
+    log::w(kTag, "video: no converter for a SurfaceTexture ({}); no picture",
+           err);
+    return nullptr;
+  }
+  log::i(kTag, "video: a converter for {}x{} frames made in {} ms", w, h,
+         std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now() - t0)
+             .count());
+  // Make room: one no codec holds, the first such.
+  if (kept.size() >= kKept) {
+    for (auto it = kept.begin(); it != kept.end(); ++it) {
+      if (it->use_count() == 1) {
+        kept.erase(it);
+        break;
+      }
+    }
+  }
+  if (kept.size() < kKept)
+    kept.push_back(c);
+  return c;
+}
+
 // A SurfaceTexture a codec draws into (new Surface(SurfaceTexture)), as a
-// player showing video on a TextureView does. Its consumer draws an image and
-// a decoder's frame is YUV, so each frame is converted to XBGR8888 on the GPU
-// first, by a converter of the sink's own: one converter keeps buffers of one
-// picture size, and the video plane's has the size of its own video. Frames
-// on their way to the SurfaceTexture share the sink, so a surface change
-// leaves them one to finish on. The converter is made on the first frame and
-// used by the codec's timed-release thread.
+// player showing video on a TextureView does. A frame its consumer cannot
+// take as it is (a TextureView on a device that does not sample the frame's
+// layout) is converted to XBGR8888 on the GPU first, by the shared converter
+// for its size. Frames on their way to the SurfaceTexture share the sink, so a
+// surface change leaves them one to finish on. Used by the codec's
+// timed-release thread.
 struct TextureSink {
   explicit TextureSink(jlong id) : st(id) {}
   const jlong st;  // the SurfaceTexture's id in graphics_jni
   std::mutex mu;
-  std::unique_ptr<gfx::VideoConverter> converter;
+  std::shared_ptr<SharedConverter> converter;  // for the last frame's size
   bool tried = false;
   bool said = false;      // a failed frame was logged
   bool said_yuv = false;  // frames going as they are was logged
@@ -322,24 +378,30 @@ void show_on_texture(TextureSink& sink,
   std::lock_guard<std::mutex> lk(sink.mu);
   if (!sink.tried) {
     sink.tried = true;
-    std::string err;
     if (set == nullptr)
       log::w(kTag,
              "video: no SurfaceTexture feed in the graphics library; no "
              "picture");
-    else if (sink.converter = gfx::VideoConverter::Create(&err); sink.converter)
+    else
       log::i(kTag,
              "video: frames go to a SurfaceTexture, converted to XBGR8888 on "
              "the GPU");
-    else
-      log::w(kTag, "video: no converter for a SurfaceTexture ({}); no picture",
-             err);
   }
-  if (set == nullptr || !sink.converter)
+  if (set == nullptr)
+    return;
+  if (!sink.converter || sink.converter->w != frame.width ||
+      sink.converter->h != frame.height)
+    sink.converter = st_converter(frame.width, frame.height);
+  if (!sink.converter)
     return;
   std::string err;
   gfx::DmabufFrame rgb{};
-  if (!sink.converter->convert(frame, &rgb, &err)) {
+  bool converted = false;
+  {
+    std::lock_guard<std::mutex> clk(sink.converter->mu);
+    converted = sink.converter->converter->convert(frame, &rgb, &err);
+  }
+  if (!converted) {
     if (!sink.said) {
       sink.said = true;
       log::w(kTag,

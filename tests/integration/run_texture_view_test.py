@@ -15,7 +15,8 @@
 # sampler where it takes the frame's format and layout, converted where it does not; the frame
 # converted to XBGR8888 and imported (ACL_SURFACETEXTURE_CONVERT); and converted with its pixels
 # copied (and ACL_SURFACETEXTURE_COPY), the path for a driver that refuses the import. The first
-# says which way its frames went.
+# says which way its frames went. The fixture plays each loop on a new codec, as a player does
+# when it seeks; the converted runs must make one converter and share it.
 #
 # Needs: a host ART build (ACL_ART_HOME), the AOSP toolchain, ffmpeg with libx264 (libx265 for
 # HEVC), a decoder for the codec (any of a4l's, software included), a render node, and a Wayland
@@ -292,6 +293,11 @@ def main() -> int:
                             "its last frame for")
             if tag == "converted" and "was not imported on the GPU" in out:
                 return fail("the frame was copied, not imported")
+            # The fixture plays each loop on a codec of its own; the converted runs must make
+            # their converter once and share it.
+            made = re.findall(r"a converter for \d+x\d+ frames made in (\d+) ms", out)
+            if vary and len(made) != 1:
+                return fail(f"{len(made)} converters were made for {LOOPS} codecs, not 1")
             if not os.path.exists(frame):
                 return fail("no rendered frame was read back")
             wrong = check_frame(frame)
@@ -307,7 +313,9 @@ def main() -> int:
                 refused = "did not take a decoder frame" in out
                 way = (" (YUV, then converted: the device refused it)" if yuv and refused
                        else " (YUV)" if yuv else " (converted)")
-            notes.append(f"{tag}{way}: {rendered} frames, {updated} updates, picture right")
+            shared = f", one converter for {LOOPS} codecs (made in {made[0]} ms)" if vary else ""
+            notes.append(f"{tag}{way}: {rendered} frames, {updated} updates, picture right"
+                         f"{shared}")
         sys.stdout.write("OK: " + "; ".join(notes) + "\n")
         return 0
     except subprocess.CalledProcessError as e:
