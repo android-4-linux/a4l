@@ -350,6 +350,18 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 300,
       is_parallel : false,
     )
+    # The same through GStreamer's software decoder (the hardware ones ranked out), whose
+    # frames are copied: FFmpeg's avdec_h264 leaves the clip's left crop to the consumer.
+    test(
+      'surface-texture-gl-gst-software',
+      py3,
+      args : [files('run_surface_texture_gl_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      env : ['ACL_VIDEO_BACKEND=gst',
+             'GST_PLUGIN_FEATURE_RANK=vah264dec:0,vaapih264dec:0,v4l2slh264dec:0,v4l2h264dec:0'],
+      timeout : 300,
+      is_parallel : false,
+    )
     # The same with an HEVC Main 10 clip: the decoder's 10-bit frames (P010, or P030 on a Pi 5)
     # bound to the app's texture as they are.
     test(

@@ -100,8 +100,15 @@ struct SpsPicture {
 // decoders, for a 640x360 picture at 16,16: caps 640x360, video meta
 // 672x400, crop 16,16 640x360. Without a crop meta the picture is the caps'
 // size at 0,0, and so is the buffer, unless the stream's SPS (`said`) puts
-// the picture elsewhere in it: gst-omx on Qualcomm's component sends caps
-// of the crop's right and bottom edges, 656x376 for 640x360 at 16,16.
+// the picture elsewhere in it. A decoder then may have applied part of the
+// crop: gst-omx on Qualcomm's component sends caps of the crop's right and
+// bottom edges, 656x376 for 640x360 at 16,16; avdec_h264 (FFmpeg) applies
+// the right and bottom crops whole and the left one only as far as its row
+// alignment allows, so 672x384 cropped 16 on each side and 12 top and bottom
+// comes as 656x360 with the picture at 16,0. Taking a decoder to apply the
+// right and bottom crops whole, if any, the picture starts where the SPS
+// says or where it ends at the buffer's edge, whichever is nearer the
+// buffer's origin.
 struct Picture {
   std::uint32_t buffer_w = 0;
   std::uint32_t buffer_h = 0;
@@ -126,14 +133,17 @@ bool picture_of(GstBuffer* buf,
   const GstVideoCropMeta* cm = gst_buffer_get_video_crop_meta(buf);
   if (cm == nullptr) {
     if (said != nullptr && (said->x != 0 || said->y != 0) && said->w > 0 &&
-        said->h > 0 && said->x % 2 == 0 && said->y % 2 == 0 &&
-        std::uint64_t{said->x} + said->w <= p->buffer_w &&
-        std::uint64_t{said->y} + said->h <= p->buffer_h) {
-      p->x = said->x;
-      p->y = said->y;
-      p->w = said->w;
-      p->h = said->h;
-      p->from_sps = true;
+        said->h > 0 && said->w <= p->buffer_w && said->h <= p->buffer_h) {
+      const std::uint32_t x = std::min(said->x, p->buffer_w - said->w);
+      const std::uint32_t y = std::min(said->y, p->buffer_h - said->h);
+      // At 0,0 the decoder has applied the whole crop: the caps stand.
+      if ((x != 0 || y != 0) && x % 2 == 0 && y % 2 == 0) {
+        p->x = x;
+        p->y = y;
+        p->w = said->w;
+        p->h = said->h;
+        p->from_sps = true;
+      }
     }
     return true;
   }
