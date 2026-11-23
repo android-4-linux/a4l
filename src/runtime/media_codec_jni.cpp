@@ -89,8 +89,8 @@ jmethodID g_bufinfo_ctor = nullptr;  // MediaCodec$BufferInfo()
 // leaves them one to finish on. The converter is made on the first frame and
 // used by the codec's timed-release thread.
 struct TextureSink {
-  explicit TextureSink(jlong handle) : st(handle) {}
-  const jlong st;  // the AclSurfaceTexture handle
+  explicit TextureSink(jlong id) : st(id) {}
+  const jlong st;  // the SurfaceTexture's id in graphics_jni
   std::mutex mu;
   std::unique_ptr<gfx::VideoConverter> converter;
   bool tried = false;
