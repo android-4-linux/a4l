@@ -24,9 +24,11 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -1206,34 +1208,84 @@ extern "C" bool acl_graphics_gpu_end_frame(int buffer_index, AclDmabuf* out) {
   return out->fd >= 0;
 }
 
-// A decoder's frame for a SurfaceTexture (graphics_jni.cpp), drawn by the
-// present device with no copy: the frame's XBGR8888 dma-buf is imported as a
-// VkImage and wrapped as a texture image. The image and its memory go when
-// Skia has finished with the texture, and `keep`, which holds the frame's
-// buffer, with them. Null when `ctx` is not the present context, the format
-// is not one this takes, or the driver refuses the import; the caller then
-// copies the pixels. Present thread.
-sk_sp<SkImage> acl_gpu_import_frame(GrDirectContext* ctx,
-                                    int fd,
-                                    uint32_t width,
-                                    uint32_t height,
-                                    uint32_t stride,
-                                    uint32_t offset,
-                                    uint32_t drm_format,
-                                    uint64_t modifier,
-                                    std::shared_ptr<void> keep) {
-  if (ctx == nullptr || ctx != g.gr.get() || g.device == VK_NULL_HANDLE ||
-      fd < 0 || width == 0 || height == 0)
-    return nullptr;
-  // Byte order R, G, B, X in memory either way; the fourth byte is unused.
-  if (drm_format != DRM_FORMAT_XBGR8888 && drm_format != DRM_FORMAT_ABGR8888)
-    return nullptr;
+namespace {
+
+// A converter buffer imported into the present device: its VkImage and the
+// memory imported from its dma-buf. The converter draws each frame into one
+// of a few buffers it keeps, so the import is made once a buffer and kept
+// while frames keep arriving in it. The dma-buf, not the descriptor, is the
+// buffer: each frame comes with a copy of the descriptor, so a buffer is
+// known by the inode behind it, with its layout.
+struct ImportKey {
+  dev_t dev = 0;
+  ino_t ino = 0;
+  uint32_t width = 0, height = 0, stride = 0, offset = 0, drm_format = 0;
+  uint64_t modifier = 0;
+  bool operator==(const ImportKey& o) const {
+    return dev == o.dev && ino == o.ino && width == o.width &&
+           height == o.height && stride == o.stride && offset == o.offset &&
+           drm_format == o.drm_format && modifier == o.modifier;
+  }
+};
+struct Import {
+  ImportKey key;
+  VkImage image = VK_NULL_HANDLE;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  VkDeviceSize size = 0;
+  VkImageUsageFlags usage = 0;
+  int in_use = 0;  // Skia images made from it that are still alive
+  std::chrono::steady_clock::time_point last;
+};
+// An import unused this long has gone with its buffer, or will be made again.
+constexpr auto kImportIdle = std::chrono::seconds(1);
+// More imports than this held at once are a sign of buffers being replaced
+// faster than they go idle; the oldest unused ones go first.
+constexpr std::size_t kMaxImports = 32;
+std::mutex g_imports_mu;
+std::vector<std::shared_ptr<Import>> g_imports;
+
+void destroy_import(const Import& i) {
+  VKD.vkDestroyImage(g.device, i.image, nullptr);
+  VKD.vkFreeMemory(g.device, i.memory, nullptr);
+}
+
+// Let go of imports nothing uses that have been idle, and of the oldest
+// unused ones while too many are held. Under g_imports_mu.
+void prune_imports(std::chrono::steady_clock::time_point now) {
+  auto idle = [&](const std::shared_ptr<Import>& i) {
+    return i->in_use == 0 && now - i->last >= kImportIdle;
+  };
+  for (auto it = g_imports.begin(); it != g_imports.end();) {
+    if (idle(*it)) {
+      destroy_import(**it);
+      it = g_imports.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  while (g_imports.size() > kMaxImports) {
+    auto oldest = g_imports.end();
+    for (auto it = g_imports.begin(); it != g_imports.end(); ++it) {
+      if ((*it)->in_use == 0 &&
+          (oldest == g_imports.end() || (*it)->last < (*oldest)->last))
+        oldest = it;
+    }
+    if (oldest == g_imports.end())
+      break;  // every one is in use
+    destroy_import(**oldest);
+    g_imports.erase(oldest);
+  }
+}
+
+// Import a converter buffer: a VkImage over memory imported from its
+// dma-buf. Null if the driver refuses.
+std::shared_ptr<Import> make_import(const ImportKey& key, int fd) {
   VkSubresourceLayout plane{};
-  plane.offset = offset;
-  plane.rowPitch = stride;
+  plane.offset = key.offset;
+  plane.rowPitch = key.stride;
   VkImageDrmFormatModifierExplicitCreateInfoEXT modci{
       VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT};
-  modci.drmFormatModifier = modifier;
+  modci.drmFormatModifier = key.modifier;
   modci.drmFormatModifierPlaneCount = 1;
   modci.pPlaneLayouts = &plane;
   VkExternalMemoryImageCreateInfo extci{
@@ -1242,7 +1294,7 @@ sk_sp<SkImage> acl_gpu_import_frame(GrDirectContext* ctx,
   VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &extci};
   ci.imageType = VK_IMAGE_TYPE_2D;
   ci.format = VK_FORMAT_R8G8B8A8_UNORM;
-  ci.extent = {width, height, 1};
+  ci.extent = {key.width, key.height, 1};
   ci.mipLevels = 1;
   ci.arrayLayers = 1;
   ci.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1256,7 +1308,7 @@ sk_sp<SkImage> acl_gpu_import_frame(GrDirectContext* ctx,
   if (VKD.vkCreateImage(g.device, &ci, nullptr, &image) != VK_SUCCESS)
     return nullptr;
   VkDeviceMemory memory = VK_NULL_HANDLE;
-  const auto fail = [&] {
+  const auto fail = [&]() -> std::shared_ptr<Import> {
     if (memory != VK_NULL_HANDLE)
       VKD.vkFreeMemory(g.device, memory, nullptr);
     VKD.vkDestroyImage(g.device, image, nullptr);
@@ -1293,40 +1345,122 @@ sk_sp<SkImage> acl_gpu_import_frame(GrDirectContext* ctx,
   }
   if (VKD.vkBindImageMemory(g.device, image, memory, 0) != VK_SUCCESS)
     return fail();
+  auto i = std::make_shared<Import>();
+  i->key = key;
+  i->image = image;
+  i->memory = memory;
+  i->size = reqs.size;
+  i->usage = ci.usage;
+  return i;
+}
+
+}  // namespace
+
+// A decoder's frame for a SurfaceTexture (graphics_jni.cpp), drawn by the
+// present device with no copy: the frame's XBGR8888 dma-buf is imported as a
+// VkImage, once a converter buffer, and wrapped as a texture image for each
+// frame. `keep`, which holds the frame's buffer, goes when Skia has finished
+// with that texture. Null when `ctx` is not the present context, the format
+// is not one this takes, or the driver refuses the import; the caller then
+// copies the pixels. Present thread.
+sk_sp<SkImage> acl_gpu_import_frame(GrDirectContext* ctx,
+                                    int fd,
+                                    uint32_t width,
+                                    uint32_t height,
+                                    uint32_t stride,
+                                    uint32_t offset,
+                                    uint32_t drm_format,
+                                    uint64_t modifier,
+                                    std::shared_ptr<void> keep) {
+  if (ctx == nullptr || ctx != g.gr.get() || g.device == VK_NULL_HANDLE ||
+      fd < 0 || width == 0 || height == 0)
+    return nullptr;
+  // Byte order R, G, B, X in memory either way; the fourth byte is unused.
+  if (drm_format != DRM_FORMAT_XBGR8888 && drm_format != DRM_FORMAT_ABGR8888)
+    return nullptr;
+  struct stat st{};
+  if (::fstat(fd, &st) != 0)
+    return nullptr;
+  ImportKey key;
+  key.dev = st.st_dev;
+  key.ino = st.st_ino;
+  key.width = width;
+  key.height = height;
+  key.stride = stride;
+  key.offset = offset;
+  key.drm_format = drm_format;
+  key.modifier = modifier;
+  const auto now = std::chrono::steady_clock::now();
+  std::shared_ptr<Import> imp;
+  {
+    std::lock_guard<std::mutex> lk(g_imports_mu);
+    prune_imports(now);
+    for (const auto& i : g_imports) {
+      if (i->key == key) {
+        imp = i;
+        break;
+      }
+    }
+    if (!imp) {
+      imp = make_import(key, fd);
+      if (!imp)
+        return nullptr;
+      g_imports.push_back(imp);
+    }
+    ++imp->in_use;
+    imp->last = now;
+  }
 
   GrVkImageInfo info{};
-  info.fImage = image;
-  info.fAlloc.fMemory = memory;
+  info.fImage = imp->image;
+  info.fAlloc.fMemory = imp->memory;
   info.fAlloc.fOffset = 0;
-  info.fAlloc.fSize = reqs.size;
+  info.fAlloc.fSize = imp->size;
   info.fImageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-  // Written outside Vulkan: Skia takes it from the external queue family, in
-  // a layout that keeps what is in it.
+  // Written outside Vulkan, by the converter, for every frame: each texture
+  // made from the image takes it from the external queue family, in a layout
+  // that keeps what is in it (acl_gpu_release_frame hands it back).
   info.fImageLayout = VK_IMAGE_LAYOUT_GENERAL;
   info.fFormat = VK_FORMAT_R8G8B8A8_UNORM;
-  info.fImageUsageFlags = ci.usage;
+  info.fImageUsageFlags = imp->usage;
   info.fSampleCount = 1;
   info.fLevelCount = 1;
   info.fCurrentQueueFamily = VK_QUEUE_FAMILY_EXTERNAL;
   info.fSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  struct Imported {
-    VkImage image;
-    VkDeviceMemory memory;
+  struct Held {
+    std::shared_ptr<Import> imp;
     std::shared_ptr<void> keep;
   };
-  auto* held = new Imported{image, memory, std::move(keep)};
+  auto* held = new Held{imp, std::move(keep)};
   const GrBackendTexture bt(static_cast<int>(width), static_cast<int>(height),
                             info);
-  sk_sp<SkImage> img = SkImage::MakeFromTexture(
+  // A null image has already called the release proc.
+  return SkImage::MakeFromTexture(
       ctx, bt, kTopLeft_GrSurfaceOrigin, kRGB_888x_SkColorType,
       kOpaque_SkAlphaType, nullptr,
       [](SkImage::ReleaseContext p) {
-        auto* h = static_cast<Imported*>(p);
-        VKD.vkDestroyImage(g.device, h->image, nullptr);
-        VKD.vkFreeMemory(g.device, h->memory, nullptr);
+        auto* h = static_cast<Held*>(p);
+        {
+          std::lock_guard<std::mutex> lk(g_imports_mu);
+          --h->imp->in_use;
+          h->imp->last = std::chrono::steady_clock::now();
+        }
         delete h;
       },
       held);
-  // A null image has already called the release proc.
-  return img;
+}
+
+// Hand a frame's texture back to the external queue family, for the
+// converter to draw the next frame into its buffer: an image
+// acl_gpu_import_frame made, which the caller is about to let go of. The
+// transition goes with the next submit. Present thread.
+void acl_gpu_release_frame(GrDirectContext* ctx, const sk_sp<SkImage>& img) {
+  if (ctx == nullptr || ctx != g.gr.get() || !img || !img->isTextureBacked())
+    return;
+  const GrBackendTexture bt = img->getBackendTexture(false);
+  if (!bt.isValid())
+    return;
+  ctx->setBackendTextureState(
+      bt, GrBackendSurfaceMutableState(VK_IMAGE_LAYOUT_GENERAL,
+                                       VK_QUEUE_FAMILY_EXTERNAL));
 }
