@@ -265,8 +265,9 @@ StSetFrameFn st_set_frame() {
 }
 
 // The feed for a decoder's frame as it is, and whether a SurfaceTexture
-// wants one: it does while an app's GL context holds it (the app samples it
-// through an external texture, which takes YUV), until its driver refuses one.
+// wants one: an app's GL samples it through an external texture, which takes
+// YUV, and the present device can draw it for a TextureView; either until its
+// driver refuses one.
 using StSetYuvFrameFn =
     void (*)(jlong, const AclStYuvFrame*, jlong, void (*)(void*), void*);
 using StWantsYuvFn = bool (*)(jlong);
@@ -282,8 +283,9 @@ StWantsYuvFn st_wants_yuv() {
 }
 
 // Hand a decoded frame to a SurfaceTexture, at `ts_ns`, its timestamp.
-// Timed-release thread. A SurfaceTexture an app samples in its own GL gets
-// the frame as it is, holding the decoder's surface; any other gets it
+// Timed-release thread. A SurfaceTexture that takes the frame as it is (an
+// app's GL, or a TextureView the present device draws YUV for; graphics_jni
+// says which) gets it so, holding the decoder's surface; any other gets it
 // converted to XBGR8888, holding one of the converter's buffers. Either is
 // kept until a newer frame replaces it.
 void show_on_texture(TextureSink& sink,
@@ -302,8 +304,8 @@ void show_on_texture(TextureSink& sink,
       if (!sink.said_yuv) {
         sink.said_yuv = true;
         log::i(kTag,
-               "video: frames go to a SurfaceTexture in an app's GL as they "
-               "are (format 0x{:x})",
+               "video: frames go to a SurfaceTexture as they are (format "
+               "0x{:x})",
                frame.drm_format);
       }
     }

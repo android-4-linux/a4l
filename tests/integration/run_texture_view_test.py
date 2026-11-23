@@ -11,8 +11,11 @@
 # for most frames and that the SurfaceTexture's timestamp is the time the app released the
 # frame for.
 #
-# Two runs: the frame imported on the present device (Vulkan) and the frame's pixels copied
-# (ACL_SURFACETEXTURE_COPY), the path for a driver that refuses the import.
+# Three runs: the decoder's frame as it is, drawn by the present device (Vulkan) through a YCbCr
+# sampler where it takes the frame's format and layout, converted where it does not; the frame
+# converted to XBGR8888 and imported (ACL_SURFACETEXTURE_CONVERT); and converted with its pixels
+# copied (and ACL_SURFACETEXTURE_COPY), the path for a driver that refuses the import. The first
+# says which way its frames went.
 #
 # Needs: a host ART build (ACL_ART_HOME), the AOSP toolchain, ffmpeg with libx264 (libx265 for
 # HEVC), a decoder for the codec (any of a4l's, software included), a render node, and a Wayland
@@ -240,8 +243,11 @@ def main() -> int:
 
         total = FRAMES * LOOPS
         notes = []
-        for tag, vary in (("import", {}), ("copy", {"ACL_SURFACETEXTURE_COPY": "1"})):
-            frame = os.path.join(work, f"frame-{tag}.ppm")
+        for tag, vary in (("as it is", {}),
+                          ("converted", {"ACL_SURFACETEXTURE_CONVERT": "1"}),
+                          ("copied", {"ACL_SURFACETEXTURE_CONVERT": "1",
+                                      "ACL_SURFACETEXTURE_COPY": "1"})):
+            frame = os.path.join(work, f"frame-{tag.replace(' ', '-')}.ppm")
             env = dict(os.environ, **vary, WAYLAND_DISPLAY=display, ACL_RUN_TIMEOUT="90",
                        ACL_BIN=acl, ACL_PRESENT_GPU="1", ACL_GPU_DUMP=frame,
                        XDG_CACHE_HOME=os.path.join(work, f"cache-{tag}"),
@@ -251,7 +257,7 @@ def main() -> int:
                                env=env, capture_output=True, text=True, timeout=240)
             out = p.stdout + p.stderr
             if keep:
-                with open(os.path.join(keep, f"run-{tag}.log"), "w") as fh:
+                with open(os.path.join(keep, f"run-{tag.replace(' ', '-')}.log"), "w") as fh:
                     fh.write(out)
                 if os.path.exists(frame):
                     shutil.copy(frame, keep)
@@ -284,7 +290,7 @@ def main() -> int:
             if m.group(4) != "matches":
                 return fail("the SurfaceTexture's timestamp is not the time the app released "
                             "its last frame for")
-            if not vary and "was not imported on the GPU" in out:
+            if tag == "converted" and "was not imported on the GPU" in out:
                 return fail("the frame was copied, not imported")
             if not os.path.exists(frame):
                 return fail("no rendered frame was read back")
@@ -292,10 +298,16 @@ def main() -> int:
             if wrong:
                 # The work directory goes; a frame that failed is kept for a look.
                 kept = os.path.join(tempfile.gettempdir(),
-                                    f"a4l-texture-fail-{os.getpid()}-{tag}.ppm")
+                                    f"a4l-texture-fail-{os.getpid()}-{tag.replace(' ', '-')}.ppm")
                 shutil.copy(frame, kept)
                 return fail(f"{wrong} (frame kept: {kept})")
-            notes.append(f"{tag}: {rendered} frames, {updated} updates, picture right")
+            way = ""
+            if not vary:
+                yuv = "frames go to a SurfaceTexture as they are" in out
+                refused = "did not take a decoder frame" in out
+                way = (" (YUV, then converted: the device refused it)" if yuv and refused
+                       else " (YUV)" if yuv else " (converted)")
+            notes.append(f"{tag}{way}: {rendered} frames, {updated} updates, picture right")
         sys.stdout.write("OK: " + "; ".join(notes) + "\n")
         return 0
     except subprocess.CalledProcessError as e:

@@ -15,10 +15,10 @@
 
 #include "gfx/dmabuf_frame.h"
 
-// A decoder's frame as it is, for a SurfaceTexture an app samples in its own
-// GL: every plane, uncropped, with the transform its texture coordinates
-// need. The layout graphics_jni takes it in (it keeps a copy of this
-// definition; the two must match). A plane's fd is -1 where it is in fd[0].
+// A decoder's frame as it is, for a SurfaceTexture: every plane, uncropped,
+// with the transform an app's texture coordinates need. The layout
+// graphics_jni takes it in (tools/aosp/graphics_jni/st_frame.h; the two must
+// match). fd[i] is plane i's dma-buf.
 struct AclStYuvFrame {
   std::uint32_t width, height;   // the picture
   std::uint32_t crop_x, crop_y;  // where it starts in the buffer
@@ -27,7 +27,7 @@ struct AclStYuvFrame {
   std::uint32_t plane_count;
   int fd[4];
   std::uint32_t offset[4], stride[4];
-  std::uint8_t yuv_matrix;  // H.273 matrix coefficients, as in DmabufFrame
+  std::uint8_t yuv_matrix;  // H.273 matrix coefficients: video_color()'s
   std::uint8_t yuv_full_range;
   float transform[16];  // SurfaceTexture.getTransformMatrix, column-major
 };

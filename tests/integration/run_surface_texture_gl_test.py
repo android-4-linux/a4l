@@ -149,7 +149,7 @@ def main() -> int:
         total = FRAMES * LOOPS
         notes = []
         for tag, vary, said in (
-                ("as it is", {}, "in an app's GL as they are"),
+                ("as it is", {}, "frames go to a SurfaceTexture as they are"),
                 ("converted", {"ACL_SURFACETEXTURE_CONVERT": "1"}, "converted to XBGR8888")):
             p = subprocess.run([os.path.join(src_root, "tools/run-apk.sh"), apk, "--verify=off"],
                                env=dict(base, **vary), capture_output=True, text=True,
