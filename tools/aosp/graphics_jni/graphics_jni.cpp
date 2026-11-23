@@ -15,6 +15,7 @@
 
 #include <fcntl.h>
 #include <jni.h>
+#include <pthread.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -6807,15 +6808,31 @@ std::atomic<std::uint64_t> g_st_produced{
 JavaVM* g_st_vm = nullptr;
 jclass g_st_class = nullptr;    // global ref to android.graphics.SurfaceTexture
 jmethodID g_st_post = nullptr;  // static postEventFromNative(WeakReference)
+// Detaches, at its exit, a thread st_post_env attached. ART aborts when a
+// thread it knows exits attached, after letting other thread-exit
+// destructors run first, so this one runs in time.
+pthread_key_t g_st_attached_key;
+pthread_once_t g_st_attached_once = PTHREAD_ONCE_INIT;
+void st_detach_at_exit(void* vm) {
+  static_cast<JavaVM*>(vm)->DetachCurrentThread();
+}
+
+// The calling thread's JNIEnv for posting frame-available, attaching it if
+// it is not. A thread attached here (a codec's timed-release thread, a
+// producer's) stays attached for its later frames and is detached when it
+// exits: a codec's thread exits when the app releases the codec.
 JNIEnv* st_post_env() {
   if (g_st_vm == nullptr || g_st_post == nullptr)
     return nullptr;
   JNIEnv* env = nullptr;
   if (g_st_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) !=
       JNI_OK) {
+    pthread_once(&g_st_attached_once, [] {
+      pthread_key_create(&g_st_attached_key, &st_detach_at_exit);
+    });
     if (g_st_vm->AttachCurrentThreadAsDaemon(&env, nullptr) != JNI_OK)
-      return nullptr;  // stays attached (pooled producer/donor thread) — cheap
-                       // on later frames
+      return nullptr;
+    pthread_setspecific(g_st_attached_key, g_st_vm);
   }
   return env;
 }
