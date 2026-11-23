@@ -35,17 +35,17 @@ gfx::BufferQueue* image_reader_queue_from_surface(JNIEnv* env, jobject surface);
 // registered like an ImageReader's so image_reader_queue_from_surface accepts
 // it) and return it as the native handle for a Surface.mNativeObject. Used for
 // a SurfaceView's video surface and by Surface.nativeCreateFromSurfaceTexture,
-// so MediaCodec has a valid, decodable output surface. `surface_texture` is
-// the SurfaceTexture's AclSurfaceTexture handle for the latter, 0 for the
-// former. Returns 0 on failure.
+// so MediaCodec has a valid, decodable output surface. `surface_texture_id`
+// is the SurfaceTexture's id in graphics_jni (acl_graphics_surfacetexture_id)
+// for the latter, 0 for the former. Returns 0 on failure.
 jlong image_reader_make_producer(JNIEnv* env,
                                  int w,
                                  int h,
-                                 jlong surface_texture = 0);
+                                 jlong surface_texture_id = 0);
 
-// The AclSurfaceTexture handle of the SurfaceTexture `surface` was made from
+// The graphics_jni id of the SurfaceTexture `surface` was made from
 // (new Surface(SurfaceTexture)), or 0 for any other surface. A decoder writing
-// to such a surface sends its frames to that SurfaceTexture.
+// to such a surface sends its frames to that SurfaceTexture, by this id.
 jlong image_reader_texture_from_surface(JNIEnv* env, jobject surface);
 #endif
 

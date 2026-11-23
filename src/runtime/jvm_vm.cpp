@@ -238,6 +238,15 @@ StDefaultSizeFn st_default_size() {
       ::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_default_size"));
   return f;
 }
+// The id graphics_jni gives a live SurfaceTexture, to send it frames by: a
+// handle can come back as a new SurfaceTexture's, an id cannot. 0 when the
+// graphics library has no ids.
+jlong st_id_of(jlong st_handle) {
+  using StIdFn = jlong (*)(jlong);
+  static const auto f = reinterpret_cast<StIdFn>(
+      ::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_id"));
+  return f != nullptr && st_handle != 0 ? f(st_handle) : 0;
+}
 // SurfaceTexture.mSurfaceTexture (the AclSurfaceTexture* the graphics_jni
 // natives stashed).
 jlong st_handle_of(JNIEnv* env, jobject surface_texture) {
@@ -6982,7 +6991,7 @@ class ArtVm final : public JniVm {
                +[](JNIEnv* e, jclass, jobject surfaceTexture) -> jlong {
 #if ACL_HAVE_GL
                  return image_reader_make_producer(
-                     e, 0, 0, st_handle_of(e, surfaceTexture));
+                     e, 0, 0, st_id_of(st_handle_of(e, surfaceTexture)));
 #else
              (void)e; (void)surfaceTexture; return 0;
 #endif

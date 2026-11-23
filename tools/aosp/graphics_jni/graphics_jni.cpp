@@ -6635,6 +6635,8 @@ struct AclSurfaceTexture {
   bool yuv_refused = false;
   bool detached = false;  // detachFromGLContext state
   bool released = false;
+  // Its id for a4l (acl_graphics_surfacetexture_id): never given to another.
+  uint64_t id = 0;
   jobject weak_self = nullptr;  // global ref to WeakReference<SurfaceTexture>
                                 // (frame-available; staged)
 
@@ -6672,10 +6674,18 @@ struct AclSurfaceTexture {
   }
 };
 
-// The SurfaceTextures that exist (nativeInit to nativeFinalize), so a frame
-// sent from a4l by handle is never given to one that is gone.
+// The SurfaceTextures that exist (nativeInit to nativeFinalize), and their
+// ids. a4l sends a frame by id, so one meant for a SurfaceTexture that is
+// gone is dropped, even when a new one has been made at its address.
 std::mutex g_st_live_mu;
 std::unordered_set<AclSurfaceTexture*> g_st_live;
+std::unordered_map<uint64_t, AclSurfaceTexture*> g_st_by_id;
+uint64_t g_st_next_id = 0;  // under g_st_live_mu
+// The live SurfaceTexture with id `id`, or null. Under g_st_live_mu.
+AclSurfaceTexture* st_by_id(jlong id) {
+  const auto it = g_st_by_id.find(static_cast<uint64_t>(id));
+  return it != g_st_by_id.end() ? it->second : nullptr;
+}
 
 // A TextureView's hardware layer: binds a SurfaceTexture + the layer's
 // size/alpha. Java wraps the handle in a VirtualRefBasePtr (inc/decStrong), so
@@ -6831,15 +6841,15 @@ JNIEnv* st_post_env() {
   }
   return env;
 }
-void post_frame_available(AclSurfaceTexture* st) {
-  if (st == nullptr || st->weak_self == nullptr)
+// Post frame-available through `weak`, a global ref of this thread's own to
+// a SurfaceTexture's WeakReference, and let go of it.
+void post_frame_available(JNIEnv* env, jobject weak) {
+  if (env == nullptr || weak == nullptr)
     return;
-  JNIEnv* env = st_post_env();
-  if (env == nullptr)
-    return;
-  env->CallStaticVoidMethod(g_st_class, g_st_post, st->weak_self);
+  env->CallStaticVoidMethod(g_st_class, g_st_post, weak);
   if (env->ExceptionCheck())
     env->ExceptionClear();
+  env->DeleteGlobalRef(weak);
 }
 
 }  // namespace
@@ -7064,29 +7074,40 @@ extern "C" void acl_graphics_surfacetexture_set_pixels(jlong st_handle,
   sk_sp<SkImage> img = SkImage::MakeRasterCopy(pm);
   if (!img)
     return;
-  std::shared_ptr<AclStBuffer> old;  // let go of outside the lock
+  std::shared_ptr<AclStBuffer> old;  // let go of outside the locks
+  jobject weak = nullptr;
+  JNIEnv* env = st_post_env();
   {
+    // A SurfaceTexture finalized while its producer still swaps is not
+    // touched.
+    std::lock_guard<std::mutex> live(g_st_live_mu);
+    if (g_st_live.count(st) == 0)
+      return;
     std::lock_guard<std::mutex> lk(st->mu);
     st->current = std::move(img);
     old = std::move(st->current_buf);
+    // The weak reference goes with nativeFinalize; post through a ref of
+    // this thread's own, once the locks are let go.
+    if (env != nullptr && st->weak_self != nullptr)
+      weak = env->NewGlobalRef(st->weak_self);
   }  // present reads via snapshot()
   g_st_produced.fetch_add(
       1, std::memory_order_relaxed);  // signal the present loop to re-record
   bump_scene();  // a TextureView produced a new frame -> the scene changed
-  post_frame_available(st);  // -> TextureView.invalidate() -> re-record so the
-                             // drawable re-snapshots
+  // -> TextureView.invalidate() -> re-record so the drawable re-snapshots
+  post_frame_available(env, weak);
 }
-void st_deliver(jlong st_handle, std::shared_ptr<AclStBuffer> buf, jlong ts);
+void st_deliver(jlong st_id, std::shared_ptr<AclStBuffer> buf, jlong ts);
 // A decoder's frame for a SurfaceTexture (a MediaCodec configured with
 // new Surface(SurfaceTexture)): an XBGR8888 dma-buf, already cropped to the
 // picture, top row first. It is pending until the consumer latches it
 // (TextureView's layer update, or the app's updateTexImage), then drawn from
 // its dma-buf or bound to the app's external texture. `release(release_ctx)` is
 // called exactly once, when graphics_jni lets go of the frame, whether it
-// was taken or not. `st_handle` may name a SurfaceTexture already finalized;
-// the frame is then dropped. Called from acl runtime via dlsym, on the
-// codec's timed-release thread.
-extern "C" void acl_graphics_surfacetexture_set_frame(jlong st_handle,
+// was taken or not. `st_id` (acl_graphics_surfacetexture_id) may name a
+// SurfaceTexture already finalized; the frame is then dropped. Called from
+// acl runtime via dlsym, on the codec's timed-release thread.
+extern "C" void acl_graphics_surfacetexture_set_frame(jlong st_id,
                                                       const AclStFrame* f,
                                                       jlong ts,
                                                       void (*release)(void*),
@@ -7100,14 +7121,14 @@ extern "C" void acl_graphics_surfacetexture_set_frame(jlong st_handle,
   buf->f.fd = ::fcntl(f->fd, F_DUPFD_CLOEXEC, 0);
   if (buf->f.fd < 0)
     return;
-  st_deliver(st_handle, std::move(buf), ts);
+  st_deliver(st_id, std::move(buf), ts);
 }
 // A decoder's frame as it is, for a SurfaceTexture an app samples in its own
 // GL (acl_graphics_surfacetexture_wants_yuv): delivered like set_frame's, and
 // bound by updateTexImage; getTransformMatrix returns the frame's
 // `transform`. `release(release_ctx)` is called exactly once.
 extern "C" void acl_graphics_surfacetexture_set_yuv_frame(
-    jlong st_handle,
+    jlong st_id,
     const AclStYuvFrame* f,
     jlong ts,
     void (*release)(void*),
@@ -7129,32 +7150,41 @@ extern "C" void acl_graphics_surfacetexture_set_yuv_frame(
     if (buf->y.fd[i] < 0)
       return;
   }
-  st_deliver(st_handle, std::move(buf), ts);
+  st_deliver(st_id, std::move(buf), ts);
 }
 // Whether a SurfaceTexture takes a decoder's frame as it is: while an app's
 // GL context holds it, unless that GL has refused one. a4l asks per frame.
-extern "C" bool acl_graphics_surfacetexture_wants_yuv(jlong st_handle) {
+extern "C" bool acl_graphics_surfacetexture_wants_yuv(jlong st_id) {
   std::lock_guard<std::mutex> live(g_st_live_mu);
-  auto* st = reinterpret_cast<AclSurfaceTexture*>(st_handle);
-  if (g_st_live.count(st) == 0 ||
+  AclSurfaceTexture* st = st_by_id(st_id);
+  if (st == nullptr ||
       g_st_gl_bind_yuv.load(std::memory_order_acquire) == nullptr)
     return false;
   std::lock_guard<std::mutex> lk(st->mu);
   return !st->released && !st->detached && st->tex_name > 0 && !st->yuv_refused;
+}
+// The id a4l keeps for the SurfaceTexture `st_handle` (its
+// SurfaceTexture.mSurfaceTexture), read while the Java object holds it, so
+// the handle is live; 0 if it is not one. Frames are sent by this id: a
+// handle can come back as a new SurfaceTexture's, an id cannot.
+extern "C" jlong acl_graphics_surfacetexture_id(jlong st_handle) {
+  std::lock_guard<std::mutex> live(g_st_live_mu);
+  auto* st = reinterpret_cast<AclSurfaceTexture*>(st_handle);
+  return g_st_live.count(st) != 0 ? static_cast<jlong>(st->id) : 0;
 }
 // a4l's EGL hook for binding a decoder's frame as it is.
 extern "C" void acl_graphics_set_st_gl_yuv_hook(StGlBindYuvFn bind) {
   g_st_gl_bind_yuv.store(bind, std::memory_order_release);
 }
 // Make `buf` the SurfaceTexture's pending frame and tell its listener.
-void st_deliver(jlong st_handle, std::shared_ptr<AclStBuffer> buf, jlong ts) {
+void st_deliver(jlong st_id, std::shared_ptr<AclStBuffer> buf, jlong ts) {
   std::shared_ptr<AclStBuffer> old;  // let go of outside the locks
   jobject weak = nullptr;
   JNIEnv* env = st_post_env();
   {
     std::lock_guard<std::mutex> live(g_st_live_mu);
-    auto* st = reinterpret_cast<AclSurfaceTexture*>(st_handle);
-    if (g_st_live.count(st) == 0)
+    AclSurfaceTexture* st = st_by_id(st_id);
+    if (st == nullptr)
       return;
     std::lock_guard<std::mutex> lk(st->mu);
     if (st->released)
@@ -7170,12 +7200,7 @@ void st_deliver(jlong st_handle, std::shared_ptr<AclStBuffer> buf, jlong ts) {
   }
   g_st_produced.fetch_add(1, std::memory_order_relaxed);
   bump_scene();
-  if (weak != nullptr) {
-    env->CallStaticVoidMethod(g_st_class, g_st_post, weak);
-    if (env->ExceptionCheck())
-      env->ExceptionClear();
-    env->DeleteGlobalRef(weak);
-  }
+  post_frame_available(env, weak);
 }
 // a4l's EGL hooks for binding a decoder frame to an app's external texture
 // (updateTexImage). Called once by acl runtime after loading this library.
@@ -7229,7 +7254,9 @@ void SurfaceTexture_nativeInit(JNIEnv* env,
     env->SetLongField(thiz, g_st_field, reinterpret_cast<jlong>(st));
   {
     std::lock_guard<std::mutex> live(g_st_live_mu);
+    st->id = ++g_st_next_id;
     g_st_live.insert(st);
+    g_st_by_id[st->id] = st;
   }
   if (g_st_post == nullptr) {  // cache the frame-available notify seam once
     env->GetJavaVM(&g_st_vm);
@@ -7250,6 +7277,7 @@ void SurfaceTexture_nativeFinalize(JNIEnv* env, jobject thiz) {
   {
     std::lock_guard<std::mutex> live(g_st_live_mu);
     g_st_live.erase(st);
+    g_st_by_id.erase(st->id);
   }  // no frame is sent to it from here on
   st_gl_drop(st);
   if (st->weak_self != nullptr)
