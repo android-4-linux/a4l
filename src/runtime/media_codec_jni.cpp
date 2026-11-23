@@ -83,7 +83,7 @@ jmethodID g_bufinfo_ctor = nullptr;  // MediaCodec$BufferInfo()
 // A converter for frames going to SurfaceTextures, shared by every codec
 // that sends them: making one sets up a GL device and context, which a
 // player that makes a new codec when it seeks would otherwise pay each time.
-// A converter keeps buffers of one picture size, so there is one a size in
+// A converter keeps buffers of one size, so there is one an output size in
 // use (the video plane's is its own). One at a time converts.
 struct SharedConverter {
   std::uint32_t w = 0, h = 0;
@@ -91,9 +91,9 @@ struct SharedConverter {
   std::unique_ptr<gfx::VideoConverter> converter;
 };
 
-// The converter for w x h, made on first use. Null where none can be made,
-// which is logged once. Two sizes are kept; a third goes in place of one no
-// codec holds.
+// The converter for frames of w x h out, made on first use. Null where none can
+// be made, which is logged once. Two sizes are kept; a third goes in place of
+// one no codec holds.
 std::shared_ptr<SharedConverter> st_converter(std::uint32_t w,
                                               std::uint32_t h) {
   constexpr std::size_t kKept = 2;
@@ -332,6 +332,14 @@ StSetYuvFrameFn st_set_yuv_frame() {
       ::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_set_yuv_frame"));
   return f;
 }
+// The size a SurfaceTexture's frames are drawn at, where graphics_jni knows
+// it and nothing else reads them.
+using StDrawSizeFn = bool (*)(jlong, int*, int*);
+StDrawSizeFn st_draw_size() {
+  static const auto f = reinterpret_cast<StDrawSizeFn>(
+      ::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_draw_size"));
+  return f;
+}
 StWantsYuvFn st_wants_yuv() {
   static const auto f = reinterpret_cast<StWantsYuvFn>(
       ::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_wants_yuv"));
@@ -389,9 +397,26 @@ void show_on_texture(TextureSink& sink,
   }
   if (set == nullptr)
     return;
-  if (!sink.converter || sink.converter->w != frame.width ||
-      sink.converter->h != frame.height)
-    sink.converter = st_converter(frame.width, frame.height);
+  // Converted at the size the SurfaceTexture is drawn at, where that is
+  // smaller than the picture: a TextureView scales the frame to its own size
+  // when it draws it, so converting at that size shows the same and writes,
+  // imports and draws fewer pixels (a ninth of a 1080p picture in a 640x360
+  // view).
+  std::uint32_t w = frame.width;
+  std::uint32_t h = frame.height;
+  int dw = 0;
+  int dh = 0;
+  if (const StDrawSizeFn draw_size = st_draw_size();
+      draw_size != nullptr && draw_size(sink.st, &dw, &dh) && dw > 0 &&
+      dh > 0 &&
+      std::uint64_t{static_cast<std::uint32_t>(dw)} *
+              static_cast<std::uint32_t>(dh) <
+          std::uint64_t{w} * h) {
+    w = static_cast<std::uint32_t>(dw);
+    h = static_cast<std::uint32_t>(dh);
+  }
+  if (!sink.converter || sink.converter->w != w || sink.converter->h != h)
+    sink.converter = st_converter(w, h);
   if (!sink.converter)
     return;
   std::string err;
@@ -399,7 +424,7 @@ void show_on_texture(TextureSink& sink,
   bool converted = false;
   {
     std::lock_guard<std::mutex> clk(sink.converter->mu);
-    converted = sink.converter->converter->convert(frame, &rgb, &err);
+    converted = sink.converter->converter->convert(frame, &rgb, &err, w, h);
   }
   if (!converted) {
     if (!sink.said) {

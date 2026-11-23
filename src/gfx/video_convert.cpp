@@ -259,7 +259,9 @@ std::unique_ptr<VideoConverter> VideoConverter::Create(std::string* error) {
 
 bool VideoConverter::convert(const DmabufFrame& in,
                              DmabufFrame* out,
-                             std::string* error) {
+                             std::string* error,
+                             std::uint32_t width,
+                             std::uint32_t height) {
   State& s = *state_;
   std::lock_guard<std::mutex> lock(s.mu);
   if (out == nullptr || in.fd < 0 || in.width == 0 || in.height == 0) {
@@ -269,13 +271,16 @@ bool VideoConverter::convert(const DmabufFrame& in,
   }
   if (!s.window->make_current(error))
     return false;
+  // The output's size: the picture's, unless one is asked for.
+  const std::uint32_t ow = width != 0 && height != 0 ? width : in.width;
+  const std::uint32_t oh = width != 0 && height != 0 ? height : in.height;
   bool ok = false;
   AHardwareBuffer* ahb = nullptr;
   EGLImageKHR image = EGL_NO_IMAGE_KHR;
   do {
     if (!s.ensure_program(error))
       break;
-    State::Slot* slot = s.take_slot(in.width, in.height, error);
+    State::Slot* slot = s.take_slot(ow, oh, error);
     if (slot == nullptr)
       break;
     ahb = ahb_import(in);
@@ -293,8 +298,7 @@ bool VideoConverter::convert(const DmabufFrame& in,
       break;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, slot->fbo);
-    glViewport(0, 0, static_cast<GLsizei>(in.width),
-               static_cast<GLsizei>(in.height));
+    glViewport(0, 0, static_cast<GLsizei>(ow), static_cast<GLsizei>(oh));
     glDisable(GL_BLEND);
     glUseProgram(s.program);
     // The output is the picture, which starts at (crop_x, crop_y) in the
@@ -325,8 +329,8 @@ bool VideoConverter::convert(const DmabufFrame& in,
     }
     slot->busy->store(true, std::memory_order_release);
     *out = slot->buffer->frame();
-    out->width = in.width;  // the picture, without the slack rows below it
-    out->height = in.height;
+    out->width = ow;  // the picture, without the slack rows below it
+    out->height = oh;
     // The buffer was allocated linear (GBM_BO_USE_LINEAR). A driver that
     // reports no modifier for such a buffer still laid it out that way, and
     // the compositor is told the layout, not "unknown".
@@ -368,7 +372,9 @@ std::unique_ptr<VideoConverter> VideoConverter::Create(std::string* error) {
 }
 bool VideoConverter::convert(const DmabufFrame&,
                              DmabufFrame*,
-                             std::string* error) {
+                             std::string* error,
+                             std::uint32_t,
+                             std::uint32_t) {
   if (error)
     *error = "built without GL";
   return false;
