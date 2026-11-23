@@ -94,4 +94,16 @@ TEST_CASE("st_yuv_frame: every plane, its own fd or the frame's",
   CHECK(y.transform[5] == Catch::Approx(-1.0F));
 }
 
+TEST_CASE("st_yuv_frame: a matrix the stream does not say is settled",
+          "[gfx][surface_texture]") {
+  DmabufFrame f = frame(640, 360, 0, 0);
+  f.yuv_matrix = 2;                                  // not said
+  CHECK(acl::gfx::st_yuv_frame(f).yuv_matrix == 6);  // BT.601 up to 720x576
+  f = frame(1920, 1080, 0, 0);
+  f.yuv_matrix = 2;
+  CHECK(acl::gfx::st_yuv_frame(f).yuv_matrix == 1);  // BT.709 above
+  f.yuv_matrix = 9;
+  CHECK(acl::gfx::st_yuv_frame(f).yuv_matrix == 9);
+}
+
 #endif  // ACL_HAVE_GL

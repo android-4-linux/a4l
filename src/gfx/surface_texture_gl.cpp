@@ -127,7 +127,19 @@ AclStYuvFrame st_yuv_frame(const DmabufFrame& frame) {
     y.offset[i] = frame.planes[i].offset;
     y.stride[i] = frame.planes[i].stride;
   }
-  y.yuv_matrix = frame.yuv_matrix;
+  // The matrix as video_color() settles it, so a consumer that is not a4l
+  // takes the one a4l's own would.
+  switch (video_color(frame).matrix) {
+    case YuvMatrix::Bt709:
+      y.yuv_matrix = 1;
+      break;
+    case YuvMatrix::Bt2020:
+      y.yuv_matrix = 9;
+      break;
+    case YuvMatrix::Bt601:
+      y.yuv_matrix = 6;
+      break;
+  }
   y.yuv_full_range = frame.yuv_full_range ? 1 : 0;
   st_transform(frame, y.transform);
   return y;

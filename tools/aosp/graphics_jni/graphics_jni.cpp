@@ -90,6 +90,7 @@
 #include "codec/SkAndroidCodec.h"
 #include "codec/SkCodec.h"
 #include "effects/SkImageFilters.h"
+#include "st_frame.h"
 #include "utils/SkParsePath.h"
 #include "utils/SkShadowUtils.h"
 
@@ -6545,31 +6546,6 @@ void draw_rendernode(SkCanvas* c, AclRenderNode* n) {
   }
 }
 
-// A decoder's frame sent to a SurfaceTexture
-// (acl_graphics_surfacetexture_set_frame): one XBGR8888 dma-buf plane, as
-// a4l's media_codec_jni.cpp describes it. Must match that definition.
-struct AclStFrame {
-  int fd;
-  uint32_t width, height, stride, offset, drm_format;
-  uint64_t modifier;
-};
-// A decoder's frame as it is, for a SurfaceTexture an app samples in its own
-// GL (acl_graphics_surfacetexture_set_yuv_frame): every plane, uncropped,
-// with the transform its texture coordinates need. a4l's
-// gfx/surface_texture_gl.h defines it; the two must match. A plane's fd is
-// -1 where it is in fd[0].
-struct AclStYuvFrame {
-  uint32_t width, height;
-  uint32_t crop_x, crop_y;
-  uint32_t drm_format;
-  uint64_t modifier;
-  uint32_t plane_count;
-  int fd[4];
-  uint32_t offset[4], stride[4];
-  uint8_t yuv_matrix;
-  uint8_t yuv_full_range;
-  float transform[16];
-};
 // Such a frame while graphics_jni holds it: an XBGR8888 one in `f`, or one as
 // it is in `y`. The fds are graphics_jni's own copies. The producer's release
 // runs once, when the last holder lets go, on whatever thread that is.
@@ -6633,6 +6609,8 @@ struct AclSurfaceTexture {
   // The app's GL refused a frame as it is: frames come converted from then
   // on (acl_graphics_surfacetexture_wants_yuv).
   bool yuv_refused = false;
+  // Likewise the present device, drawing it for a TextureView.
+  bool yuv_draw_refused = false;
   bool detached = false;  // detachFromGLContext state
   bool released = false;
   // Its id for a4l (acl_graphics_surfacetexture_id): never given to another.
@@ -6865,6 +6843,11 @@ sk_sp<SkImage> acl_gpu_import_frame(GrDirectContext* ctx,
                                     std::shared_ptr<void> keep);
 // Hand a frame's texture back for the converter's next frame (gpu_dmabuf.cpp).
 void acl_gpu_release_frame(GrDirectContext* ctx, const sk_sp<SkImage>& img);
+// A decoder's frame as it is, drawn by the present device (gpu_dmabuf.cpp).
+bool acl_gpu_draws_yuv();
+sk_sp<SkImage> acl_gpu_import_yuv(GrDirectContext* ctx,
+                                  const AclStYuvFrame& y,
+                                  std::shared_ptr<void> keep);
 namespace {
 
 // A decoder's frame as pixels: the dma-buf mapped and copied, for a canvas
@@ -6907,17 +6890,18 @@ struct StFrameImage {
   std::shared_ptr<AclStBuffer> buf;
   sk_sp<SkImage> img;
   GrDirectContext* ctx = nullptr;  // null: a pixel copy
+  SkRect src;                      // the picture in `img`
 };
 std::mutex g_st_images_mu;
 std::unordered_map<const AclSurfaceTexture*, StFrameImage> g_st_images;
 
+// The image for a SurfaceTexture's latched decoder frame on `c`, and in
+// `*src` the picture's part of it: all of a converted frame, the crop of a
+// frame as it is.
 sk_sp<SkImage> st_frame_image(SkCanvas* c,
-                              const AclSurfaceTexture* st,
-                              const std::shared_ptr<AclStBuffer>& buf) {
-  // A frame as it is goes only to a SurfaceTexture in an app's GL, which a
-  // TextureView does not draw.
-  if (buf->yuv)
-    return nullptr;
+                              AclSurfaceTexture* st,
+                              const std::shared_ptr<AclStBuffer>& buf,
+                              SkRect* src) {
   GrDirectContext* gpu = GrAsDirectContext(c->recordingContext());
   std::lock_guard<std::mutex> lk(g_st_images_mu);
   {
@@ -6936,8 +6920,45 @@ sk_sp<SkImage> st_frame_image(SkCanvas* c,
   // A pixel copy draws on any canvas, so a frame the import failed for is
   // not imported again on every draw.
   StFrameImage& e = g_st_images[st];
-  if (e.buf == buf && e.img && (e.ctx == gpu || e.ctx == nullptr))
+  if (e.buf == buf && e.img && (e.ctx == gpu || e.ctx == nullptr)) {
+    *src = e.src;
     return e.img;
+  }
+  if (buf->yuv) {
+    // A frame as it is: drawn by the present device, or not at all. One it
+    // will not take leaves the last frame up and has the frames after it
+    // converted.
+    sk_sp<SkImage> img =
+        gpu != nullptr ? acl_gpu_import_yuv(gpu, buf->y, buf) : nullptr;
+    if (!img) {
+      bool first = false;
+      {
+        std::lock_guard<std::mutex> slk(st->mu);
+        first = !st->yuv_draw_refused;
+        st->yuv_draw_refused = true;
+      }
+      if (first)  // frames already on their way are refused quietly
+        std::fprintf(stderr,
+                     "acl-graphics: the present device did not take a decoder "
+                     "frame (format 0x%x, modifier 0x%llx); frames are "
+                     "converted\n",
+                     buf->y.drm_format,
+                     static_cast<unsigned long long>(buf->y.modifier));
+      if (e.img && (e.ctx == gpu || e.ctx == nullptr)) {
+        *src = e.src;
+        return e.img;
+      }
+      return nullptr;
+    }
+    if (e.ctx != nullptr && e.ctx != gpu)
+      return img;                         // held for another canvas; see below
+    acl_gpu_release_frame(e.ctx, e.img);  // the frame this one replaces
+    *src = SkRect::MakeXYWH(
+        static_cast<float>(buf->y.crop_x), static_cast<float>(buf->y.crop_y),
+        static_cast<float>(buf->y.width), static_cast<float>(buf->y.height));
+    e = StFrameImage{buf, img, gpu, *src};
+    return img;
+  }
   // ACL_SURFACETEXTURE_COPY: copy the pixels on the present device too, to
   // try the copy where the import works.
   static const bool copy = std::getenv("ACL_SURFACETEXTURE_COPY") != nullptr;
@@ -6954,12 +6975,15 @@ sk_sp<SkImage> st_frame_image(SkCanvas* c,
   GrDirectContext* made_on = img ? gpu : nullptr;
   if (!img)
     img = st_frame_raster(buf->f);
+  if (img)
+    *src = SkRect::MakeWH(static_cast<float>(img->width()),
+                          static_cast<float>(img->height()));
   // A texture image held for another canvas stays where it is: it may only
   // be dropped on the present thread. This one is not kept.
   if (e.ctx != nullptr && made_on != e.ctx)
     return img;
   acl_gpu_release_frame(e.ctx, e.img);  // the frame this one replaces
-  e = StFrameImage{buf, img, made_on};
+  e = StFrameImage{buf, img, made_on, *src};
   return img;
 }
 
@@ -6978,9 +7002,12 @@ void draw_texture_layer_immediate(SkCanvas* c, AclTextureLayer* l) {
     return;
   }
   sk_sp<SkImage> img = l->st->snapshot();
-  if (!img) {
-    if (std::shared_ptr<AclStBuffer> buf = l->st->snapshot_buf())
-      img = st_frame_image(c, l->st, buf);
+  SkRect src = SkRect::MakeEmpty();
+  if (img) {
+    src = SkRect::MakeWH(static_cast<float>(img->width()),
+                         static_cast<float>(img->height()));
+  } else if (std::shared_ptr<AclStBuffer> buf = l->st->snapshot_buf()) {
+    img = st_frame_image(c, l->st, buf, &src);
   }
   if (dbg)
     std::fprintf(stderr, "[acl.walk] layer draw l=%p wh=%dx%d img=%p %dx%d\n",
@@ -6992,18 +7019,14 @@ void draw_texture_layer_immediate(SkCanvas* c, AclTextureLayer* l) {
     return;
   }
   g_tl_frames.fetch_add(1, std::memory_order_relaxed);
-  const float w = l->width > 0 ? static_cast<float>(l->width)
-                               : static_cast<float>(img->width());
-  const float h = l->height > 0 ? static_cast<float>(l->height)
-                                : static_cast<float>(img->height());
+  const float w = l->width > 0 ? static_cast<float>(l->width) : src.width();
+  const float h = l->height > 0 ? static_cast<float>(l->height) : src.height();
   SkPaint p;
   p.setAlphaf(l->alpha);
-  c->drawImageRect(
-      img.get(),
-      SkRect::MakeWH(static_cast<float>(img->width()),
-                     static_cast<float>(img->height())),
-      SkRect::MakeWH(w, h), SkSamplingOptions(SkFilterMode::kLinear),
-      l->alpha < 1.0f ? &p : nullptr, SkCanvas::kFast_SrcRectConstraint);
+  c->drawImageRect(img.get(), src, SkRect::MakeWH(w, h),
+                   SkSamplingOptions(SkFilterMode::kLinear),
+                   l->alpha < 1.0f ? &p : nullptr,
+                   SkCanvas::kFast_SrcRectConstraint);
 }
 
 // Resolve-at-replay drawable: reads the layer's CURRENT frame at replay time,
@@ -7153,15 +7176,22 @@ extern "C" void acl_graphics_surfacetexture_set_yuv_frame(
   st_deliver(st_id, std::move(buf), ts);
 }
 // Whether a SurfaceTexture takes a decoder's frame as it is: while an app's
-// GL context holds it, unless that GL has refused one. a4l asks per frame.
+// GL context holds it, unless that GL has refused one, and otherwise (a
+// TextureView, or no consumer yet) while the present device draws YUV,
+// unless it has refused one. a4l asks per frame.
 extern "C" bool acl_graphics_surfacetexture_wants_yuv(jlong st_id) {
   std::lock_guard<std::mutex> live(g_st_live_mu);
   AclSurfaceTexture* st = st_by_id(st_id);
-  if (st == nullptr ||
-      g_st_gl_bind_yuv.load(std::memory_order_acquire) == nullptr)
+  if (st == nullptr)
     return false;
   std::lock_guard<std::mutex> lk(st->mu);
-  return !st->released && !st->detached && st->tex_name > 0 && !st->yuv_refused;
+  if (st->released)
+    return false;
+  if (!st->detached && st->tex_name > 0)  // an app's GL
+    return g_st_gl_bind_yuv.load(std::memory_order_acquire) != nullptr &&
+           !st->yuv_refused;
+  // A TextureView, or nothing yet: the present device draws it.
+  return acl_gpu_draws_yuv() && !st->yuv_draw_refused;
 }
 // The id a4l keeps for the SurfaceTexture `st_handle` (its
 // SurfaceTexture.mSurfaceTexture), read while the Java object holds it, so

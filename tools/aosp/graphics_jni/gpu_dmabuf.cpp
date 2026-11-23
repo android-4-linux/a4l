@@ -28,6 +28,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -54,6 +55,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include "gpu/vk/GrVkBackendContext.h"
 #include "gpu/vk/GrVkExtensions.h"
 #include "gpu/vk/GrVkTypes.h"
+#include "st_frame.h"
 
 extern "C" struct AclDmabuf {
   int fd;
@@ -149,6 +151,10 @@ struct Gpu {
   VkFence sc_fence = VK_NULL_HANDLE;
   int sc_w = 0, sc_h = 0;
 } g;
+
+// Whether the present device draws a decoder's frame as it is
+// (acl_gpu_draws_yuv): set once the Skia context is made.
+std::atomic<bool> g_draws_yuv{false};
 
 // The Wayland surface to present on, set before the device is made. Both
 // null: the dma-buf path.
@@ -703,15 +709,16 @@ bool ensure_ready(int w, int h) {
   bc.fMaxAPIVersion = VK_API_VERSION_1_1;
   bc.fVkExtensions = &g.ext;
   // Skia builds its caps from that list only when it is also given the
-  // device's features; the device is made with none of the core ones.
-  static const VkPhysicalDeviceFeatures kNoFeatures{};
-  bc.fDeviceFeatures = &kNoFeatures;
+  // device's features: none of the core ones, and the sampler YCbCr
+  // conversion, with which it draws a decoder's frame as it is.
+  bc.fDeviceFeatures2 = g.features2;
   bc.fGetProc = gp;
   g.gr = GrDirectContext::MakeVulkan(bc);
   if (!g.gr) {
     std::fprintf(stderr, "acl-gpu: MakeVulkan fail\n");
     return false;
   }
+  g_draws_yuv.store(true, std::memory_order_release);
 
   choose_format();  // the surface below is made in the present format
   // kTopLeft origin: Skia renders top-down so the raw vkCmdCopyImage into the
@@ -1210,21 +1217,26 @@ extern "C" bool acl_graphics_gpu_end_frame(int buffer_index, AclDmabuf* out) {
 
 namespace {
 
-// A converter buffer imported into the present device: its VkImage and the
-// memory imported from its dma-buf. The converter draws each frame into one
-// of a few buffers it keeps, so the import is made once a buffer and kept
-// while frames keep arriving in it. The dma-buf, not the descriptor, is the
-// buffer: each frame comes with a copy of the descriptor, so a buffer is
-// known by the inode behind it, with its layout.
+// A SurfaceTexture frame's buffer imported into the present device: its
+// VkImage and the memory imported from its dma-buf. The converter draws each
+// frame into one of a few buffers it keeps, and a decoder decodes into one of
+// a pool, so the import is made once a buffer and kept while frames keep
+// arriving in it. The dma-buf, not the descriptor, is the buffer: each frame
+// comes with a copy of the descriptor, so a buffer is known by the inode
+// behind it, with its layout.
 struct ImportKey {
   dev_t dev = 0;
   ino_t ino = 0;
-  uint32_t width = 0, height = 0, stride = 0, offset = 0, drm_format = 0;
+  VkFormat format = VK_FORMAT_UNDEFINED;
+  uint32_t width = 0, height = 0, plane_count = 0;
+  uint32_t offset[2] = {0, 0}, stride[2] = {0, 0};
   uint64_t modifier = 0;
   bool operator==(const ImportKey& o) const {
-    return dev == o.dev && ino == o.ino && width == o.width &&
-           height == o.height && stride == o.stride && offset == o.offset &&
-           drm_format == o.drm_format && modifier == o.modifier;
+    return dev == o.dev && ino == o.ino && format == o.format &&
+           width == o.width && height == o.height &&
+           plane_count == o.plane_count && offset[0] == o.offset[0] &&
+           offset[1] == o.offset[1] && stride[0] == o.stride[0] &&
+           stride[1] == o.stride[1] && modifier == o.modifier;
   }
 };
 struct Import {
@@ -1239,8 +1251,9 @@ struct Import {
 // An import unused this long has gone with its buffer, or will be made again.
 constexpr auto kImportIdle = std::chrono::seconds(1);
 // More imports than this held at once are a sign of buffers being replaced
-// faster than they go idle; the oldest unused ones go first.
-constexpr std::size_t kMaxImports = 32;
+// faster than they go idle; the oldest unused ones go first. A decoder's pool
+// is up to about 30 buffers.
+constexpr std::size_t kMaxImports = 48;
 std::mutex g_imports_mu;
 std::vector<std::shared_ptr<Import>> g_imports;
 
@@ -1277,31 +1290,36 @@ void prune_imports(std::chrono::steady_clock::time_point now) {
   }
 }
 
-// Import a converter buffer: a VkImage over memory imported from its
-// dma-buf. Null if the driver refuses.
+// Skia wraps only images made with both transfer bits.
+constexpr VkImageUsageFlags kImportUsage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                           VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
+// Import a buffer: a VkImage of `key`'s format and planes over memory
+// imported from its dma-buf. Null if the driver refuses.
 std::shared_ptr<Import> make_import(const ImportKey& key, int fd) {
-  VkSubresourceLayout plane{};
-  plane.offset = key.offset;
-  plane.rowPitch = key.stride;
+  VkSubresourceLayout planes[2]{};
+  for (uint32_t i = 0; i < key.plane_count && i < 2; ++i) {
+    planes[i].offset = key.offset[i];
+    planes[i].rowPitch = key.stride[i];
+  }
   VkImageDrmFormatModifierExplicitCreateInfoEXT modci{
       VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT};
   modci.drmFormatModifier = key.modifier;
-  modci.drmFormatModifierPlaneCount = 1;
-  modci.pPlaneLayouts = &plane;
+  modci.drmFormatModifierPlaneCount = key.plane_count;
+  modci.pPlaneLayouts = planes;
   VkExternalMemoryImageCreateInfo extci{
       VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO, &modci,
       VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
   VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &extci};
   ci.imageType = VK_IMAGE_TYPE_2D;
-  ci.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ci.format = key.format;
   ci.extent = {key.width, key.height, 1};
   ci.mipLevels = 1;
   ci.arrayLayers = 1;
   ci.samples = VK_SAMPLE_COUNT_1_BIT;
   ci.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-  // Skia wraps only images made with both transfer bits.
-  ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-             VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  ci.usage = kImportUsage;
   ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   VkImage image = VK_NULL_HANDLE;
@@ -1314,6 +1332,21 @@ std::shared_ptr<Import> make_import(const ImportKey& key, int fd) {
     VKD.vkDestroyImage(g.device, image, nullptr);
     return nullptr;
   };
+  // The image must be laid out as the buffer is. A driver may take a plane's
+  // row pitch from the layouts given and place the plane itself (v3dv puts
+  // the chroma plane after the luma rows the image has): a frame it would
+  // read elsewhere than it is, it is not given.
+  static const VkImageAspectFlagBits kMemoryPlane[2] = {
+      VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT,
+      VK_IMAGE_ASPECT_MEMORY_PLANE_1_BIT_EXT};
+  for (uint32_t i = 0; i < key.plane_count && i < 2; ++i) {
+    const VkImageSubresource sub{
+        static_cast<VkImageAspectFlags>(kMemoryPlane[i]), 0, 0};
+    VkSubresourceLayout lo{};
+    VKD.vkGetImageSubresourceLayout(g.device, image, &sub, &lo);
+    if (lo.offset != key.offset[i] || lo.rowPitch != key.stride[i])
+      return fail();
+  }
   // Vulkan owns the descriptor it imports, so it gets a copy of its own.
   const int own = ::fcntl(fd, F_DUPFD_CLOEXEC, 0);
   if (own < 0)
@@ -1354,7 +1387,130 @@ std::shared_ptr<Import> make_import(const ImportKey& key, int fd) {
   return i;
 }
 
+// The import of `key`'s buffer, made on first use, with a Skia image counted
+// against it; the caller wraps it. Null if the driver refuses.
+std::shared_ptr<Import> take_import(const ImportKey& key, int fd) {
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lk(g_imports_mu);
+  prune_imports(now);
+  std::shared_ptr<Import> imp;
+  for (const auto& i : g_imports) {
+    if (i->key == key) {
+      imp = i;
+      break;
+    }
+  }
+  if (!imp) {
+    imp = make_import(key, fd);
+    if (!imp)
+      return nullptr;
+    g_imports.push_back(imp);
+  }
+  ++imp->in_use;
+  imp->last = now;
+  return imp;
+}
+
+// `imp` as a texture image of `width` x `height`, read through `ycbcr` when
+// it is valid. Written outside Vulkan, by the converter or the decoder, for
+// every frame: each texture made from the image takes it from the external
+// queue family, in a layout that keeps what is in it (acl_gpu_release_frame
+// hands it back). `keep` goes when Skia has finished with the texture.
+sk_sp<SkImage> wrap_import(GrDirectContext* ctx,
+                           std::shared_ptr<Import> imp,
+                           uint32_t width,
+                           uint32_t height,
+                           const GrVkYcbcrConversionInfo& ycbcr,
+                           std::shared_ptr<void> keep) {
+  GrVkImageInfo info{};
+  info.fImage = imp->image;
+  info.fAlloc.fMemory = imp->memory;
+  info.fAlloc.fOffset = 0;
+  info.fAlloc.fSize = imp->size;
+  info.fImageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+  info.fImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  info.fFormat = imp->key.format;
+  info.fImageUsageFlags = imp->usage;
+  info.fSampleCount = 1;
+  info.fLevelCount = 1;
+  info.fCurrentQueueFamily = VK_QUEUE_FAMILY_EXTERNAL;
+  info.fSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  info.fYcbcrConversionInfo = ycbcr;
+  struct Held {
+    std::shared_ptr<Import> imp;
+    std::shared_ptr<void> keep;
+  };
+  auto* held = new Held{std::move(imp), std::move(keep)};
+  const GrBackendTexture bt(static_cast<int>(width), static_cast<int>(height),
+                            info);
+  // A null image has already called the release proc.
+  return SkImage::MakeFromTexture(
+      ctx, bt, kTopLeft_GrSurfaceOrigin, kRGB_888x_SkColorType,
+      kOpaque_SkAlphaType, nullptr,
+      [](SkImage::ReleaseContext p) {
+        auto* h = static_cast<Held*>(p);
+        {
+          std::lock_guard<std::mutex> lk(g_imports_mu);
+          --h->imp->in_use;
+          h->imp->last = std::chrono::steady_clock::now();
+        }
+        delete h;
+      },
+      held);
+}
+
+// What the device does with NV12 (VK_FORMAT_G8_B8R8_2PLANE_420_UNORM) laid
+// out with `modifier`: 0 if it does not sample it, or cannot take it as a
+// transfer source and destination too, which Skia asks of every image it
+// wraps. Asked once a modifier. v3dv lists every modifier with one memory
+// plane, NV12's too, and lays NV12 out in two all the same; make_import
+// checks the layout it makes.
+VkFormatFeatureFlags nv12_features(uint64_t modifier) {
+  static std::mutex mu;
+  static std::vector<std::pair<uint64_t, VkFormatFeatureFlags>> known;
+  std::lock_guard<std::mutex> lk(mu);
+  for (const auto& k : known) {
+    if (k.first == modifier)
+      return k.second;
+  }
+  VkDrmFormatModifierPropertiesListEXT list{
+      VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT};
+  VkFormatProperties2 props{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, &list};
+  VKD.vkGetPhysicalDeviceFormatProperties2(
+      g.phys, VK_FORMAT_G8_B8R8_2PLANE_420_UNORM, &props);
+  std::vector<VkDrmFormatModifierPropertiesEXT> mods(
+      list.drmFormatModifierCount);
+  list.pDrmFormatModifierProperties = mods.data();
+  VKD.vkGetPhysicalDeviceFormatProperties2(
+      g.phys, VK_FORMAT_G8_B8R8_2PLANE_420_UNORM, &props);
+  VkFormatFeatureFlags f = 0;
+  for (uint32_t i = 0; i < list.drmFormatModifierCount && i < mods.size();
+       ++i) {
+    if (mods[i].drmFormatModifier == modifier &&
+        (mods[i].drmFormatModifierPlaneCount == 2 ||
+         mods[i].drmFormatModifierPlaneCount == 1))
+      f = mods[i].drmFormatModifierTilingFeatures;
+  }
+  const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                    VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+                                    VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+  if ((f & need) != need ||
+      (f & (VK_FORMAT_FEATURE_MIDPOINT_CHROMA_SAMPLES_BIT |
+            VK_FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT)) == 0)
+    f = 0;
+  known.emplace_back(modifier, f);
+  return f;
+}
+
 }  // namespace
+
+// Whether the present device can draw a decoder's frame as it is
+// (acl_gpu_import_yuv): it is up. It is made with the sampler YCbCr
+// conversion, which Vulkan 1.1 has, and Skia is told so. Which layouts it
+// takes is known only per frame.
+bool acl_gpu_draws_yuv() {
+  return g_draws_yuv.load(std::memory_order_acquire);
+}
 
 // A decoder's frame for a SurfaceTexture (graphics_jni.cpp), drawn by the
 // present device with no copy: the frame's XBGR8888 dma-buf is imported as a
@@ -1384,76 +1540,102 @@ sk_sp<SkImage> acl_gpu_import_frame(GrDirectContext* ctx,
   ImportKey key;
   key.dev = st.st_dev;
   key.ino = st.st_ino;
+  key.format = VK_FORMAT_R8G8B8A8_UNORM;
   key.width = width;
   key.height = height;
-  key.stride = stride;
-  key.offset = offset;
-  key.drm_format = drm_format;
+  key.plane_count = 1;
+  key.offset[0] = offset;
+  key.stride[0] = stride;
   key.modifier = modifier;
-  const auto now = std::chrono::steady_clock::now();
-  std::shared_ptr<Import> imp;
-  {
-    std::lock_guard<std::mutex> lk(g_imports_mu);
-    prune_imports(now);
-    for (const auto& i : g_imports) {
-      if (i->key == key) {
-        imp = i;
-        break;
-      }
-    }
-    if (!imp) {
-      imp = make_import(key, fd);
-      if (!imp)
-        return nullptr;
-      g_imports.push_back(imp);
-    }
-    ++imp->in_use;
-    imp->last = now;
-  }
+  std::shared_ptr<Import> imp = take_import(key, fd);
+  if (!imp)
+    return nullptr;
+  return wrap_import(ctx, std::move(imp), width, height,
+                     GrVkYcbcrConversionInfo{}, std::move(keep));
+}
 
-  GrVkImageInfo info{};
-  info.fImage = imp->image;
-  info.fAlloc.fMemory = imp->memory;
-  info.fAlloc.fOffset = 0;
-  info.fAlloc.fSize = imp->size;
-  info.fImageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-  // Written outside Vulkan, by the converter, for every frame: each texture
-  // made from the image takes it from the external queue family, in a layout
-  // that keeps what is in it (acl_gpu_release_frame hands it back).
-  info.fImageLayout = VK_IMAGE_LAYOUT_GENERAL;
-  info.fFormat = VK_FORMAT_R8G8B8A8_UNORM;
-  info.fImageUsageFlags = imp->usage;
-  info.fSampleCount = 1;
-  info.fLevelCount = 1;
-  info.fCurrentQueueFamily = VK_QUEUE_FAMILY_EXTERNAL;
-  info.fSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  struct Held {
-    std::shared_ptr<Import> imp;
-    std::shared_ptr<void> keep;
-  };
-  auto* held = new Held{imp, std::move(keep)};
-  const GrBackendTexture bt(static_cast<int>(width), static_cast<int>(height),
-                            info);
-  // A null image has already called the release proc.
-  return SkImage::MakeFromTexture(
-      ctx, bt, kTopLeft_GrSurfaceOrigin, kRGB_888x_SkColorType,
-      kOpaque_SkAlphaType, nullptr,
-      [](SkImage::ReleaseContext p) {
-        auto* h = static_cast<Held*>(p);
-        {
-          std::lock_guard<std::mutex> lk(g_imports_mu);
-          --h->imp->in_use;
-          h->imp->last = std::chrono::steady_clock::now();
-        }
-        delete h;
-      },
-      held);
+// A decoder's frame as it is, drawn by the present device: its NV12 dma-buf
+// imported as a two-plane VkImage of the whole buffer and sampled through a
+// YCbCr conversion with the frame's matrix and range. The caller draws the
+// picture's crop of it. Null when the frame is not NV12 in one buffer, the
+// device does not sample NV12 with the frame's modifier, or the driver
+// refuses the import; the caller then has the frames converted. Present
+// thread.
+sk_sp<SkImage> acl_gpu_import_yuv(GrDirectContext* ctx,
+                                  const AclStYuvFrame& y,
+                                  std::shared_ptr<void> keep) {
+  if (ctx == nullptr || ctx != g.gr.get() || g.device == VK_NULL_HANDLE ||
+      y.drm_format != DRM_FORMAT_NV12 || y.plane_count != 2 || y.fd[0] < 0 ||
+      y.width == 0 || y.height == 0)
+    return nullptr;
+  // One buffer: both planes behind the same inode.
+  struct stat s0{}, s1{};
+  if (::fstat(y.fd[0], &s0) != 0)
+    return nullptr;
+  if (y.fd[1] >= 0 && (::fstat(y.fd[1], &s1) != 0 || s1.st_dev != s0.st_dev ||
+                       s1.st_ino != s0.st_ino))
+    return nullptr;
+  const VkFormatFeatureFlags features = nv12_features(y.modifier);
+  if (features == 0)
+    return nullptr;
+  ImportKey key;
+  key.dev = s0.st_dev;
+  key.ino = s0.st_ino;
+  key.format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+  key.width = y.crop_x + y.width;
+  key.height = y.crop_y + y.height;
+  // As many rows as the buffer has before its chroma plane: a decoder pads
+  // the luma plane to its coded height (1088 for 1080 lines), and a driver
+  // may place the chroma plane after the image's rows. The picture's crop is
+  // what is drawn.
+  if (y.stride[0] > 0 && y.offset[1] > y.offset[0] &&
+      (y.offset[1] - y.offset[0]) % y.stride[0] == 0) {
+    const uint32_t rows = (y.offset[1] - y.offset[0]) / y.stride[0];
+    if (rows > key.height && rows <= key.height + 64)
+      key.height = rows;
+  }
+  key.plane_count = 2;
+  for (int i = 0; i < 2; ++i) {
+    key.offset[i] = y.offset[i];
+    key.stride[i] = y.stride[i];
+  }
+  key.modifier = y.modifier;
+  GrVkYcbcrConversionInfo ycbcr;
+  ycbcr.fFormat = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+  ycbcr.fYcbcrModel =
+      y.yuv_matrix == 1   ? VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709
+      : y.yuv_matrix == 9 ? VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_2020
+                          : VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601;
+  ycbcr.fYcbcrRange = y.yuv_full_range != 0 ? VK_SAMPLER_YCBCR_RANGE_ITU_FULL
+                                            : VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
+  // H.264 and HEVC 4:2:0 put chroma level with the even luma columns and
+  // between the rows, where the stream does not say otherwise.
+  const bool cosited =
+      (features & VK_FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT) != 0;
+  const bool midpoint =
+      (features & VK_FORMAT_FEATURE_MIDPOINT_CHROMA_SAMPLES_BIT) != 0;
+  ycbcr.fXChromaOffset =
+      cosited ? VK_CHROMA_LOCATION_COSITED_EVEN : VK_CHROMA_LOCATION_MIDPOINT;
+  ycbcr.fYChromaOffset =
+      midpoint ? VK_CHROMA_LOCATION_MIDPOINT : VK_CHROMA_LOCATION_COSITED_EVEN;
+  ycbcr.fChromaFilter =
+      (features &
+       VK_FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT) != 0
+          ? VK_FILTER_LINEAR
+          : VK_FILTER_NEAREST;
+  ycbcr.fForceExplicitReconstruction = VK_FALSE;
+  ycbcr.fFormatFeatures = features;
+  std::shared_ptr<Import> imp = take_import(key, y.fd[0]);
+  if (!imp)
+    return nullptr;
+  return wrap_import(ctx, std::move(imp), key.width, key.height, ycbcr,
+                     std::move(keep));
 }
 
 // Hand a frame's texture back to the external queue family, for the
-// converter to draw the next frame into its buffer: an image
-// acl_gpu_import_frame made, which the caller is about to let go of. The
-// transition goes with the next submit. Present thread.
+// converter or the decoder to write the next frame into its buffer: an image
+// acl_gpu_import_frame or acl_gpu_import_yuv made, which the caller is about
+// to let go of. The transition goes with the next submit. Present thread.
 void acl_gpu_release_frame(GrDirectContext* ctx, const sk_sp<SkImage>& img) {
   if (ctx == nullptr || ctx != g.gr.get() || !img || !img->isTextureBacked())
     return;
