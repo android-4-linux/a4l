@@ -6853,6 +6853,8 @@ sk_sp<SkImage> acl_gpu_import_frame(GrDirectContext* ctx,
                                     uint32_t drm_format,
                                     uint64_t modifier,
                                     std::shared_ptr<void> keep);
+// Hand a frame's texture back for the converter's next frame (gpu_dmabuf.cpp).
+void acl_gpu_release_frame(GrDirectContext* ctx, const sk_sp<SkImage>& img);
 namespace {
 
 // A decoder's frame as pixels: the dma-buf mapped and copied, for a canvas
@@ -6913,10 +6915,12 @@ sk_sp<SkImage> st_frame_image(SkCanvas* c,
     std::lock_guard<std::mutex> live(g_st_live_mu);
     for (auto it = g_st_images.begin(); it != g_st_images.end();) {
       if ((it->second.ctx == nullptr || it->second.ctx == gpu) &&
-          g_st_live.count(const_cast<AclSurfaceTexture*>(it->first)) == 0)
+          g_st_live.count(const_cast<AclSurfaceTexture*>(it->first)) == 0) {
+        acl_gpu_release_frame(it->second.ctx, it->second.img);
         it = g_st_images.erase(it);
-      else
+      } else {
         ++it;
+      }
     }
   }
   // A pixel copy draws on any canvas, so a frame the import failed for is
@@ -6944,6 +6948,7 @@ sk_sp<SkImage> st_frame_image(SkCanvas* c,
   // be dropped on the present thread. This one is not kept.
   if (e.ctx != nullptr && made_on != e.ctx)
     return img;
+  acl_gpu_release_frame(e.ctx, e.img);  // the frame this one replaces
   e = StFrameImage{buf, img, made_on};
   return img;
 }
