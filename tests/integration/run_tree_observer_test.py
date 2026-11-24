@@ -7,7 +7,8 @@
 # is in a window, and the window's observer gets an OnPreDrawListener and an OnDrawListener. a4l
 # runs measure, layout and draw from its own present loop, so it has to call these where
 # ViewRootImpl does: global layout after a layout pass (the first, and one a view requests
-# later), pre-draw before each draw (false cancels that frame), then draw. The fixture logs
+# later), pre-draw before each draw (false cancels that frame), then draw. The second Activity
+# also has to come up in the theme the manifest gives it, not the launcher's. The fixture logs
 # "TREE:" lines and "TREE: PASS" at the end.
 #
 # Needs a host ART build (ACL_ART_HOME), the AOSP toolchain, a render node and a Wayland
@@ -28,7 +29,11 @@ SKIP = 77
 
 PACKAGE = "com.acl.tree"
 
+THEME_MATERIAL = 0x01030224        # android:style/Theme.Material (dark)
+THEME_MATERIAL_LIGHT = 0x01030237  # android:style/Theme.Material.Light
+
 CHECKS = [
+    "TREE: theme launcher light=false second light=true",
     "TREE: global layout sized draws=0",
     "TREE: pre-draw cancelled one frame: draws then=0",
     "TREE: global layout again after requestLayout",
@@ -115,7 +120,10 @@ def main():
             + glob.glob(os.path.join(cls, "**/*.class"), recursive=True))
         run(["cp", os.path.join(dexdir, "classes.dex"), app])
         with open(os.path.join(app, "AndroidManifest.xml"), "wb") as fh:
-            fh.write(build_axml(utf8=True, package=PACKAGE, launcher=f"{PACKAGE}.Main"))
+            fh.write(build_axml(utf8=True, package=PACKAGE, launcher=f"{PACKAGE}.Main",
+                                launcher_theme=THEME_MATERIAL,
+                                activities=[(f"{PACKAGE}.Main$Second",
+                                             THEME_MATERIAL_LIGHT)]))
         unaligned = os.path.join(work, "u.apk")
         apk = os.path.join(work, "tree-observer.apk")
         run(["zip", "-X", "-0", "-j", "-q", unaligned,

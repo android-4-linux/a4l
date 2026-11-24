@@ -20,6 +20,7 @@ RES_XML_START_ELEM = 0x0102
 RES_XML_END_ELEM = 0x0103
 
 UTF8_FLAG = 1 << 8
+TYPE_REFERENCE = 0x01
 TYPE_STRING = 0x03
 TYPE_INT_DEC = 0x10
 NO_ENTRY = 0xFFFFFFFF
@@ -35,6 +36,7 @@ ATTR_NAMES = [
     ("targetSdkVersion", 0x01010270),
     ("name", 0x01010003),
     ("label", 0x01010001),
+    ("theme", 0x01010000),
 ]
 
 
@@ -111,6 +113,8 @@ def _attribute(pool, ns_idx, name_idx, value):
     if kind == "str":
         raw = pool.sid(v)
         vtype, data = TYPE_STRING, pool.sid(v)
+    elif kind == "ref":  # a resource id, as android:theme="@style/..." compiles to
+        raw, vtype, data = NO_ENTRY, TYPE_REFERENCE, v & 0xFFFFFFFF
     else:
         raw, vtype, data = NO_ENTRY, TYPE_INT_DEC, v & 0xFFFFFFFF
     return struct.pack("<IIIHBBI", ns_idx, name_idx, raw, 8, 0, vtype, data)
@@ -129,7 +133,7 @@ def end_elem(pool, name):
 
 
 def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity",
-               permissions=None, services=None):
+               permissions=None, services=None, launcher_theme=None, activities=None):
     pool = Pool()
     uri = lambda: pool.sid(ANDROID_URI)          # noqa: E731
     a = lambda name, val: _attribute(pool, uri(), pool.sid(name), val)  # noqa: E731
@@ -156,7 +160,10 @@ def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity",
     ])
     body += end_elem(pool, "uses-sdk")
     body += start_elem(pool, "application", [a("label", ("str", "Example"))])
-    body += start_elem(pool, "activity", [a("name", ("str", launcher))])
+    launcher_attrs = [a("name", ("str", launcher))]
+    if launcher_theme is not None:
+        launcher_attrs.append(a("theme", ("ref", launcher_theme)))
+    body += start_elem(pool, "activity", launcher_attrs)
     body += start_elem(pool, "intent-filter", [])
     body += start_elem(pool, "action",
                        [a("name", ("str", "android.intent.action.MAIN"))])
@@ -169,6 +176,14 @@ def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity",
     body += start_elem(pool, "activity",
                        [a("name", ("str", "com.example.app.OtherActivity"))])
     body += end_elem(pool, "activity")
+    # More <activity android:name="..." android:theme="@...">: activities is a list of
+    # (class name, theme resource id or None).
+    for name, theme in (activities or []):
+        attrs = [a("name", ("str", name))]
+        if theme is not None:
+            attrs.append(a("theme", ("ref", theme)))
+        body += start_elem(pool, "activity", attrs)
+        body += end_elem(pool, "activity")
     # <service android:name="..."> with an <intent-filter> of its actions, if any:
     # services is a list of (class name, [action, ...]).
     for name, actions in (services or []):

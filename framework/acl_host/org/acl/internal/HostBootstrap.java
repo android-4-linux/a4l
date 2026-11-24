@@ -1394,6 +1394,25 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("media_router".equals(name)) {
+                // android.media.MediaRouter over a no-op IMediaRouterService (seeded in the
+                // ServiceManager): the device's own audio route and nothing to cast to. Never
+                // null: androidx.mediarouter calls it unguarded, and a MediaRouteButton in a
+                // layout (a Cast button) fails the whole inflate without it.
+                Object made = madeManager(name);
+                if (made != null) return made;
+                try {
+                    java.lang.reflect.Constructor<?> c = android.media.MediaRouter.class
+                            .getDeclaredConstructor(android.content.Context.class);
+                    c.setAccessible(true);
+                    return keepManager(name, c.newInstance(this));
+                } catch (Throwable t) {
+                    Throwable cause = t instanceof java.lang.reflect.InvocationTargetException
+                            && t.getCause() != null ? t.getCause() : t;
+                    android.util.Log.w("acl", "MediaRouter: " + cause, cause);
+                    return null;
+                }
+            }
             if ("appwidget".equals(name)) {
                 // AppWidgetManager(Context, IAppWidgetService). No home screen hosts widgets:
                 // the app has none placed, and updates to them are dropped. Never null, for
@@ -1597,6 +1616,7 @@ public final class HostBootstrap {
             if (serviceClass == android.app.usage.UsageStatsManager.class) return "usagestats";
             if (serviceClass == android.content.pm.ShortcutManager.class) return "shortcut";
             if (serviceClass == android.appwidget.AppWidgetManager.class) return "appwidget";
+            if (serviceClass == android.media.MediaRouter.class) return "media_router";
             if (serviceClass == android.app.job.JobScheduler.class) return "jobscheduler";
             if (serviceClass == android.view.accessibility.AccessibilityManager.class) return "accessibility";
             if (serviceClass == android.view.autofill.AutofillManager.class) return "autofill";
@@ -1942,6 +1962,45 @@ public final class HostBootstrap {
 
     // full activity class -> full parentActivityName, parsed once from AndroidManifest.xml. Backs
     // PackageManager.getActivityInfo(...).parentActivityName so onSupportNavigateUp / the Up arrow work.
+    // full activity class -> its android:theme resource, and the <application>'s theme, parsed
+    // once from AndroidManifest.xml.
+    private static java.util.Map<String, Integer> sActivityTheme;
+    private static int sManifestAppTheme;
+    /** The theme the manifest gives this Activity: its own, else the application's, else 0. */
+    static synchronized int manifestThemeFor(String activityClass) {
+        if (sActivityTheme == null) {
+            java.util.Map<String, Integer> m = new java.util.HashMap<>();
+            AppContext c = sAppContext;
+            android.content.res.XmlResourceParser xml = null;
+            try {
+                if (c != null) {
+                    final String NS = "http://schemas.android.com/apk/res/android";
+                    final String p = c.getPackageName();
+                    xml = openBaseManifest(c.getResources().getAssets(),
+                            c.getApplicationInfo() != null ? c.getApplicationInfo().sourceDir : null);
+                    for (int ev = xml.getEventType();
+                         ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
+                        if (ev != android.content.res.XmlResourceParser.START_TAG) continue;
+                        final int theme = xml.getAttributeResourceValue(NS, "theme", 0);
+                        if ("application".equals(xml.getName())) {
+                            sManifestAppTheme = theme;
+                        } else if ("activity".equals(xml.getName()) && theme != 0) {
+                            String name = xml.getAttributeValue(NS, "name");
+                            if (name != null) m.put(normalizeClass(name, p), theme);
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                System.err.println("acl HostBootstrap: activity theme parse failed: " + t);
+            } finally {
+                if (xml != null) xml.close();
+            }
+            sActivityTheme = m;
+        }
+        final Integer own = sActivityTheme.get(activityClass);
+        return own != null ? own : sManifestAppTheme;
+    }
+
     private static java.util.Map<String, String> sParentActivity;
     private static String normalizeClass(String name, String pkg) {
         if (name == null) return null;
@@ -2952,7 +3011,13 @@ public final class HostBootstrap {
         // attributes off it. Without it the Activity's ContextThemeWrapper theme is bare (Themes=[])
         // → InflateException "Failed to resolve attribute". Apply the manifest app theme, or a
         // framework default (DeviceDefault has a full attribute set) when the app declares none.
-        int themeRes = defaultAppTheme();
+        // The Activity's own android:theme, else the application's, as ActivityInfo
+        // .getThemeResource() gives on Android. The default is what the launch was given,
+        // which is the launcher Activity's theme: right for the launcher, wrong for the
+        // Activities it starts (a home screen inflated under a splash theme cannot resolve
+        // the attributes its layouts name).
+        int themeRes = manifestThemeFor(a.getClass().getName());
+        if (themeRes == 0) themeRes = defaultAppTheme();
         android.content.pm.ActivityInfo ai = new android.content.pm.ActivityInfo();
         ai.theme = themeRes;
         // A valid ApplicationInfo (ComponentInfo.getIconResource reads applicationInfo.icon; the
@@ -2981,8 +3046,16 @@ public final class HostBootstrap {
         try {
             Class<?> ctw = Class.forName("android.view.ContextThemeWrapper");
             setField(ctw, a, "mThemeResource", themeRes);
-            try { setField(ctw, a, "mTheme", null); } catch (Throwable ignored) {}
-            android.content.res.Resources.Theme t = a.getTheme();  // applies themeRes now
+            // The Activity's theme is its own style over the system default, as on Android,
+            // where an Activity's base context carries no app theme. Left to
+            // ContextThemeWrapper it would start as a copy of the app Context's theme, which
+            // is the launcher Activity's: an attribute this Activity's theme leaves unset
+            // then takes the launcher's value (Pandora's home screen read hasToolbar=false
+            // from its splash theme, and removed its own toolbar).
+            android.content.res.Resources.Theme t = a.getResources().newTheme();
+            t.applyStyle(android.R.style.Theme_DeviceDefault_Light_DarkActionBar, true);
+            t.applyStyle(themeRes, true);
+            setField(ctw, a, "mTheme", t);
             System.err.println("acl HostBootstrap: activity theme -> 0x"
                     + Integer.toHexString(themeRes) + " => " + t);
         } catch (Throwable t) {
@@ -4369,6 +4442,10 @@ public final class HostBootstrap {
                     switch (method.getName()) {
                         case "getDisplayInfo": return buildDisplayInfo();
                         case "getDisplayIds": return new int[]{0};
+                        // Never null on Android. No Wi-Fi display here: the default status is
+                        // "feature unavailable". android.media.MediaRouter reads it unguarded.
+                        case "getWifiDisplayStatus":
+                            return method.getReturnType().getConstructor().newInstance();
                         default: return defaultValue(method.getReturnType());
                     }
                 });
@@ -4666,6 +4743,9 @@ public final class HostBootstrap {
         // MediaSession routes through ISessionManager; makeSessionManagerHandler returns a no-op
         // ISession (with a no-op ISessionController) so MediaSession construction completes.
         svc.put("media_session", "android.media.session.ISessionManager");
+        // android.media.MediaRouter asks for IMediaRouterService when it is made; a no-op one
+        // (no remote routes, no client state kept) is enough for the local route.
+        svc.put("media_router", "android.media.IMediaRouterService");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},

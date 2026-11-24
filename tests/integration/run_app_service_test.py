@@ -8,7 +8,7 @@
 # connects once the Service is started, and a foreground Service. Another app's service, an
 # intent with no component or package, and an undeclared class are not found. Last, the system
 # services a Service's setup reads are there: UsageStatsManager, ShortcutManager, AppWidgetManager,
-# a notification channel read back, and a media session's playback info. The fixture logs a
+# a notification channel read back, a media session's playback info, and MediaRouter. The fixture logs a
 # "SERVICE:" line per case and "SERVICE: PASS" at the end.
 #
 # Needs a host ART build (ACL_ART_HOME), the AOSP toolchain, a render node and a Wayland
@@ -45,7 +45,7 @@ CHECKS = [
     "SERVICE: late connected before=false after=true",
     "SERVICE: late stopped=true destroyed=1",
     "SERVICE: foreground ran=true destroyed=1",
-    "SERVICE: system usage=10 shortcuts=0 widgets=0 channel=4/2 playback=1",
+    "SERVICE: system usage=10 shortcuts=0 widgets=0 channel=4/2 playback=1 router=true",
     "SERVICE: PASS",
 ]
 
