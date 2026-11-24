@@ -1349,6 +1349,91 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("appwidget".equals(name)) {
+                // AppWidgetManager(Context, IAppWidgetService). No home screen hosts widgets:
+                // the app has none placed, and updates to them are dropped. Never null, for
+                // the reason given for UsageStatsManager below.
+                Object made = madeManager(name);
+                if (made != null) return made;
+                try {
+                    Class<?> iaw = Class.forName("com.android.internal.appwidget.IAppWidgetService");
+                    Object svc = java.lang.reflect.Proxy.newProxyInstance(iaw.getClassLoader(),
+                            new Class<?>[]{iaw}, (p, m, a) -> {
+                                final Class<?> rt = m.getReturnType();
+                                if (rt == int[].class) return new int[0];
+                                if (rt.getName().equals("android.content.pm.ParceledListSlice"))
+                                    return rt.getConstructor(java.util.List.class)
+                                            .newInstance(new java.util.ArrayList<Object>());
+                                return defaultValue(rt);
+                            });
+                    java.lang.reflect.Constructor<?> c = android.appwidget.AppWidgetManager.class
+                            .getDeclaredConstructor(android.content.Context.class, iaw);
+                    c.setAccessible(true);
+                    return keepManager(name, c.newInstance(this, svc));
+                } catch (Throwable t) {
+                    android.util.Log.w("acl", "AppWidgetManager: " + t);
+                    return null;
+                }
+            }
+            if ("shortcut".equals(name)) {
+                // ShortcutManager(Context, IShortcutService). There is no launcher to publish
+                // shortcuts to: sets and updates are accepted and dropped, queries are empty.
+                // Never null, for the reason given for UsageStatsManager below.
+                Object made = madeManager(name);
+                if (made != null) return made;
+                try {
+                    Class<?> iss = Class.forName("android.content.pm.IShortcutService");
+                    Object svc = java.lang.reflect.Proxy.newProxyInstance(iss.getClassLoader(),
+                            new Class<?>[]{iss}, (p, m, a) -> {
+                                final Class<?> rt = m.getReturnType();
+                                // ShortcutManager calls getList() on what the service returns.
+                                if (rt.getName().equals("android.content.pm.ParceledListSlice"))
+                                    return rt.getConstructor(java.util.List.class)
+                                            .newInstance(new java.util.ArrayList<Object>());
+                                final String mn = m.getName();
+                                if (mn.equals("getMaxShortcutCountPerActivity")) return 15;
+                                if (rt == boolean.class && (mn.startsWith("set")
+                                        || mn.startsWith("add") || mn.startsWith("update")))
+                                    return Boolean.TRUE;
+                                return defaultValue(rt);
+                            });
+                    java.lang.reflect.Constructor<?> c = android.content.pm.ShortcutManager.class
+                            .getDeclaredConstructor(android.content.Context.class, iss);
+                    c.setAccessible(true);
+                    return keepManager(name, c.newInstance(this, svc));
+                } catch (Throwable t) {
+                    android.util.Log.w("acl", "ShortcutManager: " + t);
+                    return null;
+                }
+            }
+            if ("usagestats".equals(name)) {
+                // UsageStatsManager(Context, IUsageStatsManager). a4l keeps no usage history:
+                // queries come back empty and the app is in the active standby bucket. A null
+                // manager is worse than an empty one: an app that injects it (Pandora's Dagger
+                // graph, a non-null @Provides) fails to create whatever needs it.
+                Object made = madeManager(name);
+                if (made != null) return made;
+                try {
+                    Class<?> ius = Class.forName("android.app.usage.IUsageStatsManager");
+                    Object svc = java.lang.reflect.Proxy.newProxyInstance(ius.getClassLoader(),
+                            new Class<?>[]{ius}, (p, m, a) -> {
+                                final Class<?> rt = m.getReturnType();
+                                if (m.getName().equals("getAppStandbyBucket") && rt == int.class)
+                                    return android.app.usage.UsageStatsManager.STANDBY_BUCKET_ACTIVE;
+                                if (rt.getName().equals("android.content.pm.ParceledListSlice"))
+                                    return rt.getConstructor(java.util.List.class)
+                                            .newInstance(new java.util.ArrayList<Object>());
+                                return defaultValue(rt);
+                            });
+                    java.lang.reflect.Constructor<?> c = android.app.usage.UsageStatsManager.class
+                            .getDeclaredConstructor(android.content.Context.class, ius);
+                    c.setAccessible(true);
+                    return keepManager(name, c.newInstance(this, svc));
+                } catch (Throwable t) {
+                    android.util.Log.w("acl", "UsageStatsManager: " + t);
+                    return null;
+                }
+            }
             if ("user".equals(name)) {
                 // UserManager(Context, IUserManager). Chromium's WebView reads
                 // getApplicationRestrictions() (managed-config); a null service NPEs, and a default
@@ -1464,6 +1549,9 @@ public final class HostBootstrap {
         // (remaining Managers are svc/-routed later, ADR-2). @hide → compiled vs classes.jar.
         @Override public String getSystemServiceName(Class<?> serviceClass) {
             if (serviceClass == android.app.ActivityManager.class) return "activity";
+            if (serviceClass == android.app.usage.UsageStatsManager.class) return "usagestats";
+            if (serviceClass == android.content.pm.ShortcutManager.class) return "shortcut";
+            if (serviceClass == android.appwidget.AppWidgetManager.class) return "appwidget";
             if (serviceClass == android.app.job.JobScheduler.class) return "jobscheduler";
             if (serviceClass == android.view.accessibility.AccessibilityManager.class) return "accessibility";
             if (serviceClass == android.view.autofill.AutofillManager.class) return "autofill";
@@ -1597,6 +1685,21 @@ public final class HostBootstrap {
             return new java.util.concurrent.Executor() {
                 @Override public void execute(Runnable r) { h.post(r); }
             };
+        }
+
+        // Managers built once and handed out again, as Android hands out one per Context
+        // (appwidget, shortcut, usagestats).
+        private final java.util.Map<String, Object> madeManagers = new java.util.HashMap<>();
+        private Object madeManager(String name) {
+            synchronized (madeManagers) { return madeManagers.get(name); }
+        }
+        private Object keepManager(String name, Object manager) {
+            synchronized (madeManagers) {
+                Object first = madeManagers.get(name);
+                if (first != null) return first;
+                madeManagers.put(name, manager);
+                return manager;
+            }
         }
 
         // The app's own services run in this process (AppServices): a4l has no ActivityManager
@@ -3924,9 +4027,14 @@ public final class HostBootstrap {
 
     // INotificationManager translated to the host notification daemon (svc/notify).
     // enqueue → NotifyBridge.nNotify (host Notify), cancel → nClose; per-app-id → server-id
-    // map keeps replace/cancel coherent. Channel ops and everything else default.
+    // map keeps replace/cancel coherent. The app's channels are kept, so it reads back what it
+    // created (an app checks a channel's importance before startForeground); nothing else is
+    // done with them. Everything else defaults.
     private static Object makeNotificationHandler(Class<?> iface) {
         final java.util.Map<Integer, Long> ids = new java.util.concurrent.ConcurrentHashMap<>();
+        final java.util.Map<String, android.app.NotificationChannel> channels =
+                java.util.Collections.synchronizedMap(
+                        new java.util.LinkedHashMap<String, android.app.NotificationChannel>());
         return java.lang.reflect.Proxy.newProxyInstance(
                 iface.getClassLoader(), new Class<?>[]{iface},
                 (p, method, a) -> {
@@ -3950,6 +4058,39 @@ public final class HostBootstrap {
                             for (Long s : ids.values()) NotifyBridge.nClose(s);
                             ids.clear();
                             return null;
+                        }
+                        case "createNotificationChannels": {
+                            // (String pkg, ParceledListSlice channels). Creating one that
+                            // exists keeps the first, as Android keeps the user's settings.
+                            java.util.List<?> list = (java.util.List<?>) a[1].getClass()
+                                    .getMethod("getList").invoke(a[1]);
+                            for (Object c : list) {
+                                if (c instanceof android.app.NotificationChannel) {
+                                    android.app.NotificationChannel ch =
+                                            (android.app.NotificationChannel) c;
+                                    synchronized (channels) {
+                                        if (!channels.containsKey(ch.getId()))
+                                            channels.put(ch.getId(), ch);
+                                    }
+                                }
+                            }
+                            return null;
+                        }
+                        case "getNotificationChannel":              // (callingPkg, user, pkg, id)
+                        case "getConversationNotificationChannel":  // (callingPkg, user, pkg, id, ...)
+                            return channels.get((String) a[3]);
+                        case "deleteNotificationChannel":           // (pkg, id)
+                            channels.remove((String) a[1]);
+                            return null;
+                        case "getNotificationChannels": {
+                            // A ParceledListSlice, never null: NotificationManager calls
+                            // getList() on it.
+                            java.util.List<android.app.NotificationChannel> all;
+                            synchronized (channels) {
+                                all = new java.util.ArrayList<>(channels.values());
+                            }
+                            return method.getReturnType().getConstructor(java.util.List.class)
+                                    .newInstance(all);
                         }
                         default:
                             return defaultValue(method.getReturnType());
@@ -4257,8 +4398,41 @@ public final class HostBootstrap {
                 (p, method, a) -> {
                     if ("getController".equals(method.getName())) {
                         try {
-                            return noop(Class.forName("android.media.session.ISessionController"));
+                            return makeSessionControllerHandler(
+                                    Class.forName("android.media.session.ISessionController"));
                         } catch (Throwable t) {
+                            return null;
+                        }
+                    }
+                    return defaultValue(method.getReturnType());
+                });
+    }
+
+    // ISessionController: everything defaults but the volume attributes. A session always has
+    // them on Android (MediaController.getPlaybackInfo is never null there), and
+    // MediaControllerCompat callers read getPlaybackInfo().getPlaybackType() unguarded. Report
+    // local playback on the music stream, with the host's master volume.
+    private static Object makeSessionControllerHandler(Class<?> iface) {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    if ("getVolumeAttributes".equals(method.getName())) {
+                        try {
+                            final int music = android.media.AudioManager.STREAM_MUSIC;
+                            java.lang.reflect.Constructor<?> c = method.getReturnType()
+                                    .getDeclaredConstructor(int.class, int.class, int.class,
+                                            int.class, android.media.AudioAttributes.class,
+                                            String.class);
+                            c.setAccessible(true);
+                            return c.newInstance(
+                                    android.media.session.MediaController.PlaybackInfo.PLAYBACK_TYPE_LOCAL,
+                                    android.media.VolumeProvider.VOLUME_CONTROL_ABSOLUTE,
+                                    AudioBridge.maxVolume(music), AudioBridge.getVolume(music),
+                                    new android.media.AudioAttributes.Builder()
+                                            .setLegacyStreamType(music).build(),
+                                    null);
+                        } catch (Throwable t) {
+                            android.util.Log.w("acl", "session volume attributes: " + t);
                             return null;
                         }
                     }
