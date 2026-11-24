@@ -70,6 +70,7 @@ public class Main extends Activity {
             case 4: startedTwice(); break;
             case 5: bindBeforeStart(); break;
             case 6: foreground(); break;
+            case 7: systemServices(); break;
             default:
                 log("PASS");
                 System.exit(0);
@@ -224,6 +225,38 @@ public class Main extends Activity {
                 next();
             }
         });
+    }
+
+    // 7. System services that always exist on Android, and that a Service's setup reads: a null
+    //    manager, or a null answer where Android gives a value, fails whatever asked for it.
+    void systemServices() {
+        android.app.usage.UsageStatsManager usage =
+                getSystemService(android.app.usage.UsageStatsManager.class);
+        android.content.pm.ShortcutManager shortcuts =
+                getSystemService(android.content.pm.ShortcutManager.class);
+        android.appwidget.AppWidgetManager widgets =
+                android.appwidget.AppWidgetManager.getInstance(this);
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        nm.createNotificationChannel(new NotificationChannel("probe", "Probe",
+                NotificationManager.IMPORTANCE_HIGH));
+        NotificationChannel channel = nm.getNotificationChannel("probe");
+        int listed = nm.getNotificationChannels().size();
+        android.media.session.MediaSession session =
+                new android.media.session.MediaSession(this, "probe");
+        android.media.session.MediaController.PlaybackInfo playback =
+                session.getController().getPlaybackInfo();
+        String line = "system usage=" + (usage != null ? usage.getAppStandbyBucket() : -1)
+                + " shortcuts=" + (shortcuts != null ? shortcuts.getDynamicShortcuts().size() : -1)
+                + " widgets=" + (widgets != null
+                        ? widgets.getAppWidgetIds(new ComponentName(this, Main.class)).length : -1)
+                + " channel=" + (channel != null ? channel.getImportance() : -1) + "/" + listed
+                + " playback=" + (playback != null ? playback.getPlaybackType() : -1);
+        session.release();
+        log(line);
+        // Bucket 10 is STANDBY_BUCKET_ACTIVE; channel "svc" from case 6 and "probe" are listed.
+        expect("system usage=10 shortcuts=0 widgets=0 channel=4/2 playback=1".equals(line),
+                "system services");
+        next();
     }
 
     public static class LocalService extends Service {

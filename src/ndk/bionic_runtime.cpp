@@ -3753,8 +3753,8 @@ void set_anw_ops(void* (*from_native_obj)(void*),
 // ──────────────────────────────────────────────────────────── libandroid's
 // acl_looper_bridge_{fd,pump} expose the current thread's NDK ALooper so acl's
 // main Java Looper can service it (see the libandroid side). These run the
-// bionic exports as this thread — the main thread, which is attached — under
-// its bionic %fs.
+// bionic exports as this thread — the main thread, which
+// main_looper_bridge_fd attaches — under its bionic %fs.
 namespace {
 int (*g_bridge_fd_fn)() = nullptr;
 void (*g_bridge_pump_fn)() = nullptr;
@@ -3780,6 +3780,17 @@ bool ensure_looper_bridge_syms() {
 
 int main_looper_bridge_fd() {
 #if defined(__x86_64__)
+  // The caller is the main thread, and nothing has attached it when the app's
+  // first native library was loaded on another thread (a WebView made off the
+  // main thread before the first frame). load() and the bridge calls run
+  // bionic code under RunScope, which aborts on a thread with no TCB.
+  BionicRuntime* rt = BionicRuntime::get();
+  if (rt == nullptr)
+    return -1;
+  if (std::string why; rt->attach_current_thread(&why) == 0) {
+    log::w(kTag, "looper bridge: main thread not attached to bionic: {}", why);
+    return -1;
+  }
   if (!ensure_looper_bridge_syms())
     return -1;
   BionicRuntime::RunScope scope(*BionicRuntime::get());
