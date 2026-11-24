@@ -4,8 +4,8 @@
 // media::TimedRelease: what holds a video frame until the time the player
 // released it for. Actions run at their time and in time order, a time that
 // has passed runs at once but not ahead of what is already waiting, a cancel
-// tells each action it was cancelled, and nothing is lost when the object
-// goes away.
+// tells each action it was cancelled, a release runs them all at once, and
+// nothing is lost when the object goes away.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -154,6 +154,28 @@ TEST_CASE("timed release: cancel tells each action, and each runs once",
   CHECK_FALSE(ran.due[3]);
   CHECK_FALSE(ran.due[4]);
   CHECK(owned.use_count() == 1);
+}
+
+TEST_CASE("timed release: release runs each action now, in time order",
+          "[media][timed]") {
+  Ran ran;
+  TimedRelease t;
+  const std::int64_t when = TimedRelease::now_ns() + 150 * kMs;
+  auto owned = std::make_shared<int>(7);
+  for (int i : {2, 0, 1})
+    t.at(when + i * kMs,
+         [&ran, i, when, owned](bool due) { ran.add(i, due, when); });
+  t.release_all();
+  CHECK(ran.ids == std::vector<int>{0, 1, 2});
+  CHECK(ran.due == std::vector<bool>{true, true, true});
+  // Run at once, well ahead of their time.
+  for (std::int64_t late : ran.late_ns)
+    CHECK(late < 0);
+  CHECK(t.waiting() == 0);
+  CHECK(owned.use_count() == 1);
+  // Nothing runs again at its time.
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  CHECK(ran.count() == 3);
 }
 
 TEST_CASE("timed release: it is used from many threads", "[media][timed]") {

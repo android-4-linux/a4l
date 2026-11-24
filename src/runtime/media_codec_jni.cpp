@@ -1470,7 +1470,11 @@ void teardown(CodecCtx* ctx) {
                   std::memory_order_release);  // stop the async driver (if any)
                                                // before the decoder
   ctx->acv.notify_all();
-  ctx->present.cancel_all();  // frames waiting for their time are dropped
+  // Frames the app released and that wait for their time go to their
+  // surface now: on Android they are the surface's already, and the codec
+  // going does not take them back. Shown at once, they are at most as early
+  // as the player released them (media3: 50 ms).
+  ctx->present.release_all();
   if (ctx->audio)
     ctx->audio->wake();
   if (ctx->driver.joinable())
@@ -1510,6 +1514,8 @@ void JNICALL MC_native_flush(JNIEnv* env, jobject thiz) {
   // every output slot empty; what was queued, decoding or waiting for its
   // time is stale. Asynchronous: nothing is offered until start().
   std::lock_guard<std::mutex> pass(ctx->dmu);  // between the driver's passes
+  // Frames waiting for their time are dropped too: a seek's old frames would
+  // show over the new position.
   ctx->present.cancel_all();
   {
     std::lock_guard<std::mutex> lk(ctx->amu);
@@ -1551,7 +1557,7 @@ void JNICALL MC_native_finalize(JNIEnv* env, jobject thiz) {
 void JNICALL MC_native_setSurface(JNIEnv* env, jobject thiz, jobject surface) {
   CodecCtx* ctx = ctx_of(env, thiz);
   if (ctx != nullptr)
-    ctx->present.cancel_all();  // they were for the old surface
+    ctx->present.release_all();  // to the old surface, whose they already are
   if (ctx != nullptr)
     set_output(env, ctx, surface);
 }
