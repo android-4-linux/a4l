@@ -3046,8 +3046,16 @@ public final class HostBootstrap {
         try {
             Class<?> ctw = Class.forName("android.view.ContextThemeWrapper");
             setField(ctw, a, "mThemeResource", themeRes);
-            try { setField(ctw, a, "mTheme", null); } catch (Throwable ignored) {}
-            android.content.res.Resources.Theme t = a.getTheme();  // applies themeRes now
+            // The Activity's theme is its own style over the system default, as on Android,
+            // where an Activity's base context carries no app theme. Left to
+            // ContextThemeWrapper it would start as a copy of the app Context's theme, which
+            // is the launcher Activity's: an attribute this Activity's theme leaves unset
+            // then takes the launcher's value (Pandora's home screen read hasToolbar=false
+            // from its splash theme, and removed its own toolbar).
+            android.content.res.Resources.Theme t = a.getResources().newTheme();
+            t.applyStyle(android.R.style.Theme_DeviceDefault_Light_DarkActionBar, true);
+            t.applyStyle(themeRes, true);
+            setField(ctw, a, "mTheme", t);
             System.err.println("acl HostBootstrap: activity theme -> 0x"
                     + Integer.toHexString(themeRes) + " => " + t);
         } catch (Throwable t) {
