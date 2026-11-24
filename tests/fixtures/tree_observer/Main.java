@@ -5,8 +5,9 @@
 // A view's ViewTreeObserver listeners, in the shape a splash screen has: the launcher Activity
 // starts the real one from its onCreate and finishes, and the real one's view registers an
 // OnGlobalLayoutListener before it is attached to a window. The view then waits for that
-// callback, as a logo waits for its size before it starts to animate. Main is both Activities:
-// the second is started with the extra "second".
+// callback, as a logo waits for its size before it starts to animate. Main is the launcher and
+// Second, a subclass, the Activity it starts. The manifest gives each its own theme (dark for
+// the launcher, light for Second), and Second must come up in its own.
 //
 // Logs "TREE:" lines the test reads, ending "TREE: PASS" (exit 0). A callback that does not come
 // is caught by a 20 s limit (exit 3).
@@ -49,6 +50,16 @@ public class Main extends Activity {
         }
     }
 
+    /** The Activity the launcher starts; declared with its own theme. */
+    public static class Second extends Main {}
+
+    static boolean sLauncherLight;
+
+    boolean isLightTheme() {
+        final android.util.TypedValue v = new android.util.TypedValue();
+        return getTheme().resolveAttribute(android.R.attr.isLightTheme, v, true) && v.data != 0;
+    }
+
     int layouts, preDraws, drawCalls, drawsAtFirstPass = -1;
     int layoutsAtRequest = -1;  // set when the test asks for a layout
     Probe probe;
@@ -56,13 +67,14 @@ public class Main extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
-        Intent in = getIntent();
-        if (in == null || !in.getBooleanExtra("second", false)) {
+        if (!(this instanceof Second)) {
             // The launcher: hand over to the real Activity before any frame, as a splash does.
-            startActivity(new Intent(this, Main.class).putExtra("second", true));
+            sLauncherLight = isLightTheme();
+            startActivity(new Intent(this, Second.class));
             finish();
             return;
         }
+        log("theme launcher light=" + sLauncherLight + " second light=" + isLightTheme());
         main.postDelayed(new Runnable() {
             @Override public void run() {
                 log("FAIL timed out: layouts=" + layouts + " preDraws=" + preDraws
