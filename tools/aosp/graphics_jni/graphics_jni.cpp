@@ -161,6 +161,24 @@ struct DisplayItem {
                            // + cast shadow
 };
 
+// What a node last recorded. A recording replaces it whole, and the
+// RenderThread walks it while the UI thread records the next frame, so it is
+// immutable once published: a reader takes a reference and keeps the snapshot
+// it started with. (A vector replaced under a walk was a use-after-free, seen
+// as a SIGSEGV in SkPicture playback on the RenderThread.)
+struct NodeContent {
+  // The segmented content: own-op SkPictures and live child/layer boundaries.
+  std::vector<DisplayItem> items;
+  // A single-picture fallback (deferred present-root path, leaf nodes with no
+  // boundaries).
+  sk_sp<SkPicture> picture;
+};
+// Guards only the pointer swap in AclRenderNode::content()/set_content().
+inline std::mutex& node_content_mutex() {
+  static std::mutex m;
+  return m;
+}
+
 struct AclRenderNode : public SkRefCnt {
   int left = 0, top = 0, right = 0, bottom = 0;
   float alpha = 1.0f, cameraDistance = 0.0f;
@@ -193,14 +211,29 @@ struct AclRenderNode : public SkRefCnt {
   // color-filter / offset / chain).
   sk_sp<SkImageFilter> render_effect;
   // RenderNode record/replay (Compose renders its content into RenderNode
-  // layers). `display_list` is the segmented content (own-op SkPictures + live
-  // child/layer boundaries), walked live each frame by
-  // draw_rendernode_immediate; `picture` is a legacy single-picture fallback
-  // (deferred present-root path, and leaf nodes with no boundaries).
+  // layers): the recorded content, walked each frame by
+  // draw_rendernode_immediate. Never null from content().
+  std::shared_ptr<const NodeContent> content() const {
+    static const std::shared_ptr<const NodeContent> empty =
+        std::make_shared<NodeContent>();
+    std::lock_guard<std::mutex> lk(node_content_mutex());
+    return content_ ? content_ : empty;
+  }
+  void set_content(std::vector<DisplayItem> items, sk_sp<SkPicture> picture) {
+    auto next = std::make_shared<NodeContent>();
+    next->items = std::move(items);
+    next->picture = std::move(picture);
+    std::shared_ptr<const NodeContent> old = std::move(next);
+    {
+      std::lock_guard<std::mutex> lk(node_content_mutex());
+      content_.swap(old);
+    }
+    // `old` (the previous content) is released here, outside the lock.
+  }
+  // Read and replaced only through content() and set_content().
+  std::shared_ptr<const NodeContent> content_;
   // is_present_root marks acl's top-level node whose RecordingCanvas draws
   // immediately onto the GPU SkCanvas (not recorded).
-  std::vector<DisplayItem> display_list;
-  sk_sp<SkPicture> picture;
   bool is_present_root = false;
   // Video SurfaceView hole-punch: when set, the walk clears this node's rect to
   // TRANSPARENT (kSrc) at the node's z-position — after the app's opaque
@@ -263,12 +296,12 @@ static sk_sp<AclRenderNode> freeze_subtree(AclRenderNode* n) {
   c->outline_radius = n->outline_radius;
   c->outline_path = n->outline_path;
   c->render_effect = n->render_effect;
-  c->picture = n->picture;  // SkPicture is immutable — shared by ref, safe to
-                            // read cross-thread
   c->punch_hole = n->punch_hole;
   c->is_present_root = false;
-  c->display_list.reserve(n->display_list.size());
-  for (const DisplayItem& it : n->display_list) {
+  const std::shared_ptr<const NodeContent> src = n->content();
+  std::vector<DisplayItem> copy;
+  copy.reserve(src->items.size());
+  for (const DisplayItem& it : src->items) {
     DisplayItem d;
     d.kind = it.kind;
     d.picture = it.picture;
@@ -281,8 +314,10 @@ static sk_sp<AclRenderNode> freeze_subtree(AclRenderNode* n) {
           it.child.get());  // recurse: no live child refs survive in the copy
     else
       d.child = it.child;
-    c->display_list.push_back(std::move(d));
+    copy.push_back(std::move(d));
   }
+  // SkPicture is immutable — shared by ref, safe to read cross-thread.
+  c->set_content(std::move(copy), src->picture);
   return c;
 }
 
@@ -2530,8 +2565,7 @@ extern "C" std::uint64_t acl_graphics_scene_generation() {
 // View.updateDisplayListIfDirty() re-records.
 void RenderNode_nDiscardDisplayList(jlong node) {
   if (auto* n = reinterpret_cast<AclRenderNode*>(node)) {
-    n->picture = nullptr;
-    n->display_list.clear();
+    n->set_content({}, nullptr);
   }
 }
 // RenderNode.hasDisplayList() -> nIsValid. This MUST be false until the node
@@ -2589,10 +2623,11 @@ jboolean RenderNode_nIsValid(jlong node) {
       (!g_force_oneshot ||
        n->force_epoch != g_frame_epoch.load(std::memory_order_relaxed)))
     return JNI_FALSE;
-  return (n->is_present_root || !n->display_list.empty() ||
-          n->picture != nullptr)
-             ? JNI_TRUE
-             : JNI_FALSE;
+  if (n->is_present_root)
+    return JNI_TRUE;
+  const std::shared_ptr<const NodeContent> content = n->content();
+  return (!content->items.empty() || content->picture != nullptr) ? JNI_TRUE
+                                                                  : JNI_FALSE;
 }
 void RenderNode_nGetTransformMatrix(jlong, jlong m) {
   if (auto* mat = reinterpret_cast<SkMatrix*>(m))
@@ -6308,8 +6343,9 @@ extern "C" void acl_graphics_present_finish_record() {
     if (g_present_root_rec == 0 || g_present_root_node == nullptr)
       return;
     std::vector<DisplayItem> items = recorder_of(g_present_root_rec)->finish();
-    g_present_root_node->display_list =
-        items;  // keep the node's own copy (child refs) for parity
+    // keep the node's own copy (child refs) for parity
+    g_present_root_node->set_content(items,
+                                     g_present_root_node->content()->picture);
     std::lock_guard<std::mutex> lk(g_present_pic_mu);
     g_present_dl_ready = std::move(items);
     return;
@@ -6368,10 +6404,10 @@ extern "C" void acl_graphics_present_replay_onto(void* sk_canvas) {
     root->right = g_present_walk_w;
     root->bottom = g_present_walk_h;
     root->clipToBounds = true;
-    root->display_list = std::move(dl);
+    root->set_content(std::move(dl), nullptr);
     draw_rendernode_immediate(c, root);
-    root->display_list
-        .clear();  // release this frame's child refs held by the temp root
+    // release this frame's child refs held by the temp root
+    root->set_content({}, nullptr);
     return;
   }
   sk_sp<SkPicture> pic;
@@ -6507,7 +6543,10 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
   // (empty display list) but must still run — to clear its rect transparent so
   // the video plane below shows through. So don't take the empty-node fast-out
   // when punch_hole is set.
-  if (n->display_list.empty() && n->picture == nullptr && !n->punch_hole)
+  // One snapshot for the whole visit: the UI thread may publish new content
+  // for this node at any point from here on.
+  const std::shared_ptr<const NodeContent> content = n->content();
+  if (content->items.empty() && content->picture == nullptr && !n->punch_hole)
     return;
   const float w = static_cast<float>(n->right - n->left);
   const float h = static_cast<float>(n->bottom - n->top);
@@ -6574,14 +6613,14 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
   static std::atomic<int> walk_dbg_budget{400};
   if (walk_dbg && walk_dbg_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
     int np = 0, nc = 0, nl = 0;
-    for (const DisplayItem& it : n->display_list)
+    for (const DisplayItem& it : content->items)
       (it.kind == DisplayItem::Kind::Picture ? np
        : it.kind == DisplayItem::Kind::Child ? nc
                                              : nl)++;
     // The items in drawing order: p = picture, c = child node, l = layer.
     char order[33] = {0};
-    for (std::size_t i = 0; i < n->display_list.size() && i < 32; ++i) {
-      const DisplayItem::Kind k = n->display_list[i].kind;
+    for (std::size_t i = 0; i < content->items.size() && i < 32; ++i) {
+      const DisplayItem::Kind k = content->items[i].kind;
       order[i] = k == DisplayItem::Kind::Picture ? 'p'
                  : k == DisplayItem::Kind::Child ? 'c'
                                                  : 'l';
@@ -6590,11 +6629,12 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
                  "[acl.walk] node ltrb=(%d,%d,%d,%d) alpha=%.2f clip=%d dl=%zu "
                  "(pic=%d child=%d layer=%d) order=%s punch=%d pic=%p\n",
                  n->left, n->top, n->right, n->bottom, n->alpha,
-                 n->clipToBounds, n->display_list.size(), np, nc, nl, order,
-                 n->punch_hole ? 1 : 0, static_cast<void*>(n->picture.get()));
+                 n->clipToBounds, content->items.size(), np, nc, nl, order,
+                 n->punch_hole ? 1 : 0,
+                 static_cast<void*>(content->picture.get()));
   }
-  if (!n->display_list.empty()) {
-    const std::vector<DisplayItem>& dl = n->display_list;
+  if (!content->items.empty()) {
+    const std::vector<DisplayItem>& dl = content->items;
     for (std::size_t i = 0; i < dl.size();) {
       const DisplayItem& it = dl[i];
       // A run of consecutive Z-ordered child boundaries (an enableZ region):
@@ -6668,9 +6708,9 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
       }
       ++i;
     }
-  } else if (n->picture) {
-    c->drawPicture(n->picture);  // (may be null for a punch-hole node — nothing
-                                 // to draw beyond the clear)
+  } else if (content->picture) {
+    c->drawPicture(content->picture);  // (may be null for a punch-hole node —
+                                       // nothing to draw beyond the clear)
   }
 }
 
@@ -7796,8 +7836,7 @@ void RecordingCanvas_nFinish(jlong canvas, jlong node) {
   if (is_recorder_handle(canvas)) {
     std::vector<DisplayItem> items = recorder_of(canvas)->finish();
     if (n != nullptr) {
-      n->display_list = std::move(items);
-      n->picture = nullptr;
+      n->set_content(std::move(items), nullptr);
       n->force_epoch = g_frame_epoch.load(
           std::memory_order_relaxed);  // recorded this frame -> now valid
     }
@@ -7810,7 +7849,7 @@ void RecordingCanvas_nFinish(jlong canvas, jlong node) {
   std::lock_guard<std::mutex> lk(g_rec_mu);
   auto it = g_recorders.find(c);
   if (it != g_recorders.end() && n != nullptr)
-    n->picture = it->second->finishRecordingAsPicture();
+    n->set_content(n->content()->items, it->second->finishRecordingAsPicture());
 }
 // nDrawRenderNode(canvas, node): record a live child boundary into the
 // recording, or (on the present- root GPU/deferred canvas) replay the node —
