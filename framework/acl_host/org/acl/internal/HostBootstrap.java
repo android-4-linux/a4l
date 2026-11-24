@@ -1599,21 +1599,38 @@ public final class HostBootstrap {
             };
         }
 
-        // App service start/stop: acl has no ActivityManager service dispatch yet (ADR-3), and
-        // ContextWrapper delegates to the null base (NPE). Acknowledge the start (return the
-        // component) so onCreate proceeds; actually hosting the Service is a follow-on.
+        // The app's own services run in this process (AppServices): a4l has no ActivityManager
+        // (ADR-3), and ContextWrapper would hand these to the null base. Another app's service
+        // is not found: start returns null, bind returns false.
         @Override public android.content.ComponentName startService(android.content.Intent service) {
-            return service != null ? service.getComponent() : null;
+            return AppServices.start(this, service);
         }
         @Override public android.content.ComponentName startForegroundService(android.content.Intent service) {
-            return service != null ? service.getComponent() : null;
+            return AppServices.start(this, service);
         }
-        @Override public boolean stopService(android.content.Intent service) { return true; }
+        @Override public boolean stopService(android.content.Intent service) {
+            return AppServices.stop(this, service);
+        }
         @Override public boolean bindService(android.content.Intent service,
                 android.content.ServiceConnection conn, int flags) {
-            return false;
+            return AppServices.bind(this, service, conn, flags, null);
         }
-        @Override public void unbindService(android.content.ServiceConnection conn) {}
+        @Override public boolean bindService(android.content.Intent service, int flags,
+                java.util.concurrent.Executor executor, android.content.ServiceConnection conn) {
+            return AppServices.bind(this, service, conn, flags, executor);
+        }
+        @Override public boolean bindIsolatedService(android.content.Intent service, int flags,
+                String instanceName, java.util.concurrent.Executor executor,
+                android.content.ServiceConnection conn) {
+            return AppServices.bind(this, service, conn, flags, executor);
+        }
+        @Override public boolean bindServiceAsUser(android.content.Intent service,
+                android.content.ServiceConnection conn, int flags, android.os.UserHandle user) {
+            return AppServices.bind(this, service, conn, flags, null);
+        }
+        @Override public void unbindService(android.content.ServiceConnection conn) {
+            AppServices.unbind(conn);
+        }
 
         // File-backed SharedPreferences (real android.app.SharedPreferencesImpl over a temp
         // dir) — apps read/write prefs in Application.onCreate. No app data dir yet, so a temp.
@@ -1762,6 +1779,12 @@ public final class HostBootstrap {
     // GET_META_DATA).metaData to find the ComponentRegistrar classes (firebase-messaging, etc.).
     static final java.util.Map<String, android.os.Bundle> sServiceMeta =
             new java.util.HashMap<String, android.os.Bundle>();
+
+    // The app's declared services, fully-qualified class name -> its intent-filter actions, from
+    // the manifest (installContentProviders). AppServices runs only these.
+    static final java.util.Map<String, java.util.List<String>> sServiceActions =
+            java.util.Collections.synchronizedMap(
+                    new java.util.LinkedHashMap<String, java.util.List<String>>());
 
     // Installed providers keyed by each declared authority — AppContentResolver.acquireProvider
     // resolves content:// lookups here so query/insert/openFile reach the live provider instead of
@@ -2378,9 +2401,10 @@ public final class HostBootstrap {
             final String NS = "http://schemas.android.com/apk/res/android";
             String cur = null;
             android.os.Bundle curMeta = null;
-            // <service> parsing runs in parallel: acl never starts a service (no ActivityThread/AMS),
-            // but their <meta-data> must be re-servable via getServiceInfo — Firebase's
-            // ComponentDiscoveryService is a metadata-only holder listing the ComponentRegistrars.
+            // <service> parsing runs in parallel: each declared service and its intent-filter
+            // actions (AppServices starts and binds them), and its <meta-data>, re-servable via
+            // getServiceInfo — Firebase's ComponentDiscoveryService is a metadata-only holder
+            // listing the ComponentRegistrars.
             String curSvc = null;
             android.os.Bundle curSvcMeta = null;
             for (int ev = xml.getEventType();
@@ -2405,7 +2429,12 @@ public final class HostBootstrap {
                             else if (name.indexOf('.') < 0) name = pkg + "." + name;
                             curSvc = name;
                             curSvcMeta = new android.os.Bundle();
+                            sServiceActions.put(name, new java.util.ArrayList<String>());
                         }
+                    } else if ("action".equals(tag) && curSvc != null) {
+                        String action = xml.getAttributeValue(NS, "name");
+                        java.util.List<String> actions = sServiceActions.get(curSvc);
+                        if (action != null && actions != null) actions.add(action);
                     } else if ("meta-data".equals(tag)) {
                         // Attribute to whichever component encloses it (service takes precedence when
                         // both are open, though they never nest); a bare <application> meta-data with

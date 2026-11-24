@@ -129,7 +129,7 @@ def end_elem(pool, name):
 
 
 def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity",
-               permissions=None):
+               permissions=None, services=None):
     pool = Pool()
     uri = lambda: pool.sid(ANDROID_URI)          # noqa: E731
     a = lambda name, val: _attribute(pool, uri(), pool.sid(name), val)  # noqa: E731
@@ -169,6 +169,17 @@ def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity",
     body += start_elem(pool, "activity",
                        [a("name", ("str", "com.example.app.OtherActivity"))])
     body += end_elem(pool, "activity")
+    # <service android:name="..."> with an <intent-filter> of its actions, if any:
+    # services is a list of (class name, [action, ...]).
+    for name, actions in (services or []):
+        body += start_elem(pool, "service", [a("name", ("str", name))])
+        if actions:
+            body += start_elem(pool, "intent-filter", [])
+            for action in actions:
+                body += start_elem(pool, "action", [a("name", ("str", action))])
+                body += end_elem(pool, "action")
+            body += end_elem(pool, "intent-filter")
+        body += end_elem(pool, "service")
     body += end_elem(pool, "application")
     body += end_elem(pool, "manifest")
     body += _node(RES_XML_END_NS,
