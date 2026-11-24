@@ -26,6 +26,8 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <utility>
+#include <vector>
 
 #include <poll.h>
 #include <sys/mman.h>
@@ -633,9 +635,32 @@ class Presenter : public wl::ime::TextInputListener {
     if (input_ == nullptr || !*input_)
       return;
     const bool pressed = e.state == WL_KEYBOARD_KEY_STATE_PRESSED;
+    const auto sym = static_cast<std::uint32_t>(e.keysym);
+    const auto held =
+        std::find_if(held_keys_.begin(), held_keys_.end(),
+                     [&](const auto& k) { return k.first == e.key; });
+    if (pressed && held == held_keys_.end())
+      held_keys_.emplace_back(e.key, sym);
+    else if (!pressed && held != held_keys_.end())
+      held_keys_.erase(held);
     (*input_)(KeyInput{pressed ? KeyInput::Action::Down : KeyInput::Action::Up,
-                       e.key, static_cast<std::uint32_t>(e.keysym)});
+                       e.key, sym});
   }
+  // Keyboard focus left the surface (wl::KeyboardHandler calls this). The
+  // compositor sends no release for a key still down, and the next focus may
+  // never see one: Alt held for the window switcher stayed "down" for the app,
+  // and every key typed afterwards read as an Alt shortcut. Release what is
+  // held, as Android cancels keys when a window loses focus.
+  void OnKeyboardLeave() {
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> held;
+    held.swap(held_keys_);
+    if (input_ == nullptr || !*input_)
+      return;
+    for (const auto& k : held)
+      (*input_)(KeyInput{KeyInput::Action::Up, k.first, k.second});
+  }
+  // Keys down on this surface: (evdev keycode, keysym).
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> held_keys_;
 
   // wl::ime::TextInputListener — events from the compositor's IME
   // (text-input-v3).
