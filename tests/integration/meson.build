@@ -373,6 +373,16 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 300,
       is_parallel : false,
     )
+    # The app's own Services, run in its process: bound, started, stopped with stopSelfResult,
+    # a binding that waits for a start, a foreground Service; another app's service refused.
+    # Starts a headless Weston for itself. Needs host ART; SKIPs otherwise, which includes CI.
+    test(
+      'app-service',
+      py3,
+      args : [files('run_app_service_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+    )
     # Video on a TextureView: a fixture app decodes an H.264 clip onto
     # new Surface(surfaceTexture), and the test reads back the frame a4l rendered and checks the
     # picture inside the TextureView, with the frame imported on the GPU and with its pixels
