@@ -6862,6 +6862,9 @@ sk_sp<SkImage> acl_gpu_import_frame(GrDirectContext* ctx,
 void acl_gpu_release_frame(GrDirectContext* ctx, const sk_sp<SkImage>& img);
 // A decoder's frame as it is, drawn by the present device (gpu_dmabuf.cpp).
 bool acl_gpu_draws_yuv();
+bool acl_gpu_takes_yuv(uint32_t drm_format,
+                       uint64_t modifier,
+                       uint32_t plane_count);
 sk_sp<SkImage> acl_gpu_import_yuv(GrDirectContext* ctx,
                                   const AclStYuvFrame& y,
                                   std::shared_ptr<void> keep);
@@ -7239,6 +7242,27 @@ extern "C" bool acl_graphics_surfacetexture_draw_size(jlong st_id,
   *w = st->def_w;
   *h = st->def_h;
   return true;
+}
+// wants_yuv for a frame of this format and layout: the same answer for an
+// app's GL; for a TextureView, no where the present device does not sample
+// the layout, which wants_yuv learns only from a refused frame (and that
+// frame is not shown). a4l asks per frame, where this library has it.
+extern "C" bool acl_graphics_surfacetexture_wants_frame(jlong st_id,
+                                                        uint32_t drm_format,
+                                                        uint64_t modifier,
+                                                        uint32_t plane_count) {
+  std::lock_guard<std::mutex> live(g_st_live_mu);
+  AclSurfaceTexture* st = st_by_id(st_id);
+  if (st == nullptr)
+    return false;
+  std::lock_guard<std::mutex> lk(st->mu);
+  if (st->released)
+    return false;
+  if (!st->detached && st->tex_name > 0)  // an app's GL
+    return g_st_gl_bind_yuv.load(std::memory_order_acquire) != nullptr &&
+           !st->yuv_refused;
+  return !st->yuv_draw_refused &&
+         acl_gpu_takes_yuv(drm_format, modifier, plane_count);
 }
 // a4l's EGL hook for binding a decoder's frame as it is.
 extern "C" void acl_graphics_set_st_gl_yuv_hook(StGlBindYuvFn bind) {

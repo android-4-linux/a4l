@@ -1512,6 +1512,17 @@ bool acl_gpu_draws_yuv() {
   return g_draws_yuv.load(std::memory_order_acquire);
 }
 
+// Whether the present device samples a decoder's frame of this format and
+// layout as it is (acl_gpu_import_yuv): NV12 in two planes, with a modifier
+// it samples. The import may still refuse a frame (one in two buffers, a
+// layout the driver places differently). Any thread.
+bool acl_gpu_takes_yuv(uint32_t drm_format,
+                       uint64_t modifier,
+                       uint32_t plane_count) {
+  return acl_gpu_draws_yuv() && drm_format == DRM_FORMAT_NV12 &&
+         plane_count == 2 && nv12_features(modifier) != 0;
+}
+
 // A decoder's frame for a SurfaceTexture (graphics_jni.cpp), drawn by the
 // present device with no copy: the frame's XBGR8888 dma-buf is imported as a
 // VkImage, once a converter buffer, and wrapped as a texture image for each

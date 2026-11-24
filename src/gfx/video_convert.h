@@ -46,6 +46,25 @@ class VideoConverter {
                std::uint32_t width = 0,
                std::uint32_t height = 0);
 
+  // Make `count` of the buffers for output size width x height now, so that
+  // the first frames do not wait for them. False, with `error`, if one
+  // cannot be made. Any thread, one at a time with convert().
+  bool prepare(std::uint32_t width,
+               std::uint32_t height,
+               int count,
+               std::string* error);
+
+  // Convert a linear NV12 picture of picture_width x picture_height `times`
+  // at output size width x height, and throw the results away: a driver that
+  // builds its shaders and copies at the first draws (Mesa's v3d) does so
+  // now.
+  bool rehearse(std::uint32_t width,
+                std::uint32_t height,
+                std::uint32_t picture_width,
+                std::uint32_t picture_height,
+                int times,
+                std::string* error);
+
   // Buffers the converter keeps for one picture size. More than the video
   // plane holds on screen and in flight (wm: 8 under --split).
   static constexpr int kPoolSize = 12;

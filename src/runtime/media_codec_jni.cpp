@@ -284,6 +284,8 @@ std::shared_ptr<TextureSink> texture_sink(CodecCtx* ctx) {
   return ctx->sink;
 }
 
+void warm_converter(jlong st, std::uint32_t w, std::uint32_t h);
+
 // Point the codec at `surface`: its ImageReader queue, and its SurfaceTexture
 // when it was made from one. App's thread.
 void set_output(JNIEnv* env, CodecCtx* ctx, jobject surface) {
@@ -293,10 +295,14 @@ void set_output(JNIEnv* env, CodecCtx* ctx, jobject surface) {
   const jlong st =
       surface != nullptr ? image_reader_texture_from_surface(env, surface) : 0;
   std::lock_guard<std::mutex> lk(ctx->sink_mu);
-  if (st == 0)
+  if (st == 0) {
     ctx->sink.reset();
-  else if (ctx->sink == nullptr || ctx->sink->st != st)
+  } else if (ctx->sink == nullptr || ctx->sink->st != st) {
     ctx->sink = std::make_shared<TextureSink>(st);
+    if (ctx->width > 0 && ctx->height > 0)
+      warm_converter(st, static_cast<std::uint32_t>(ctx->width),
+                     static_cast<std::uint32_t>(ctx->height));
+  }
 }
 
 // Whether the codec keeps each decoded frame as it is, for the video plane or
@@ -340,6 +346,61 @@ StDrawSizeFn st_draw_size() {
       ::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_draw_size"));
   return f;
 }
+
+// Whether a SurfaceTexture takes this frame as it is, asked with its layout:
+// graphics_jni can then say no up front for one its device does not sample,
+// where wants_yuv learns it only from a refused frame.
+using StWantsFrameFn = bool (*)(jlong,
+                                std::uint32_t,
+                                std::uint64_t,
+                                std::uint32_t);
+StWantsFrameFn st_wants_frame() {
+  static const auto f = reinterpret_cast<StWantsFrameFn>(
+      ::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_wants_frame"));
+  return f;
+}
+
+// The size frames for SurfaceTexture `st` are converted at: its draw size,
+// where that is known and smaller than the picture's (w x h).
+void conversion_size(jlong st, std::uint32_t* w, std::uint32_t* h) {
+  int dw = 0;
+  int dh = 0;
+  if (const StDrawSizeFn draw_size = st_draw_size();
+      draw_size != nullptr && draw_size(st, &dw, &dh) && dw > 0 && dh > 0 &&
+      std::uint64_t{static_cast<std::uint32_t>(dw)} *
+              static_cast<std::uint32_t>(dh) <
+          std::uint64_t{*w} * *h) {
+    *w = static_cast<std::uint32_t>(dw);
+    *h = static_cast<std::uint32_t>(dh);
+  }
+}
+
+// Make the converter frames for SurfaceTexture `st` of a w x h picture would
+// use, in the background, where the SurfaceTexture does not take a linear
+// NV12 frame as it is (a Raspberry Pi's v3dv does not sample one). Making
+// one takes 90 ms on a Raspberry Pi 4, and its buffers more, which a codec's
+// first frames would otherwise wait for and then arrive in a burst, faster
+// than they are shown. A stream whose frames go as they are after all does
+// not use it; one whose picture is another size makes its own.
+constexpr int kWarmBuffers = 4;
+constexpr std::uint32_t kFourccNv12 = 0x3231564eu;  // 'NV12'
+void warm_converter(jlong st, std::uint32_t w, std::uint32_t h) {
+  if (const StWantsFrameFn wants_frame = st_wants_frame();
+      wants_frame != nullptr && wants_frame(st, kFourccNv12, 0, 2))
+    return;
+  const std::uint32_t pw = w;
+  const std::uint32_t ph = h;
+  conversion_size(st, &w, &h);
+  std::thread([w, h, pw, ph] {
+    const std::shared_ptr<SharedConverter> c = st_converter(w, h);
+    std::string err;
+    if (c != nullptr && c->converter != nullptr &&
+        (!c->converter->prepare(w, h, kWarmBuffers, &err) ||
+         !c->converter->rehearse(w, h, pw, ph, 2, &err)))
+      log::w(kTag, "converter for {}x{} not made ready: {}", w, h, err);
+  }).detach();
+}
+
 StWantsYuvFn st_wants_yuv() {
   static const auto f = reinterpret_cast<StWantsYuvFn>(
       ::dlsym(RTLD_DEFAULT, "acl_graphics_surfacetexture_wants_yuv"));
@@ -360,9 +421,13 @@ void show_on_texture(TextureSink& sink,
   static const bool convert =
       std::getenv("ACL_SURFACETEXTURE_CONVERT") != nullptr;
   const StSetYuvFrameFn set_yuv = st_set_yuv_frame();
+  const StWantsFrameFn wants_frame = st_wants_frame();
   const StWantsYuvFn wants_yuv = st_wants_yuv();
-  if (!convert && set_yuv != nullptr && wants_yuv != nullptr &&
-      wants_yuv(sink.st)) {
+  const bool as_is = wants_frame != nullptr
+                         ? wants_frame(sink.st, frame.drm_format,
+                                       frame.modifier, frame.plane_count)
+                         : wants_yuv != nullptr && wants_yuv(sink.st);
+  if (!convert && set_yuv != nullptr && as_is) {
     {
       std::lock_guard<std::mutex> lk(sink.mu);
       if (!sink.said_yuv) {
@@ -404,17 +469,7 @@ void show_on_texture(TextureSink& sink,
   // view).
   std::uint32_t w = frame.width;
   std::uint32_t h = frame.height;
-  int dw = 0;
-  int dh = 0;
-  if (const StDrawSizeFn draw_size = st_draw_size();
-      draw_size != nullptr && draw_size(sink.st, &dw, &dh) && dw > 0 &&
-      dh > 0 &&
-      std::uint64_t{static_cast<std::uint32_t>(dw)} *
-              static_cast<std::uint32_t>(dh) <
-          std::uint64_t{w} * h) {
-    w = static_cast<std::uint32_t>(dw);
-    h = static_cast<std::uint32_t>(dh);
-  }
+  conversion_size(sink.st, &w, &h);
   if (!sink.converter || sink.converter->w != w || sink.converter->h != h)
     sink.converter = st_converter(w, h);
   if (!sink.converter)
