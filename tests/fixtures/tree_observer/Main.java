@@ -138,9 +138,82 @@ public class Main extends Activity {
                 log("draw listener called=" + (drawCalls > 0) + " view drawn=" + (probe.draws > 0));
                 if (drawsAtFirstPass != 0) fail("the view was drawn before its first pre-draw");
                 if (drawCalls == 0 || probe.draws == 0) fail("no draw after pre-draw allowed it");
-                log("PASS");
-                System.exit(0);
+                // Last, the task: Second is declared noHistory, so starting Home over it
+                // finishes it.
+                startActivity(new Intent(Main.this, Home.class));
             }
         }, 200);
+    }
+
+    static boolean sSecondDestroyed;
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (this instanceof Second) sSecondDestroyed = true;
+    }
+
+    @Override
+    protected void onRestart() {
+        super.onRestart();
+        log("FAIL came back to an Activity the new task cleared");
+        System.exit(1);
+    }
+
+    /**
+     * Started twice. First over Second, which is noHistory and so is destroyed. Then again with
+     * NEW_TASK | CLEAR_TASK, which destroys the first Home. When the second Home finishes the
+     * task is empty and the app ends instead of going back to anything.
+     */
+    public static class Home extends Activity {
+        static int sHomes, sHomesDestroyed;
+        int nth;
+
+        @Override
+        protected void onCreate(Bundle b) {
+            super.onCreate(b);
+            nth = ++sHomes;
+            setContentView(new View(this));
+        }
+
+        @Override
+        protected void onDestroy() {
+            super.onDestroy();
+            sHomesDestroyed++;
+        }
+
+        @Override
+        protected void onRestart() {
+            super.onRestart();
+            log("FAIL came back to a Home the new task cleared");
+            System.exit(1);
+        }
+
+        @Override
+        protected void onResume() {
+            super.onResume();
+            final Handler h = new Handler(Looper.getMainLooper());
+            h.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (nth == 1) {
+                        log("no history second destroyed=" + sSecondDestroyed);
+                        if (!sSecondDestroyed) System.exit(1);
+                        startActivity(new Intent(Home.this, Home.class).addFlags(
+                                Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
+                        return;
+                    }
+                    log("clear task first home destroyed=" + (sHomesDestroyed == 1));
+                    if (sHomesDestroyed != 1) System.exit(1);
+                    h.postDelayed(new Runnable() {
+                        @Override public void run() {
+                            log("FAIL the app kept running after its last Activity finished");
+                            System.exit(4);
+                        }
+                    }, 3000);
+                    log("PASS");
+                    finish();
+                }
+            }, 100);
+        }
     }
 }

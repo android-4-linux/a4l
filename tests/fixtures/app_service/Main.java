@@ -71,6 +71,10 @@ public class Main extends Activity {
             case 5: bindBeforeStart(); break;
             case 6: foreground(); break;
             case 7: systemServices(); break;
+            case 8: components(); break;
+            case 9: androidId(); break;
+            case 10: job(); break;
+            case 11: artwork(); break;
             default:
                 log("PASS");
                 System.exit(0);
@@ -246,20 +250,180 @@ public class Main extends Activity {
         android.media.session.MediaController.PlaybackInfo playback =
                 session.getController().getPlaybackInfo();
         android.media.MediaRouter router = getSystemService(android.media.MediaRouter.class);
+        android.app.SearchManager search =
+                (android.app.SearchManager) getSystemService(SEARCH_SERVICE);
         String line = "system usage=" + (usage != null ? usage.getAppStandbyBucket() : -1)
                 + " shortcuts=" + (shortcuts != null ? shortcuts.getDynamicShortcuts().size() : -1)
                 + " widgets=" + (widgets != null
                         ? widgets.getAppWidgetIds(new ComponentName(this, Main.class)).length : -1)
                 + " channel=" + (channel != null ? channel.getImportance() : -1) + "/" + listed
                 + " playback=" + (playback != null ? playback.getPlaybackType() : -1)
-                + " router=" + (router != null && router.getRouteCount() > 0);
+                + " router=" + (router != null && router.getRouteCount() > 0)
+                + " search=" + (search != null
+                        ? String.valueOf(search.getSearchableInfo(getComponentName())) : "none");
         session.release();
         log(line);
         // Bucket 10 is STANDBY_BUCKET_ACTIVE; channel "svc" from case 6 and "probe" are listed.
-        expect("system usage=10 shortcuts=0 widgets=0 channel=4/2 playback=1 router=true"
-                        .equals(line),
+        expect(("system usage=10 shortcuts=0 widgets=0 channel=4/2 playback=1 router=true"
+                        + " search=null").equals(line),
                 "system services");
         next();
+    }
+
+    static String shortName(android.content.pm.ComponentInfo ci) {
+        return ci == null ? "null" : ci.name.substring(ci.packageName.length());
+    }
+
+    // 8. PackageManager finds the app's own services and receivers, by class and by action, and
+    //    nothing of another package. Libraries ask this before they use a component.
+    void components() {
+        android.content.pm.PackageManager pm = getPackageManager();
+        int explicit = pm.queryIntentServices(new Intent(this, LocalService.class), 0).size();
+        java.util.List<android.content.pm.ResolveInfo> byAction =
+                pm.queryIntentServices(new Intent("com.acl.svc.MESSENGER"), 0);
+        android.content.pm.ResolveInfo job =
+                pm.resolveService(new Intent(this, JobLikeService.class), 0);
+        Intent off = new Intent("com.acl.svc.OFF");
+        int disabled = pm.queryIntentServices(off, 0).size();
+        int disabledToo = pm.queryIntentServices(off,
+                android.content.pm.PackageManager.MATCH_DISABLED_COMPONENTS).size();
+        Intent other = new Intent().setComponent(
+                new ComponentName("com.example.other", "com.example.other.Svc"));
+        java.util.List<android.content.pm.ResolveInfo> ticks =
+                pm.queryBroadcastReceivers(new Intent("com.acl.svc.TICK"), 0);
+        String line = "components explicit=" + explicit
+                + " action=" + (byAction.size() == 1 ? shortName(byAction.get(0).serviceInfo) : "?")
+                + " permission=" + (job != null ? job.serviceInfo.permission : "?")
+                + " disabled=" + disabled + "/" + disabledToo
+                + " other=" + pm.queryIntentServices(other, 0).size() + "/"
+                + pm.resolveService(other, 0)
+                + " receiver=" + (ticks.size() == 1 ? shortName(ticks.get(0).activityInfo) : "?")
+                + "/" + pm.queryBroadcastReceivers(new Intent("com.acl.svc.MESSENGER"), 0).size();
+        log(line);
+        expect(("components explicit=1 action=.Main$MessengerService"
+                + " permission=android.permission.BIND_JOB_SERVICE disabled=0/1 other=0/null"
+                + " receiver=.Main$TickReceiver/0").equals(line), "components");
+        next();
+    }
+
+    // 9. Settings.Secure.ANDROID_ID always has a value on Android: 16 hex digits, the same each
+    //    time it is read.
+    void androidId() {
+        String id = android.provider.Settings.Secure.getString(getContentResolver(),
+                android.provider.Settings.Secure.ANDROID_ID);
+        String again = android.provider.Settings.Secure.getString(getContentResolver(),
+                android.provider.Settings.Secure.ANDROID_ID);
+        boolean hex = id != null && id.matches("[0-9a-f]{16}");
+        log("settings android_id=" + (hex ? 16 : -1) + " stable=" + (id != null && id.equals(again)));
+        expect(hex && id.equals(again), "android_id");
+        next();
+    }
+
+    // 10. A job that needs a network: the JobInfo builds, reads its network request back, and
+    //     the scheduler accepts it.
+    void job() {
+        android.net.NetworkRequest request = new android.net.NetworkRequest.Builder()
+                .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                .removeTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                .build();
+        android.app.job.JobInfo info = new android.app.job.JobInfo.Builder(1,
+                new ComponentName(this, JobLikeService.class))
+                .setRequiredNetwork(request)
+                .build();
+        android.net.NetworkRequest back = info.getRequiredNetwork();
+        int scheduled = getSystemService(android.app.job.JobScheduler.class).schedule(info);
+        String line = "job network="
+                + back.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                + "/" + back.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                + " specifier=" + back.getNetworkSpecifier() + " scheduled=" + scheduled;
+        log(line);
+        // 1 is JobScheduler.RESULT_SUCCESS.
+        expect("job network=true/false specifier=null scheduled=1".equals(line), "job");
+        next();
+    }
+
+    /** The last pixel of `b`. */
+    static int pixel(android.graphics.Bitmap b) {
+        int[] px = new int[b.getWidth() * b.getHeight()];
+        b.getPixels(px, 0, b.getWidth(), 0, 0, b.getWidth(), b.getHeight());
+        return px[px.length - 1];
+    }
+
+    // 11. Artwork as a playing app hands it on: Bitmap.asShared(), a Bitmap through a Parcel,
+    //     and a notification's RemoteViews, bitmap included, cloned through a Parcel.
+    void artwork() {
+        android.graphics.Bitmap src = android.graphics.Bitmap.createBitmap(3, 2,
+                android.graphics.Bitmap.Config.ARGB_8888);
+        src.eraseColor(0xff336699);
+        android.graphics.Bitmap shared = src.asShared();
+        android.os.Parcel p = android.os.Parcel.obtain();
+        src.writeToParcel(p, 0);
+        p.writeInt(77);
+        p.setDataPosition(0);
+        android.graphics.Bitmap back = android.graphics.Bitmap.CREATOR.createFromParcel(p);
+        int after = p.readInt();
+        p.recycle();
+        String views;
+        try {
+            android.widget.RemoteViews rv = new android.widget.RemoteViews(getPackageName(),
+                    android.R.layout.simple_list_item_1);
+            rv.setImageViewBitmap(android.R.id.icon, src);
+            rv.setTextViewText(android.R.id.text1, "x");
+            rv.setOnClickPendingIntent(android.R.id.text1, android.app.PendingIntent.getBroadcast(
+                    this, 0, new Intent("com.acl.svc.TICK").setPackage(getPackageName()),
+                    android.app.PendingIntent.FLAG_IMMUTABLE));
+            android.os.Parcel q = android.os.Parcel.obtain();
+            rv.writeToParcel(q, 0);
+            q.setDataPosition(0);
+            android.widget.RemoteViews copy = android.widget.RemoteViews.CREATOR.createFromParcel(q);
+            q.recycle();
+            views = String.valueOf(copy.getLayoutId() == android.R.layout.simple_list_item_1);
+        } catch (Throwable t) {
+            Log.w(TAG, "RemoteViews through a Parcel", t);
+            views = t.toString();
+        }
+        String cloned;
+        try {
+            android.app.PendingIntent tick = android.app.PendingIntent.getBroadcast(this, 0,
+                    new Intent("com.acl.svc.TICK").setPackage(getPackageName()),
+                    android.app.PendingIntent.FLAG_IMMUTABLE);
+            Notification n = new Notification.Builder(this, "probe")
+                    .setSmallIcon(android.R.drawable.ic_media_play)
+                    .setLargeIcon(src)
+                    .setContentTitle("Title")
+                    .setContentText("Text")
+                    .setContentIntent(tick)
+                    .addAction(new Notification.Action.Builder(
+                            android.graphics.drawable.Icon.createWithResource(this,
+                                    android.R.drawable.ic_media_pause), "Pause", tick).build())
+                    .setStyle(new Notification.MediaStyle().setShowActionsInCompactView(0))
+                    .build();
+            cloned = String.valueOf(n.clone().getLargeIcon() != null);
+        } catch (Throwable t) {
+            Log.w(TAG, "Notification.clone", t);
+            cloned = t.toString();
+        }
+        android.content.pm.ApplicationInfo ai = getApplicationInfo();
+        String sdk = ai.minSdkVersion + "/" + ai.targetSdkVersion;
+        String line = "artwork shared=" + shared.getWidth() + "x" + shared.getHeight() + "/"
+                + Integer.toHexString(pixel(shared)) + "/" + shared.isMutable()
+                + " parcel=" + back.getWidth() + "x" + back.getHeight() + "/"
+                + Integer.toHexString(pixel(back))
+                + " next=" + after + " views=" + views + " notification=" + cloned + " sdk=" + sdk;
+        log(line);
+        expect(("artwork shared=3x2/ff336699/false parcel=3x2/ff336699 next=77 views=true"
+                + " notification=true sdk=24/33")
+                .equals(line), "artwork");
+        next();
+    }
+
+    public static class JobLikeService extends Service {
+        @Override public IBinder onBind(Intent i) { return null; }
+    }
+
+    public static class TickReceiver extends android.content.BroadcastReceiver {
+        @Override public void onReceive(Context c, Intent i) {}
     }
 
     public static class LocalService extends Service {

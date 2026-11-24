@@ -8,8 +8,11 @@
 # connects once the Service is started, and a foreground Service. Another app's service, an
 # intent with no component or package, and an undeclared class are not found. Last, the system
 # services a Service's setup reads are there: UsageStatsManager, ShortcutManager, AppWidgetManager,
-# a notification channel read back, a media session's playback info, and MediaRouter. The fixture logs a
-# "SERVICE:" line per case and "SERVICE: PASS" at the end.
+# a notification channel read back, a media session's playback info, MediaRouter, and SearchManager. Then what
+# libraries ask before they schedule work: PackageManager finds the app's own services and
+# receivers by class and by action, Settings.Secure.ANDROID_ID has a value, and a JobInfo that
+# needs a network builds and is accepted. The fixture logs a "SERVICE:" line per case and
+# "SERVICE: PASS" at the end.
 #
 # Needs a host ART build (ACL_ART_HOME), the AOSP toolchain, a render node and a Wayland
 # compositor: the main looper runs under the GPU present path (--present, ACL_PRESENT_GPU). It
@@ -34,6 +37,11 @@ SERVICES = [
     (f"{PACKAGE}.Main$StartedService", []),
     (f"{PACKAGE}.Main$LateService", []),
     (f"{PACKAGE}.Main$ForegroundService", []),
+    (f"{PACKAGE}.Main$JobLikeService", [], {"permission": "android.permission.BIND_JOB_SERVICE"}),
+    (f"{PACKAGE}.Main$DisabledService", [f"{PACKAGE}.OFF"], {"enabled": False}),
+]
+RECEIVERS = [
+    (f"{PACKAGE}.Main$TickReceiver", [f"{PACKAGE}.TICK"]),
 ]
 
 CHECKS = [
@@ -45,7 +53,15 @@ CHECKS = [
     "SERVICE: late connected before=false after=true",
     "SERVICE: late stopped=true destroyed=1",
     "SERVICE: foreground ran=true destroyed=1",
-    "SERVICE: system usage=10 shortcuts=0 widgets=0 channel=4/2 playback=1 router=true",
+    "SERVICE: system usage=10 shortcuts=0 widgets=0 channel=4/2 playback=1 router=true"
+    " search=null",
+    "SERVICE: components explicit=1 action=.Main$MessengerService"
+    " permission=android.permission.BIND_JOB_SERVICE disabled=0/1 other=0/null"
+    " receiver=.Main$TickReceiver/0",
+    "SERVICE: settings android_id=16 stable=true",
+    "SERVICE: job network=true/false specifier=null scheduled=1",
+    "SERVICE: artwork shared=3x2/ff336699/false parcel=3x2/ff336699 next=77 views=true"
+    " notification=true sdk=24/33",
     "SERVICE: PASS",
 ]
 
@@ -129,7 +145,7 @@ def main():
         run(["cp", os.path.join(dexdir, "classes.dex"), app])
         with open(os.path.join(app, "AndroidManifest.xml"), "wb") as fh:
             fh.write(build_axml(utf8=True, package=PACKAGE, launcher=f"{PACKAGE}.Main",
-                                services=SERVICES))
+                                services=SERVICES, receivers=RECEIVERS))
         unaligned = os.path.join(work, "u.apk")
         apk = os.path.join(work, "app-service.apk")
         run(["zip", "-X", "-0", "-j", "-q", unaligned,

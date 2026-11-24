@@ -708,17 +708,16 @@ jobject Bitmap_nativeComputeColorSpace(JNIEnv* env,
   }
   return result;
 }
-jobject Bitmap_nativeCopy(JNIEnv* env,
-                          jclass,
-                          jlong srcPtr,
-                          jint dstConfig,
-                          jboolean isMutable) {
-  auto* src = reinterpret_cast<AclBitmap*>(srcPtr);
+// A deep copy of `src` in color type `ct`, shared by Bitmap.copy and the
+// ashmem copies.
+jobject copy_bitmap(JNIEnv* env,
+                    const AclBitmap* src,
+                    SkColorType ct,
+                    bool is_mutable) {
   if (src == nullptr)
     return nullptr;
   const int width = src->bitmap.width();
   const int height = src->bitmap.height();
-  const SkColorType ct = config_to_ct(dstConfig);
   // Coerce the alpha type to one the destination color type allows (565 is
   // always opaque; a single-channel ALPHA_8 can't be opaque) — otherwise
   // SkImageInfo/tryAllocPixels rejects it.
@@ -738,10 +737,168 @@ jobject Bitmap_nativeCopy(JNIEnv* env,
   if (!src->bitmap.readPixels(w->bitmap.pixmap(), 0, 0))
     w->bitmap.eraseColor(SK_ColorTRANSPARENT);  // unsupported conversion ->
                                                 // transparent, not a crash
-  w->immutable = (isMutable == JNI_FALSE);
+  w->immutable = !is_mutable;
   return env->NewObject(g_bitmap_class, g_bitmap_ctor,
                         reinterpret_cast<jlong>(w), width, height,
                         /*density=*/0, /*requestPremultiplied=*/JNI_TRUE,
+                        /*ninePatchChunk=*/static_cast<jbyteArray>(nullptr),
+                        /*ninePatchInsets=*/static_cast<jobject>(nullptr));
+}
+jobject Bitmap_nativeCopy(JNIEnv* env,
+                          jclass,
+                          jlong srcPtr,
+                          jint dstConfig,
+                          jboolean isMutable) {
+  return copy_bitmap(env, reinterpret_cast<AclBitmap*>(srcPtr),
+                     config_to_ct(dstConfig), isMutable != JNI_FALSE);
+}
+// Bitmap.asShared() / createAshmemBitmap(): on Android an immutable copy in
+// shared memory, made so the pixels cross Binder without another copy (a
+// notification's large icon). acl sends no bitmap to another process, so an
+// immutable heap copy answers both forms.
+jobject Bitmap_nativeCopyAshmem(JNIEnv* env, jclass, jlong srcPtr) {
+  auto* src = reinterpret_cast<AclBitmap*>(srcPtr);
+  if (src == nullptr)
+    return nullptr;
+  return copy_bitmap(env, src, src->bitmap.colorType(), false);
+}
+jobject Bitmap_nativeCopyAshmemConfig(JNIEnv* env,
+                                      jclass,
+                                      jlong srcPtr,
+                                      jint dstConfig) {
+  return copy_bitmap(env, reinterpret_cast<AclBitmap*>(srcPtr),
+                     config_to_ct(dstConfig), false);
+}
+
+// Bitmap.writeToParcel / CREATOR.createFromParcel. On Android the pixels cross
+// Binder; on acl a Parcel never leaves the process, and what parcels a Bitmap
+// is a round trip in place (androidx media turns its metadata, artwork
+// included, into the platform's through a Parcel). The layout is acl's own:
+// width, height, SkColorType, SkAlphaType, density, mutable, then the pixel
+// rows as one byte array. Written through Parcel's Java methods, so it works
+// with whichever Parcel backs the runtime.
+struct ParcelIds {
+  jmethodID write_int = nullptr;
+  jmethodID write_bytes = nullptr;
+  jmethodID read_int = nullptr;
+  jmethodID create_bytes = nullptr;
+};
+bool parcel_ids(JNIEnv* env, jobject parcel, ParcelIds* ids) {
+  jclass cls = env->GetObjectClass(parcel);
+  ids->write_int = env->GetMethodID(cls, "writeInt", "(I)V");
+  ids->write_bytes = env->GetMethodID(cls, "writeByteArray", "([B)V");
+  ids->read_int = env->GetMethodID(cls, "readInt", "()I");
+  ids->create_bytes = env->GetMethodID(cls, "createByteArray", "()[B");
+  env->DeleteLocalRef(cls);
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    return false;
+  }
+  return true;
+}
+// The color types a Bitmap.Config maps to; a parcel naming another is refused.
+bool parcelable_color_type(int ct) {
+  switch (ct) {
+    case kAlpha_8_SkColorType:
+    case kRGB_565_SkColorType:
+    case kARGB_4444_SkColorType:
+    case kRGBA_8888_SkColorType:
+    case kBGRA_8888_SkColorType:
+    case kRGBA_1010102_SkColorType:
+    case kRGBA_F16_SkColorType:
+      return true;
+    default:
+      return false;
+  }
+}
+constexpr jint kMaxParcelBitmapSide = 32768;
+jboolean Bitmap_nativeWriteToParcel(JNIEnv* env,
+                                    jclass,
+                                    jlong ptr,
+                                    jint density,
+                                    jobject parcel) {
+  auto* w = reinterpret_cast<AclBitmap*>(ptr);
+  ParcelIds ids;
+  if (w == nullptr || parcel == nullptr || !parcel_ids(env, parcel, &ids))
+    return JNI_FALSE;
+  const SkImageInfo& info = w->bitmap.info();
+  const void* pixels = w->bitmap.getPixels();
+  if (pixels == nullptr || info.width() <= 0 || info.height() <= 0 ||
+      !parcelable_color_type(info.colorType()))
+    return JNI_FALSE;
+  // Tightly packed rows: the bitmap's own row may carry padding.
+  const size_t row = info.minRowBytes();
+  const uint64_t total =
+      static_cast<uint64_t>(row) * static_cast<uint64_t>(info.height());
+  if (total > static_cast<uint64_t>(INT32_MAX))
+    return JNI_FALSE;
+  jbyteArray bytes = env->NewByteArray(static_cast<jsize>(total));
+  if (bytes == nullptr) {
+    env->ExceptionClear();  // out of memory: report failure, as Android does
+    return JNI_FALSE;
+  }
+  const auto* src = static_cast<const jbyte*>(pixels);
+  for (int y = 0; y < info.height(); ++y)
+    env->SetByteArrayRegion(bytes, static_cast<jsize>(row * y),
+                            static_cast<jsize>(row),
+                            src + w->bitmap.rowBytes() * y);
+  const jint head[] = {info.width(),
+                       info.height(),
+                       static_cast<jint>(info.colorType()),
+                       static_cast<jint>(info.alphaType()),
+                       density,
+                       w->immutable ? 0 : 1};
+  for (jint v : head) {
+    env->CallVoidMethod(parcel, ids.write_int, v);
+    if (env->ExceptionCheck())
+      return JNI_FALSE;  // the Parcel's own exception goes to the caller
+  }
+  env->CallVoidMethod(parcel, ids.write_bytes, bytes);
+  env->DeleteLocalRef(bytes);
+  return env->ExceptionCheck() ? JNI_FALSE : JNI_TRUE;
+}
+jobject Bitmap_nativeCreateFromParcel(JNIEnv* env, jclass, jobject parcel) {
+  ParcelIds ids;
+  if (parcel == nullptr || !parcel_ids(env, parcel, &ids))
+    return nullptr;
+  jint head[6];
+  for (jint& v : head) {
+    v = env->CallIntMethod(parcel, ids.read_int);
+    if (env->ExceptionCheck())
+      return nullptr;
+  }
+  auto* bytes =
+      static_cast<jbyteArray>(env->CallObjectMethod(parcel, ids.create_bytes));
+  if (env->ExceptionCheck() || bytes == nullptr)
+    return nullptr;
+  const jint width = head[0];
+  const jint height = head[1];
+  if (width <= 0 || height <= 0 || width > kMaxParcelBitmapSide ||
+      height > kMaxParcelBitmapSide || !parcelable_color_type(head[2]) ||
+      head[3] <= kUnknown_SkAlphaType || head[3] > kLastEnum_SkAlphaType)
+    return nullptr;
+  const SkImageInfo info = SkImageInfo::Make(
+      width, height, static_cast<SkColorType>(head[2]),
+      static_cast<SkAlphaType>(head[3]), SkColorSpace::MakeSRGB());
+  const size_t row = info.minRowBytes();
+  // 64-bit, and the sides are bounded above: the product cannot overflow.
+  if (static_cast<uint64_t>(row) * static_cast<uint64_t>(height) !=
+      static_cast<uint64_t>(env->GetArrayLength(bytes)))
+    return nullptr;
+  auto* w = new AclBitmap();
+  if (!w->bitmap.tryAllocPixels(info)) {
+    delete w;
+    return nullptr;
+  }
+  auto* dst = static_cast<jbyte*>(w->bitmap.getPixels());
+  for (int y = 0; y < height; ++y)
+    env->GetByteArrayRegion(bytes, static_cast<jsize>(row * y),
+                            static_cast<jsize>(row),
+                            dst + w->bitmap.rowBytes() * y);
+  w->immutable = (head[5] == 0);
+  return env->NewObject(g_bitmap_class, g_bitmap_ctor,
+                        reinterpret_cast<jlong>(w), width, height, head[4],
+                        /*requestPremultiplied=*/JNI_TRUE,
                         /*ninePatchChunk=*/static_cast<jbyteArray>(nullptr),
                         /*ninePatchInsets=*/static_cast<jobject>(nullptr));
 }
@@ -5747,6 +5904,14 @@ const JNINativeMethod kBitmap[] = {
     {"nativeErase", "(JI)V", reinterpret_cast<void*>(Bitmap_nativeErase)},
     {"nativeCopy", "(JIZ)Landroid/graphics/Bitmap;",
      reinterpret_cast<void*>(Bitmap_nativeCopy)},
+    {"nativeWriteToParcel", "(JILandroid/os/Parcel;)Z",
+     reinterpret_cast<void*>(Bitmap_nativeWriteToParcel)},
+    {"nativeCreateFromParcel", "(Landroid/os/Parcel;)Landroid/graphics/Bitmap;",
+     reinterpret_cast<void*>(Bitmap_nativeCreateFromParcel)},
+    {"nativeCopyAshmem", "(J)Landroid/graphics/Bitmap;",
+     reinterpret_cast<void*>(Bitmap_nativeCopyAshmem)},
+    {"nativeCopyAshmemConfig", "(JI)Landroid/graphics/Bitmap;",
+     reinterpret_cast<void*>(Bitmap_nativeCopyAshmemConfig)},
     {"nativeComputeColorSpace", "(J)Landroid/graphics/ColorSpace;",
      reinterpret_cast<void*>(Bitmap_nativeComputeColorSpace)},
     {"nativeCompress", "(JIILjava/io/OutputStream;[B)Z",
