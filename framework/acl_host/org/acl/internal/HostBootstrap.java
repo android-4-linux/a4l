@@ -3608,6 +3608,12 @@ public final class HostBootstrap {
 
     public static void attachDecorToWindow(android.view.View decor) {
         if (decor == null) return;
+        // Once only. A second attach makes a new AttachInfo and moves every view to it, and
+        // what the first one holds is lost: the tree observer's listeners (a view registers
+        // OnGlobalLayoutListener or OnPreDrawListener from its constructor or onAttachedToWindow)
+        // are never called again. An Activity started from another's onCreate is attached when
+        // it is launched, and was attached again when the present loop opened.
+        if (decor.isAttachedToWindow()) return;
         try {
             android.content.Context ctx = decor.getContext();
             Class<?> dmgCls = Class.forName("android.hardware.display.DisplayManagerGlobal");
