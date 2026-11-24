@@ -1426,6 +1426,11 @@ struct PresentSession {
   void (*vsync_set_immediate)(int) = nullptr;
   jmethodID m_measure = nullptr, m_gmw = nullptr, m_gmh = nullptr,
             m_layout = nullptr, m_draw = nullptr;
+  // The root's ViewTreeObserver, called as ViewRootImpl calls it (nTraverse).
+  jmethodID m_layout_requested = nullptr;  // View.isLayoutRequested
+  jmethodID m_tree_observer = nullptr;     // HostBootstrap.dispatchTreeObserver
+  bool global_layout_due = true;  // a root no traversal has reported yet
+  bool draw_cancelled = false;    // the last traversal's pre-draw said no
   jclass motionevent_cls = nullptr, keyevent_cls = nullptr;  // global refs
   jmethodID me_obtain = nullptr, me_recycle = nullptr, ke_obtain = nullptr;
   jmethodID ke_obtain_meta =
@@ -2276,6 +2281,7 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env,
     s->m_gmh = env->GetMethodID(vc, "getMeasuredHeight", "()I");
     s->m_layout = env->GetMethodID(vc, "layout", "(IIII)V");
     s->m_draw = env->GetMethodID(vc, "draw", "(Landroid/graphics/Canvas;)V");
+    s->m_layout_requested = env->GetMethodID(vc, "isLayoutRequested", "()Z");
     s->dispatch_touch = env->GetMethodID(vc, "dispatchTouchEvent",
                                          "(Landroid/view/MotionEvent;)Z");
     s->dispatch_key =
@@ -2286,6 +2292,10 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env,
   // absent it, input falls through to the Activity as before.
   if (jclass hb = env->FindClass("org/acl/internal/HostBootstrap")) {
     s->hostbootstrap_cls = static_cast<jclass>(env->NewGlobalRef(hb));
+    s->m_tree_observer = env->GetStaticMethodID(hb, "dispatchTreeObserver",
+                                                "(Landroid/view/View;Z)Z");
+    if (env->ExceptionCheck() == JNI_TRUE)
+      env->ExceptionClear();
     s->route_overlay_touch = env->GetStaticMethodID(
         hb, "routeOverlayTouch", "(Landroid/view/MotionEvent;)Z");
     env->DeleteLocalRef(hb);
@@ -2591,6 +2601,7 @@ void JNICALL PresentDriver_nSetContentView(JNIEnv* env,
     return;
   jobject old = s->view;
   s->view = env->NewGlobalRef(view);
+  s->global_layout_due = true;
   if (old != nullptr)
     env->DeleteGlobalRef(old);
   // The old screen's video SurfaceView (if any) is gone — hide the stale video
@@ -2785,6 +2796,14 @@ jlong JNICALL PresentDriver_nMaybeDeliverVsync(JNIEnv* env, jclass, jlong sp) {
   }
   s->deliver_vsync(env, static_cast<jlong>(s->presenter->frame_time_ns()));
   return 0;
+}
+// Whether the traversal just run stopped at a pre-draw listener, read once.
+jboolean JNICALL PresentDriver_nDrawCancelled(JNIEnv*, jclass, jlong sp) {
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s == nullptr || !s->draw_cancelled)
+    return JNI_FALSE;
+  s->draw_cancelled = false;
+  return JNI_TRUE;
 }
 // Create a real MediaCodec-decodable producer Surface handle (a ReaderCtx over
 // a BufferQueue) for an app's on-screen video SurfaceView (e.g. media3
@@ -3244,6 +3263,13 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     return;
   }
   const bool diag = tdiag <= 4;
+  // Whether this traversal lays the tree out anew: the first for this root, or
+  // one a view asked for. Read before measure and layout clear the request.
+  bool did_layout = s->global_layout_due;
+  if (s->m_layout_requested != nullptr)
+    did_layout =
+        env->CallBooleanMethod(s->view, s->m_layout_requested) == JNI_TRUE ||
+        did_layout;
   if (s->m_measure != nullptr && s->m_layout != nullptr) {
     env->CallVoidMethod(s->view, s->m_measure, s->wspec, s->hspec);
     const jint mw = env->CallIntMethod(s->view, s->m_gmw);
@@ -3293,6 +3319,30 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     s->presenter
         ->keepalive();  // measure/layout threw — keep ticking, retry next frame
     return;
+  }
+  // The tree observer, where ViewRootImpl.performTraversals calls it: global
+  // layout after a layout pass, then pre-draw, then draw. A view that waits
+  // for its size (OnGlobalLayoutListener) or for the frame before a draw
+  // (OnPreDrawListener) is never called otherwise. A pre-draw listener that
+  // returns false cancels this frame's draw; the next traversal asks again.
+  if (s->m_tree_observer != nullptr && s->hostbootstrap_cls != nullptr) {
+    const jboolean cancel = env->CallStaticBooleanMethod(
+        s->hostbootstrap_cls, s->m_tree_observer, s->view,
+        did_layout ? JNI_TRUE : JNI_FALSE);
+    if (env->ExceptionCheck() == JNI_TRUE) {
+      env->ExceptionDescribe();
+      env->ExceptionClear();
+    } else {
+      s->global_layout_due = false;
+      if (cancel == JNI_TRUE) {
+        // With a frame on screen, keepalive() arms the compositor's next
+        // callback. Before the first frame there is nothing to arm; the
+        // driver clocks the next vsync itself (nDrawCancelled).
+        s->draw_cancelled = true;
+        s->presenter->keepalive();
+        return;
+      }
+    }
   }
   // DIAG (Compose draw-path): count draw ops issued during this frame's draw.
   // ~0 => the view tree produced no paint (blank/white frame); high => content
@@ -3716,6 +3766,10 @@ void attach_view_to_gl_session(JNIEnv* env,
   }
   if (jclass hb = env->FindClass("org/acl/internal/HostBootstrap")) {
     s->hostbootstrap_cls = static_cast<jclass>(env->NewGlobalRef(hb));
+    s->m_tree_observer = env->GetStaticMethodID(hb, "dispatchTreeObserver",
+                                                "(Landroid/view/View;Z)Z");
+    if (env->ExceptionCheck() == JNI_TRUE)
+      env->ExceptionClear();
     s->route_overlay_touch = env->GetStaticMethodID(
         hb, "routeOverlayTouch", "(Landroid/view/MotionEvent;)Z");
     env->DeleteLocalRef(hb);
@@ -3968,6 +4022,8 @@ void register_present_driver_natives(JNIEnv* env) {
        reinterpret_cast<void*>(PresentDriver_nMaybeDeliverVsync)},
       {const_cast<char*>("nTraverse"), const_cast<char*>("(J)V"),
        reinterpret_cast<void*>(PresentDriver_nTraverse)},
+      {const_cast<char*>("nDrawCancelled"), const_cast<char*>("(J)Z"),
+       reinterpret_cast<void*>(PresentDriver_nDrawCancelled)},
       {const_cast<char*>("nMakeVideoSurface"), const_cast<char*>("(JII)J"),
        reinterpret_cast<void*>(PresentDriver_nMakeVideoSurface)},
       {const_cast<char*>("nSetVideoBounds"), const_cast<char*>("(JIIII)V"),

@@ -73,6 +73,7 @@ public final class PresentDriver {
     // to ask again when the rate cap held the vsync back (see clockVsync).
     private static native long nMaybeDeliverVsync(long s);
     private static native void nTraverse(long s);         // beginFrame -> measure/layout/draw -> submit
+    private static native boolean nDrawCancelled(long s); // the traversal stopped at a pre-draw listener
     private static native void nClose(long s);            // tear down presenter + release refs
 
     // Video HW-plane: create a MediaCodec-decodable producer Surface handle (ReaderCtx) for an app's
@@ -146,6 +147,8 @@ public final class PresentDriver {
 
         // Re-posting traversal: runs in the TRAVERSAL phase, after Compose recomposes (ANIMATION).
         final Method postCallback = resolvePostCallback();
+        final Handler handler = new Handler(looper);
+        final Runnable[] vsyncRetry = new Runnable[1];
         final Runnable[] traversal = new Runnable[1];
         traversal[0] = new Runnable() {
             @Override public void run() {
@@ -156,12 +159,14 @@ public final class PresentDriver {
                 HostBootstrap.maybeLogVideoPlayer(decor);
                 nTraverse(s);
                 postTraversal(choreo, postCallback, traversal[0]);
+                // A pre-draw listener cancelled the draw (a splash screen holding its first
+                // frame). Nothing was committed, so no compositor event will clock the next
+                // traversal: clock it here, at most once a refresh (the cap in clockVsync).
+                if (nDrawCancelled(s)) clockVsync(s, handler, vsyncRetry[0]);
             }
         };
 
         // Retry for a vsync the rate cap held back (clockVsync).
-        final Handler handler = new Handler(looper);
-        final Runnable[] vsyncRetry = new Runnable[1];
         vsyncRetry[0] = new Runnable() {
             @Override public void run() {
                 if (sSession == s) clockVsync(s, handler, this);

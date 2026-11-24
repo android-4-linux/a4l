@@ -383,6 +383,16 @@ if py3.found() and have_gl and have_ffmpeg
       depends : [acl_exe],
       timeout : 300,
     )
+    # A view's ViewTreeObserver listeners (global layout, pre-draw, draw), for an Activity
+    # started from another's onCreate whose view registers before it is in a window. Starts a
+    # headless Weston for itself. Needs host ART; SKIPs otherwise, which includes CI.
+    test(
+      'tree-observer',
+      py3,
+      args : [files('run_tree_observer_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+    )
     # Video on a TextureView: a fixture app decodes an H.264 clip onto
     # new Surface(surfaceTexture), and the test reads back the frame a4l rendered and checks the
     # picture inside the TextureView, with the frame imported on the GPU and with its pixels

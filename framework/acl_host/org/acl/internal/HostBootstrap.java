@@ -38,6 +38,51 @@ public final class HostBootstrap {
     // but Jetpack Compose's recomposer (and other async framework work) posts its continuations
     // to the main Handler. Pump them each frame (after Choreographer.doFrame) so the composition
     // completes before measure/layout, which would otherwise block. Bounded; stops when idle.
+    /**
+     * The root's ViewTreeObserver for one traversal, in ViewRootImpl.performTraversals' order:
+     * global layout when the tree was laid out, pre-draw, then draw. Returns true when a
+     * pre-draw listener cancelled the draw.
+     */
+    public static boolean dispatchTreeObserver(android.view.View root, boolean didLayout) {
+        final android.view.ViewTreeObserver observer = root.getViewTreeObserver();
+        if (didLayout) {
+            // A view added to the tree asks for a layout, so this is when a new SurfaceView
+            // can have appeared.
+            dropSurfaceViewPreDraw(root, observer);
+            observer.dispatchOnGlobalLayout();
+        }
+        if (observer.dispatchOnPreDraw()) return true;
+        observer.dispatchOnDraw();
+        return false;
+    }
+
+    // SurfaceView registers a pre-draw listener of its own that runs updateSurface(). a4l gives
+    // a SurfaceView its surface itself (injectSurface, maybeInjectVideoSurface); updateSurface()
+    // finds no window surface behind a4l's stand-in ViewRootImpl and tells the app its surface
+    // was destroyed. Take that listener off the observer.
+    private static java.lang.reflect.Field sSurfaceViewDrawListener;
+    private static void dropSurfaceViewPreDraw(android.view.View v,
+            android.view.ViewTreeObserver observer) {
+        if (v instanceof android.view.SurfaceView) {
+            try {
+                if (sSurfaceViewDrawListener == null) {
+                    java.lang.reflect.Field f =
+                            android.view.SurfaceView.class.getDeclaredField("mDrawListener");
+                    f.setAccessible(true);
+                    sSurfaceViewDrawListener = f;
+                }
+                observer.removeOnPreDrawListener((android.view.ViewTreeObserver.OnPreDrawListener)
+                        sSurfaceViewDrawListener.get(v));
+            } catch (Throwable t) {
+                android.util.Log.w("acl", "SurfaceView pre-draw listener: " + t);
+            }
+        } else if (v instanceof android.view.ViewGroup) {
+            final android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++)
+                dropSurfaceViewPreDraw(g.getChildAt(i), observer);
+        }
+    }
+
     public static void pumpMainLooper(int maxIters) {
         try {
             android.os.Looper looper = android.os.Looper.getMainLooper();
