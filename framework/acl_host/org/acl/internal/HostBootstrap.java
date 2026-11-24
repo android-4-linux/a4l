@@ -840,6 +840,11 @@ public final class HostBootstrap {
             // metaData.containsKey/getBoolean on it, so a NULL metaData is an NPE before the app's
             // own code runs. Populate from AndroidManifest.xml; never leave it null.
             ai.metaData = parseManifestMetaData();
+            // <uses-sdk>, read by the same pass. The framework branches on targetSdkVersion in
+            // many places (a Notification built by an app that targets less than 24 gets its
+            // views made in build()); left at 0, every app took the oldest path.
+            ai.minSdkVersion = manifestMinSdk;
+            ai.targetSdkVersion = manifestTargetSdk > 0 ? manifestTargetSdk : manifestMinSdk;
             appInfo = ai;
             return ai;
         }
@@ -848,6 +853,11 @@ public final class HostBootstrap {
         // meta-data value is typed (string/bool/int/float) or a resource id; put each under its
         // real type so getBoolean/getInt/getString return what the app expects. Best-effort: on any
         // parse failure return an empty (non-null) Bundle rather than null.
+        // From <uses-sdk>; set by parseManifestMetaData. Android's defaults: minSdkVersion 1, and
+        // a targetSdkVersion that is not given equals minSdkVersion.
+        private int manifestMinSdk = 1;
+        private int manifestTargetSdk;
+
         private android.os.Bundle parseManifestMetaData() {
             android.os.Bundle b = new android.os.Bundle();
             android.content.res.XmlResourceParser xml = null;
@@ -860,6 +870,11 @@ public final class HostBootstrap {
                         String tag = xml.getName();
                         if ("application".equals(tag)) {
                             inApp = true;
+                        } else if ("uses-sdk".equals(tag)) {
+                            final String NS = "http://schemas.android.com/apk/res/android";
+                            manifestMinSdk = Math.max(1,
+                                    xml.getAttributeIntValue(NS, "minSdkVersion", 1));
+                            manifestTargetSdk = xml.getAttributeIntValue(NS, "targetSdkVersion", 0);
                         } else if (inApp && "meta-data".equals(tag)) {
                             putMetaData(b, xml, getResources());
                         }
@@ -1937,6 +1952,34 @@ public final class HostBootstrap {
 
     // <provider> meta-data keyed by fully-qualified class name, parsed once in
     // installContentProviders and re-served via AppPackageManager.getProviderInfo — androidx.startup's
+    // Settings.Secure.ANDROID_ID: 64 random bits as 16 hex digits, made on first use and kept in
+    // the app's data directory. It is per app and per user, as on Android 8 and later, and it
+    // names nothing about the machine. Clearing the app's data makes a new one.
+    private static String sAndroidId;
+    static synchronized String androidId() {
+        if (sAndroidId != null) return sAndroidId;
+        java.io.File f = null;
+        try {
+            AppContext c = sAppContext;
+            if (c != null) f = new java.io.File(c.getDataDir(), "android_id");
+            if (f != null && f.isFile() && f.length() == 16) {
+                String s = new String(java.nio.file.Files.readAllBytes(f.toPath()),
+                        java.nio.charset.StandardCharsets.US_ASCII);
+                if (s.matches("[0-9a-f]{16}")) return sAndroidId = s;
+            }
+        } catch (Throwable ignored) {}
+        String id = String.format("%016x", new java.security.SecureRandom().nextLong());
+        try {
+            if (f != null) {
+                java.nio.file.Files.write(f.toPath(),
+                        id.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                f.setReadable(false, false);  // the owner alone reads it
+                f.setReadable(true, true);
+            }
+        } catch (Throwable ignored) {}  // not kept: the id then lasts for this run only
+        return sAndroidId = id;
+    }
+
     // InitializationProvider re-reads its declared Initializers from getProviderInfo(cn, GET_META_DATA).
     static final java.util.Map<String, android.os.Bundle> sProviderMeta =
             new java.util.HashMap<String, android.os.Bundle>();
@@ -1953,6 +1996,24 @@ public final class HostBootstrap {
     static final java.util.Map<String, java.util.List<String>> sServiceActions =
             java.util.Collections.synchronizedMap(
                     new java.util.LinkedHashMap<String, java.util.List<String>>());
+
+    // A <service> or <receiver> the manifest declares, as PackageManager's intent queries report it.
+    static final class Declared {
+        final boolean service;
+        final String permission;
+        final boolean enabled;
+        final boolean exported;
+        final java.util.List<String> actions = new java.util.ArrayList<String>();
+        Declared(boolean service, String permission, boolean enabled, boolean exported) {
+            this.service = service;
+            this.permission = permission;
+            this.enabled = enabled;
+            this.exported = exported;
+        }
+    }
+    // Fully-qualified class name -> the declaration. Written once by installContentProviders.
+    static final java.util.Map<String, Declared> sDeclared =
+            java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<String, Declared>());
 
     // Installed providers keyed by each declared authority — AppContentResolver.acquireProvider
     // resolves content:// lookups here so query/insert/openFile reach the live provider instead of
@@ -1984,9 +2045,12 @@ public final class HostBootstrap {
                         final int theme = xml.getAttributeResourceValue(NS, "theme", 0);
                         if ("application".equals(xml.getName())) {
                             sManifestAppTheme = theme;
-                        } else if ("activity".equals(xml.getName()) && theme != 0) {
+                        } else if ("activity".equals(xml.getName())) {
                             String name = xml.getAttributeValue(NS, "name");
-                            if (name != null) m.put(normalizeClass(name, p), theme);
+                            if (name == null) continue;
+                            if (theme != 0) m.put(normalizeClass(name, p), theme);
+                            if (xml.getAttributeBooleanValue(NS, "noHistory", false))
+                                sNoHistory.add(normalizeClass(name, p));
                         }
                     }
                 }
@@ -1999,6 +2063,17 @@ public final class HostBootstrap {
         }
         final Integer own = sActivityTheme.get(activityClass);
         return own != null ? own : sManifestAppTheme;
+    }
+
+    // Activities declared android:noHistory="true"; filled by manifestThemeFor's manifest pass.
+    private static final java.util.Set<String> sNoHistory = new java.util.HashSet<String>();
+    /** True for an Activity the task does not keep once another is started over it. */
+    static synchronized boolean noHistory(android.app.Activity a) {
+        manifestThemeFor(a.getClass().getName());  // makes sure the manifest has been read
+        if (sNoHistory.contains(a.getClass().getName())) return true;
+        android.content.Intent i = a.getIntent();
+        return i != null
+                && (i.getFlags() & android.content.Intent.FLAG_ACTIVITY_NO_HISTORY) != 0;
     }
 
     private static java.util.Map<String, String> sParentActivity;
@@ -2406,7 +2481,84 @@ public final class HostBootstrap {
             si.name = component != null ? component.getClassName() : null;
             si.applicationInfo = getApplicationInfo(pkg, 0);
             if (si.name != null) si.metaData = sServiceMeta.get(si.name);
+            Declared d = si.name != null ? sDeclared.get(si.name) : null;
+            if (d != null && d.service) {
+                si.permission = d.permission;
+                si.enabled = d.enabled;
+                si.exported = d.exported;
+            }
             return si;
+        }
+        // The app's own services and receivers answer intent queries, as an installed package's do:
+        // by class for an explicit Intent, by intent-filter action otherwise. Libraries gate on
+        // this (android-job counts a scheduler API as usable only when its service resolves).
+        // Other packages stay unresolved. Filters are matched on the action alone.
+        private java.util.List<android.content.pm.ResolveInfo> queryOwn(
+                android.content.Intent intent, int flags, boolean service) {
+            java.util.List<android.content.pm.ResolveInfo> out = new java.util.ArrayList<>();
+            if (intent == null) return out;
+            android.content.ComponentName cn = intent.getComponent();
+            String target = cn != null ? cn.getPackageName() : intent.getPackage();
+            if (target != null && !target.equals(pkg)) return out;
+            boolean disabledToo =
+                    (flags & android.content.pm.PackageManager.MATCH_DISABLED_COMPONENTS) != 0;
+            String action = intent.getAction();
+            if (cn == null && action == null) return out;
+            synchronized (sDeclared) {
+                for (java.util.Map.Entry<String, Declared> e : sDeclared.entrySet()) {
+                    Declared d = e.getValue();
+                    if (d.service != service || (!d.enabled && !disabledToo)) continue;
+                    if (cn != null ? !e.getKey().equals(cn.getClassName())
+                                   : !d.actions.contains(action)) continue;
+                    out.add(resolveInfoFor(e.getKey(), d, flags));
+                }
+            }
+            return out;
+        }
+        private android.content.pm.ResolveInfo resolveInfoFor(String name, Declared d, int flags) {
+            android.content.pm.ComponentInfo ci = d.service
+                    ? new android.content.pm.ServiceInfo() : new android.content.pm.ActivityInfo();
+            ci.packageName = pkg;
+            ci.name = name;
+            ci.enabled = d.enabled;
+            ci.exported = d.exported;
+            ci.applicationInfo = getApplicationInfo(pkg, 0);
+            android.content.pm.ResolveInfo ri = new android.content.pm.ResolveInfo();
+            if (d.service) {
+                android.content.pm.ServiceInfo si = (android.content.pm.ServiceInfo) ci;
+                si.permission = d.permission;
+                if ((flags & android.content.pm.PackageManager.GET_META_DATA) != 0)
+                    si.metaData = sServiceMeta.get(name);
+                ri.serviceInfo = si;
+            } else {
+                android.content.pm.ActivityInfo ai = (android.content.pm.ActivityInfo) ci;
+                ai.permission = d.permission;
+                ri.activityInfo = ai;
+            }
+            return ri;
+        }
+        @Override public java.util.List queryIntentServices(android.content.Intent intent, int flags) {
+            return queryOwn(intent, flags, true);
+        }
+        @Override public java.util.List<android.content.pm.ResolveInfo> queryIntentServices(
+                android.content.Intent intent, android.content.pm.PackageManager.ResolveInfoFlags flags) {
+            return queryOwn(intent, (int) flags.getValue(), true);
+        }
+        @Override public android.content.pm.ResolveInfo resolveService(
+                android.content.Intent intent, int flags) {
+            java.util.List<android.content.pm.ResolveInfo> l = queryOwn(intent, flags, true);
+            return l.isEmpty() ? null : l.get(0);
+        }
+        @Override public android.content.pm.ResolveInfo resolveService(
+                android.content.Intent intent, android.content.pm.PackageManager.ResolveInfoFlags flags) {
+            return resolveService(intent, (int) flags.getValue());
+        }
+        @Override public java.util.List queryBroadcastReceivers(android.content.Intent intent, int flags) {
+            return queryOwn(intent, flags, false);
+        }
+        @Override public java.util.List<android.content.pm.ResolveInfo> queryBroadcastReceivers(
+                android.content.Intent intent, android.content.pm.PackageManager.ResolveInfoFlags flags) {
+            return queryOwn(intent, (int) flags.getValue(), false);
         }
         // Non-null ActivityInfo (no parent activity) so androidx NavUtils.getParentActivityName
         // and similar reads don't NPE on a null result.
@@ -2482,7 +2634,29 @@ public final class HostBootstrap {
             if (cp != null) {
                 try { return cp.getIContentProvider(); } catch (Throwable ignore) {}
             }
+            if ("settings".equals(authority)) return settingsProvider();
             return stubProvider();
+        }
+        // The settings provider, answering one key: Settings.Secure.ANDROID_ID. Android always has
+        // a value there and apps hash it unchecked (Firebase Performance does). Every other
+        // setting stays unset, so its reader takes the default.
+        private static android.content.IContentProvider sSettings;
+        private static synchronized android.content.IContentProvider settingsProvider() {
+            if (sSettings == null) {
+                final Class<?> iface = android.content.IContentProvider.class;
+                sSettings = (android.content.IContentProvider) java.lang.reflect.Proxy.newProxyInstance(
+                        iface.getClassLoader(), new Class<?>[]{iface}, (p, method, a) -> {
+                            // call(AttributionSource, authority, method, arg, extras)
+                            if ("call".equals(method.getName()) && a != null && a.length == 5
+                                    && "GET_secure".equals(a[2]) && "android_id".equals(a[3])) {
+                                android.os.Bundle b = new android.os.Bundle();
+                                b.putString("value", androidId());
+                                return b;
+                            }
+                            return defaultValue(method.getReturnType());
+                        });
+            }
+            return sSettings;
         }
         @Override protected android.content.IContentProvider acquireProvider(
                 android.content.Context c, String name) { return resolve(name); }
@@ -2597,6 +2771,15 @@ public final class HostBootstrap {
     // <meta-data> is stashed in sProviderMeta so getProviderInfo() can re-serve it (the whole
     // reason androidx.startup's InitializationProvider works). Best-effort per provider: a
     // failing onCreate is logged and skipped so one bad provider doesn't sink app startup.
+    private static Declared declare(android.content.res.XmlResourceParser xml, String ns,
+            String name, boolean service) {
+        Declared d = new Declared(service, xml.getAttributeValue(ns, "permission"),
+                xml.getAttributeBooleanValue(ns, "enabled", true),
+                xml.getAttributeBooleanValue(ns, "exported", false));
+        sDeclared.put(name, d);
+        return d;
+    }
+
     static void installContentProviders(android.content.Context base, String pkg) {
         // {className, authorities, exported, grantUriPermissions} — the last two decide whether
         // FileProvider (exported=false + grantUriPermissions=true, else it throws in attachInfo).
@@ -2614,6 +2797,7 @@ public final class HostBootstrap {
             // listing the ComponentRegistrars.
             String curSvc = null;
             android.os.Bundle curSvcMeta = null;
+            Declared curDecl = null;
             for (int ev = xml.getEventType();
                  ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
                 if (ev == android.content.res.XmlResourceParser.START_TAG) {
@@ -2637,11 +2821,23 @@ public final class HostBootstrap {
                             curSvc = name;
                             curSvcMeta = new android.os.Bundle();
                             sServiceActions.put(name, new java.util.ArrayList<String>());
+                            curDecl = declare(xml, NS, name, true);
                         }
-                    } else if ("action".equals(tag) && curSvc != null) {
+                    } else if ("receiver".equals(tag)) {
+                        String name = xml.getAttributeValue(NS, "name");
+                        if (name != null) {
+                            if (name.startsWith(".")) name = pkg + name;
+                            else if (name.indexOf('.') < 0) name = pkg + "." + name;
+                            curDecl = declare(xml, NS, name, false);
+                        }
+                    } else if ("action".equals(tag) && curDecl != null) {
                         String action = xml.getAttributeValue(NS, "name");
-                        java.util.List<String> actions = sServiceActions.get(curSvc);
-                        if (action != null && actions != null) actions.add(action);
+                        if (action != null) {
+                            curDecl.actions.add(action);
+                            java.util.List<String> actions =
+                                    curSvc != null ? sServiceActions.get(curSvc) : null;
+                            if (actions != null) actions.add(action);
+                        }
                     } else if ("meta-data".equals(tag)) {
                         // Attribute to whichever component encloses it (service takes precedence when
                         // both are open, though they never nest); a bare <application> meta-data with
@@ -2655,6 +2851,9 @@ public final class HostBootstrap {
                         if (cur != null) { sProviderMeta.put(cur, curMeta); cur = null; curMeta = null; }
                     } else if ("service".equals(end)) {
                         if (curSvc != null) { sServiceMeta.put(curSvc, curSvcMeta); curSvc = null; curSvcMeta = null; }
+                        curDecl = null;
+                    } else if ("receiver".equals(end)) {
+                        curDecl = null;
                     }
                 }
             }
@@ -2879,6 +3078,9 @@ public final class HostBootstrap {
         System.out.println("acl activity-stack: finishActivity(token) -> "
                 + (token != null && sByToken.get(token) != null
                         ? sByToken.get(token).activity.getClass().getName() : "UNKNOWN/null token"));
+        // ACL_TRACE_FINISH: who called finish(). The call arrives on the caller's own stack.
+        if (System.getenv("ACL_TRACE_FINISH") != null)
+            new Throwable("acl activity-stack: finish() called from").printStackTrace();
         final ActivityRecord rec = token != null ? sByToken.get(token) : null;
         if (rec == null) return false;
         rec.resultCode = resultCode;
@@ -3241,6 +3443,27 @@ public final class HostBootstrap {
             attachDecorToWindow(decor);
             boolean shown = PresentDriver.setContentView(decor);
             if (prev != null) safeLifecycle(prev.activity, "onStop");  // outgoing fully stopped once the new shows
+            // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK: the Activities already in the task
+            // are finished and the new one becomes its root. An app's router screen starts its
+            // home screen this way; kept underneath, the router would come back when home finishes.
+            // android:noHistory (or FLAG_ACTIVITY_NO_HISTORY): the Activity the new one covers is
+            // finished rather than kept. Pandora's startup screen is one.
+            final int clearTask = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                    | android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK;
+            final boolean clear = (flags & clearTask) == clearTask;
+            java.util.List<ActivityRecord> gone = new java.util.ArrayList<ActivityRecord>();
+            for (ActivityRecord r : sTask) {
+                if (r.activity == a) continue;
+                if (clear || (r == prev && noHistory(r.activity))) gone.add(r);
+            }
+            for (ActivityRecord r : gone) {
+                sTask.remove(r);
+                sByToken.remove(r.token);
+                safeLifecycle(r.activity, "onDestroy");
+                System.out.println("acl activity-stack: cleared "
+                        + r.activity.getClass().getName()
+                        + (clear ? " (clear task)" : " (no history)"));
+            }
             android.util.Log.i("acl", "launchInternalActivity: " + targetCls + (shown ? " presented" : " launched (no present)"));
             return shown;
         } catch (Throwable t) {
@@ -4746,6 +4969,9 @@ public final class HostBootstrap {
         // android.media.MediaRouter asks for IMediaRouterService when it is made; a no-op one
         // (no remote routes, no client state kept) is enough for the local route.
         svc.put("media_router", "android.media.IMediaRouterService");
+        // An Activity makes its SearchManager when a menu holds a SearchView; a no-op service
+        // answers that no Activity is searchable.
+        svc.put("search", "android.app.ISearchManager");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},

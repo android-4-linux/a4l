@@ -23,6 +23,7 @@ UTF8_FLAG = 1 << 8
 TYPE_REFERENCE = 0x01
 TYPE_STRING = 0x03
 TYPE_INT_DEC = 0x10
+TYPE_INT_BOOLEAN = 0x12
 NO_ENTRY = 0xFFFFFFFF
 ANDROID_URI = "http://schemas.android.com/apk/res/android"
 
@@ -37,6 +38,9 @@ ATTR_NAMES = [
     ("name", 0x01010003),
     ("label", 0x01010001),
     ("theme", 0x01010000),
+    ("permission", 0x01010006),
+    ("enabled", 0x0101000E),
+    ("noHistory", 0x0101022D),
 ]
 
 
@@ -115,6 +119,8 @@ def _attribute(pool, ns_idx, name_idx, value):
         vtype, data = TYPE_STRING, pool.sid(v)
     elif kind == "ref":  # a resource id, as android:theme="@style/..." compiles to
         raw, vtype, data = NO_ENTRY, TYPE_REFERENCE, v & 0xFFFFFFFF
+    elif kind == "bool":
+        raw, vtype, data = NO_ENTRY, TYPE_INT_BOOLEAN, 0xFFFFFFFF if v else 0
     else:
         raw, vtype, data = NO_ENTRY, TYPE_INT_DEC, v & 0xFFFFFFFF
     return struct.pack("<IIIHBBI", ns_idx, name_idx, raw, 8, 0, vtype, data)
@@ -133,7 +139,8 @@ def end_elem(pool, name):
 
 
 def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity",
-               permissions=None, services=None, launcher_theme=None, activities=None):
+               permissions=None, services=None, launcher_theme=None, activities=None,
+               receivers=None):
     pool = Pool()
     uri = lambda: pool.sid(ANDROID_URI)          # noqa: E731
     a = lambda name, val: _attribute(pool, uri(), pool.sid(name), val)  # noqa: E731
@@ -177,24 +184,36 @@ def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity",
                        [a("name", ("str", "com.example.app.OtherActivity"))])
     body += end_elem(pool, "activity")
     # More <activity android:name="..." android:theme="@...">: activities is a list of
-    # (class name, theme resource id or None).
-    for name, theme in (activities or []):
+    # (class name, theme resource id or None) or (class name, theme, {"noHistory": bool}).
+    for entry in (activities or []):
+        name, theme = entry[0], entry[1]
         attrs = [a("name", ("str", name))]
         if theme is not None:
             attrs.append(a("theme", ("ref", theme)))
+        if len(entry) > 2 and "noHistory" in entry[2]:
+            attrs.append(a("noHistory", ("bool", entry[2]["noHistory"])))
         body += start_elem(pool, "activity", attrs)
         body += end_elem(pool, "activity")
-    # <service android:name="..."> with an <intent-filter> of its actions, if any:
-    # services is a list of (class name, [action, ...]).
-    for name, actions in (services or []):
-        body += start_elem(pool, "service", [a("name", ("str", name))])
-        if actions:
-            body += start_elem(pool, "intent-filter", [])
-            for action in actions:
-                body += start_elem(pool, "action", [a("name", ("str", action))])
-                body += end_elem(pool, "action")
-            body += end_elem(pool, "intent-filter")
-        body += end_elem(pool, "service")
+    # <service android:name="..."> and <receiver android:name="..."> with an <intent-filter>
+    # of its actions, if any: each list holds (class name, [action, ...]) or
+    # (class name, [action, ...], {"permission": name, "enabled": bool}).
+    for tag, entries in (("service", services), ("receiver", receivers)):
+        for entry in (entries or []):
+            name, actions = entry[0], entry[1]
+            extra = entry[2] if len(entry) > 2 else {}
+            attrs = [a("name", ("str", name))]
+            if "permission" in extra:
+                attrs.append(a("permission", ("str", extra["permission"])))
+            if "enabled" in extra:
+                attrs.append(a("enabled", ("bool", extra["enabled"])))
+            body += start_elem(pool, tag, attrs)
+            if actions:
+                body += start_elem(pool, "intent-filter", [])
+                for action in actions:
+                    body += start_elem(pool, "action", [a("name", ("str", action))])
+                    body += end_elem(pool, "action")
+                body += end_elem(pool, "intent-filter")
+            body += end_elem(pool, tag)
     body += end_elem(pool, "application")
     body += end_elem(pool, "manifest")
     body += _node(RES_XML_END_NS,

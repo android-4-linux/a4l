@@ -758,7 +758,7 @@ jstring JNICALL ndk_native_load(JNIEnv* env,
 // -Xplugin:libopenjdkjvmti[d].so option (added below when the env is set).
 void JNICALL acl_jvmti_exception(jvmtiEnv* jvmti,
                                  JNIEnv* jni,
-                                 jthread,
+                                 jthread thread,
                                  jmethodID method,
                                  jlocation location,
                                  jobject exception,
@@ -823,6 +823,38 @@ void JNICALL acl_jvmti_exception(jvmtiEnv* jvmti,
     log::w(kTag, "JVMTI: {} msg='{}' at {}.{} loc={}", exc_sig, msg,
            dsig ? dsig : "?", mname ? mname : "?",
            static_cast<long long>(location));
+  }
+  // ACL_JVMTI_STACK=<text>: the thrower's Java stack for every exception whose
+  // class signature contains <text>. Names who threw an exception the app
+  // catches, or hands to a handler that prints nothing.
+  static const char* const stack_of = std::getenv("ACL_JVMTI_STACK");
+  if (stack_of != nullptr && *stack_of != '\0' &&
+      std::strstr(exc_sig, stack_of) != nullptr) {
+    constexpr jint kMax = 48;
+    jvmtiFrameInfo frames[kMax];
+    jint depth = 0;
+    if (jvmti->GetStackTrace(thread, 0, kMax, frames, &depth) ==
+        JVMTI_ERROR_NONE) {
+      log::i(kTag, "JVMTI-STACK: {} ({} frames):", exc_sig, depth);
+      for (jint f = 0; f < depth; ++f) {
+        char* fn = nullptr;
+        char* fd = nullptr;
+        jclass fc = nullptr;
+        jvmti->GetMethodName(frames[f].method, &fn, nullptr, nullptr);
+        if (jvmti->GetMethodDeclaringClass(frames[f].method, &fc) ==
+                JVMTI_ERROR_NONE &&
+            fc != nullptr)
+          jvmti->GetClassSignature(fc, &fd, nullptr);
+        log::i(kTag, "JVMTI-STACK:   #{} {}{} @{}", f, fd ? fd : "?",
+               fn ? fn : "?", static_cast<long long>(frames[f].location));
+        if (fn)
+          jvmti->Deallocate(reinterpret_cast<unsigned char*>(fn));
+        if (fd)
+          jvmti->Deallocate(reinterpret_cast<unsigned char*>(fd));
+        if (fc)
+          jni->DeleteLocalRef(fc);
+      }
+    }
   }
   if (mname)
     jvmti->Deallocate(reinterpret_cast<unsigned char*>(mname));
@@ -923,6 +955,53 @@ void JNICALL acl_jvmti_class_prepare(jvmtiEnv* jvmti,
   if (jvmti->GetClassSignature(klass, &sig, nullptr) != JVMTI_ERROR_NONE ||
       sig == nullptr)
     return;
+  // ACL_JVMTI_TRACE=<list>: "Lpkg/Class;.method" entries separated by commas
+  // name the methods to break on ("*" for every method of the class). Any
+  // other value keeps the Flutter-embedding set below.
+  static const std::vector<std::pair<std::string, std::string>> wanted = [] {
+    std::vector<std::pair<std::string, std::string>> out;
+    const char* v = std::getenv("ACL_JVMTI_TRACE");
+    std::string list = v != nullptr ? v : "";
+    std::size_t pos = 0;
+    while (pos < list.size()) {
+      std::size_t end = list.find(',', pos);
+      if (end == std::string::npos)
+        end = list.size();
+      const std::string item = list.substr(pos, end - pos);
+      const std::size_t dot = item.find(";.");
+      if (dot != std::string::npos)
+        out.emplace_back(item.substr(0, dot + 1), item.substr(dot + 2));
+      pos = end + 1;
+    }
+    return out;
+  }();
+  if (!wanted.empty()) {
+    jint n = 0;
+    jmethodID* ms = nullptr;
+    bool any = false;
+    for (const auto& w : wanted)
+      any = any || w.first == sig;
+    if (any && jvmti->GetClassMethods(klass, &n, &ms) == JVMTI_ERROR_NONE) {
+      for (jint i = 0; i < n; ++i) {
+        char* mn = nullptr;
+        if (jvmti->GetMethodName(ms[i], &mn, nullptr, nullptr) !=
+                JVMTI_ERROR_NONE ||
+            mn == nullptr)
+          continue;
+        for (const auto& w : wanted) {
+          if (w.first == sig && (w.second == "*" || w.second == mn)) {
+            if (jvmti->SetBreakpoint(ms[i], 0) == JVMTI_ERROR_NONE)
+              log::i(kTag, "JVMTI-TRACE:   bp on {}.{}", sig, mn);
+            break;
+          }
+        }
+        jvmti->Deallocate(reinterpret_cast<unsigned char*>(mn));
+      }
+      jvmti->Deallocate(reinterpret_cast<unsigned char*>(ms));
+    }
+    jvmti->Deallocate(reinterpret_cast<unsigned char*>(sig));
+    return;
+  }
   const bool interesting = std::strstr(sig, "engine/FlutterJNI") != nullptr;
   if (interesting) {
     int set = 0;
@@ -7175,8 +7254,15 @@ class ArtVm final : public JniVm {
           {const_cast<char*>("listAudioPatches"),
            const_cast<char*>("(Ljava/util/ArrayList;[I)I"),
            reinterpret_cast<void*>(empty_ports)},
+          // AudioManager.isWiredHeadsetOn / isBluetoothA2dpOn ask per device
+          // type. acl plays through the host's default sink and tracks no
+          // headset or Bluetooth device: DEVICE_STATE_UNAVAILABLE (0).
+          {const_cast<char*>("getDeviceConnectionState"),
+           const_cast<char*>("(ILjava/lang/String;)I"),
+           reinterpret_cast<void*>(
+               +[](JNIEnv*, jclass, jint, jstring) -> jint { return 0; })},
       };
-      if (env->RegisterNatives(as, m, 2) == JNI_OK)
+      if (env->RegisterNatives(as, m, 3) == JNI_OK)
         log::i(kTag,
                "android.media.AudioSystem.listAudioPorts/Patches -> acl no-op "
                "success");

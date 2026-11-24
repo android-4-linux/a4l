@@ -38,7 +38,10 @@ CHECKS = [
     "TREE: pre-draw cancelled one frame: draws then=0",
     "TREE: global layout again after requestLayout",
     "TREE: draw listener called=true view drawn=true",
+    "TREE: no history second destroyed=true",
+    "TREE: clear task first home destroyed=true",
     "TREE: PASS",
+    "acl activity-stack: task empty (root finished) -> exit",
 ]
 
 
@@ -123,7 +126,8 @@ def main():
             fh.write(build_axml(utf8=True, package=PACKAGE, launcher=f"{PACKAGE}.Main",
                                 launcher_theme=THEME_MATERIAL,
                                 activities=[(f"{PACKAGE}.Main$Second",
-                                             THEME_MATERIAL_LIGHT)]))
+                                             THEME_MATERIAL_LIGHT, {"noHistory": True}),
+                                            (f"{PACKAGE}.Main$Home", None)]))
         unaligned = os.path.join(work, "u.apk")
         apk = os.path.join(work, "tree-observer.apk")
         run(["zip", "-X", "-0", "-j", "-q", unaligned,
@@ -145,6 +149,9 @@ def main():
         out = p.stdout + p.stderr
         if p.returncode == SKIP:
             return skip("run-apk.sh (vendored framework not built)", out[-2000:])
+        if "TREE: FAIL" in out:
+            sys.stderr.write(f"FAIL: the fixture reported a failure\n{out[-8000:]}\n")
+            return 1
         for c in CHECKS:
             if c not in out:
                 sys.stderr.write(f"FAIL: missing '{c}'\n{out[-8000:]}\n")
