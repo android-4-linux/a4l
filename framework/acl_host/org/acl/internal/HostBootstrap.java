@@ -1394,6 +1394,25 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("media_router".equals(name)) {
+                // android.media.MediaRouter over a no-op IMediaRouterService (seeded in the
+                // ServiceManager): the device's own audio route and nothing to cast to. Never
+                // null: androidx.mediarouter calls it unguarded, and a MediaRouteButton in a
+                // layout (a Cast button) fails the whole inflate without it.
+                Object made = madeManager(name);
+                if (made != null) return made;
+                try {
+                    java.lang.reflect.Constructor<?> c = android.media.MediaRouter.class
+                            .getDeclaredConstructor(android.content.Context.class);
+                    c.setAccessible(true);
+                    return keepManager(name, c.newInstance(this));
+                } catch (Throwable t) {
+                    Throwable cause = t instanceof java.lang.reflect.InvocationTargetException
+                            && t.getCause() != null ? t.getCause() : t;
+                    android.util.Log.w("acl", "MediaRouter: " + cause, cause);
+                    return null;
+                }
+            }
             if ("appwidget".equals(name)) {
                 // AppWidgetManager(Context, IAppWidgetService). No home screen hosts widgets:
                 // the app has none placed, and updates to them are dropped. Never null, for
@@ -1597,6 +1616,7 @@ public final class HostBootstrap {
             if (serviceClass == android.app.usage.UsageStatsManager.class) return "usagestats";
             if (serviceClass == android.content.pm.ShortcutManager.class) return "shortcut";
             if (serviceClass == android.appwidget.AppWidgetManager.class) return "appwidget";
+            if (serviceClass == android.media.MediaRouter.class) return "media_router";
             if (serviceClass == android.app.job.JobScheduler.class) return "jobscheduler";
             if (serviceClass == android.view.accessibility.AccessibilityManager.class) return "accessibility";
             if (serviceClass == android.view.autofill.AutofillManager.class) return "autofill";
@@ -4369,6 +4389,10 @@ public final class HostBootstrap {
                     switch (method.getName()) {
                         case "getDisplayInfo": return buildDisplayInfo();
                         case "getDisplayIds": return new int[]{0};
+                        // Never null on Android. No Wi-Fi display here: the default status is
+                        // "feature unavailable". android.media.MediaRouter reads it unguarded.
+                        case "getWifiDisplayStatus":
+                            return method.getReturnType().getConstructor().newInstance();
                         default: return defaultValue(method.getReturnType());
                     }
                 });
@@ -4666,6 +4690,9 @@ public final class HostBootstrap {
         // MediaSession routes through ISessionManager; makeSessionManagerHandler returns a no-op
         // ISession (with a no-op ISessionController) so MediaSession construction completes.
         svc.put("media_session", "android.media.session.ISessionManager");
+        // android.media.MediaRouter asks for IMediaRouterService when it is made; a no-op one
+        // (no remote routes, no client state kept) is enough for the local route.
+        svc.put("media_router", "android.media.IMediaRouterService");
         Class<?> ism = Class.forName("android.os.IServiceManager");
         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                 ism.getClassLoader(), new Class<?>[]{ism},

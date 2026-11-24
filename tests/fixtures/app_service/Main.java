@@ -245,16 +245,19 @@ public class Main extends Activity {
                 new android.media.session.MediaSession(this, "probe");
         android.media.session.MediaController.PlaybackInfo playback =
                 session.getController().getPlaybackInfo();
+        android.media.MediaRouter router = getSystemService(android.media.MediaRouter.class);
         String line = "system usage=" + (usage != null ? usage.getAppStandbyBucket() : -1)
                 + " shortcuts=" + (shortcuts != null ? shortcuts.getDynamicShortcuts().size() : -1)
                 + " widgets=" + (widgets != null
                         ? widgets.getAppWidgetIds(new ComponentName(this, Main.class)).length : -1)
                 + " channel=" + (channel != null ? channel.getImportance() : -1) + "/" + listed
-                + " playback=" + (playback != null ? playback.getPlaybackType() : -1);
+                + " playback=" + (playback != null ? playback.getPlaybackType() : -1)
+                + " router=" + (router != null && router.getRouteCount() > 0);
         session.release();
         log(line);
         // Bucket 10 is STANDBY_BUCKET_ACTIVE; channel "svc" from case 6 and "probe" are listed.
-        expect("system usage=10 shortcuts=0 widgets=0 channel=4/2 playback=1".equals(line),
+        expect("system usage=10 shortcuts=0 widgets=0 channel=4/2 playback=1 router=true"
+                        .equals(line),
                 "system services");
         next();
     }
