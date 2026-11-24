@@ -3451,18 +3451,19 @@ public final class HostBootstrap {
             final int clearTask = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
                     | android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK;
             final boolean clear = (flags & clearTask) == clearTask;
-            java.util.List<ActivityRecord> gone = new java.util.ArrayList<ActivityRecord>();
+            final java.util.List<ActivityRecord> gone = new java.util.ArrayList<ActivityRecord>();
             for (ActivityRecord r : sTask) {
                 if (r.activity == a) continue;
                 if (clear || (r == prev && noHistory(r.activity))) gone.add(r);
             }
+            // Each is finished the way its own finish() would: on a later turn of the main loop.
+            // The Activity that called startActivity is often still inside its onCreate (a
+            // router screen), and its remaining lifecycle calls must not land on a destroyed one.
             for (ActivityRecord r : gone) {
-                sTask.remove(r);
-                sByToken.remove(r.token);
-                safeLifecycle(r.activity, "onDestroy");
-                System.out.println("acl activity-stack: cleared "
+                System.out.println("acl activity-stack: clearing "
                         + r.activity.getClass().getName()
                         + (clear ? " (clear task)" : " (no history)"));
+                finishActivityByToken(r.token, android.app.Activity.RESULT_CANCELED, null);
             }
             android.util.Log.i("acl", "launchInternalActivity: " + targetCls + (shown ? " presented" : " launched (no present)"));
             return shown;
