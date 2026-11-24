@@ -1893,6 +1893,27 @@ bool bootstrap_x86_64(const BionicConfig& cfg,
   for (std::size_t i = 0; i < std::size(kBionicSignals); ++i)
     have_sa[i] = ::sigaction(kBionicSignals[i], nullptr, &saved_sa[i]) == 0;
 
+  // Restoring the handlers afterwards is not enough: between the linker's
+  // sigaction calls and the restore below, bionic's crash handler is the
+  // process's SIGSEGV handler. The bootstrap often runs on a worker (the app's
+  // first System.loadLibrary), and an implicit null check on any other thread
+  // in that window goes to bionic's handler and kills the process instead of
+  // becoming a NullPointerException. So keep the linker from installing them
+  // at all: make linker_debuggerd_init() return at once. It is a void function
+  // that only registers the handlers. Without the symbol (a stripped linker)
+  // the restore below is all there is.
+  if (const std::uintptr_t dbg = find_sym(cfg.linker.c_str(), lk.base,
+                                          "__dl__Z21linker_debuggerd_initv");
+      dbg != 0) {
+    const std::uintptr_t page = dbg & ~static_cast<std::uintptr_t>(0xfff);
+    if (::mprotect(reinterpret_cast<void*>(page), 0x1000,
+                   PROT_READ | PROT_WRITE) == 0) {
+      *reinterpret_cast<std::uint8_t*>(dbg) = 0xC3;  // ret
+      ::mprotect(reinterpret_cast<void*>(page), 0x1000, PROT_READ | PROT_EXEC);
+      log::i(kTag, "linker crash handlers not installed (host keeps SIGSEGV)");
+    }
+  }
+
   const std::uintptr_t glibc_fs = get_fs();
   reinterpret_cast<std::uintptr_t (*)(void*)>(init_addr)(
       kab);  // sets %fs -> permanent bionic TCB
