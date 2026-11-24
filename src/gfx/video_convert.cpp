@@ -126,6 +126,11 @@ struct VideoConverter::State {
       if (!slot.busy->load(std::memory_order_acquire))
         return &slot;
     }
+    return add_slot(w, h, error);
+  }
+
+  // A new buffer for the pool, of the pool's size. GL current.
+  Slot* add_slot(std::uint32_t w, std::uint32_t h, std::string* error) {
     if (pool.size() >= static_cast<std::size_t>(kPoolSize)) {
       if (error)
         *error = "every converted buffer is still held";
@@ -250,11 +255,78 @@ std::unique_ptr<VideoConverter> VideoConverter::Create(std::string* error) {
       *error = "no EGL image import on this GL";
     return nullptr;
   }
+  // The program is compiled now, not on the first frame, which a player has
+  // released for a time already near.
+  if (!state->window->make_current(error))
+    return nullptr;
+  const bool compiled = state->ensure_program(error);
   // Whatever bring-up left current stays on this thread no longer: convert()
   // may run on another.
   state->release_current();
+  if (!compiled)
+    return nullptr;
   log::i(kTag, "video converter on {}", state->device->renderer());
   return std::unique_ptr<VideoConverter>(new VideoConverter(std::move(state)));
+}
+
+bool VideoConverter::prepare(std::uint32_t width,
+                             std::uint32_t height,
+                             int count,
+                             std::string* error) {
+  State& s = *state_;
+  std::lock_guard<std::mutex> lock(s.mu);
+  if (width == 0 || height == 0 || !s.window->make_current(error))
+    return false;
+  bool ok = true;
+  if (width != s.pool_w || height != s.pool_h) {
+    s.drop_pool();
+    s.pool_w = width;
+    s.pool_h = height;
+  }
+  while (ok && s.pool.size() < static_cast<std::size_t>(count))
+    ok = s.add_slot(width, height, error) != nullptr;
+  s.release_current();
+  return ok;
+}
+
+bool VideoConverter::rehearse(std::uint32_t width,
+                              std::uint32_t height,
+                              std::uint32_t picture_width,
+                              std::uint32_t picture_height,
+                              int times,
+                              std::string* error) {
+  constexpr std::uint32_t kFourccNv12 = 0x3231564eu;  // 'NV12'
+  const std::uint32_t pw = picture_width & ~3u;
+  const std::uint32_t ph = picture_height & ~1u;
+  if (pw == 0 || ph == 0)
+    return false;
+  // An RGBX buffer a quarter as wide as the picture has its rows: read as
+  // NV12, its luma, then its chroma below.
+  const auto buf = HardwareBuffer::allocate(pw / 4, ph + ph / 2,
+                                            HbFormat::R8G8B8X8_UNORM, 0, error);
+  if (!buf)
+    return false;
+  const DmabufFrame rgbx = buf->frame();
+  const std::uint32_t pitch = rgbx.planes[0].stride;
+  if (pitch < pw)
+    return false;
+  DmabufFrame nv12;
+  nv12.fd = rgbx.fd;
+  nv12.width = pw;
+  nv12.height = ph;
+  nv12.plane_count = 2;
+  nv12.planes[0] = {rgbx.planes[0].offset, pitch, rgbx.fd};
+  nv12.planes[1] = {rgbx.planes[0].offset + pitch * ph, pitch, rgbx.fd};
+  nv12.drm_format = kFourccNv12;
+  nv12.modifier = 0;
+  nv12.mem_size = rgbx.mem_size;
+  // Held together, as frames in flight are: each draw's own resources.
+  std::vector<DmabufFrame> outs(static_cast<std::size_t>(times));
+  for (DmabufFrame& out : outs) {
+    if (!convert(nv12, &out, error, width, height))
+      return false;
+  }
+  return true;
 }
 
 bool VideoConverter::convert(const DmabufFrame& in,
@@ -375,6 +447,26 @@ bool VideoConverter::convert(const DmabufFrame&,
                              std::string* error,
                              std::uint32_t,
                              std::uint32_t) {
+  if (error)
+    *error = "built without GL";
+  return false;
+}
+
+bool VideoConverter::prepare(std::uint32_t,
+                             std::uint32_t,
+                             int,
+                             std::string* error) {
+  if (error)
+    *error = "built without GL";
+  return false;
+}
+
+bool VideoConverter::rehearse(std::uint32_t,
+                              std::uint32_t,
+                              std::uint32_t,
+                              std::uint32_t,
+                              int,
+                              std::string* error) {
   if (error)
     *error = "built without GL";
   return false;

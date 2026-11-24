@@ -88,6 +88,21 @@ public class Main extends Activity {
         }
     }
 
+    // The size the codec is configured with: assets/size ("<w>x<h>", the stream's, as a player
+    // gives it), or the TextureView's where there is none.
+    int[] configuredSize() {
+        try {
+            InputStream m = getAssets().open("size");
+            byte[] b = new byte[32];
+            int n = m.read(b);
+            m.close();
+            String[] wh = new String(b, 0, Math.max(n, 0), "US-ASCII").trim().split("x");
+            return new int[] {Integer.parseInt(wh[0]), Integer.parseInt(wh[1])};
+        } catch (java.io.IOException | RuntimeException e) {
+            return new int[] {W, H};
+        }
+    }
+
     // The offsets at which access units start: every access unit delimiter (H.264 NAL type 9,
     // HEVC NAL type 35).
     static ArrayList<Integer> accessUnits(byte[] d, boolean hevc) {
@@ -149,7 +164,8 @@ public class Main extends Activity {
     // One loop of the clip on a codec of its own, released when it is done, the way a player
     // makes a new codec when it seeks: the next loop makes another on the same Surface.
     private void playLoop(final Surface surface, final int loop) throws Exception {
-        MediaFormat f = MediaFormat.createVideoFormat(mime, W, H);
+        final int[] size = configuredSize();
+        MediaFormat f = MediaFormat.createVideoFormat(mime, size[0], size[1]);
         String name = new MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(f);
         final MediaCodec c = MediaCodec.createByCodecName(name);
         final int frames = au.size();
