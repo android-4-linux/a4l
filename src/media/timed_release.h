@@ -85,6 +85,20 @@ class TimedRelease {
     for (auto& [when, action] : now)
       action(true);
   }
+  // Let what is waiting run at its time, waiting up to `max_wait_ns` for the
+  // last of it and for an action already running; whatever is still waiting
+  // then runs now, as release_all. For a codec that goes: its frames are
+  // shown at their times, and none is running when it is gone.
+  void finish(std::int64_t max_wait_ns) {
+    {
+      std::unique_lock<std::mutex> lock(mu_);
+      const auto until = std::chrono::steady_clock::now() +
+                         std::chrono::nanoseconds(max_wait_ns);
+      idle_cv_.wait_until(lock, until,
+                          [this] { return pending_.empty() && !running_; });
+    }
+    release_all();
+  }
   // Cancel everything waiting. Each action is called with false.
   void cancel_all() {
     std::multimap<std::int64_t, Action> gone;
@@ -117,14 +131,21 @@ class TimedRelease {
       }
       Action action = std::move(pending_.begin()->second);
       pending_.erase(pending_.begin());
+      running_ = true;
       lock.unlock();
       action(true);
+      action = nullptr;  // what it owns goes before finish() is told
       lock.lock();
+      running_ = false;
+      if (pending_.empty())
+        idle_cv_.notify_all();
     }
   }
 
   mutable std::mutex mu_;
   std::condition_variable cv_;
+  std::condition_variable idle_cv_;  // nothing waiting, nothing running
+  bool running_ = false;
   std::multimap<std::int64_t, Action>
       pending_;  // by time; equal times in order
   bool quit_ = false;

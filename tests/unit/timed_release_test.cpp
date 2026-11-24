@@ -4,8 +4,9 @@
 // media::TimedRelease: what holds a video frame until the time the player
 // released it for. Actions run at their time and in time order, a time that
 // has passed runs at once but not ahead of what is already waiting, a cancel
-// tells each action it was cancelled, a release runs them all at once, and
-// nothing is lost when the object goes away.
+// tells each action it was cancelled, a release runs them all at once, a
+// finish lets them run at their times within a limit, and nothing is lost
+// when the object goes away.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -176,6 +177,48 @@ TEST_CASE("timed release: release runs each action now, in time order",
   // Nothing runs again at its time.
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
   CHECK(ran.count() == 3);
+}
+
+TEST_CASE("timed release: finish runs what waits at its time, within a limit",
+          "[media][timed]") {
+  Ran ran;
+  TimedRelease t;
+  const std::int64_t start = TimedRelease::now_ns();
+  for (int i : {1, 0})
+    t.at(start + (30 + i * 30) * kMs, [&ran, i, start](bool due) {
+      ran.add(i, due, start + (30 + i * 30) * kMs);
+    });
+  t.finish(500 * kMs);
+  // Both ran, in order, each at or after its time; finish returned after the
+  // last, well before its limit.
+  CHECK(ran.ids == std::vector<int>{0, 1});
+  CHECK(ran.due == std::vector<bool>{true, true});
+  for (std::int64_t late : ran.late_ns)
+    CHECK(late >= 0);
+  CHECK(TimedRelease::now_ns() - start < 300 * kMs);
+  CHECK(t.waiting() == 0);
+
+  // A time past the limit: it runs when finish gives up, early.
+  const std::int64_t far = TimedRelease::now_ns() + 150 * kMs;
+  t.at(far, [&ran, far](bool due) { ran.add(2, due, far); });
+  t.finish(10 * kMs);
+  CHECK(ran.count() == 3);
+  CHECK(ran.due[2]);
+  CHECK(ran.late_ns[2] < 0);
+}
+
+TEST_CASE("timed release: finish waits for an action that is running",
+          "[media][timed]") {
+  std::atomic<bool> done{false};
+  TimedRelease t;
+  t.at(0, [&done](bool) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    done = true;
+  });
+  // Let it start.
+  REQUIRE(eventually(500, [&t] { return t.waiting() == 0; }));
+  t.finish(1000 * kMs);
+  CHECK(done);
 }
 
 TEST_CASE("timed release: it is used from many threads", "[media][timed]") {

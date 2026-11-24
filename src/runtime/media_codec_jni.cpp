@@ -1463,6 +1463,9 @@ void JNICALL MC_releaseOutputBuffer(JNIEnv* env,
   }
 }
 
+// How long stopping a codec waits for the frames it holds for their time.
+constexpr std::int64_t kFinishWaitNs = 100'000'000;
+
 void teardown(CodecCtx* ctx) {
   if (ctx == nullptr)
     return;
@@ -1470,11 +1473,13 @@ void teardown(CodecCtx* ctx) {
                   std::memory_order_release);  // stop the async driver (if any)
                                                // before the decoder
   ctx->acv.notify_all();
-  // Frames the app released and that wait for their time go to their
-  // surface now: on Android they are the surface's already, and the codec
-  // going does not take them back. Shown at once, they are at most as early
-  // as the player released them (media3: 50 ms).
-  ctx->present.release_all();
+  // Frames the app released and that wait for their time are still shown at
+  // it: on Android they are the surface's already, and the codec going does
+  // not take them back. A player releases a frame at most 50 ms ahead
+  // (media3); one held longer goes at once. Shown at once instead, the last
+  // frame replaces the one before it on a SurfaceTexture before that is
+  // drawn.
+  ctx->present.finish(kFinishWaitNs);
   if (ctx->audio)
     ctx->audio->wake();
   if (ctx->driver.joinable())
