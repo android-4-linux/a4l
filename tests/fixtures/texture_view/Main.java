@@ -199,11 +199,10 @@ public class Main extends Activity {
                 if (waitMs > 0) handler.postDelayed(release, waitMs);
                 else release.run();
             }
-            // This codec's loop is out: let it go once its last frame is due, then the next
-            // loop, or the end. (a4l drops a frame still waiting for its time when its codec is
-            // stopped.)
+            // This codec's loop is out: let it go at once, its last frame released but not yet
+            // due (as on Android, that frame is still shown), then the next loop, or the end.
             private void next(final MediaCodec mc) {
-                handler.postDelayed(new Runnable() {
+                handler.post(new Runnable() {
                     public void run() {
                         mc.stop();
                         mc.release();
@@ -223,7 +222,7 @@ public class Main extends Activity {
                             System.exit(3);
                         }
                     }
-                }, 100);
+                });
             }
             public void onOutputFormatChanged(MediaCodec mc, MediaFormat fmt) {
                 Log.i(TAG, "TEXTURE: format " + fmt.getInteger(MediaFormat.KEY_WIDTH) + "x"

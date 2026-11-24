@@ -73,6 +73,18 @@ class TimedRelease {
     cv_.notify_all();
   }
 
+  // Run everything waiting now, in time order, on the calling thread: each
+  // action is called with true. For frames a player has released when their
+  // codec goes: on Android they are already the surface's, and shown.
+  void release_all() {
+    std::multimap<std::int64_t, Action> now;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      now.swap(pending_);
+    }
+    for (auto& [when, action] : now)
+      action(true);
+  }
   // Cancel everything waiting. Each action is called with false.
   void cancel_all() {
     std::multimap<std::int64_t, Action> gone;
