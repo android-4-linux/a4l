@@ -298,6 +298,19 @@ int drm_desc_to_dmabuf(const AVDRMFrameDescriptor* desc,
   return 1;
 }
 
+// A hardware frame's size: its own, which FFmpeg gives with the right and
+// bottom crops already taken off (crop_hw_frame applies the rest), not the
+// size the decoder was configured with: a stream can be larger than that, or
+// change size partway. The configured size only where the frame gives none.
+std::uint32_t frame_width(const AVFrame* f, std::uint32_t configured) {
+  return f != nullptr && f->width > 0 ? static_cast<std::uint32_t>(f->width)
+                                      : configured;
+}
+std::uint32_t frame_height(const AVFrame* f, std::uint32_t configured) {
+  return f != nullptr && f->height > 0 ? static_cast<std::uint32_t>(f->height)
+                                       : configured;
+}
+
 // A DRM_PRIME descriptor for a decoded frame: a hwaccel surface (VAAPI/DRM)
 // mapped DIRECT (zero-copy export, no download), or a vendor M2M decoder's
 // already-DRM_PRIME frame used as-is. nullptr on fail.
@@ -659,7 +672,8 @@ int VideoDecoder::next_frame(gfx::DmabufFrame* out, std::string* error) {
     return err(
         "av_hwframe_map(DRM_PRIME) failed (decoder not outputting a hw "
         "surface?)");
-  const int rc = drm_desc_to_dmabuf(desc, d->width, d->height, out);
+  const int rc = drm_desc_to_dmabuf(desc, frame_width(d->hw_frame, d->width),
+                                    frame_height(d->hw_frame, d->height), out);
   if (rc == -2)
     return err("multi-object DRM frame (per-plane fds) not yet supported");
   if (rc != 1)
@@ -1188,7 +1202,8 @@ int CodecDecoder::receive_frame(gfx::DmabufFrame* out,
   const AVDRMFrameDescriptor* desc = map_drm(d->hw_frame, d->drm_frame);
   if (desc == nullptr)
     return err("map DRM_PRIME failed (decoder not outputting a hw surface?)");
-  const int rc = drm_desc_to_dmabuf(desc, d->width, d->height, out);
+  const int rc = drm_desc_to_dmabuf(desc, frame_width(d->hw_frame, d->width),
+                                    frame_height(d->hw_frame, d->height), out);
   if (rc == -2)
     return err("multi-object DRM frame (per-plane fds) not yet supported");
   if (rc != 1)

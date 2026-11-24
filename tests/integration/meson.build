@@ -386,6 +386,17 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 300,
       is_parallel : false,
     )
+    # The same with a 1280x720 clip in the 640x360 TextureView: frames that are converted are
+    # converted at the view's size.
+    test(
+      'texture-view-video-720p',
+      py3,
+      args : [files('run_texture_view_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      env : ['ACL_TEST_VIDEO_SIZE=1280x720'],
+      timeout : 300,
+      is_parallel : false,
+    )
     # The same with an HEVC Main 10 clip, converted from the decoder's 10-bit frames.
     test(
       'texture-view-video-hevc10',

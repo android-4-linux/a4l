@@ -7219,6 +7219,27 @@ extern "C" jlong acl_graphics_surfacetexture_id(jlong st_handle) {
   auto* st = reinterpret_cast<AclSurfaceTexture*>(st_handle);
   return g_st_live.count(st) != 0 ? static_cast<jlong>(st->id) : 0;
 }
+// The size a SurfaceTexture's frames are drawn at, where that is known and
+// nothing else reads them: its default buffer size, which a TextureView sets
+// to its own, while no app GL holds it (an app sampling it in its own GL
+// gets the frames at their size, as on Android). False otherwise. A frame
+// converted for it can be converted at this size: the TextureView draws it
+// there anyway.
+extern "C" bool acl_graphics_surfacetexture_draw_size(jlong st_id,
+                                                      int* w,
+                                                      int* h) {
+  std::lock_guard<std::mutex> live(g_st_live_mu);
+  AclSurfaceTexture* st = st_by_id(st_id);
+  if (st == nullptr || w == nullptr || h == nullptr)
+    return false;
+  std::lock_guard<std::mutex> lk(st->mu);
+  if (st->released || (!st->detached && st->tex_name > 0) || st->def_w <= 0 ||
+      st->def_h <= 0)
+    return false;
+  *w = st->def_w;
+  *h = st->def_h;
+  return true;
+}
 // a4l's EGL hook for binding a decoder's frame as it is.
 extern "C" void acl_graphics_set_st_gl_yuv_hook(StGlBindYuvFn bind) {
   g_st_gl_bind_yuv.store(bind, std::memory_order_release);
@@ -7368,6 +7389,7 @@ void SurfaceTexture_nativeSetDefaultBufferSize(JNIEnv* env,
                                                jint h) {
   auto* st = st_from(env, thiz);
   if (st != nullptr) {
+    std::lock_guard<std::mutex> lk(st->mu);
     st->def_w = w;
     st->def_h = h;
   }

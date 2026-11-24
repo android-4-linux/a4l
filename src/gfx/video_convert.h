@@ -32,14 +32,19 @@ class VideoConverter {
   VideoConverter(const VideoConverter&) = delete;
   VideoConverter& operator=(const VideoConverter&) = delete;
 
-  // Draw `in` into a buffer and fill `*out` with it: the picture's size,
+  // Draw `in` into a buffer and fill `*out` with it: the picture's size, or
+  // `width` x `height` when both are given (the picture scaled to it),
   // DRM_FORMAT_XBGR8888, LINEAR. The buffer has unused rows below the
   // picture. `out->fd` belongs to the converter and
   // `out->hold` keeps the buffer from being drawn into again: whoever keeps
   // the frame keeps the hold, as for a decoder's surface. False, with
   // `error`, when the frame cannot be imported or every buffer is still
   // held; the caller drops the frame. Any thread, one at a time.
-  bool convert(const DmabufFrame& in, DmabufFrame* out, std::string* error);
+  bool convert(const DmabufFrame& in,
+               DmabufFrame* out,
+               std::string* error,
+               std::uint32_t width = 0,
+               std::uint32_t height = 0);
 
   // Buffers the converter keeps for one picture size. More than the video
   // plane holds on screen and in flight (wm: 8 under --split).

@@ -26,6 +26,8 @@
 #
 # ACL_TEST_TEXTURE_KEEP=<dir> keeps the APK, the runs' logs and frames there.
 # ACL_TEST_VIDEO_CODEC picks the clip's codec: h264 (the default), hevc, or hevc10 (HEVC Main 10).
+# ACL_TEST_VIDEO_SIZE=<w>x<h> encodes the clip at that size (default the TextureView's, 640x360);
+#   one larger than the view must be converted at the view's size.
 import glob
 import os
 import re
@@ -160,6 +162,12 @@ def main() -> int:
         return 2
     acl, android_jar = sys.argv[1], sys.argv[2]
     codec = os.environ.get("ACL_TEST_VIDEO_CODEC", "h264")
+    size = os.environ.get("ACL_TEST_VIDEO_SIZE", f"{W}x{H}")
+    m = re.fullmatch(r"(\d+)x(\d+)", size)
+    if not m or int(m.group(1)) % 4 or int(m.group(2)) % 4:
+        sys.stderr.write(f"ACL_TEST_VIDEO_SIZE={size}: <w>x<h>, each a multiple of 4\n")
+        return 2
+    cw, ch = int(m.group(1)), int(m.group(2))
     if codec not in CODECS:
         sys.stderr.write(f"ACL_TEST_VIDEO_CODEC={codec}: one of {', '.join(CODECS)}\n")
         return 2
@@ -197,12 +205,13 @@ def main() -> int:
         enc, mime, raw, _ = CODECS[codec]
         app = os.path.join(work, "app")
         os.makedirs(os.path.join(app, "assets"))
-        box = "drawbox=x={}:y={}:w=320:h=180:color={}:t=fill"
+        qw, qh = cw // 2, ch // 2
+        box = f"drawbox=x={{}}:y={{}}:w={qw}:h={qh}:color={{}}:t=fill"
         g = subprocess.run(
             [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
-             "-i", f"color=c=blue:s={W}x{H}:r=30:d=2," + ",".join(
-                 [box.format(0, 0, "red"), box.format(320, 0, "lime"),
-                  box.format(320, 180, "white")])]
+             "-i", f"color=c=blue:s={cw}x{ch}:r=30:d=2," + ",".join(
+                 [box.format(0, 0, "red"), box.format(qw, 0, "lime"),
+                  box.format(qw, qh, "white")])]
             + enc + ["-f", raw, os.path.join(app, "assets/clip")],
             capture_output=True, text=True)
         if g.returncode != 0:
@@ -295,9 +304,14 @@ def main() -> int:
                 return fail("the frame was copied, not imported")
             # The fixture plays each loop on a codec of its own; the converted runs must make
             # their converter once and share it.
-            made = re.findall(r"a converter for \d+x\d+ frames made in (\d+) ms", out)
+            made = re.findall(r"a converter for (\d+)x(\d+) frames made in (\d+) ms", out)
             if vary and len(made) != 1:
                 return fail(f"{len(made)} converters were made for {LOOPS} codecs, not 1")
+            # A clip larger than the view is converted at the view's size.
+            want = (W, H) if cw * ch > W * H else (cw, ch)
+            if vary and (int(made[0][0]), int(made[0][1])) != want:
+                return fail(f"frames were converted at {made[0][0]}x{made[0][1]}, not "
+                            f"{want[0]}x{want[1]}")
             if not os.path.exists(frame):
                 return fail("no rendered frame was read back")
             wrong = check_frame(frame)
@@ -313,7 +327,8 @@ def main() -> int:
                 refused = "did not take a decoder frame" in out
                 way = (" (YUV, then converted: the device refused it)" if yuv and refused
                        else " (YUV)" if yuv else " (converted)")
-            shared = f", one converter for {LOOPS} codecs (made in {made[0]} ms)" if vary else ""
+            shared = (f", one converter at {made[0][0]}x{made[0][1]} for {LOOPS} codecs (made in "
+                      f"{made[0][2]} ms)" if vary else "")
             notes.append(f"{tag}{way}: {rendered} frames, {updated} updates, picture right"
                          f"{shared}")
         sys.stdout.write("OK: " + "; ".join(notes) + "\n")
