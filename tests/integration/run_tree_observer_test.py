@@ -38,6 +38,7 @@ CHECKS = [
     "TREE: pre-draw cancelled one frame: draws then=0",
     "TREE: global layout again after requestLayout",
     "TREE: draw listener called=true view drawn=true",
+    "TREE: started activity launch order csCrR",
     "TREE: no history second destroyed=true",
     "TREE: clear task first home destroyed=true",
     "TREE: view animation ended",
