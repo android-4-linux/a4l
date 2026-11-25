@@ -153,6 +153,37 @@ public class Main extends Activity {
         log("package uid consistent=" + uids);
         expect(uids, "uid: info " + infoUid + " process " + android.os.Process.myUid()
                 + " caller " + android.os.Binder.getCallingUid());
+        // ImageDecoder from a file: a PNG written here is decoded at its size with its
+        // pixel, and a file that is no image is an IOException, not a crash.
+        boolean decoded = false, refused = false;
+        try {
+            final java.io.File png = new java.io.File(getCacheDir(), "decode.png");
+            final android.graphics.Bitmap src = android.graphics.Bitmap.createBitmap(
+                    12, 7, android.graphics.Bitmap.Config.ARGB_8888);
+            src.eraseColor(0xFF336699);
+            try (java.io.FileOutputStream os = new java.io.FileOutputStream(png)) {
+                src.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, os);
+            }
+            final android.graphics.Bitmap out = android.graphics.ImageDecoder.decodeBitmap(
+                    android.graphics.ImageDecoder.createSource(png))
+                    .copy(android.graphics.Bitmap.Config.ARGB_8888, false);
+            decoded = out.getWidth() == 12 && out.getHeight() == 7
+                    && out.getPixel(5, 3) == 0xFF336699;
+            final java.io.File junk = new java.io.File(getCacheDir(), "decode.junk");
+            try (java.io.FileOutputStream os = new java.io.FileOutputStream(junk)) {
+                os.write(new byte[]{1, 2, 3, 4, 5, 6, 7, 8});
+            }
+            try {
+                android.graphics.ImageDecoder.decodeBitmap(
+                        android.graphics.ImageDecoder.createSource(junk));
+            } catch (java.io.IOException e) {
+                refused = true;
+            }
+        } catch (java.io.IOException e) {
+            Log.w(TAG, "image decode: " + e);
+        }
+        log("image file decoded=" + decoded + " junk refused=" + refused);
+        expect(decoded && refused, "ImageDecoder from a file");
         // The process has the package's name, from both places an app reads it.
         final String proc = android.os.Process.myProcessName();
         log("process name " + proc + " application " + android.app.Application.getProcessName());
