@@ -24,6 +24,13 @@ Repository tooling. Phase 0 placeholder for the items called out in `plan.md` §
   the framework shims require (see `docs/framework-bootstrap.md` A1.1), then `a4l run <apk>
   --vm=art`. Needs a host ART build (`$ACL_ART_HOME`) and the AOSP host toolchain; exits 77 (skip)
   when absent. Example: `ACL_ART_HOME=… tools/run-apk.sh app.apk --present`.
+- **`desktop-entry.sh` - write or remove an APK's desktop entry and icon.** `install <app.apk>`
+  writes `<package>.desktop` and a 256-pixel icon under `$XDG_DATA_HOME`, so the desktop has a
+  name and an icon for the app's window, its notifications and its launcher; the entry starts
+  the app with `run-apk.sh` from this checkout. `remove <app.apk | package>` (or `uninstall`)
+  deletes both; by package it needs neither the APK nor host ART. It reads the APK's manifest
+  and resources and runs none of its code, and leaves alone an entry it did not write.
+  `install` needs what `run-apk.sh` needs.
 - **`record-seccomp.py` - record the system calls a confined app process makes.** Runs APKs
   through `run-apk.sh --split` under `strace` with the filter off and prints the calls the app
   process made, as a list or as the body of `src/confine/seccomp_allow_<arch>.inc` (ADR-0009

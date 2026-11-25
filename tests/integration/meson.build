@@ -401,6 +401,16 @@ if py3.found() and have_gl and have_ffmpeg
         timeout : 300,
       )
     endif
+    # tools/desktop-entry.sh writes and removes an APK's desktop entry: its keys, a label and a
+    # launch command that need escaping, and a file a4l did not write left alone. Needs host
+    # ART; SKIPs otherwise, which includes CI.
+    test(
+      'desktop-entry',
+      py3,
+      args : [files('run_desktop_entry_test.py'), acl_exe],
+      depends : [acl_exe],
+      timeout : 600,
+    )
     # A view's ViewTreeObserver listeners (global layout, pre-draw, draw), for an Activity
     # started from another's onCreate whose view registers before it is in a window. Starts a
     # headless Weston for itself. Needs host ART; SKIPs otherwise, which includes CI.
