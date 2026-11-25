@@ -242,6 +242,25 @@ public class Main extends Activity {
                 && android.graphics.Color.red(end) < 16;
         log("sweep gradient drawn=" + swept);
         expect(swept, String.format("sweep gradient %08x %08x %08x", start, half, end));
+        // drawPoint, drawPoints and drawLines, with a 3-pixel square stroke: each mark is
+        // where it was put, and a pixel between marks is untouched. drawPoints takes its
+        // offset and count in floats; the first pair here is skipped.
+        final android.graphics.Bitmap marks = android.graphics.Bitmap.createBitmap(
+                40, 20, android.graphics.Bitmap.Config.ARGB_8888);
+        final android.graphics.Canvas markCanvas = new android.graphics.Canvas(marks);
+        final android.graphics.Paint mark = new android.graphics.Paint();
+        mark.setColor(0xFF00FF00);
+        mark.setStrokeWidth(3);
+        markCanvas.drawPoint(4, 4, mark);
+        markCanvas.drawPoints(new float[]{30, 4, 12, 4, 20, 4}, 2, 4, mark);
+        markCanvas.drawLines(new float[]{4, 14, 16, 14, 24, 14, 36, 14}, mark);
+        final boolean marked = marks.getPixel(4, 4) == 0xFF00FF00
+                && marks.getPixel(12, 4) == 0xFF00FF00 && marks.getPixel(20, 4) == 0xFF00FF00
+                && marks.getPixel(30, 4) == 0 && marks.getPixel(8, 4) == 0
+                && marks.getPixel(10, 14) == 0xFF00FF00 && marks.getPixel(30, 14) == 0xFF00FF00
+                && marks.getPixel(20, 14) == 0;
+        log("points and lines drawn=" + marked);
+        expect(marked, "drawPoint, drawPoints, drawLines");
     }
 
     @Override
