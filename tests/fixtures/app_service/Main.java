@@ -33,6 +33,15 @@ public class Main extends Activity {
     final Handler main = new Handler(Looper.getMainLooper());
     int step;
 
+    // True when the file's group and others have no permission on it.
+    private static boolean ownerOnly(java.io.File f) {
+        try {
+            return (android.system.Os.stat(f.getPath()).st_mode & 077) == 0;
+        } catch (android.system.ErrnoException e) {
+            return false;
+        }
+    }
+
     static void log(String s) {
         Log.i(TAG, "SERVICE: " + s);
     }
@@ -95,6 +104,38 @@ public class Main extends Activity {
         log("bitmap pixel set=" + set);
         expect(set, String.format("setPixel read back %08x %08x %08x", dots.getPixel(1, 2),
                 dots.getPixel(3, 0), dots.getPixel(2, 2)));
+        // The app's own accounts: added with a password and user data, listed by type,
+        // changed, and removed. The file they are kept in is the owner's alone.
+        final android.accounts.AccountManager am = android.accounts.AccountManager.get(this);
+        expect(am != null, "AccountManager.get() is null");
+        final android.accounts.Account acct =
+                new android.accounts.Account("user@example", "com.acl.svc.account");
+        for (android.accounts.Account old : am.getAccountsByType(acct.type)) {
+            am.removeAccountExplicitly(old);  // from a run that did not finish
+        }
+        final Bundle data = new Bundle();
+        data.putString("region", "us");
+        final boolean added = am.addAccountExplicitly(acct, "secret", data);
+        final boolean twice = am.addAccountExplicitly(acct, "other", null);
+        final android.accounts.Account[] mine = am.getAccountsByType(acct.type);
+        final android.accounts.Account[] others = am.getAccountsByType("com.acl.svc.none");
+        am.setUserData(acct, "tier", "premium");
+        am.setAuthToken(acct, "api", "token-1");
+        final java.io.File kept = new java.io.File(getDataDir(), "a4l_accounts.json");
+        final boolean stored = added && !twice && mine.length == 1 && acct.equals(mine[0])
+                && others.length == 0 && am.getAccounts().length == 1
+                && "secret".equals(am.getPassword(acct))
+                && "us".equals(am.getUserData(acct, "region"))
+                && "premium".equals(am.getUserData(acct, "tier"))
+                && "token-1".equals(am.peekAuthToken(acct, "api"))
+                && kept.isFile() && ownerOnly(kept);
+        am.invalidateAuthToken(acct.type, "token-1");
+        final boolean dropped = am.peekAuthToken(acct, "api") == null;
+        final boolean removed = am.removeAccountExplicitly(acct)
+                && am.getAccountsByType(acct.type).length == 0
+                && !am.removeAccountExplicitly(acct);
+        log("accounts stored=" + stored + " token dropped=" + dropped + " removed=" + removed);
+        expect(stored && dropped && removed, "accounts");
         // The process has the package's name, from both places an app reads it.
         final String proc = android.os.Process.myProcessName();
         log("process name " + proc + " application " + android.app.Application.getProcessName());

@@ -1519,6 +1519,15 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("account".equals(name)) {
+                // AccountManager over the app's own accounts (AppAccounts). One per process:
+                // it holds the accounts. Never null: AccountManager.get() is declared
+                // non-null and an app that injects it fails on null.
+                Object made = madeManager(name);
+                if (made != null) return made;
+                final Object am = AppAccounts.manager(this, getDataDir());
+                return am != null ? keepManager(name, am) : null;
+            }
             if ("shortcut".equals(name)) {
                 // ShortcutManager(Context, IShortcutService). There is no launcher to publish
                 // shortcuts to: sets and updates are accepted and dropped, queries are empty.
@@ -1694,6 +1703,7 @@ public final class HostBootstrap {
         @Override public String getSystemServiceName(Class<?> serviceClass) {
             if (serviceClass == android.app.ActivityManager.class) return "activity";
             if (serviceClass == android.app.usage.UsageStatsManager.class) return "usagestats";
+            if (serviceClass == android.accounts.AccountManager.class) return "account";
             if (serviceClass == android.content.pm.ShortcutManager.class) return "shortcut";
             if (serviceClass == android.appwidget.AppWidgetManager.class) return "appwidget";
             if (serviceClass == android.media.MediaRouter.class) return "media_router";
