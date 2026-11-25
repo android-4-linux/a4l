@@ -124,6 +124,29 @@ Java_com_acl_ndktest_Main_donorReuse(JNIEnv* env, jclass clazz) {
   (*env)->DeleteGlobalRef(env, g_reuse_class);
   return (jint)(long)ret;
 }
+// Installs a SIGSEGV handler of its own, as a crash reporter's native part does, and looks
+// again a moment later. a4l's handler has to be back: ART takes faults it recovers from (the
+// null checks in compiled code), and a reporter's handler in front of ART's treats the first
+// of them as a crash and ends the process. The kernel's rt_sigaction is called directly, so
+// the answer does not depend on which libc's struct sigaction this is compiled against.
+// Returns 1 when the handler that was there before is there again, 0 when this library's is
+// still in place, 2 for anything else, negative for a call that failed.
+extern long syscall(long number, ...);
+struct ndktest_ksigaction { void* handler; unsigned long flags; void* restorer; unsigned long mask; };
+static void ndktest_own_handler(int sig) { (void)sig; }
+JNIEXPORT jint JNICALL
+Java_com_acl_ndktest_Main_handlerKept(JNIEnv* e, jclass c) {
+  enum { kRtSigaction = 13, kSigsegv = 11 };
+  struct ndktest_ksigaction before = {0}, mine, now = {0};
+  if (syscall(kRtSigaction, kSigsegv, (void*)0, &before, 8L) != 0) return -1;
+  mine = before;                       // keeps the restorer and flags the kernel needs
+  mine.handler = (void*)ndktest_own_handler;
+  if (syscall(kRtSigaction, kSigsegv, &mine, (void*)0, 8L) != 0) return -2;
+  usleep(300000);
+  if (syscall(kRtSigaction, kSigsegv, (void*)0, &now, 8L) != 0) return -3;
+  if (now.handler == (void*)ndktest_own_handler) return 0;
+  return now.handler == before.handler ? 1 : 2;
+}
 // Decoy for the bind-by-name path: an EXPORTED Java_<class>_answer, while JNI_OnLoad below ALSO
 // RegisterNatives-binds answer() to the_registered (4250). A RegisterNatives binding is the app's
 // explicit choice and must win, so acl's name binding has to skip methods JNI_OnLoad already

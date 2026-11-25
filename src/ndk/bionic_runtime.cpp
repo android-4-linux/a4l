@@ -1474,31 +1474,33 @@ int reassert_fault_shims() {
 }
 std::atomic<bool> g_crashpad_keeper_armed{false};
 void* crashpad_shim_keeper(void*) {
-  // Re-assert every ~20ms for ~60s — covers crashpad's (repeated) GPU-process
-  // init installs. A normal thread (not a signal handler), so log/syscalls here
-  // are fine. Cheap; exits after the window.
-  bool announced = false;
-  for (int i = 0; i < 6000;
-       ++i) {  // ~60s at 10ms cadence (matches the ACL_WV_FAULT_CATCH poker)
+  // Re-assert a4l's handlers over whatever a crash reporter installs. A normal
+  // thread (not a signal handler), so log and syscalls here are fine.
+  // Every 10 ms for the first minute, when a library's init installs its
+  // handlers (the cadence of the ACL_WV_FAULT_CATCH poker), then every 100 ms
+  // for as long as the process runs: a crash reporter installs its handlers
+  // again when it opens a new session, long after start.
+  int announced = 0;
+  for (std::uint64_t i = 0;; ++i) {
     const int n = reassert_fault_shims();
-    if (n > 0 && !announced) {
-      announced = true;
-      log::i(
-          kTag,
-          "crashpad shim-keeper: reclaimed {} fault handler(s) from crashpad",
-          n);
+    if (n > 0 && announced < 4) {
+      ++announced;
+      log::i(kTag,
+             "shim-keeper: took back {} fault handler(s) an app library "
+             "installed over a4l's",
+             n);
     }
-    usleep(10000);
+    usleep(i < 6000 ? 10000 : 100000);
   }
   return nullptr;
 }
-// Arm the keeper when the chromium WebView lib loads (the only thing that ships
-// crashpad). On by default; opt out with ACL_NO_CRASHPAD_SHIM_KEEPER.
+// Arm the keeper when the first app library loads. Any of them may install
+// fault handlers of its own with bionic's sigaction, over a4l's: the chromium
+// WebView's crashpad does, and so do the crash reporters apps ship
+// (Crashlytics, Sentry, Breakpad). There is no telling from a library's name.
+// On by default; opt out with ACL_NO_CRASHPAD_SHIM_KEEPER.
 void maybe_install_crashpad_shim_keeper(const char* lib) {
   if (lib == nullptr)
-    return;
-  if (std::strstr(lib, "webviewchromium") == nullptr &&
-      std::strstr(lib, "libmonochrome") == nullptr)
     return;
   if (std::getenv("ACL_NO_CRASHPAD_SHIM_KEEPER") != nullptr)
     return;
@@ -1508,8 +1510,8 @@ void maybe_install_crashpad_shim_keeper(const char* lib) {
   if (pthread_create(&t, nullptr, crashpad_shim_keeper, nullptr) == 0) {
     pthread_detach(t);
     log::i(kTag,
-           "crashpad shim-keeper armed (re-asserting acl's fault shim over "
-           "crashpad during WebView init)");
+           "shim-keeper armed (keeping a4l's fault handlers over any an app "
+           "library installs)");
   }
 }
 

@@ -60,6 +60,13 @@ DONOR_CHECKS = [
     "DONOR: second attached thread got 4250",
 ]
 
+# --handler: the library installs a SIGSEGV handler of its own, as a crash reporter does, and
+# 300 ms later a4l's is in place again.
+HANDLER_CHECKS = [
+    "shim-keeper armed",
+    "HANDLER: a4l's fault handler back=1",
+]
+
 CHECKS = [
     "NDK bionic loader armed",   # the gated nativeLoad hook installed (bootstraps lazily)
     "loaded bionic native lib",   # routed as bionic (not glibc dlopen)
@@ -87,10 +94,13 @@ def main() -> int:
     donor = "--donor" in argv             # attach-after-detach mode; see DONOR_CHECKS
     if donor:
         argv.remove("--donor")
+    handler = "--handler" in argv         # fault-handler keeper mode; see HANDLER_CHECKS
+    if handler:
+        argv.remove("--handler")
     if len(argv) != 4:
         sys.stderr.write(
             "usage: run_ndk_art_test.py <acl> <src_root> <android.jar> <ndk.apk> "
-            "[--worker|--donor]\n")
+            "[--worker|--donor|--handler]\n")
         return 2
     acl, src_root, android_jar, ndk_apk = argv
 
@@ -188,6 +198,9 @@ def main() -> int:
             env["ACL_NDK_TEST_WORKER"] = "1"  # the fixture also calls the native off-main-thread
         if donor:
             env["ACL_NDK_TEST_DONOR"] = "1"
+        if handler:
+            env["ACL_NDK_TEST_HANDLER"] = "1"
+            env.pop("ACL_NO_CRASHPAD_SHIM_KEEPER", None)
         p = subprocess.run([acl, "run", apk, "--vm=art"],
                            env=env, capture_output=True, text=True, timeout=300)
         out = p.stdout + p.stderr
@@ -198,7 +211,15 @@ def main() -> int:
         subprocess.run(["rm", "-rf", work], check=False)
 
     ok = True
-    if donor:
+    if handler:
+        if p.returncode != 0:
+            sys.stderr.write(f"FAIL: fault-handler keeper: acl exit {p.returncode}\n")
+            ok = False
+        for c in HANDLER_CHECKS:
+            if c not in out:
+                sys.stderr.write(f"FAIL: missing '{c}'\n")
+                ok = False
+    elif donor:
         if p.returncode != 0:
             sys.stderr.write(f"FAIL: attach after detach: acl exit {p.returncode}\n")
             ok = False
@@ -230,7 +251,10 @@ def main() -> int:
     if not ok:
         sys.stderr.write("--- captured output ---\n" + out + "\n")
         return 1
-    if donor:
+    if handler:
+        sys.stdout.write("OK: a4l's fault handler was back in place after an app library "
+                         "installed its own\n")
+    elif donor:
         sys.stdout.write("OK: a native thread that attached after another had detached took a "
                          "native call from Java on its own TCB\n")
     elif worker:
