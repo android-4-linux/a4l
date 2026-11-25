@@ -2445,6 +2445,20 @@ public final class HostBootstrap {
     static final class AppPackageManager extends StubPackageManager {
         private final String pkg;
         AppPackageManager(String pkg) { this.pkg = pkg; }
+        // A <property> the manifest does not declare is a NameNotFoundException, which is
+        // what callers catch: Environment.isExternalStorageLegacy() reads one and takes the
+        // exception for "not set". The base class throws UnsupportedOperationException, which
+        // nobody catches. a4l reads no <property> elements, so none is ever found.
+        @Override public android.content.pm.PackageManager.Property getProperty(
+                String propertyName, String packageName)
+                throws android.content.pm.PackageManager.NameNotFoundException {
+            throw new android.content.pm.PackageManager.NameNotFoundException(propertyName);
+        }
+        @Override public android.content.pm.PackageManager.Property getProperty(
+                String propertyName, android.content.ComponentName component)
+                throws android.content.pm.PackageManager.NameNotFoundException {
+            throw new android.content.pm.PackageManager.NameNotFoundException(propertyName);
+        }
         // One app in the process, so every caller is this package whatever uid
         // Binder.getCallingUid() gives. MediaBrowserService checks a connecting client's
         // package against these and takes null for a caller it cannot name.
