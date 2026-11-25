@@ -432,6 +432,21 @@ if py3.found() and have_gl and have_ffmpeg
       depends : [acl_exe],
       timeout : 300,
     )
+    # An app's MediaSession is an MPRIS player on the session bus: its track, picture,
+    # position and playback state, and Pause, Play, Next and SetPosition back to the session;
+    # and the session's own notification is held back while the player is on the bus. Runs a
+    # private session bus with a stand-in notification daemon and a headless Weston, and acts
+    # as the desktop with gdbus.
+    # Needs host ART and sdbus-c++; SKIPs otherwise, which includes CI.
+    if have_sdbus
+      test(
+        'mpris',
+        py3,
+        args : [files('run_mpris_test.py'), acl_exe, framework_android_jar, notify_stub],
+        depends : [acl_exe, notify_stub],
+        timeout : 300,
+      )
+    endif
     # A view's ViewTreeObserver listeners (global layout, pre-draw, draw), for an Activity
     # started from another's onCreate whose view registers before it is in a window. Starts a
     # headless Weston for itself. Needs host ART; SKIPs otherwise, which includes CI.
