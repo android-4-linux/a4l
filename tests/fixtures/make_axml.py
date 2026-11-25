@@ -140,7 +140,7 @@ def end_elem(pool, name):
 
 def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity",
                permissions=None, services=None, launcher_theme=None, activities=None,
-               receivers=None):
+               receivers=None, label="Example"):
     pool = Pool()
     uri = lambda: pool.sid(ANDROID_URI)          # noqa: E731
     a = lambda name, val: _attribute(pool, uri(), pool.sid(name), val)  # noqa: E731
@@ -166,7 +166,7 @@ def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity",
         a("targetSdkVersion", ("int", 33)),
     ])
     body += end_elem(pool, "uses-sdk")
-    body += start_elem(pool, "application", [a("label", ("str", "Example"))])
+    body += start_elem(pool, "application", [a("label", ("str", label))])
     launcher_attrs = [a("name", ("str", launcher))]
     if launcher_theme is not None:
         launcher_attrs.append(a("theme", ("ref", launcher_theme)))
