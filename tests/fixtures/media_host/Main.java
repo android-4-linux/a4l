@@ -8,7 +8,8 @@
 // interface instead (org.acl.internal.MediaHost).
 //
 // The service logs "MEDIAHOST: onGetRoot ..." with whether the caller it was given is this
-// package with this process's uid, which is what a service checks before it answers.
+// package with this process's uid, which is what a service checks before it answers, and
+// "MEDIAHOST: session ..." for its MediaSession: see sessionRoundTrip.
 package com.acl.mediahost;
 
 import android.app.Activity;
@@ -17,7 +18,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.media.MediaDescription;
 import android.media.browse.MediaBrowser.MediaItem;
+import android.media.MediaMetadata;
+import android.media.session.MediaController;
 import android.media.session.MediaSession;
+import android.media.session.MediaSessionManager;
+import android.media.session.PlaybackState;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.service.media.MediaBrowserService;
@@ -49,7 +56,73 @@ public class Main extends Activity {
         @Override public void onCreate() {
             super.onCreate();
             // A browser's connection completes once the service has a session token.
-            setSessionToken(new MediaSession(this, "media-host").getSessionToken());
+            final MediaSession session = new MediaSession(this, "media-host");
+            setSessionToken(session.getSessionToken());
+            sessionRoundTrip(session);
+        }
+
+        // What the session is given, a MediaController reads back and is told of when it
+        // changes; what the controller asks for, the session's callback is given. Logs one
+        // "MEDIAHOST: session ..." line once the main looper has delivered all of it.
+        private void sessionRoundTrip(final MediaSession session) {
+            final Handler main = new Handler(Looper.getMainLooper());
+            final StringBuilder commands = new StringBuilder();
+            session.setCallback(new MediaSession.Callback() {
+                @Override public void onPlay() { commands.append("play "); }
+                @Override public void onPause() { commands.append("pause "); }
+                @Override public void onSkipToNext() { commands.append("next "); }
+                @Override public void onSeekTo(long pos) { commands.append("seek" + pos + " "); }
+                @Override public void onPlayFromMediaId(String id, Bundle extras) {
+                    commands.append("id:" + id + " ");
+                }
+            }, main);
+            session.setMetadata(new MediaMetadata.Builder()
+                    .putString(MediaMetadata.METADATA_KEY_TITLE, "Song")
+                    .putString(MediaMetadata.METADATA_KEY_ARTIST, "Band")
+                    .putLong(MediaMetadata.METADATA_KEY_DURATION, 180000).build());
+            session.setPlaybackState(new PlaybackState.Builder()
+                    .setState(PlaybackState.STATE_PLAYING, 1500, 1f)
+                    .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE).build());
+            session.setActive(true);
+
+            final MediaController controller =
+                    new MediaController(this, session.getSessionToken());
+            final MediaMetadata md = controller.getMetadata();
+            final PlaybackState ps = controller.getPlaybackState();
+            final boolean read = md != null && ps != null
+                    && "Song".equals(md.getString(MediaMetadata.METADATA_KEY_TITLE))
+                    && "Band".equals(md.getString(MediaMetadata.METADATA_KEY_ARTIST))
+                    && md.getLong(MediaMetadata.METADATA_KEY_DURATION) == 180000
+                    && ps.getState() == PlaybackState.STATE_PLAYING && ps.getPosition() == 1500
+                    && getPackageName().equals(controller.getPackageName());
+            final int[] told = {0};
+            controller.registerCallback(new MediaController.Callback() {
+                @Override public void onMetadataChanged(MediaMetadata m) {
+                    if (m != null && "Next".equals(m.getString(MediaMetadata.METADATA_KEY_TITLE)))
+                        told[0] |= 1;
+                }
+                @Override public void onPlaybackStateChanged(PlaybackState st) {
+                    if (st != null && st.getState() == PlaybackState.STATE_PAUSED) told[0] |= 2;
+                }
+            }, main);
+            session.setMetadata(new MediaMetadata.Builder()
+                    .putString(MediaMetadata.METADATA_KEY_TITLE, "Next").build());
+            session.setPlaybackState(new PlaybackState.Builder()
+                    .setState(PlaybackState.STATE_PAUSED, 0, 0f).build());
+            final MediaController.TransportControls t = controller.getTransportControls();
+            t.play();
+            t.pause();
+            t.skipToNext();
+            t.seekTo(42000);
+            t.playFromMediaId("track-1", null);
+            final int active = ((MediaSessionManager) getSystemService(MEDIA_SESSION_SERVICE))
+                    .getActiveSessions(null).size();
+            main.post(new Runnable() {
+                @Override public void run() {
+                    Log.i("acl", "MEDIAHOST: session read=" + read + " told=" + told[0]
+                            + " active=" + active + " commands=" + commands.toString().trim());
+                }
+            });
         }
 
         @Override public BrowserRoot onGetRoot(String clientPackage, int clientUid, Bundle hints) {

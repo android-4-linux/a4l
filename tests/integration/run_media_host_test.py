@@ -9,6 +9,10 @@
 # process's uid as its client, the browser reads the root, and the root's two children come
 # back with their flags and titles.
 #
+# The fixture also checks its MediaSession: a MediaController reads the metadata and playback
+# state it set and is told when they change, the session manager lists it as active, and the
+# controller's play, pause, skipToNext, seekTo and playFromMediaId reach its callback.
+#
 # Needs a host ART build (ACL_ART_HOME) and the AOSP toolchain. Exits 77 (skip) without them.
 #
 # Usage: run_media_host_test.py <a4l> <android.jar>
@@ -30,6 +34,11 @@ WANT = [
     "acl media:   [browse] albums 'Albums'",
     "acl media:   [play] track-1 'Track 1'",
 ]
+
+
+# The session line comes when the main looper gets to it, so its place is not checked.
+SESSION = ("MEDIAHOST: session read=true told=3 active=1 "
+           "commands=play pause next seek42000 id:track-1")
 
 
 def first(*paths):
@@ -107,6 +116,9 @@ def main():
             if at < 0:
                 sys.stderr.write(f"FAIL: missing, or out of order: {want}\n{story}\n")
                 return 1
+        if SESSION not in out:
+            sys.stderr.write(f"FAIL: missing: {SESSION}\n{story}\n")
+            return 1
         if p.returncode != 0:
             sys.stderr.write(f"FAIL: a4l exited {p.returncode}\n{story}\n")
             return 1

@@ -5166,73 +5166,36 @@ public final class HostBootstrap {
                 });
     }
 
-    // ISessionManager: MediaSession.<init> does mBinder = manager.createSession(...) and then
-    // immediately mBinder.getController() to build its Token, so a defaulted null ISession NPEs
-    // every media app at construction. Hand back a no-op ISession whose getController() is a no-op
-    // ISessionController; the session's later setFlags/setMediaButtonReceiver/setPlaybackState
-    // calls are accepted and dropped (acl has no system media-session router yet, so a published
-    // session simply has no external subscribers).
+    // ISessionManager: the app's media sessions are kept by MediaSessions, which answers
+    // ISession and ISessionController too.
     private static Object makeSessionManagerHandler(Class<?> iface) {
         return java.lang.reflect.Proxy.newProxyInstance(
                 iface.getClassLoader(), new Class<?>[]{iface},
-                (p, method, a) -> {
-                    if ("createSession".equals(method.getName())) {
-                        try {
-                            return makeSessionHandler(Class.forName("android.media.session.ISession"));
-                        } catch (Throwable t) {
-                            return null;
-                        }
-                    }
-                    return defaultValue(method.getReturnType());
-                });
+                (p, method, a) -> MediaSessions.managerCall(method, a));
     }
 
-    private static Object makeSessionHandler(Class<?> iface) {
-        return java.lang.reflect.Proxy.newProxyInstance(
-                iface.getClassLoader(), new Class<?>[]{iface},
-                (p, method, a) -> {
-                    if ("getController".equals(method.getName())) {
-                        try {
-                            return makeSessionControllerHandler(
-                                    Class.forName("android.media.session.ISessionController"));
-                        } catch (Throwable t) {
-                            return null;
-                        }
-                    }
-                    return defaultValue(method.getReturnType());
-                });
-    }
-
-    // ISessionController: everything defaults but the volume attributes. A session always has
-    // them on Android (MediaController.getPlaybackInfo is never null there), and
-    // MediaControllerCompat callers read getPlaybackInfo().getPlaybackType() unguarded. Report
-    // local playback on the music stream, with the host's master volume.
-    private static Object makeSessionControllerHandler(Class<?> iface) {
-        return java.lang.reflect.Proxy.newProxyInstance(
-                iface.getClassLoader(), new Class<?>[]{iface},
-                (p, method, a) -> {
-                    if ("getVolumeAttributes".equals(method.getName())) {
-                        try {
-                            final int music = android.media.AudioManager.STREAM_MUSIC;
-                            java.lang.reflect.Constructor<?> c = method.getReturnType()
-                                    .getDeclaredConstructor(int.class, int.class, int.class,
-                                            int.class, android.media.AudioAttributes.class,
-                                            String.class);
-                            c.setAccessible(true);
-                            return c.newInstance(
-                                    android.media.session.MediaController.PlaybackInfo.PLAYBACK_TYPE_LOCAL,
-                                    android.media.VolumeProvider.VOLUME_CONTROL_ABSOLUTE,
-                                    AudioBridge.maxVolume(music), AudioBridge.getVolume(music),
-                                    new android.media.AudioAttributes.Builder()
-                                            .setLegacyStreamType(music).build(),
-                                    null);
-                        } catch (Throwable t) {
-                            android.util.Log.w("acl", "session volume attributes: " + t);
-                            return null;
-                        }
-                    }
-                    return defaultValue(method.getReturnType());
-                });
+    // A session's MediaController.PlaybackInfo. A session always has one on Android
+    // (MediaController.getPlaybackInfo is never null there), and MediaControllerCompat callers
+    // read getPlaybackInfo().getPlaybackType() unguarded. Local playback on the music stream,
+    // with the host's master volume.
+    static Object sessionVolumeAttributes(Class<?> type) {
+        try {
+            final int music = android.media.AudioManager.STREAM_MUSIC;
+            java.lang.reflect.Constructor<?> c = type.getDeclaredConstructor(int.class,
+                    int.class, int.class, int.class, android.media.AudioAttributes.class,
+                    String.class);
+            c.setAccessible(true);
+            return c.newInstance(
+                    android.media.session.MediaController.PlaybackInfo.PLAYBACK_TYPE_LOCAL,
+                    android.media.VolumeProvider.VOLUME_CONTROL_ABSOLUTE,
+                    AudioBridge.maxVolume(music), AudioBridge.getVolume(music),
+                    new android.media.AudioAttributes.Builder()
+                            .setLegacyStreamType(music).build(),
+                    null);
+        } catch (Throwable t) {
+            android.util.Log.w("acl", "session volume attributes: " + t);
+            return null;
+        }
     }
 
     // IThermalService: the kernel thermal zones, via svc/power.
