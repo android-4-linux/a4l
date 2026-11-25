@@ -54,6 +54,7 @@ CHECKS = [
     "SERVICE: base context chain ends=true",
     f"SERVICE: process name {PACKAGE} application {PACKAGE}",
     "SERVICE: sweep gradient drawn=true",
+    "SERVICE: points and lines drawn=true",
     "SERVICE: refused other=false implicit=false/null undeclared=false",
     "SERVICE: local connected .Main$LocalService add=5",
     "SERVICE: local after unbind created=1 unbound=1 destroyed=1",

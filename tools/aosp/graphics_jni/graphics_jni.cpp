@@ -1189,6 +1189,71 @@ void Canvas_nDrawLine(JNIEnv*,
     c->drawLine(x0, y0, x1, y1, p ? *p : SkPaint());
 }
 
+// drawPoint, drawPoints and drawLines. A point is drawn as Skia draws one: a
+// square or a round dot of the paint's stroke width, by its cap. pts holds x, y
+// pairs from offset; count is the number of floats, as the Java side passes it,
+// and drawLines takes them four to a line.
+void Canvas_nDrawPoint(JNIEnv*,
+                       jclass,
+                       jlong canvas,
+                       jfloat x,
+                       jfloat y,
+                       jlong paint) {
+  tick_draw();
+  auto* c = canvas_sk(canvas);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  if (c != nullptr)
+    c->drawPoint(x, y, ap != nullptr ? ap->paint : SkPaint());
+}
+
+void draw_point_array(JNIEnv* env,
+                      jlong canvas,
+                      jfloatArray pts,
+                      jint offset,
+                      jint count,
+                      jlong paint,
+                      SkCanvas::PointMode mode) {
+  tick_draw();
+  auto* c = canvas_sk(canvas);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  if (c == nullptr || pts == nullptr || offset < 0 || count < 2)
+    return;
+  const jsize len = env->GetArrayLength(pts);
+  if (offset > len || count > len - offset)
+    return;  // Canvas.java has checked this; a bad range draws nothing
+  const std::size_t points = static_cast<std::size_t>(count) / 2;
+  std::vector<jfloat> xy(points * 2);
+  env->GetFloatArrayRegion(pts, offset, static_cast<jsize>(xy.size()),
+                           xy.data());
+  std::vector<SkPoint> sk(points);
+  for (std::size_t i = 0; i < points; ++i)
+    sk[i] = SkPoint::Make(xy[i * 2], xy[i * 2 + 1]);
+  c->drawPoints(mode, sk.size(), sk.data(),
+                ap != nullptr ? ap->paint : SkPaint());
+}
+
+void Canvas_nDrawPoints(JNIEnv* env,
+                        jclass,
+                        jlong canvas,
+                        jfloatArray pts,
+                        jint offset,
+                        jint count,
+                        jlong paint) {
+  draw_point_array(env, canvas, pts, offset, count, paint,
+                   SkCanvas::kPoints_PointMode);
+}
+
+void Canvas_nDrawLines(JNIEnv* env,
+                       jclass,
+                       jlong canvas,
+                       jfloatArray pts,
+                       jint offset,
+                       jint count,
+                       jlong paint) {
+  draw_point_array(env, canvas, pts, offset, count, paint,
+                   SkCanvas::kLines_PointMode);
+}
+
 void Canvas_nDrawOval(JNIEnv*,
                       jclass,
                       jlong canvas,
@@ -8941,6 +9006,9 @@ const JNINativeMethod kBaseCanvas[] = {
     {"nDrawColor", "(JII)V", reinterpret_cast<void*>(Canvas_nDrawColor)},
     {"nDrawRect", "(JFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawRect)},
     {"nDrawLine", "(JFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawLine)},
+    {"nDrawPoint", "(JFFJ)V", reinterpret_cast<void*>(Canvas_nDrawPoint)},
+    {"nDrawPoints", "(J[FIIJ)V", reinterpret_cast<void*>(Canvas_nDrawPoints)},
+    {"nDrawLines", "(J[FIIJ)V", reinterpret_cast<void*>(Canvas_nDrawLines)},
     {"nDrawOval", "(JFFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawOval)},
     {"nDrawCircle", "(JFFFJ)V", reinterpret_cast<void*>(Canvas_nDrawCircle)},
     {"nDrawArc", "(JFFFFFFZJ)V", reinterpret_cast<void*>(Canvas_nDrawArc)},
