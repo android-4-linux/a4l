@@ -83,6 +83,18 @@ public class Main extends Activity {
         log("system resources sized=" + sized);
         expect(sized, "system resources " + sys.widthPixels + "x" + sys.heightPixels
                 + ", app " + app.widthPixels + "x" + app.heightPixels);
+        // Bitmap.setPixel: an opaque color and a translucent one read back as written, and
+        // the pixels beside them are untouched.
+        final android.graphics.Bitmap dots = android.graphics.Bitmap.createBitmap(
+                4, 4, android.graphics.Bitmap.Config.ARGB_8888);
+        dots.setPixel(1, 2, 0xFF336699);
+        dots.setPixel(3, 0, 0x80FF0000);
+        final boolean set = dots.getPixel(1, 2) == 0xFF336699
+                && dots.getPixel(3, 0) == 0x80FF0000
+                && dots.getPixel(2, 2) == 0 && dots.getPixel(0, 0) == 0;
+        log("bitmap pixel set=" + set);
+        expect(set, String.format("setPixel read back %08x %08x %08x", dots.getPixel(1, 2),
+                dots.getPixel(3, 0), dots.getPixel(2, 2)));
         // The process has the package's name, from both places an app reads it.
         final String proc = android.os.Process.myProcessName();
         log("process name " + proc + " application " + android.app.Application.getProcessName());
