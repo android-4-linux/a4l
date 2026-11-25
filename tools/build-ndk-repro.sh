@@ -80,6 +80,50 @@ static jint the_registered(JNIEnv* env, jclass clazz) {
   jint sum = (*env)->CallStaticIntMethod(env, clazz, mid, 20, 30);  // varargs up-call -> 50
   return 4200 + sum;                          // expect 4250
 }
+// Two native threads, one after the other. Each attaches to the VM, calls Main.callBack(),
+// which calls the native answer(), and detaches. callBack() is a call down from Java on a
+// native thread, which is when a4l notes the thread's bionic TCB against the glibc-side donor
+// the thread borrowed at attach. The first thread's detach gives that donor back to the pool
+// and the second thread is given the same one. answer() calls back up (helper), so the second
+// thread's round trip only works if its call down ran on ITS bionic TCB and not on the one
+// the first thread left noted in the donor. The first thread stays alive, detached, until the
+// second is done: were it to exit, the second thread's TCB could land at the address the
+// first one's had, and the stale note would be right by accident. Returns what the second
+// callBack() returned, 4250, or a negative number for the step that failed.
+extern int pthread_create(long* t, const void* attr, void* (*fn)(void*), void* arg);
+extern int pthread_join(long t, void** ret);
+static JavaVM* g_reuse_vm;
+static jclass g_reuse_class;
+static volatile int g_reuse_first_done, g_reuse_release;
+static void* reuse_thread(void* first) {
+  JNIEnv* env = 0;
+  if ((*g_reuse_vm)->AttachCurrentThread(g_reuse_vm, (void**)&env, 0) != JNI_OK) return (void*)-2;
+  jmethodID mid = (*env)->GetStaticMethodID(env, g_reuse_class, "callBack", "()I");
+  long r = mid ? (*env)->CallStaticIntMethod(env, g_reuse_class, mid) : -3;
+  (*g_reuse_vm)->DetachCurrentThread(g_reuse_vm);
+  if (first) {
+    g_reuse_first_done = 1;
+    while (!g_reuse_release) usleep(1000);
+  }
+  return (void*)r;
+}
+JNIEXPORT jint JNICALL
+Java_com_acl_ndktest_Main_donorReuse(JNIEnv* env, jclass clazz) {
+  if ((*env)->GetJavaVM(env, &g_reuse_vm) != JNI_OK) return -10;
+  g_reuse_class = (jclass)(*env)->NewGlobalRef(env, clazz);
+  long t = 0;
+  void* ret = 0;
+  long first = 0;
+  void* first_ret = 0;
+  if (pthread_create(&first, 0, reuse_thread, (void*)1) != 0) return -11;
+  while (!g_reuse_first_done) usleep(1000);
+  const int second = pthread_create(&t, 0, reuse_thread, 0) != 0 || pthread_join(t, &ret) != 0;
+  g_reuse_release = 1;
+  if (pthread_join(first, &first_ret) != 0 || (long)first_ret != 4250) return -13;
+  if (second) return -12;
+  (*env)->DeleteGlobalRef(env, g_reuse_class);
+  return (jint)(long)ret;
+}
 // Decoy for the bind-by-name path: an EXPORTED Java_<class>_answer, while JNI_OnLoad below ALSO
 // RegisterNatives-binds answer() to the_registered (4250). A RegisterNatives binding is the app's
 // explicit choice and must win, so acl's name binding has to skip methods JNI_OnLoad already

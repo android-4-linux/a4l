@@ -37,6 +37,16 @@ public class Main extends Activity {
     // Bound by NAME: the .so exports Java_com_acl_ndktest_Main_nativeAnswer, nothing registers it.
     public static native int nativeAnswer();
 
+    // Bound by name. Two native threads, one after the other, attach to the VM, call
+    // callBack() and detach; see Java_com_acl_ndktest_Main_donorReuse in
+    // tools/build-ndk-repro.sh.
+    public static native int donorReuse();
+
+    // Called by each of donorReuse()'s threads: a native call down from Java on that thread.
+    public static int callBack() {
+        return answer();
+    }
+
     // Up-called BY the native, from bionic %fs back into ART's glibc %fs.
     public static int helper(int a, int b) {
         return a + b;
@@ -47,6 +57,12 @@ public class Main extends Activity {
         super.onCreate(savedInstanceState);
         Log.i("acl", "Main.onCreate: bionic native answer()=" + answer()
                      + " nativeAnswer()=" + nativeAnswer());
+
+        // Opt-in (run_ndk_art_test.py --donor): a native thread that attaches after another
+        // has detached, and takes a native call from Java.
+        if (System.getenv("ACL_NDK_TEST_DONOR") != null) {
+            Log.i("acl", "DONOR: second attached thread got " + donorReuse());
+        }
 
         // Opt-in (run_ndk_thread_test.py): call the same native from a NON-main thread. Only the
         // thread that bootstrapped the bionic linker has a bionic TCB, so acl must refuse this
