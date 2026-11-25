@@ -47,6 +47,10 @@ public class Main extends Activity {
         return answer();
     }
 
+    // Bound by name. Installs a SIGSEGV handler and reports whether a4l's was put back; see
+    // Java_com_acl_ndktest_Main_handlerKept in tools/build-ndk-repro.sh.
+    public static native int handlerKept();
+
     // Up-called BY the native, from bionic %fs back into ART's glibc %fs.
     public static int helper(int a, int b) {
         return a + b;
@@ -62,6 +66,12 @@ public class Main extends Activity {
         // has detached, and takes a native call from Java.
         if (System.getenv("ACL_NDK_TEST_DONOR") != null) {
             Log.i("acl", "DONOR: second attached thread got " + donorReuse());
+        }
+
+        // Opt-in (run_ndk_art_test.py --handler): the library installs a fault handler of its
+        // own, as a crash reporter does.
+        if (System.getenv("ACL_NDK_TEST_HANDLER") != null) {
+            Log.i("acl", "HANDLER: a4l's fault handler back=" + handlerKept());
         }
 
         // Opt-in (run_ndk_thread_test.py): call the same native from a NON-main thread. Only the

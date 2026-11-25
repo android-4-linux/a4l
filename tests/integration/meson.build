@@ -764,6 +764,17 @@ if py3.found() and have_jni
         depends : [acl_exe, ndk_apk],
         timeout : 300,
       )
+      # An app library installs a SIGSEGV handler of its own, as a crash reporter's native
+      # part does, and a4l's is back in place 300 ms later. Same fixture,
+      # ACL_NDK_TEST_HANDLER=1.
+      test(
+        'run-apk-ndk-art-handler',
+        py3,
+        args : [files('run_ndk_art_test.py'), acl_exe,
+                meson.project_source_root(), framework_android_jar, ndk_apk, '--handler'],
+        depends : [acl_exe, ndk_apk],
+        timeout : 300,
+      )
       # ANativeWindow producer end-to-end ([[flutter-texture-bridge]] M3c): a bionic-ABI .so drives
       # one frame through the real NDK ANativeWindow C ABI (fromSurface -> lock -> unlockAndPost)
       # into an acl android.media.ImageReader, and the consumer acquires it. Runs the app through
