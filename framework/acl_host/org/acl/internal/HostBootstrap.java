@@ -887,6 +887,9 @@ public final class HostBootstrap {
             android.content.pm.ApplicationInfo ai = new android.content.pm.ApplicationInfo();
             ai.packageName = pkg;
             ai.processName = pkg;   // single-process; WorkManager compares against this
+            // The uid a caller of the app's own services has. A media browser service checks
+            // a connecting package's uid against Binder.getCallingUid().
+            ai.uid = android.os.Process.myUid();
             // Native-lib loaders (Flutter/ReLinker, System.loadLibrary internals) read these:
             // sourceDir = the APK to scan for lib/<abi>/*.so; nativeLibraryDir = where acl
             // extracted them (matches the run-time java.library.path). Absent -> new File(null) NPE.
@@ -2395,6 +2398,11 @@ public final class HostBootstrap {
     static final class AppPackageManager extends StubPackageManager {
         private final String pkg;
         AppPackageManager(String pkg) { this.pkg = pkg; }
+        // One app in the process, so every caller is this package whatever uid
+        // Binder.getCallingUid() gives. MediaBrowserService checks a connecting client's
+        // package against these and takes null for a caller it cannot name.
+        @Override public String[] getPackagesForUid(int uid) { return new String[]{pkg}; }
+        @Override public String getNameForUid(int uid) { return pkg; }
         // The app's own launch intent, as a launcher would start it. A media app builds its
         // notification's content intent from this, and PendingIntent.getActivity throws on null.
         @Override public android.content.Intent getLaunchIntentForPackage(String packageName) {

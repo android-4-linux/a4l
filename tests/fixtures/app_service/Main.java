@@ -136,6 +136,23 @@ public class Main extends Activity {
                 && !am.removeAccountExplicitly(acct);
         log("accounts stored=" + stored + " token dropped=" + dropped + " removed=" + removed);
         expect(stored && dropped && removed, "accounts");
+        // The app's own PackageInfo carries its uid, which is the one a caller of its own
+        // services has: a media browser service checks a client this way.
+        int infoUid = -1;
+        String[] forUid = null;
+        try {
+            infoUid = getPackageManager().getPackageInfo(getPackageName(),
+                    android.content.pm.PackageManager.GET_PERMISSIONS).applicationInfo.uid;
+            forUid = getPackageManager().getPackagesForUid(android.os.Binder.getCallingUid());
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            // infoUid stays -1
+        }
+        final boolean uids = infoUid == android.os.Process.myUid()
+                && infoUid == android.os.Binder.getCallingUid()
+                && forUid != null && forUid.length == 1 && getPackageName().equals(forUid[0]);
+        log("package uid consistent=" + uids);
+        expect(uids, "uid: info " + infoUid + " process " + android.os.Process.myUid()
+                + " caller " + android.os.Binder.getCallingUid());
         // The process has the package's name, from both places an app reads it.
         final String proc = android.os.Process.myProcessName();
         log("process name " + proc + " application " + android.app.Application.getProcessName());
