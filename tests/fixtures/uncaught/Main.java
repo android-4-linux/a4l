@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: original a4l test fixture; public Android API only. No GPL-3.0 sources.
 //
-// A thread that is not the main one fails, in the way ACL_TEST_END names:
+// A thread fails, in the way ACL_TEST_END names:
 //   throw   the thread "worker-x" throws an exception nothing catches
 //   direct  the thread hands an exception to its handler itself, as kotlinx.coroutines does,
 //           which does not pass the pre-handler Thread.dispatchUncaughtException runs
+//   main    a message on the main thread throws
 //   exit    the thread "quitter" calls System.exit(3)
-// After throw and direct the main thread logs "UNCAUGHT: still running" half a second later
-// and exits with status 0.
+// After throw, direct and main the main thread logs "UNCAUGHT: still running" half a second
+// later and exits with status 0.
 package com.acl.uncaught;
 
 import android.app.Activity;
@@ -35,6 +36,12 @@ public class Main extends Activity {
                     System.exit(3);
                 }
             }, "quitter").start();
+        } else if ("main".equals(how)) {
+            new Handler(Looper.getMainLooper()).post(new Runnable() {
+                @Override public void run() {
+                    throw new IllegalStateException("boom main");
+                }
+            });
         } else if ("direct".equals(how)) {
             new Thread(new Runnable() {
                 @Override public void run() {

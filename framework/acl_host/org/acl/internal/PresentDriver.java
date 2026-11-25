@@ -237,10 +237,51 @@ public final class PresentDriver {
         clockVsync(s, handler, vsyncRetry[0]);
 
         try {
-            Looper.loop();
+            loop();
         } finally {
             sSession = 0L;  // stop routing IME show/hide to a session about to be freed
             nClose(s);
+        }
+    }
+
+    // How many exceptions the main loop takes within LOOP_WINDOW_MS before it gives up.
+    private static final int LOOP_MAX_FAILURES = 20;
+    private static final long LOOP_WINDOW_MS = 10_000;
+
+    /**
+     * Runs the main looper, and runs it again after a message throws. The exception is logged
+     * as Android's runtime logs it, "FATAL EXCEPTION: main", and the message that threw is
+     * gone; the next one is taken up.
+     *
+     * <p>Android ends the app there. a4l goes on, for the reason its uncaught-exception
+     * handler does: the exception is often a4l's own gap, a missing native or an unanswered
+     * service, and an app that keeps its window, and what it had got as far as saving, is
+     * worth more than one that is gone. Telegram's sign-in ended this way on a missing
+     * native in the screen after it, before the session was written.
+     *
+     * <p>A loop that fails again and again is ended: more than LOOP_MAX_FAILURES within
+     * LOOP_WINDOW_MS rethrows.
+     */
+    private static void loop() {
+        int failures = 0;
+        long windowStart = android.os.SystemClock.uptimeMillis();
+        for (;;) {
+            try {
+                Looper.loop();
+                return;  // the looper was quit
+            } catch (RuntimeException | Error t) {
+                android.util.Log.e("AndroidRuntime", "FATAL EXCEPTION: main", t);
+                final long now = android.os.SystemClock.uptimeMillis();
+                if (now - windowStart > LOOP_WINDOW_MS) {
+                    windowStart = now;
+                    failures = 0;
+                }
+                if (++failures > LOOP_MAX_FAILURES) {
+                    android.util.Log.e("AndroidRuntime", "the main loop failed " + failures
+                            + " times in " + (now - windowStart) + " ms; ending");
+                    throw t;
+                }
+            }
         }
     }
 
@@ -314,7 +355,7 @@ public final class PresentDriver {
         }
 
         try {
-            Looper.loop();
+            loop();
         } finally {
             nGlClose(s);
         }

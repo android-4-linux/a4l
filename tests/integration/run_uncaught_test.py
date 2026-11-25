@@ -2,10 +2,12 @@
 # Provenance: original a4l test harness; tests/fixtures/uncaught/Main.java. No GPL-3.0 sources.
 #
 # An exception no thread catches is logged as Android's runtime logs it, "FATAL EXCEPTION:
-# <thread>" with the exception, and the app goes on. The fixture runs three ways:
+# <thread>" with the exception, and the app goes on. The fixture runs four ways:
 #   - a thread throws: the log names the thread and the exception, and the main thread is
 #     still running half a second later
 #   - a thread hands the exception to its handler itself, as kotlinx.coroutines does: the same
+#   - a message on the main thread throws: the same, and the main loop goes on to the next
+#     message
 #   - a thread calls System.exit(3) with ACL_EXIT_STACKS=1: the exit status is 3 and the log
 #     names the thread that called it
 #
@@ -30,6 +32,8 @@ RUNS = [
                   "UNCAUGHT: still running"]),
     ("direct", 0, ["FATAL EXCEPTION: worker-d", "java.lang.IllegalStateException: boom direct",
                    "UNCAUGHT: still running"]),
+    ("main", 0, ["FATAL EXCEPTION: main", "java.lang.IllegalStateException: boom main",
+                 "UNCAUGHT: still running"]),
     ("exit", 3, ["acl exit: called on thread quitter",
                  "acl exit:   at java.lang.System.exit"]),
 ]
