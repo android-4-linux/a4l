@@ -2453,6 +2453,30 @@ jlong RadialGradient_nativeCreate(JNIEnv* env,
   return reinterpret_cast<jlong>(sh.release());
 }
 
+// SweepGradient.nativeCreate is a STATIC native. The colors run clockwise from
+// the positive x axis around (x, y), as SkGradientShader::MakeSweep lays them.
+jlong SweepGradient_nativeCreate(JNIEnv* env,
+                                 jclass,
+                                 jlong matrix,
+                                 jfloat x,
+                                 jfloat y,
+                                 jlongArray colorsArr,
+                                 jfloatArray posArr,
+                                 jlong /*colorSpaceHandle*/) {
+  const std::vector<SkColor> colors = decode_colors(env, colorsArr);
+  if (colors.size() < 2)
+    return 0;
+  std::vector<SkScalar> pos = read_positions(env, posArr);
+  // Skia reads one position per color.
+  if (pos.size() != colors.size())
+    pos.clear();
+  sk_sp<SkShader> sh = SkGradientShader::MakeSweep(
+      x, y, colors.data(), pos.empty() ? nullptr : pos.data(),
+      static_cast<int>(colors.size()), 0,
+      reinterpret_cast<const SkMatrix*>(matrix));
+  return reinterpret_cast<jlong>(sh.release());
+}
+
 jlong Shader_nativeGetFinalizer(JNIEnv*, jclass) {
   return reinterpret_cast<jlong>(&free_shader);
 }
@@ -9153,6 +9177,10 @@ const JNINativeMethod kRadialGradient[] = {
     {"nativeCreate", "(JFFFFFF[J[FIJ)J",
      reinterpret_cast<void*>(RadialGradient_nativeCreate)},
 };
+const JNINativeMethod kSweepGradient[] = {
+    {"nativeCreate", "(JFF[J[FJ)J",
+     reinterpret_cast<void*>(SweepGradient_nativeCreate)},
+};
 const JNINativeMethod kBitmapShader[] = {
     {"nativeCreate", "(JJIIZZ)J",
      reinterpret_cast<void*>(BitmapShader_nativeCreate)},
@@ -10016,6 +10044,9 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
        ok;
   ok = reg(env, "android/graphics/RadialGradient", kRadialGradient,
            n(kRadialGradient)) &&
+       ok;
+  ok = reg(env, "android/graphics/SweepGradient", kSweepGradient,
+           n(kSweepGradient)) &&
        ok;
   ok = reg(env, "android/graphics/BitmapShader", kBitmapShader,
            n(kBitmapShader)) &&
