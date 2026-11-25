@@ -3558,77 +3558,61 @@ public final class HostBootstrap {
         // WindowRecomposer never activates → blank content. Unlike the androidx-name reflection below,
         // this works even when the app obfuscates androidx.lifecycle (forkyz renames all of it).
         dispatchLifecycleCallbacks(activity);
+        // Then check the registry itself. An app that renames androidx.lifecycle keeps neither
+        // getLifecycle() nor Lifecycle.Event by name, so the registry is told from its shape:
+        // handleLifecycleEvent(Event) takes an enum of 7 constants and getCurrentState() returns
+        // one of 5. Events go by ordinal, which renaming leaves alone.
+        Object reg = null;
         try {
-            java.lang.reflect.Method getLifecycle = activity.getClass().getMethod("getLifecycle");
-            Object lifecycle = getLifecycle.invoke(activity);
-            if (lifecycle == null) return;
-            Object cur = null;
-            try {
-                cur = lifecycle.getClass().getMethod("getCurrentState").invoke(lifecycle);
-            } catch (Throwable ignored) {}
-            // LifecycleRegistry.handleLifecycleEvent(Lifecycle.Event) walks CREATED->STARTED->RESUMED,
-            // firing every observer in between (what the missing framework dispatch would have done).
-            Class<?> eventCls = Class.forName("androidx.lifecycle.Lifecycle$Event");
-            java.lang.reflect.Method handle = null;
-            for (java.lang.reflect.Method m : lifecycle.getClass().getMethods()) {
-                if (m.getName().equals("handleLifecycleEvent") && m.getParameterCount() == 1) { handle = m; break; }
-            }
-            if (handle != null) {
-                for (String ev : new String[]{"ON_CREATE", "ON_START", "ON_RESUME"}) {
-                    Object e = eventCls.getField(ev).get(null);
-                    try { handle.invoke(lifecycle, e); } catch (Throwable ignored) {}
+            Object lc = activity.getClass().getMethod("getLifecycle").invoke(activity);
+            if (isLifecycleRegistry(lc)) reg = lc;
+        } catch (Throwable ignored) {}
+        if (reg == null) {
+            for (Class<?> c = activity.getClass(); c != null && c != Object.class && reg == null;
+                    c = c.getSuperclass()) {
+                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    Object val;
+                    try { f.setAccessible(true); val = f.get(activity); } catch (Throwable ignored) { continue; }
+                    if (isLifecycleRegistry(val)) { reg = val; break; }
                 }
             }
-            Object now = null;
-            try { now = lifecycle.getClass().getMethod("getCurrentState").invoke(lifecycle); } catch (Throwable ignored) {}
-            System.out.println("acl HostBootstrap: lifecycle " + cur + " -> " + now);
-        } catch (Throwable t) {
-            System.err.println("acl HostBootstrap: ensureResumed (androidx path) skipped: " + t);
         }
-        // Obfuscation-proof fallback (SHAPE-based). Some apps (areada) rename LifecycleOwner.getLifecycle()
-        // -> g() and androidx.lifecycle.* wholesale, so both paths above miss and the Lifecycle never
-        // leaves CREATED — Compose's WindowRecomposer stays paused, so the app renders its FIRST frame
-        // then never recomposes (clicks fire but nothing updates). Reach the LifecycleRegistry by the
-        // SHAPE of handleLifecycleEvent(Event) — the only 1-arg method whose enum parameter has the 7
-        // Lifecycle.Event constants — and drive ON_CREATE/ON_START/ON_RESUME by ORDINAL (names are
-        // obfuscated; ordinals are stable). Idempotent: skips when already at/above STARTED.
-        try { resumeLifecycleByShape(activity); } catch (Throwable ignored) {}
+        if (reg == null) return;
+        try {
+            java.lang.reflect.Method handle = findEventHandle(reg.getClass());
+            java.lang.reflect.Method state = findStateGetter(reg.getClass());
+            handle.setAccessible(true);
+            state.setAccessible(true);
+            Object cur = state.invoke(reg);
+            // State ordinals: DESTROYED, INITIALIZED, CREATED, STARTED, RESUMED.
+            int at = ((Enum<?>) cur).ordinal();
+            if (at == 0 || at == 4) return;
+            Object[] events = handle.getParameterTypes()[0].getEnumConstants();
+            // Event ordinals: ON_CREATE=0, ON_START=1, ON_RESUME=2. Send only the ones still owed.
+            for (int i = at - 1; i <= 2; i++) {
+                try { handle.invoke(reg, events[i]); } catch (Throwable ignored) {}
+            }
+            System.out.println("acl HostBootstrap: lifecycle " + cur + " -> " + state.invoke(reg));
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: ensureResumed skipped: " + t);
+        }
     }
 
-    // Find the app's LifecycleRegistry by scanning the activity's field hierarchy for an object whose
-    // class exposes a handleLifecycleEvent(Event)-shaped method, then drive it to RESUMED by ordinal.
-    private static void resumeLifecycleByShape(Object activity) {
-        Object reg = null; java.lang.reflect.Method handle = null; Object[] events = null;
-        for (Class<?> c = activity.getClass(); c != null && c != Object.class && reg == null; c = c.getSuperclass()) {
-            for (java.lang.reflect.Field f : c.getDeclaredFields()) {
-                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
-                Object val;
-                try { f.setAccessible(true); val = f.get(activity); } catch (Throwable ignored) { continue; }
-                if (val == null) continue;
-                java.lang.reflect.Method h = findEventHandle(val.getClass());
-                if (h != null) { reg = val; handle = h; events = h.getParameterTypes()[0].getEnumConstants(); break; }
-            }
+    private static boolean isLifecycleRegistry(Object o) {
+        return o != null && findEventHandle(o.getClass()) != null
+                && findStateGetter(o.getClass()) != null;
+    }
+
+    // getCurrentState(): the no-argument method that returns an enum of the 5 Lifecycle.State
+    // constants.
+    private static java.lang.reflect.Method findStateGetter(Class<?> cls) {
+        for (java.lang.reflect.Method m : cls.getMethods()) {
+            if (m.getParameterCount() != 0) continue;
+            Class<?> rt = m.getReturnType();
+            if (rt.isEnum() && rt.getEnumConstants() != null && rt.getEnumConstants().length == 5) return m;
         }
-        if (reg == null || handle == null || events == null || events.length != 7) return;
-        // Guard: if a getCurrentState()-shaped method (no-arg, returns a 5-constant State enum) already
-        // reports >= STARTED (ordinal 3), don't churn the state machine.
-        try {
-            for (java.lang.reflect.Method m : reg.getClass().getMethods()) {
-                if (m.getParameterCount() != 0) continue;
-                Class<?> rt = m.getReturnType();
-                if (rt.isEnum() && rt.getEnumConstants() != null && rt.getEnumConstants().length == 5) {
-                    m.setAccessible(true);
-                    Object st = m.invoke(reg);
-                    if (st instanceof Enum && ((Enum<?>) st).ordinal() >= 3) return;  // already STARTED/RESUMED
-                    break;
-                }
-            }
-        } catch (Throwable ignored) {}
-        handle.setAccessible(true);
-        for (int i = 0; i <= 2; i++) {  // Event ordinals: ON_CREATE=0, ON_START=1, ON_RESUME=2
-            try { handle.invoke(reg, events[i]); } catch (Throwable ignored) {}
-        }
-        System.out.println("acl HostBootstrap: lifecycle resumed by shape (" + reg.getClass().getName() + ")");
+        return null;
     }
 
     // A LifecycleRegistry exposes exactly one method taking a single enum whose type has the 7
