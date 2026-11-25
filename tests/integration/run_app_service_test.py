@@ -47,6 +47,7 @@ RECEIVERS = [
 CHECKS = [
     "SERVICE: launch order csCrR",
     "SERVICE: system resources sized=true",
+    "SERVICE: bitmap pixel set=true",
     f"SERVICE: process name {PACKAGE} application {PACKAGE}",
     "SERVICE: sweep gradient drawn=true",
     "SERVICE: refused other=false implicit=false/null undeclared=false",

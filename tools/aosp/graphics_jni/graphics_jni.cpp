@@ -687,6 +687,24 @@ void Bitmap_nativeSetPixels(JNIEnv* env,
       pixels, src, JNI_ABORT);  // src read-only; nothing to copy back
 }
 
+// Bitmap.setPixel: one unpremultiplied Color int, converted to the bitmap's
+// config and alpha as nativeSetPixels does. Bitmap.setPixel has checked the
+// bounds; an immutable bitmap is left alone here as there.
+void Bitmap_nativeSetPixel(JNIEnv*,
+                           jclass,
+                           jlong ptr,
+                           jint x,
+                           jint y,
+                           jint color) {
+  auto* w = reinterpret_cast<AclBitmap*>(ptr);
+  if (w == nullptr || w->immutable)
+    return;
+  const SkImageInfo info =
+      SkImageInfo::Make(1, 1, kN32_SkColorType, kUnpremul_SkAlphaType);
+  const SkPixmap pm(info, &color, sizeof(jint));
+  w->bitmap.writePixels(pm, x, y);
+}
+
 jint Bitmap_nativeGetAllocationByteCount(JNIEnv*, jclass, jlong ptr) {
   auto* w = reinterpret_cast<AclBitmap*>(ptr);
   return static_cast<jint>(w->bitmap.computeByteSize());
@@ -5990,6 +6008,8 @@ const JNINativeMethod kBitmap[] = {
      reinterpret_cast<void*>(Bitmap_nativeGetPixel)},
     {"nativeGetPixels", "(J[IIIIIII)V",
      reinterpret_cast<void*>(Bitmap_nativeGetPixels)},
+    {"nativeSetPixel", "(JIII)V",
+     reinterpret_cast<void*>(Bitmap_nativeSetPixel)},
     {"nativeSetPixels", "(J[IIIIIII)V",
      reinterpret_cast<void*>(Bitmap_nativeSetPixels)},
     {"nativeGetAllocationByteCount", "(J)I",
