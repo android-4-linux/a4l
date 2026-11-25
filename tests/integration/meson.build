@@ -468,6 +468,16 @@ if py3.found() and have_gl and have_ffmpeg
       depends : [acl_exe],
       timeout : 300,
     )
+    # `a4l run --service --present` gives a media browser service a window: its tabs and
+    # lists, a track played from its row and paused from the transport bar. Starts a headless
+    # Weston for itself. Needs host ART; SKIPs otherwise, which includes CI.
+    test(
+      'media-browse',
+      py3,
+      args : [files('run_media_browse_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+    )
     # A view's ViewTreeObserver listeners (global layout, pre-draw, draw), for an Activity
     # started from another's onCreate whose view registers before it is in a window. Starts a
     # headless Weston for itself. Needs host ART; SKIPs otherwise, which includes CI.

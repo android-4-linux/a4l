@@ -69,11 +69,26 @@ public class Main extends Activity {
             final StringBuilder commands = new StringBuilder();
             session.setCallback(new MediaSession.Callback() {
                 @Override public void onPlay() { commands.append("play "); }
-                @Override public void onPause() { commands.append("pause "); }
+                @Override public void onPause() {
+                    commands.append("pause ");
+                    Log.i("acl", "MEDIAHOST: asked to pause");
+                    session.setPlaybackState(new PlaybackState.Builder()
+                            .setState(PlaybackState.STATE_PAUSED, 0, 0f)
+                            .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE)
+                            .build());
+                }
                 @Override public void onSkipToNext() { commands.append("next "); }
                 @Override public void onSeekTo(long pos) { commands.append("seek" + pos + " "); }
                 @Override public void onPlayFromMediaId(String id, Bundle extras) {
                     commands.append("id:" + id + " ");
+                    Log.i("acl", "MEDIAHOST: asked to play " + id);
+                    session.setMetadata(new MediaMetadata.Builder()
+                            .putString(MediaMetadata.METADATA_KEY_TITLE, "Playing " + id)
+                            .build());
+                    session.setPlaybackState(new PlaybackState.Builder()
+                            .setState(PlaybackState.STATE_PLAYING, 0, 1f)
+                            .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE)
+                            .build());
                 }
             }, main);
             session.setMetadata(new MediaMetadata.Builder()
@@ -167,6 +182,12 @@ public class Main extends Activity {
                         .setTitle("Albums").build(), MediaItem.FLAG_BROWSABLE));
                 items.add(new MediaItem(new MediaDescription.Builder().setMediaId("track-1")
                         .setTitle("Track 1").build(), MediaItem.FLAG_PLAYABLE));
+            } else if ("albums".equals(parentId)) {
+                items.add(new MediaItem(new MediaDescription.Builder().setMediaId("track-2")
+                        .setTitle("Track 2").setSubtitle("Band").build(),
+                        MediaItem.FLAG_PLAYABLE));
+                items.add(new MediaItem(new MediaDescription.Builder().setMediaId("album-9")
+                        .setTitle("Album 9").build(), MediaItem.FLAG_BROWSABLE));
             }
             result.sendResult(items);
         }
