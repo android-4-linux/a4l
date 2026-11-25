@@ -80,6 +80,26 @@ def start_weston(runtime_dir, log_path):
     return None, "no headless Weston could be started"
 
 
+def read_ppm(path):
+    """(width, height, rgb bytes) of a binary PPM."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    fields = []
+    i = 0
+    while len(fields) < 4:
+        while data[i:i + 1].isspace():
+            i += 1
+        j = i
+        while not data[j:j + 1].isspace():
+            j += 1
+        fields.append(data[i:j])
+        i = j
+    if fields[0] != b"P6" or int(fields[3]) != 255:
+        raise ValueError(f"{path} is not an 8-bit binary PPM")
+    w, h = int(fields[1]), int(fields[2])
+    return w, h, data[i + 1:i + 1 + w * h * 3]
+
+
 def main():
     if len(sys.argv) != 3:
         sys.stderr.write("usage: run_tree_observer_test.py <a4l> <android.jar>\n")
@@ -140,8 +160,9 @@ def main():
             if weston is None:
                 return skip(display)
 
+        frame = os.path.join(work, "frame.ppm")
         env = dict(os.environ, WAYLAND_DISPLAY=display, ACL_RUN_TIMEOUT="60", ACL_BIN=acl,
-                   ACL_PRESENT_GPU="1",
+                   ACL_PRESENT_GPU="1", ACL_GPU_DUMP=frame,
                    XDG_CACHE_HOME=os.path.join(work, "cache"),
                    XDG_DATA_HOME=os.path.join(work, "data"))
         p = subprocess.run([os.path.join(src_root, "tools/run-apk.sh"), apk, "--verify=off",
@@ -156,6 +177,21 @@ def main():
             if c not in out:
                 sys.stderr.write(f"FAIL: missing '{c}'\n{out[-8000:]}\n")
                 return 1
+        # The last frame is Home's ClipGroup: its red child is clipped to the top half in
+        # drawChild, so the bottom half shows the group's own blue.
+        if not os.path.isfile(frame):
+            sys.stderr.write("FAIL: no frame was dumped (ACL_GPU_DUMP)\n")
+            return 1
+        w, h, px = read_ppm(frame)
+
+        def at(x, y):
+            o = (y * w + x) * 3
+            return px[o], px[o + 1], px[o + 2]
+        top, bottom = at(w // 2, h // 4), at(w // 2, 3 * h // 4)
+        if not (top[0] > 200 and top[2] < 60 and bottom[2] > 200 and bottom[0] < 60):
+            sys.stderr.write(f"FAIL: drawChild clip not applied: top={top} bottom={bottom} "
+                             f"(want red above, blue below)\n")
+            return 1
     except subprocess.CalledProcessError as e:
         sys.stderr.write(f"FAIL: build step: {e.cmd}\n{e.stderr}\n")
         return 1

@@ -159,6 +159,12 @@ struct DisplayItem {
                                     // (Child/Layer/Functor)
   bool z_ordered = false;  // Child recorded inside an enableZ region: sort by Z
                            // + cast shadow
+  // The clip in force at the boundary, as its bounds in the node's own space
+  // (Child/Layer/Functor). A ViewGroup that clips in drawChild or dispatchDraw
+  // (clipToPadding, a sliding panel) does it with Canvas.clipRect before the
+  // child is drawn; the walk applies this ahead of `matrix`.
+  bool has_clip = false;
+  SkRect clip = SkRect::MakeEmpty();
 };
 
 // What a node last recorded. A recording replaces it whole, and the
@@ -309,6 +315,8 @@ static sk_sp<AclRenderNode> freeze_subtree(AclRenderNode* n) {
     d.functor = it.functor;
     d.matrix = it.matrix;
     d.z_ordered = it.z_ordered;
+    d.has_clip = it.has_clip;
+    d.clip = it.clip;
     if (it.kind == DisplayItem::Kind::Child && it.child)
       d.child = freeze_subtree(
           it.child.get());  // recurse: no live child refs survive in the copy
@@ -6025,6 +6033,10 @@ struct NodeRecorder {
   int w = 1, h = 1;
   SkMatrix carry_m = SkMatrix::I();  // CTM at the last boundary, re-applied to
                                      // the next segment
+  // The clip at the last boundary (bounds, node space), re-applied to the next
+  // segment so the node's own ops after a child stay clipped too.
+  bool carry_has_clip = false;
+  SkRect carry_clip = SkRect::MakeEmpty();
   int carry_saves = 0;  // unbalanced save() depth carried across the boundary
   // CTM captured at each outstanding save() (the value its restore returns to),
   // mirroring the seg's save stack above the base. A single carry_m can only
@@ -6064,7 +6076,14 @@ struct NodeRecorder {
       seg->setMatrix(base);
       seg->save();
     }
-    if (carry_saves > 0 || !carry_m.isIdentity())
+    // The clip goes in the innermost save level, where a clip issued just
+    // before a child (save, clipRect, drawChild, restore) lives; the restore
+    // that straddles the boundary then drops it, as in an unsplit recording.
+    if (carry_has_clip) {
+      seg->resetMatrix();
+      seg->clipRect(carry_clip);
+    }
+    if (carry_saves > 0 || carry_has_clip || !carry_m.isIdentity())
       seg->setMatrix(carry_m);
   }
   // Finalize the current segment into a Picture item (dropped if it recorded
@@ -6091,6 +6110,20 @@ struct NodeRecorder {
     carry_m = seg != nullptr ? seg->getTotalMatrix() : SkMatrix::I();
     carry_saves = sc > 1 ? sc - 1 : 0;
     boundary.matrix = carry_m;
+    // A recording starts clipped to its cull rect (w x h); anything tighter
+    // was asked for by the View.
+    carry_has_clip = false;
+    if (seg != nullptr) {
+      const SkIRect full = SkIRect::MakeWH(w, h);
+      const SkIRect dc = seg->isClipEmpty() ? SkIRect::MakeEmpty()
+                                            : seg->getDeviceClipBounds();
+      if (dc.isEmpty() || !dc.contains(full)) {
+        carry_has_clip = true;
+        carry_clip = SkRect::Make(dc);
+      }
+    }
+    boundary.has_clip = carry_has_clip;
+    boundary.clip = carry_clip;
     flush_seg();
     items.push_back(std::move(boundary));
     begin_seg();
@@ -6140,6 +6173,7 @@ struct NodeRecorder {
     items.clear();
     carry_m = SkMatrix::I();
     carry_saves = 0;
+    carry_has_clip = false;
     save_ctms.clear();
     z_enabled = false;
     w = W > 0 ? W : 1;
@@ -6660,6 +6694,8 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
         }
         for (const DisplayItem* g : grp) {
           SkAutoCanvasRestore bcr(c, true);
+          if (g->has_clip)
+            c->clipRect(g->clip);
           c->concat(g->matrix);
           draw_rendernode_immediate(c, g->child.get());
         }
@@ -6673,6 +6709,8 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
           break;
         case DisplayItem::Kind::Child: {
           SkAutoCanvasRestore bcr(c, true);
+          if (it.has_clip)
+            c->clipRect(it.clip);
           c->concat(it.matrix);  // node-local CTM at the boundary (composed
                                  // with the walk CTM)
           draw_rendernode_immediate(c, it.child.get());
@@ -6680,6 +6718,8 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
         }
         case DisplayItem::Kind::Layer: {
           SkAutoCanvasRestore bcr(c, true);
+          if (it.has_clip)
+            c->clipRect(it.clip);
           c->concat(it.matrix);
           draw_texture_layer_immediate(c, it.layer);
           break;
@@ -6691,6 +6731,8 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
           // secondary command buffer here — in-order, so overlays walked after
           // this compose on top.
           SkAutoCanvasRestore bcr(c, true);
+          if (it.has_clip)
+            c->clipRect(it.clip);
           c->concat(it.matrix);
           static const bool zdbg = std::getenv("ACL_WEBVIEW_ZDEBUG") != nullptr;
           if (zdbg) {

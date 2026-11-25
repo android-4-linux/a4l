@@ -161,6 +161,37 @@ public class Main extends Activity {
     }
 
     /**
+     * Blue, with one red child that fills it and is clipped to the top half in drawChild, the
+     * way a sliding panel reveals part of a child. The test reads the frame: red above the
+     * middle, blue below.
+     */
+    public static class ClipGroup extends android.view.ViewGroup {
+        final View child;
+
+        ClipGroup(android.content.Context c) {
+            super(c);
+            setBackgroundColor(0xff0000ff);
+            child = new View(c);
+            child.setBackgroundColor(0xffff0000);
+            addView(child);
+        }
+
+        @Override
+        protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            child.layout(0, 0, r - l, b - t);
+        }
+
+        @Override
+        protected boolean drawChild(Canvas canvas, View v, long time) {
+            final int save = canvas.save();
+            canvas.clipRect(0, 0, getWidth(), getHeight() / 2);
+            final boolean more = super.drawChild(canvas, v, time);
+            canvas.restoreToCount(save);
+            return more;
+        }
+    }
+
+    /**
      * Started twice. First over Second, which is noHistory and so is destroyed. Then again with
      * NEW_TASK | CLEAR_TASK, which destroys the first Home. When the second Home finishes the
      * task is empty and the app ends instead of going back to anything.
@@ -173,7 +204,7 @@ public class Main extends Activity {
         protected void onCreate(Bundle b) {
             super.onCreate(b);
             nth = ++sHomes;
-            setContentView(new View(this));
+            setContentView(new ClipGroup(this));
         }
 
         @Override
