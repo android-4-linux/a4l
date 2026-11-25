@@ -49,6 +49,8 @@ public class Main extends Activity {
     }
 
     static class Inner extends MediaBrowserService {
+        private MediaSession kept;
+
         void attach(Context base) {
             attachBaseContext(base);
         }
@@ -57,6 +59,10 @@ public class Main extends Activity {
             super.onCreate();
             // A browser's connection completes once the service has a session token.
             final MediaSession session = new MediaSession(this, "media-host");
+            // Held for the service's life: the framework reaches a session's callback through
+            // a weak reference, so a session nothing else holds stops taking commands once
+            // it is collected.
+            kept = session;
             setSessionToken(session.getSessionToken());
             sessionRoundTrip(session);
         }
