@@ -447,6 +447,17 @@ if py3.found() and have_gl and have_ffmpeg
         timeout : 300,
       )
     endif
+    # An exception no thread catches is logged as "FATAL EXCEPTION", thrown or handed to the
+    # handler directly, and the app goes on; and ACL_EXIT_STACKS names a
+    # thread that calls System.exit. Starts a headless Weston for itself. Needs host ART;
+    # SKIPs otherwise, which includes CI.
+    test(
+      'uncaught-exception',
+      py3,
+      args : [files('run_uncaught_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+    )
     # A view's ViewTreeObserver listeners (global layout, pre-draw, draw), for an Activity
     # started from another's onCreate whose view registers before it is in a window. Starts a
     # headless Weston for itself. Needs host ART; SKIPs otherwise, which includes CI.
