@@ -752,6 +752,18 @@ if py3.found() and have_jni
         depends : [acl_exe, ndk_apk],
         timeout : 300,
       )
+      # A native thread attaches to the VM after another has detached, is given the donor the
+      # first one had, and takes a native call from Java: it must run on its own bionic TCB,
+      # not the one the first thread left cached in the donor. Same fixture,
+      # ACL_NDK_TEST_DONOR=1.
+      test(
+        'run-apk-ndk-art-donor',
+        py3,
+        args : [files('run_ndk_art_test.py'), acl_exe,
+                meson.project_source_root(), framework_android_jar, ndk_apk, '--donor'],
+        depends : [acl_exe, ndk_apk],
+        timeout : 300,
+      )
       # ANativeWindow producer end-to-end ([[flutter-texture-bridge]] M3c): a bionic-ABI .so drives
       # one frame through the real NDK ANativeWindow C ABI (fromSurface -> lock -> unlockAndPost)
       # into an acl android.media.ImageReader, and the consumer acquires it. Runs the app through

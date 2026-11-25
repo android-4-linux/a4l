@@ -3434,6 +3434,15 @@ jint JNICALL w_DetachCurrentThread(JavaVM* vm) {
   if (glibc != 0) {
     ndk_set_fs(glibc);
     const jint rc = w->real->functions->DetachCurrentThread(w->real);
+    // The donor goes back to the pool below, and its thread-locals go with it.
+    // attach_current_thread caches this thread's bionic TCB in the donor's
+    // t_bionic_fs, which is what the down-call trampoline reads. Left set, the
+    // next thread to borrow this donor and take a native call from Java would
+    // run that native on this thread's TCB: the wrong one, and by then
+    // unpaired, so its first call back up aborts as unattached. Its wrapped
+    // env is this thread's too.
+    t_bionic_fs = 0;
+    t_wrap_env.real = nullptr;
     ndk_set_fs(cur);
     // Reclaim this thread's pairing + donor slot so a later bionic thread can
     // reuse them (Chromium's ThreadPool churns more threads over a session than

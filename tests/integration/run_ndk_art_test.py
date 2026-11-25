@@ -54,6 +54,12 @@ WORKER_MUST_NOT = [
     "no bionic TCB",                 # nothing should be refused now
 ]
 
+# --donor: a native thread attaches to the VM after another has detached, so it is given the
+# donor the first one had, and takes a native call from Java. 4250 is answer()'s round trip.
+DONOR_CHECKS = [
+    "DONOR: second attached thread got 4250",
+]
+
 CHECKS = [
     "NDK bionic loader armed",   # the gated nativeLoad hook installed (bootstraps lazily)
     "loaded bionic native lib",   # routed as bionic (not glibc dlopen)
@@ -78,9 +84,13 @@ def main() -> int:
     worker = "--worker" in argv           # off-main-thread refusal mode; see WORKER_CHECKS
     if worker:
         argv.remove("--worker")
+    donor = "--donor" in argv             # attach-after-detach mode; see DONOR_CHECKS
+    if donor:
+        argv.remove("--donor")
     if len(argv) != 4:
         sys.stderr.write(
-            "usage: run_ndk_art_test.py <acl> <src_root> <android.jar> <ndk.apk> [--worker]\n")
+            "usage: run_ndk_art_test.py <acl> <src_root> <android.jar> <ndk.apk> "
+            "[--worker|--donor]\n")
         return 2
     acl, src_root, android_jar, ndk_apk = argv
 
@@ -176,6 +186,8 @@ def main() -> int:
         env.pop("ACL_BIONIC_APP_LIBS", None)
         if worker:
             env["ACL_NDK_TEST_WORKER"] = "1"  # the fixture also calls the native off-main-thread
+        if donor:
+            env["ACL_NDK_TEST_DONOR"] = "1"
         p = subprocess.run([acl, "run", apk, "--vm=art"],
                            env=env, capture_output=True, text=True, timeout=300)
         out = p.stdout + p.stderr
@@ -186,7 +198,16 @@ def main() -> int:
         subprocess.run(["rm", "-rf", work], check=False)
 
     ok = True
-    if worker:
+    if donor:
+        if p.returncode != 0:
+            sys.stderr.write(f"FAIL: attach after detach: acl exit {p.returncode}\n")
+            ok = False
+        for c in DONOR_CHECKS + WORKER_MUST_NOT:
+            if (c in out) != (c in DONOR_CHECKS):
+                sys.stderr.write(f"FAIL: '{c}' " + ("missing" if c in DONOR_CHECKS
+                                                  else "present") + "\n")
+                ok = False
+    elif worker:
         if p.returncode != 0:
             sys.stderr.write(f"FAIL: off-main-thread native call: acl exit {p.returncode}\n")
             ok = False
@@ -209,7 +230,10 @@ def main() -> int:
     if not ok:
         sys.stderr.write("--- captured output ---\n" + out + "\n")
         return 1
-    if worker:
+    if donor:
+        sys.stdout.write("OK: a native thread that attached after another had detached took a "
+                         "native call from Java on its own TCB\n")
+    elif worker:
         sys.stdout.write("OK: an ART thread attached itself to bionic on first native call; "
                          "nativeAnswer()=42 off the main thread, no TLS corruption\n")
     else:
