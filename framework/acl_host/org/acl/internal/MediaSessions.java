@@ -27,8 +27,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * callback, which is how the app is told to act. There is one app in the process, so every
  * session and every controller is its own.
  *
- * <p>{@link Watcher} is for the host: a desktop media interface or a browse window follows the
- * sessions through it and drives them through {@link Session#transport}.
+ * <p>{@link Watcher} is for the host: {@link MprisBridge} follows the sessions through it and
+ * drives them through {@link Session#transport}.
  */
 final class MediaSessions {
     private MediaSessions() {}
@@ -261,6 +261,7 @@ final class MediaSessions {
     static Object managerCall(Method m, Object[] a) throws Throwable {
         switch (m.getName()) {
             case "createSession": {
+                MprisBridge.start();  // the desktop's media controls follow the sessions
                 final Session s = new Session((String) a[0], a[1], (String) a[2], (Bundle) a[3]);
                 sSessions.add(s);
                 return s.session;

@@ -41,6 +41,7 @@ ATTR_NAMES = [
     ("permission", 0x01010006),
     ("enabled", 0x0101000E),
     ("noHistory", 0x0101022D),
+    ("authorities", 0x01010018),
 ]
 
 
@@ -140,7 +141,7 @@ def end_elem(pool, name):
 
 def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity",
                permissions=None, services=None, launcher_theme=None, activities=None,
-               receivers=None, label="Example"):
+               receivers=None, label="Example", providers=None):
     pool = Pool()
     uri = lambda: pool.sid(ANDROID_URI)          # noqa: E731
     a = lambda name, val: _attribute(pool, uri(), pool.sid(name), val)  # noqa: E731
@@ -214,6 +215,11 @@ def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity",
                     body += end_elem(pool, "action")
                 body += end_elem(pool, "intent-filter")
             body += end_elem(pool, tag)
+    # <provider android:name="..." android:authorities="...">: (class name, authority).
+    for name, authority in (providers or []):
+        body += start_elem(pool, "provider", [a("name", ("str", name)),
+                                              a("authorities", ("str", authority))])
+        body += end_elem(pool, "provider")
     body += end_elem(pool, "application")
     body += end_elem(pool, "manifest")
     body += _node(RES_XML_END_NS,

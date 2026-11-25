@@ -41,6 +41,7 @@
 #include "svc/battery/battery_jni.h"
 #include "svc/bluetooth/bt_jni.h"
 #include "svc/keystore/keystore_jni.h"
+#include "svc/mpris/mpris_jni.h"
 #include "svc/net/connectivity_jni.h"
 #include "svc/notify/notify_jni.h"
 #include "svc/nsd/nsd_jni.h"
@@ -7530,6 +7531,9 @@ class ArtVm final : public JniVm {
     // Bind org.acl.internal.NotifyBridge (INotificationManager translation) to
     // the svc/notify host backend (org.freedesktop.Notifications).
     acl::notify::register_notify_natives(env);
+    // Bind org.acl.internal.MprisBridge (the app's MediaSession) to the
+    // svc/mpris host backend (an MPRIS player on the session bus).
+    acl::mpris::register_mpris_natives(env);
     // Bind org.acl.internal.BatteryBridge (ACTION_BATTERY_CHANGED extras) to
     // the svc/battery host power backend (org.freedesktop.UPower).
     acl::battery::register_battery_natives(env);

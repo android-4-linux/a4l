@@ -10,6 +10,10 @@ svc_sources = files('svc.cpp')
 if have_sdbus
   subdir('net')
   subdir('notify')
+  # svc/mpris: the app's media session as an MPRIS player. Needs D-Bus and JNI.
+  if have_jni
+    subdir('mpris')
+  endif
   subdir('battery')
   subdir('bluetooth')
   subdir('storage')

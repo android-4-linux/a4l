@@ -39,11 +39,19 @@ public final class NotifyBridge {
     private static final String DEFAULT_ACTION = "default";
 
     private static final class Posted {
-        long server;
+        long server;  // 0 while the notification is held back
         Notification notification;
         // What was last sent, to skip a repost that changes nothing the desktop shows.
         int signature;
+        String pkg;
+        int appId;
     }
+
+    // True while the app's media session is on the desktop's media controls. A notification
+    // that belongs to a media session is then held back: the controls already show the track
+    // and its transport, and the desktop would show the app twice. Android does the same
+    // with a media notification and its own media controls.
+    private static volatile boolean sMediaControls;
 
     // By the app's notification id, and by the daemon's. Guarded by the class lock: post and
     // cancel come from any app thread, events from the D-Bus thread.
@@ -54,6 +62,10 @@ public final class NotifyBridge {
     /** NotificationManager.notify, and a Service's startForeground. */
     static void post(String pkg, int appId, Notification n) {
         if (n == null) return;
+        if (sMediaControls && isMedia(n)) {
+            hold(pkg, appId, n);
+            return;
+        }
         final String title = text(n, Notification.EXTRA_TITLE);
         final String body = text(n, Notification.EXTRA_TEXT);
         final List<String> actions = new ArrayList<>();
@@ -103,8 +115,61 @@ public final class NotifyBridge {
                 p.server = server;
                 p.notification = n;
                 p.signature = signature;
+                p.pkg = pkg;
+                p.appId = appId;
                 sByServer.put(server, p);
             }
+        }
+    }
+
+    // A notification of a media session: Notification.MediaStyle names its session.
+    private static boolean isMedia(Notification n) {
+        if (n.extras == null) return false;
+        if (n.extras.containsKey(Notification.EXTRA_MEDIA_SESSION)) return true;
+        final String template = n.extras.getString(Notification.EXTRA_TEMPLATE);
+        return template != null && template.endsWith("MediaStyle");
+    }
+
+    // Keeps the notification without showing it, and takes it down if it is showing.
+    private static void hold(String pkg, int appId, Notification n) {
+        synchronized (sPostLock) {
+            final long shown;
+            synchronized (NotifyBridge.class) {
+                Posted p = sByAppId.get(appId);
+                if (p == null) {
+                    p = new Posted();
+                    sByAppId.put(appId, p);
+                }
+                shown = p.server;
+                if (shown != 0) sByServer.remove(shown);
+                p.server = 0;
+                p.notification = n;
+                p.signature = 0;
+                p.pkg = pkg;
+                p.appId = appId;
+            }
+            if (shown != 0) nClose(shown);
+        }
+    }
+
+    /**
+     * The app's media session came onto the desktop's media controls, or left them. Media
+     * notifications are taken down when it comes and shown again when it leaves.
+     */
+    static void mediaControls(boolean on) {
+        sMediaControls = on;
+        final List<Posted> affected = new ArrayList<>();
+        synchronized (NotifyBridge.class) {
+            for (Posted p : sByAppId.values()) {
+                if (p.notification != null && isMedia(p.notification)
+                        && (on ? p.server != 0 : p.server == 0)) {
+                    affected.add(p);
+                }
+            }
+        }
+        for (Posted p : affected) {
+            if (on) hold(p.pkg, p.appId, p.notification);
+            else post(p.pkg, p.appId, p.notification);
         }
     }
 
@@ -115,7 +180,7 @@ public final class NotifyBridge {
             p = sByAppId.remove(appId);
             if (p != null) sByServer.remove(p.server);
         }
-        if (p != null) nClose(p.server);
+        if (p != null && p.server != 0) nClose(p.server);
     }
 
     static void cancelAll() {
@@ -125,7 +190,9 @@ public final class NotifyBridge {
             sByAppId.clear();
             sByServer.clear();
         }
-        for (Posted p : all) nClose(p.server);
+        for (Posted p : all) {
+            if (p.server != 0) nClose(p.server);
+        }
     }
 
     // The name the desktop shows over the notification: the app's label, else its package.
