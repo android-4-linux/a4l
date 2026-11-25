@@ -324,7 +324,8 @@ int main(int argc, char** argv) {
     std::fprintf(
         stderr,
         "usage: %s <abs-path-to.so> "
-        "<symbol>|--boundary|--jni|--realvm|--thread|--looper|--load\n",
+        "<symbol>|--boundary|--jni|--realvm|--thread|--looper|--mediaformat|"
+        "--load\n",
         argv[0]);
     return 2;
   }
@@ -361,6 +362,27 @@ int main(int argc, char** argv) {
         "%s\n",
         r, r == 55 ? "(PASS)" : "(FAIL)");
     return r == 55 ? 0 : 1;
+  }
+
+  // Media format mode: drive a4l's libmediandk.so from a bionic .so that
+  // links it - see Java_com_acl_ndktest_Main_mediaFormatTest in
+  // tools/build-ndk-repro.sh for the steps and what 77 means.
+  if (std::string(argv[2]) == "--mediaformat") {
+    void* fn = rt->symbol(h, "Java_com_acl_ndktest_Main_mediaFormatTest");
+    if (!fn) {
+      std::fprintf(
+          stderr,
+          "mediaFormatTest not in the target (staged libmediandk.so?)\n");
+      return 1;
+    }
+    int r;
+    {
+      acl::ndk::BionicRuntime::RunScope scope(*rt);
+      r = reinterpret_cast<int (*)(void*, void*)>(fn)(nullptr, nullptr);
+    }
+    std::printf("acl-ndk-probe: AMediaFormat and AMediaCodec = %d %s\n", r,
+                r == 77 ? "(PASS)" : "(FAIL)");
+    return r == 77 ? 0 : 1;
   }
 
   // Load mode: just load the .so in-process and report. For a REAL app's

@@ -181,6 +181,7 @@ for pair in "libEGL.so:acl_egl_fwd.c:" "libGLESv2.so:acl_gles_fwd.c:$SYS/libEGL.
             "libGLESv3.so:acl_gles_fwd.c:$SYS/libEGL.so" \
             "libGLESv1_CM.so:acl_gles_fwd.c:$SYS/libEGL.so" \
             "libjnigraphics.so:acl_libjnigraphics.c:" \
+            "libmediandk.so:acl_libmediandk.c:" \
             "libwebviewchromium_plat_support.so:acl_libwebviewchromium_plat_support.c:" \
             ${VK_FWD:+"$VK_FWD"}; do
   gso="${pair%%:*}"; rest="${pair#*:}"; gsrc="${rest%%:*}"; gextra="${rest#*:}"

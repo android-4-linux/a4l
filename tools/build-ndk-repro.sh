@@ -152,6 +152,83 @@ EOF
      "$CRTBEGIN" "$OUT/ndktest.c" "$CRTEND" \
      "$BIONIC_LIBC" "$BIONIC_LIBLOG" "$BIONIC_LIBDL" $ACL_LIBANDROID -fuse-ld=lld
 
+# --- A second .so that links a4l's libmediandk.so, where the stage has one ---
+ACL_LIBMEDIANDK="$(dirname "$ACL_LIBANDROID")/libmediandk.so"
+if [ -f "$ACL_LIBMEDIANDK" ]; then
+  cat >"$OUT/mediatest.c" <<'EOF'
+// SPDX-License-Identifier: Apache-2.0
+// Provenance: original a4l fixture (generated); calls the NDK media API as
+// <media/NdkMediaFormat.h> and <media/NdkMediaCodec.h> declare it. No GPL-3.0 sources.
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+typedef struct AMediaFormat AMediaFormat;
+typedef struct AMediaCodec AMediaCodec;
+extern const char* AMEDIAFORMAT_KEY_MIME;
+extern const char* AMEDIAFORMAT_KEY_SAMPLE_RATE;
+extern const char* AMEDIAFORMAT_KEY_CHANNEL_COUNT;
+AMediaFormat* AMediaFormat_new(void);
+int32_t AMediaFormat_delete(AMediaFormat*);
+void AMediaFormat_setInt32(AMediaFormat*, const char*, int32_t);
+void AMediaFormat_setString(AMediaFormat*, const char*, const char*);
+void AMediaFormat_setBuffer(AMediaFormat*, const char*, const void*, size_t);
+bool AMediaFormat_getInt32(AMediaFormat*, const char*, int32_t*);
+bool AMediaFormat_getString(AMediaFormat*, const char*, const char**);
+bool AMediaFormat_getBuffer(AMediaFormat*, const char*, void**, size_t*);
+const char* AMediaFormat_toString(AMediaFormat*);
+AMediaCodec* AMediaCodec_createDecoderByType(const char*);
+int32_t AMediaCodec_start(AMediaCodec*);
+
+// 77 when every step holds; a negative number names the step that did not.
+__attribute__((visibility("default")))
+int Java_com_acl_ndktest_Main_mediaFormatTest(void* e, void* c) {
+  (void)e; (void)c;
+  if (strcmp(AMEDIAFORMAT_KEY_MIME, "mime") != 0 ||
+      strcmp(AMEDIAFORMAT_KEY_SAMPLE_RATE, "sample-rate") != 0) return -1;
+  AMediaFormat* f = AMediaFormat_new();
+  if (!f) return -2;
+  AMediaFormat_setString(f, AMEDIAFORMAT_KEY_MIME, "audio/mp4a-latm");
+  AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_SAMPLE_RATE, 44100);
+  AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_CHANNEL_COUNT, 2);
+  const unsigned char csd[4] = {0x12, 0x10, 0x00, 0xff};
+  AMediaFormat_setBuffer(f, "csd-0", csd, sizeof csd);
+  const char* mime = NULL;
+  int32_t rate = 0, channels = 0, none = 5;
+  if (!AMediaFormat_getString(f, AMEDIAFORMAT_KEY_MIME, &mime) ||
+      strcmp(mime, "audio/mp4a-latm") != 0) return -3;
+  if (!AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_SAMPLE_RATE, &rate) || rate != 44100) return -4;
+  if (!AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &channels) || channels != 2)
+    return -5;
+  // A key that is absent, and one of another type, are both "not there".
+  if (AMediaFormat_getInt32(f, "absent", &none) || none != 5) return -6;
+  if (AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_MIME, &none)) return -7;
+  void* data = NULL;
+  size_t size = 0;
+  if (!AMediaFormat_getBuffer(f, "csd-0", &data, &size) || size != sizeof csd ||
+      memcmp(data, csd, size) != 0 || data == (const void*)csd) return -8;
+  // Setting a key again replaces its value and may change its type.
+  AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_SAMPLE_RATE, 48000);
+  if (!AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_SAMPLE_RATE, &rate) || rate != 48000) return -9;
+  AMediaFormat_setString(f, "csd-0", "now a string");
+  if (AMediaFormat_getBuffer(f, "csd-0", &data, &size)) return -10;
+  const char* text = AMediaFormat_toString(f);
+  if (!text || !strstr(text, "sample-rate: int32(48000)") ||
+      !strstr(text, "mime: string(audio/mp4a-latm)")) return -11;
+  if (AMediaFormat_delete(f) != 0) return -12;
+  // No codec stands behind AMediaCodec yet: NULL, and a call on it is an error, not a crash.
+  AMediaCodec* codec = AMediaCodec_createDecoderByType("audio/mp4a-latm");
+  if (codec != NULL) return -13;
+  if (AMediaCodec_start(codec) == 0) return -14;
+  return 77;
+}
+EOF
+  "$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls \
+    -Wl,-soname,libmediatest.so -o "$OUT/libmediatest.so" \
+    "$CRTBEGIN" "$OUT/mediatest.c" "$CRTEND" "$BIONIC_LIBC" "$ACL_LIBMEDIANDK" -fuse-ld=lld
+  echo "== built $OUT/libmediatest.so =="
+fi
+
 echo "== built $OUT/libndktest.so =="
 readelf -d "$OUT/libndktest.so" | grep -E 'NEEDED|SONAME'
 echo "== exported symbol =="
