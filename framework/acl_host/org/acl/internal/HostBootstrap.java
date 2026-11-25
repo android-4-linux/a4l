@@ -260,6 +260,51 @@ public final class HostBootstrap {
         // runs. On acl the app runs as the host user; a uid-1000 user collides with SYSTEM_UID, so
         // WebViewFactory and other myUid()==SYSTEM_UID gates misfire. See AclOs.
         AclOs.install();
+        // An exception no thread caught is logged as Android's runtime logs it ("FATAL
+        // EXCEPTION: <thread>"), from a pre-handler and again from the default handler for a
+        // caller that goes to the handler directly, as kotlinx.coroutines does.
+        //
+        // Android then ends the process. This default handler does not: the thread ends and
+        // the app goes on, as it did before there was a handler here. An exception on a
+        // worker is often a4l's own gap, and an app that would have shown its screen is worth
+        // more than one that is gone. An app's own handler still does what it does; a crash
+        // reporter chains to this one and, finding one, does not end the process itself.
+        try {
+            final Throwable[] logged = {null};
+            final Thread.UncaughtExceptionHandler log = (thread, error) -> {
+                synchronized (logged) {
+                    if (logged[0] == error) return;
+                    logged[0] = error;
+                }
+                android.util.Log.e("AndroidRuntime",
+                        "FATAL EXCEPTION: " + thread.getName(), error);
+            };
+            // Hidden in libcore, so it is not in the jar this compiles against.
+            Thread.class.getMethod("setUncaughtExceptionPreHandler",
+                    Thread.UncaughtExceptionHandler.class).invoke(null, log);
+            Thread.setDefaultUncaughtExceptionHandler(log);
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: uncaught-exception logging not set: " + t);
+        }
+        // ACL_EXIT_STACKS=1: when the process exits, print the stack of the thread that is in
+        // Runtime.exit, to name who ended it. A shutdown hook runs while that thread waits.
+        if ("1".equals(System.getenv("ACL_EXIT_STACKS"))) {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                for (java.util.Map.Entry<Thread, StackTraceElement[]> e
+                        : Thread.getAllStackTraces().entrySet()) {
+                    boolean exiting = false;
+                    for (StackTraceElement f : e.getValue()) {
+                        exiting |= "java.lang.Runtime".equals(f.getClassName())
+                                && "exit".equals(f.getMethodName());
+                    }
+                    if (!exiting) continue;
+                    System.err.println("acl exit: called on thread " + e.getKey().getName());
+                    for (StackTraceElement f : e.getValue()) {
+                        System.err.println("acl exit:   at " + f);
+                    }
+                }
+            }, "acl-exit-stacks"));
+        }
         try {
             if (android.os.Looper.myLooper() == null) android.os.Looper.prepareMainLooper();
         } catch (Throwable ignored) {
