@@ -87,7 +87,9 @@ void print_usage() {
       "  --vm=<art|jvm|null>  runtime backend (default: $ACL_VM or art)\n"
       "  --main=<class>       static main() class to invoke\n"
       "  --service=<class>    host a MediaBrowserService (automotive media "
-      "path)\n"
+      "path);\n"
+      "                       with --present, in a window that browses and "
+      "plays it\n"
       "  --cal=<class>        host a CarAppService (automotive Car App Library "
       "path)\n"
       "  --classpath=<paths>  extra classpath entries (colon-separated); the "
@@ -989,6 +991,17 @@ int cmd_run(const std::vector<std::string>& args) {
     }
   }
 
+  // --service with --present: the service gets a window. The host layer's
+  // MediaBrowseActivity binds it and draws its browse tree, as a car's media
+  // app does for an app that has no screen of its own; it reads the service's
+  // name from ACL_MEDIA_SERVICE.
+  const bool browse_window = !service_class.empty() && present;
+  if (browse_window) {
+    ::setenv("ACL_MEDIA_SERVICE", service_class.c_str(), 1);
+    main_class = "org.acl.internal.MediaBrowseActivity";
+    acl::log::i(kTag, "browse window for {}", service_class);
+  }
+
   // Configure the runtime. The APK is passed on the classpath; extraction to a
   // real DEX/OAT cache is a later step (needs the framework boot classpath).
   r::VmConfig cfg;
@@ -1163,7 +1176,7 @@ int cmd_run(const std::vector<std::string>& args) {
   std::signal(SIGTERM, acl_on_kill_signal);
   std::signal(SIGINT, acl_on_kill_signal);
 
-  if (!service_class.empty()) {
+  if (!service_class.empty() && !browse_window) {
     // Automotive media path: host a MediaBrowserService (no Views, no
     // launcher).
     if (r::Error e = vm->call_media_browser(service_class)) {
