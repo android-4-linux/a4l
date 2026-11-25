@@ -46,9 +46,49 @@ public class Main extends Activity {
         if (!ok) fail(what);
     }
 
+    /** The launch callbacks in the order they came: c, s, C (post create), r, R (post resume). */
+    private final StringBuilder launch = new StringBuilder();
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        launch.append('s');
+    }
+
+    @Override
+    protected void onPostCreate(Bundle b) {
+        super.onPostCreate(b);
+        launch.append('C');
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        launch.append('r');
+    }
+
+    @Override
+    protected void onPostResume() {
+        super.onPostResume();
+        launch.append('R');
+        // Activity.performCreate/Start/Resume and ActivityThread give this order.
+        log("launch order " + launch);
+        expect("csCrR".contentEquals(launch), "launch order " + launch);
+        // Resources.getSystem() has the display's size, as the app's own Resources does.
+        final android.util.DisplayMetrics sys =
+                android.content.res.Resources.getSystem().getDisplayMetrics();
+        final android.util.DisplayMetrics app = getResources().getDisplayMetrics();
+        final boolean sized = sys.widthPixels > 0 && sys.widthPixels == app.widthPixels
+                && sys.heightPixels == app.heightPixels;
+        log("system resources sized=" + sized);
+        expect(sized, "system resources " + sys.widthPixels + "x" + sys.heightPixels
+                + ", app " + app.widthPixels + "x" + app.heightPixels);
+    }
+
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        launch.append('c');
         sMain = this;
         main.postDelayed(new Runnable() {
             @Override public void run() {

@@ -657,6 +657,7 @@ public final class HostBootstrap {
         // ResourcesManager so split-only resources resolve. Single-APK apps (no ACL_SPLIT_APKS) keep
         // the proven hand-rolled path below unchanged.
         String[] splits = splitApkPaths();
+        sizeSystemResources();
         if (splits.length > 0) {
             Resources r = appResourcesViaSplits(apkPath, splits);
             if (r != null) return r;
@@ -678,6 +679,34 @@ public final class HostBootstrap {
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: app resources failed: " + t);
             return Resources.getSystem();
+        }
+    }
+
+    // Give a Resources the display's size. Keeps what the Resources has that a4l does not set
+    // (locale, font scale, an activity's own override) and changes only what the size decides.
+    private static void applyDisplaySize(Resources r, android.content.res.Configuration cfg,
+            android.util.DisplayMetrics dm) {
+        android.content.res.Configuration c = new android.content.res.Configuration(r.getConfiguration());
+        c.screenWidthDp = cfg.screenWidthDp;
+        c.screenHeightDp = cfg.screenHeightDp;
+        c.smallestScreenWidthDp = cfg.smallestScreenWidthDp;
+        c.orientation = cfg.orientation;
+        c.screenLayout = cfg.screenLayout;
+        android.util.DisplayMetrics m = new android.util.DisplayMetrics();
+        m.setTo(r.getDisplayMetrics());
+        m.widthPixels = m.noncompatWidthPixels = dm.widthPixels;
+        m.heightPixels = m.noncompatHeightPixels = dm.heightPixels;
+        r.updateConfiguration(c, m);
+    }
+
+    // Resources.getSystem() starts with a 0x0 display. On Android it has the display's size like
+    // any other Resources, and apps read Resources.getSystem().getDisplayMetrics().widthPixels
+    // to size views. Called when the app's own Resources is built, after setDisplay.
+    private static void sizeSystemResources() {
+        try {
+            applyDisplaySize(Resources.getSystem(), appConfiguration(), appMetrics());
+        } catch (RuntimeException e) {
+            System.err.println("acl HostBootstrap: system resources keep no display size: " + e);
         }
     }
 
@@ -3494,6 +3523,7 @@ public final class HostBootstrap {
             try { setField(android.app.Activity.class, a, "mIntent", intent); } catch (Throwable ignored) {}
             invokeActivityLifecycle(a, "onCreate", android.os.Bundle.class, null);
             invokeActivityLifecycle(a, "onStart", null, null);
+            invokeActivityLifecycle(a, "onPostCreate", android.os.Bundle.class, null);
             invokeActivityLifecycle(a, "onResume", null, null);
             ensureResumed(a);
             android.view.Window w = a.getWindow();
@@ -3561,6 +3591,9 @@ public final class HostBootstrap {
                 : android.app.Activity.class.getDeclaredMethod(name);
         m.setAccessible(true);
         if (argType != null) m.invoke(a, arg); else m.invoke(a);
+        // Activity.performResume calls onPostResume after onResume. androidx FragmentActivity
+        // resumes its fragments there, not in onResume.
+        if ("onResume".equals(name)) invokeActivityLifecycle(a, "onPostResume", null, null);
     }
 
     // Attach the decor view tree to a window before the measure/layout/draw pass — real
@@ -4295,6 +4328,25 @@ public final class HostBootstrap {
           .append(" hscroll=").append(v.canScrollHorizontally(-1)).append(',').append(v.canScrollHorizontally(1))
           .append(" vscroll=").append(v.canScrollVertically(-1)).append(',').append(v.canScrollVertically(1))
           .append(" attached=").append(v.isAttachedToWindow());
+        if (v.getId() != android.view.View.NO_ID) {
+            try {
+                sb.append(" id=").append(v.getResources().getResourceEntryName(v.getId()));
+            } catch (RuntimeException e) {
+                // An id set in code has no resource name.
+            }
+        }
+        if (v.getClass().getName().contains("RecyclerView")) {
+            try {
+                Object ad = v.getClass().getMethod("getAdapter").invoke(v);
+                sb.append(" [LIST adapter=").append(ad == null ? "null" : ad.getClass().getName());
+                if (ad != null) {
+                    sb.append(" count=").append(ad.getClass().getMethod("getItemCount").invoke(ad));
+                }
+                sb.append(']');
+            } catch (ReflectiveOperationException e) {
+                // getAdapter or getItemCount renamed: nothing to add.
+            }
+        }
         // Only when set: a view can be laid out and visible and still show nothing.
         if (v.getAlpha() != 1f) sb.append(" alpha=").append(v.getAlpha());
         if (v.getTranslationX() != 0f || v.getTranslationY() != 0f) {
@@ -5203,21 +5255,7 @@ public final class HostBootstrap {
             for (ActivityRecord r : sTask) seen.add(r.activity.getResources());
             seen.add(Resources.getSystem());
             seen.remove(null);
-            for (Resources r : seen) {
-                // Keep what the Resources has that a4l does not set (locale, font scale, an
-                // activity's own override), and change only what the size decides.
-                android.content.res.Configuration c = new android.content.res.Configuration(r.getConfiguration());
-                c.screenWidthDp = cfg.screenWidthDp;
-                c.screenHeightDp = cfg.screenHeightDp;
-                c.smallestScreenWidthDp = cfg.smallestScreenWidthDp;
-                c.orientation = cfg.orientation;
-                c.screenLayout = cfg.screenLayout;
-                android.util.DisplayMetrics m = new android.util.DisplayMetrics();
-                m.setTo(r.getDisplayMetrics());
-                m.widthPixels = m.noncompatWidthPixels = dm.widthPixels;
-                m.heightPixels = m.noncompatHeightPixels = dm.heightPixels;
-                r.updateConfiguration(c, m);
-            }
+            for (Resources r : seen) applyDisplaySize(r, cfg, dm);
             // The frames a hollow ViewRootImpl answers getWindowVisibleDisplayFrame from.
             java.util.List<android.view.View> decors = new java.util.ArrayList<android.view.View>();
             if (decor != null) decors.add(decor);

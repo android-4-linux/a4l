@@ -45,6 +45,8 @@ RECEIVERS = [
 ]
 
 CHECKS = [
+    "SERVICE: launch order csCrR",
+    "SERVICE: system resources sized=true",
     "SERVICE: refused other=false implicit=false/null undeclared=false",
     "SERVICE: local connected .Main$LocalService add=5",
     "SERVICE: local after unbind created=1 unbound=1 destroyed=1",

@@ -4336,7 +4336,10 @@ class JniVm : public Vm {
       attach_app_context(
           activity);  // host ART: give the Activity a real app Context
       log_context(activity);
-      // onCreate(null) -> onStart() -> onResume(), the documented launch order.
+      // onCreate(null) -> onStart() -> onPostCreate(null) -> onResume() ->
+      // onPostResume(), the order Activity.performCreate/Start/Resume and
+      // ActivityThread give. androidx FragmentActivity resumes its fragments
+      // from onPostResume.
       result = call_lifecycle(cls, activity, "onCreate",
                               "(Landroid/os/Bundle;)V", true);
       if (result.is_ok())
@@ -4344,7 +4347,12 @@ class JniVm : public Vm {
       if (result.is_ok())
         result = call_lifecycle(cls, activity, "onStart", "()V", false);
       if (result.is_ok())
+        result = call_lifecycle(cls, activity, "onPostCreate",
+                                "(Landroid/os/Bundle;)V", true);
+      if (result.is_ok())
         result = call_lifecycle(cls, activity, "onResume", "()V", false);
+      if (result.is_ok())
+        result = call_lifecycle(cls, activity, "onPostResume", "()V", false);
       // androidx ComponentActivity's LifecycleRegistry only reaches RESUMED via
       // the framework's Application.dispatchActivityResumed path, which acl's
       // stub Application doesn't complete — force it so lifecycle-gated Compose

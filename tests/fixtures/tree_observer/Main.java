@@ -229,9 +229,31 @@ public class Main extends Activity {
         int nth;
         ClipGroup group;
 
+        /** Launch callbacks in the order they came: c, s, C (post create), r, R (post resume). */
+        final StringBuilder launch = new StringBuilder();
+
+        @Override
+        protected void onStart() {
+            super.onStart();
+            launch.append('s');
+        }
+
+        @Override
+        protected void onPostCreate(Bundle b) {
+            super.onPostCreate(b);
+            launch.append('C');
+        }
+
+        @Override
+        protected void onPostResume() {
+            super.onPostResume();
+            launch.append('R');
+        }
+
         @Override
         protected void onCreate(Bundle b) {
             super.onCreate(b);
+            launch.append('c');
             nth = ++sHomes;
             group = new ClipGroup(this);
             setContentView(group);
@@ -253,10 +275,13 @@ public class Main extends Activity {
         @Override
         protected void onResume() {
             super.onResume();
+            launch.append('r');
             final Handler h = new Handler(Looper.getMainLooper());
             h.postDelayed(new Runnable() {
                 @Override public void run() {
                     if (nth == 1) {
+                        log("started activity launch order " + launch);
+                        if (!"csCrR".contentEquals(launch)) System.exit(1);
                         log("no history second destroyed=" + sSecondDestroyed);
                         if (!sSecondDestroyed) System.exit(1);
                         startActivity(new Intent(Home.this, Home.class).addFlags(
