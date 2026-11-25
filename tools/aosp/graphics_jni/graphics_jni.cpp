@@ -5406,6 +5406,63 @@ jobject ImageDecoder_nCreateBytes(JNIEnv* env,
   return make_image_decoder(env, d);
 }
 
+// nCreate(FileDescriptor fd, long length, boolean, Source): the file's bytes
+// from where the descriptor stands, read with pread so the descriptor's own
+// position does not move. The caller keeps the descriptor. An app's content
+// provider decodes a downloaded picture this way before it hands it on.
+jobject ImageDecoder_nCreateFd(JNIEnv* env,
+                               jclass,
+                               jobject file_descriptor,
+                               jlong /*length*/,
+                               jboolean,
+                               jobject) {
+  constexpr size_t kMaxEncoded = 64U * 1024U * 1024U;
+  const auto fail = [env](const char* why) -> jobject {
+    if (jclass io = env->FindClass("java/io/IOException")) {
+      env->ThrowNew(io, why);
+      env->DeleteLocalRef(io);
+    }
+    return nullptr;
+  };
+  if (file_descriptor == nullptr)
+    return fail("no file descriptor");
+  jclass fd_class = env->GetObjectClass(file_descriptor);
+  jfieldID fd_field = env->GetFieldID(fd_class, "descriptor", "I");
+  env->DeleteLocalRef(fd_class);
+  if (fd_field == nullptr) {
+    env->ExceptionClear();
+    return fail("no descriptor in the FileDescriptor");
+  }
+  const int fd = env->GetIntField(file_descriptor, fd_field);
+  const off_t start = fd >= 0 ? ::lseek(fd, 0, SEEK_CUR) : -1;
+  if (start < 0)
+    return fail("the file descriptor is not seekable");
+  std::vector<uint8_t> bytes;
+  uint8_t chunk[64 * 1024];
+  off_t at = start;
+  for (;;) {
+    const ssize_t n = ::pread(fd, chunk, sizeof chunk, at);
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      return fail("the file could not be read");
+    }
+    if (n == 0)
+      break;
+    if (bytes.size() + static_cast<size_t>(n) > kMaxEncoded)
+      return fail("the file is too large to decode");
+    bytes.insert(bytes.end(), chunk, chunk + n);
+    at += n;
+  }
+  if (bytes.empty())
+    return fail("the file is empty");
+  jobject decoder =
+      make_image_decoder(env, SkData::MakeWithCopy(bytes.data(), bytes.size()));
+  if (decoder == nullptr && env->ExceptionCheck() == JNI_FALSE)
+    return fail("the file is not an image this decoder reads");
+  return decoder;
+}
+
 // nCreate(InputStream is, byte[] storage, boolean, Source): drain the stream
 // (storage is the read buffer) and decode the accumulated bytes.
 jobject ImageDecoder_nCreateStream(JNIEnv* env,
@@ -5973,6 +6030,10 @@ const JNINativeMethod kImageDecoder[] = {
      "(Ljava/nio/ByteBuffer;IIZLandroid/graphics/ImageDecoder$Source;)Landroid/"
      "graphics/ImageDecoder;",
      reinterpret_cast<void*>(ImageDecoder_nCreateBuffer)},
+    {"nCreate",
+     "(Ljava/io/FileDescriptor;JZLandroid/graphics/ImageDecoder$Source;)"
+     "Landroid/graphics/ImageDecoder;",
+     reinterpret_cast<void*>(ImageDecoder_nCreateFd)},
     {"nDecodeBitmap",
      "(JLandroid/graphics/ImageDecoder;ZIILandroid/graphics/"
      "Rect;ZIZZZJZ)Landroid/graphics/Bitmap;",

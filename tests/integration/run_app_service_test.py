@@ -50,6 +50,7 @@ CHECKS = [
     "SERVICE: bitmap pixel set=true",
     "SERVICE: accounts stored=true token dropped=true removed=true",
     "SERVICE: package uid consistent=true",
+    "SERVICE: image file decoded=true junk refused=true",
     f"SERVICE: process name {PACKAGE} application {PACKAGE}",
     "SERVICE: sweep gradient drawn=true",
     "SERVICE: refused other=false implicit=false/null undeclared=false",
