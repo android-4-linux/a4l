@@ -87,6 +87,23 @@ public class Main extends Activity {
         final String proc = android.os.Process.myProcessName();
         log("process name " + proc + " application " + android.app.Application.getProcessName());
         expect(getPackageName().equals(proc), "Process.myProcessName() is " + proc);
+        // A SweepGradient from red to blue around the center: red just past the positive x
+        // axis, an even mix opposite it, blue just before the axis again.
+        final android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
+                64, 64, android.graphics.Bitmap.Config.ARGB_8888);
+        final android.graphics.Paint paint = new android.graphics.Paint();
+        paint.setShader(new android.graphics.SweepGradient(32f, 32f, 0xFFFF0000, 0xFF0000FF));
+        new android.graphics.Canvas(bmp).drawRect(0, 0, 64, 64, paint);
+        final int start = bmp.getPixel(60, 33), half = bmp.getPixel(4, 32),
+                end = bmp.getPixel(60, 30);
+        final boolean swept = android.graphics.Color.red(start) > 240
+                && android.graphics.Color.blue(start) < 16
+                && Math.abs(android.graphics.Color.red(half) - 128) < 24
+                && Math.abs(android.graphics.Color.blue(half) - 128) < 24
+                && android.graphics.Color.blue(end) > 240
+                && android.graphics.Color.red(end) < 16;
+        log("sweep gradient drawn=" + swept);
+        expect(swept, String.format("sweep gradient %08x %08x %08x", start, half, end));
     }
 
     @Override
