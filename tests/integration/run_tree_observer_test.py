@@ -40,6 +40,7 @@ CHECKS = [
     "TREE: draw listener called=true view drawn=true",
     "TREE: no history second destroyed=true",
     "TREE: clear task first home destroyed=true",
+    "TREE: touch reached the moved view",
     "TREE: PASS",
     "acl activity-stack: task empty (root finished) -> exit",
 ]
@@ -78,6 +79,9 @@ def start_weston(runtime_dir, log_path):
             time.sleep(0.1)
         proc.kill()
     return None, "no headless Weston could be started"
+
+
+TAPS = ";".join(f"50,{150 if i % 2 == 0 else 450},{1500 + i * 350}" for i in range(30))
 
 
 def read_ppm(path):
@@ -163,6 +167,9 @@ def main():
         frame = os.path.join(work, "frame.ppm")
         env = dict(os.environ, WAYLAND_DISPLAY=display, ACL_RUN_TIMEOUT="60", ACL_BIN=acl,
                    ACL_PRESENT_GPU="1", ACL_GPU_DUMP=frame,
+                   # Taps by wall clock, in turn at (50,150), where the fixture's moved view
+                   # was laid out, and (50,450), where translationY put it.
+                   ACL_TEST_MS="1", ACL_TEST_TAP=TAPS,
                    XDG_CACHE_HOME=os.path.join(work, "cache"),
                    XDG_DATA_HOME=os.path.join(work, "data"))
         p = subprocess.run([os.path.join(src_root, "tools/run-apk.sh"), apk, "--verify=off",
@@ -170,12 +177,16 @@ def main():
         out = p.stdout + p.stderr
         if p.returncode == SKIP:
             return skip("run-apk.sh (vendored framework not built)", out[-2000:])
+        # What the fixture and the input path said, for a failure report.
+        story = "\n".join(ln for ln in out.splitlines()
+                          if "TREE: " in ln or "input: " in ln or "activity-stack" in ln)
         if "TREE: FAIL" in out:
-            sys.stderr.write(f"FAIL: the fixture reported a failure\n{out[-8000:]}\n")
+            sys.stderr.write(f"FAIL: the fixture reported a failure\n{story}\n"
+                             f"{out[-4000:]}\n")
             return 1
         for c in CHECKS:
             if c not in out:
-                sys.stderr.write(f"FAIL: missing '{c}'\n{out[-8000:]}\n")
+                sys.stderr.write(f"FAIL: missing '{c}'\n{story}\n{out[-4000:]}\n")
                 return 1
         # The last frame is Home's ClipGroup: its red child is clipped to the top half in
         # drawChild, so the bottom half shows the group's own blue.

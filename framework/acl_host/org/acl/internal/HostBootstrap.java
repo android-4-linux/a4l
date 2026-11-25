@@ -3088,6 +3088,40 @@ public final class HostBootstrap {
         new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> finishRecord(rec));
         return true;
     }
+    /**
+     * ACL_INPUT_DIAG: the views the current gesture is going to, outermost first, read from each
+     * ViewGroup's touch target after the DOWN was dispatched. Names the view that took a click
+     * when nothing visible reacts.
+     */
+    public static String touchTargetChain(android.view.View root) {
+        StringBuilder sb = new StringBuilder();
+        try {
+            java.lang.reflect.Field first =
+                    android.view.ViewGroup.class.getDeclaredField("mFirstTouchTarget");
+            first.setAccessible(true);
+            android.view.View v = root;
+            for (int depth = 0; v != null && depth < 64; depth++) {
+                if (sb.length() > 0) sb.append(" > ");
+                sb.append(v.getClass().getSimpleName());
+                if (v.getId() != android.view.View.NO_ID) {
+                    try {
+                        sb.append('#').append(v.getResources().getResourceEntryName(v.getId()));
+                    } catch (Throwable ignored) {}
+                }
+                sb.append('[').append(v.getWidth()).append('x').append(v.getHeight()).append(']');
+                if (!(v instanceof android.view.ViewGroup)) break;
+                Object target = first.get(v);
+                if (target == null) break;
+                java.lang.reflect.Field child = target.getClass().getDeclaredField("child");
+                child.setAccessible(true);
+                v = (android.view.View) child.get(target);
+            }
+        } catch (Throwable t) {
+            sb.append(" (").append(t).append(')');
+        }
+        return sb.toString();
+    }
+
     // The system's BACK action. A real ViewRootImpl routes the BACK key to the top window's back
     // handling; acl owns that system side, so it invokes the top activity's onBackPressed() — which
     // consults the OnBackPressedDispatcher (app interception: closing a drawer/sheet, WebView history,

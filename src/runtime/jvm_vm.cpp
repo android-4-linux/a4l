@@ -2086,6 +2086,32 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
         if (!input_diag)
           ++idiag;
       }
+      // ACL_INPUT_DIAG: who took the DOWN. handled=true with nothing visibly
+      // reacting means a view the user cannot see consumed it.
+      if (input_diag && action == 0 && consumed == JNI_FALSE &&
+          s->hostbootstrap_cls != nullptr) {
+        static jmethodID chain = nullptr;
+        if (chain == nullptr) {
+          chain =
+              env->GetStaticMethodID(s->hostbootstrap_cls, "touchTargetChain",
+                                     "(Landroid/view/View;)Ljava/lang/String;");
+          if (env->ExceptionCheck() == JNI_TRUE)
+            env->ExceptionClear();
+        }
+        if (chain != nullptr) {
+          auto js = static_cast<jstring>(env->CallStaticObjectMethod(
+              s->hostbootstrap_cls, chain, s->view));
+          if (env->ExceptionCheck() == JNI_TRUE) {
+            env->ExceptionClear();
+          } else if (js != nullptr) {
+            if (const char* c = env->GetStringUTFChars(js, nullptr)) {
+              log::i(kTag, "input: target {}", c);
+              env->ReleaseStringUTFChars(js, c);
+            }
+            env->DeleteLocalRef(js);
+          }
+        }
+      }
       if (s->me_recycle != nullptr)
         env->CallVoidMethod(me, s->me_recycle);
       env->DeleteLocalRef(me);
@@ -6930,6 +6956,76 @@ class ArtVm final : public JniVm {
            "libandroid_runtime "
            "({} unavailable)",
            ok, unavailable);
+    // MotionEvent.transform(Matrix) / applyTransform(Matrix). The framework's
+    // natives read the Matrix through libhwui's accessor, whose field id is
+    // set by libhwui's own Matrix registration; acl registers its own
+    // android.graphics natives, so that id is null and the call aborts the
+    // VM. ViewGroup transforms the event whenever it dispatches to a child
+    // that was translated, scaled or rotated. Do the same work here: read the
+    // nine values through Matrix.getValues and hand them to the exported
+    // MotionEvent methods.
+    {
+      using XformFn = void (*)(void* self, const float (*m)[9]);
+      static XformFn s_transform = nullptr;
+      static XformFn s_apply = nullptr;
+      static jmethodID s_get_values = nullptr;
+      s_transform = reinterpret_cast<XformFn>(::dlsym(
+          h, "_ZN7android11MotionEvent9transformERKNSt3__15arrayIfLm9EEE"));
+      s_apply = reinterpret_cast<XformFn>(::dlsym(
+          h,
+          "_ZN7android11MotionEvent14applyTransformERKNSt3__15arrayIfLm9EEE"));
+      jclass me = env->FindClass("android/view/MotionEvent");
+      if (env->ExceptionCheck() == JNI_TRUE)
+        env->ExceptionClear();
+      if (s_transform != nullptr && s_apply != nullptr && me != nullptr) {
+        static const auto run =
+            +[](JNIEnv* e, jlong ptr, jobject matrix, XformFn fn) {
+              if (ptr == 0 || matrix == nullptr || fn == nullptr)
+                return;
+              // Looked up at the first call, from the Matrix in hand: asking
+              // for it at registration would initialize android.graphics.Matrix
+              // before acl's graphics natives exist, and fail its <clinit>.
+              if (s_get_values == nullptr) {
+                jclass mcls = e->GetObjectClass(matrix);
+                s_get_values = e->GetMethodID(mcls, "getValues", "([F)V");
+                e->DeleteLocalRef(mcls);
+                if (s_get_values == nullptr)
+                  return;  // NoSuchMethodError is pending
+              }
+              jfloatArray arr = e->NewFloatArray(9);
+              if (arr == nullptr)
+                return;  // OutOfMemoryError is pending
+              e->CallVoidMethod(matrix, s_get_values, arr);
+              float v[9];
+              if (e->ExceptionCheck() == JNI_FALSE) {
+                e->GetFloatArrayRegion(arr, 0, 9, v);
+                fn(reinterpret_cast<void*>(ptr), &v);
+              }
+              e->DeleteLocalRef(arr);
+            };
+        const JNINativeMethod m[] = {
+            {const_cast<char*>("nativeTransform"),
+             const_cast<char*>("(JLandroid/graphics/Matrix;)V"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv* e, jclass, jlong ptr, jobject matrix) {
+                   run(e, ptr, matrix, s_transform);
+                 })},
+            {const_cast<char*>("nativeApplyTransform"),
+             const_cast<char*>("(JLandroid/graphics/Matrix;)V"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv* e, jclass, jlong ptr, jobject matrix) {
+                   run(e, ptr, matrix, s_apply);
+                 })},
+        };
+        if (env->RegisterNatives(me, m, 2) != JNI_OK) {
+          log::w(kTag, "MotionEvent transform natives not registered");
+          if (env->ExceptionCheck() == JNI_TRUE)
+            env->ExceptionClear();
+        }
+      }
+      if (me != nullptr)
+        env->DeleteLocalRef(me);
+    }
     // libandroid_runtime's host build omits graphics-buffer natives, so supply
     // acl's (the vendored android.hardware.HardwareBuffer's native underside
     // over a gbm dma-buf — Flutter external textures).

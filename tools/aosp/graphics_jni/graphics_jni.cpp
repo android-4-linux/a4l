@@ -2637,16 +2637,44 @@ jboolean RenderNode_nIsValid(jlong node) {
   return (!content->items.empty() || content->picture != nullptr) ? JNI_TRUE
                                                                   : JNI_FALSE;
 }
-void RenderNode_nGetTransformMatrix(jlong, jlong m) {
+// The node's own transform: translation, then rotation and scale about the
+// pivot. It leaves out the position (left/top), as RenderNode.getMatrix does,
+// and is built in the order apply_view_transform draws with, so a view is
+// hit-tested where it is drawn. View.getMatrix, hasIdentityMatrix and the
+// inverse come from here: ViewGroup uses them to map a touch into a child that
+// was moved with translationX/Y, scaled or rotated.
+SkMatrix node_property_matrix(const AclRenderNode* n) {
+  SkMatrix m = SkMatrix::I();
+  if (n == nullptr)
+    return m;
+  m.preTranslate(n->translationX, n->translationY);
+  if (n->scaleX != 1.0f || n->scaleY != 1.0f || n->rotation != 0.0f) {
+    const float w = static_cast<float>(n->right - n->left);
+    const float h = static_cast<float>(n->bottom - n->top);
+    const float px = n->pivotExplicit ? n->pivotX : w * 0.5f;
+    const float py = n->pivotExplicit ? n->pivotY : h * 0.5f;
+    m.preTranslate(px, py);
+    if (n->rotation != 0.0f)
+      m.preRotate(n->rotation);
+    m.preScale(n->scaleX, n->scaleY);
+    m.preTranslate(-px, -py);
+  }
+  return m;
+}
+void RenderNode_nGetTransformMatrix(jlong h, jlong m) {
   if (auto* mat = reinterpret_cast<SkMatrix*>(m))
+    *mat = node_property_matrix(rnode(h));
+}
+void RenderNode_nGetInverseTransformMatrix(jlong h, jlong m) {
+  auto* mat = reinterpret_cast<SkMatrix*>(m);
+  if (mat == nullptr)
+    return;
+  // A scale of 0 has no inverse; identity then, as before.
+  if (!node_property_matrix(rnode(h)).invert(mat))
     mat->reset();
 }
-void RenderNode_nGetInverseTransformMatrix(jlong, jlong m) {
-  if (auto* mat = reinterpret_cast<SkMatrix*>(m))
-    mat->reset();
-}
-jboolean RenderNode_nHasIdentityMatrix(jlong) {
-  return JNI_TRUE;
+jboolean RenderNode_nHasIdentityMatrix(jlong h) {
+  return node_property_matrix(rnode(h)).isIdentity() ? JNI_TRUE : JNI_FALSE;
 }
 jboolean RenderNode_nOffsetTopAndBottom(jlong h, jint off) {
   auto* n = rnode(h);

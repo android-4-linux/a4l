@@ -167,6 +167,14 @@ public class Main extends Activity {
      */
     public static class ClipGroup extends android.view.ViewGroup {
         final View child;
+        /**
+         * 100 wide and 200 tall, laid out at the top left and moved 300 down with
+         * translationY. Tall, so the test's two taps land inside the old and the new place
+         * whether or not the window has an action bar above the content.
+         */
+        final View moved;
+        /** Run when a touch reaches `moved` where it is drawn. */
+        Runnable onMovedTouched;
 
         ClipGroup(android.content.Context c) {
             super(c);
@@ -174,15 +182,35 @@ public class Main extends Activity {
             child = new View(c);
             child.setBackgroundColor(0xffff0000);
             addView(child);
+            moved = new View(c);
+            moved.setBackgroundColor(0xff00ff00);
+            moved.setTranslationY(300);
+            moved.setOnTouchListener(new View.OnTouchListener() {
+                @Override public boolean onTouch(View v, android.view.MotionEvent e) {
+                    if (e.getActionMasked() != android.view.MotionEvent.ACTION_DOWN) return true;
+                    if (e.getRawY() < 250) {
+                        // The test also taps (50,150), where the view was laid out and is not.
+                        log("FAIL a touch at y=" + e.getRawY()
+                                + " reached a view that translationY moved to y=300");
+                        System.exit(1);
+                    }
+                    log("touch reached the moved view");
+                    if (onMovedTouched != null) onMovedTouched.run();
+                    return true;
+                }
+            });
+            addView(moved);
         }
 
         @Override
         protected void onLayout(boolean changed, int l, int t, int r, int b) {
             child.layout(0, 0, r - l, b - t);
+            moved.layout(0, 0, 100, 200);
         }
 
         @Override
         protected boolean drawChild(Canvas canvas, View v, long time) {
+            if (v != child) return super.drawChild(canvas, v, time);
             final int save = canvas.save();
             canvas.clipRect(0, 0, getWidth(), getHeight() / 2);
             final boolean more = super.drawChild(canvas, v, time);
@@ -199,12 +227,14 @@ public class Main extends Activity {
     public static class Home extends Activity {
         static int sHomes, sHomesDestroyed;
         int nth;
+        ClipGroup group;
 
         @Override
         protected void onCreate(Bundle b) {
             super.onCreate(b);
             nth = ++sHomes;
-            setContentView(new ClipGroup(this));
+            group = new ClipGroup(this);
+            setContentView(group);
         }
 
         @Override
@@ -235,14 +265,39 @@ public class Main extends Activity {
                     }
                     log("clear task first home destroyed=" + (sHomesDestroyed == 1));
                     if (sHomesDestroyed != 1) System.exit(1);
-                    h.postDelayed(new Runnable() {
+                    // Last, hit-testing: the test taps (50,150) and (50,450) in turn. Only the
+                    // second is on the moved view.
+                    final Runnable noTouch = new Runnable() {
                         @Override public void run() {
-                            log("FAIL the app kept running after its last Activity finished");
-                            System.exit(4);
+                            log("FAIL no touch reached the moved view where it is drawn");
+                            System.exit(5);
                         }
-                    }, 3000);
-                    log("PASS");
-                    finish();
+                    };
+                    h.postDelayed(noTouch, 12000);
+                    // The test's taps are injected from the frame loop, which idles while
+                    // nothing changes: keep it turning until the touch arrives.
+                    h.post(new Runnable() {
+                        @Override public void run() {
+                            if (group.onMovedTouched == null) return;
+                            group.invalidate();
+                            h.postDelayed(this, 50);
+                        }
+                    });
+                    group.onMovedTouched = new Runnable() {
+                        @Override public void run() {
+                            group.onMovedTouched = null;
+                            h.removeCallbacks(noTouch);
+                            h.postDelayed(new Runnable() {
+                                @Override public void run() {
+                                    log("FAIL the app kept running after its last Activity "
+                                            + "finished");
+                                    System.exit(4);
+                                }
+                            }, 3000);
+                            log("PASS");
+                            finish();
+                        }
+                    };
                 }
             }, 100);
         }
