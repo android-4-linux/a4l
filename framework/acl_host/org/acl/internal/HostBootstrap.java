@@ -873,18 +873,20 @@ public final class HostBootstrap {
             if (sApplication != null) return sApplication;
             return this;
         }
-        // getBaseContext() returns mBase, which is null (super(null)). Libraries that unwrap a
-        // ContextWrapper chain then NPE: Glide's RequestManagerRetriever.get() does
-        // ((ContextWrapper) ctx).getBaseContext().getApplicationContext(), so binding a F-Droid app
-        // card (Glide.with(view context) -> recurse into this bare AppContext) crashed the
-        // RecyclerView layout and left the app list unrendered. Hand back the Application: Glide's
-        // get() short-circuits on `instanceof Application`, terminating the unwrap cleanly. Only when
-        // no Application exists yet (early startup, before any view renders) fall back to the null
-        // base, preserving the prior behavior for that window.
+        // The base context is a RootContext: not a ContextWrapper, and handing every call
+        // back to this context. mBase itself stays null (super(null)).
+        //
+        // A library that unwraps a context needs both halves. Glide's
+        // RequestManagerRetriever.get() does
+        // ((ContextWrapper) ctx).getBaseContext().getApplicationContext(), so a null base is a
+        // NullPointerException in a RecyclerView's layout. Coil looks for a LifecycleOwner
+        // with "while it is a ContextWrapper, take its base", so a base that is the
+        // Application, whose own base is this context, never ends: that loop held Spotify's
+        // main thread at full load. On Android the chain ends at a ContextImpl.
+        private android.content.Context root;
         @Override public android.content.Context getBaseContext() {
-            if (application != null) return application;
-            if (sApplication != null) return sApplication;
-            return super.getBaseContext();
+            if (root == null) root = new RootContext(this);
+            return root;
         }
         public int getDisplayId() { return 0; }
         // A null-base ContextWrapper NPEs on getDisplay()/getDisplayNoVerify() (mBase == null);
