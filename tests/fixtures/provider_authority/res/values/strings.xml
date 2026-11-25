@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0
+     Provenance: original a4l test fixture. No GPL-3.0 sources. -->
+<resources>
+    <string name="authority">com.acl.authres.files</string>
+</resources>

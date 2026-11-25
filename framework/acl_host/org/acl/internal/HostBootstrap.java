@@ -3032,7 +3032,19 @@ public final class HostBootstrap {
                             else if (name.indexOf('.') < 0) name = pkg + "." + name;
                             cur = name;
                             curMeta = new android.os.Bundle();
-                            providers.add(new String[]{name, xml.getAttributeValue(NS, "authorities"),
+                            // The authorities may be a string resource, which reads back
+                            // as "@<id>": the provider is then reached by a name no URI has.
+                            String authorities = xml.getAttributeValue(NS, "authorities");
+                            final int authRes =
+                                    xml.getAttributeResourceValue(NS, "authorities", 0);
+                            if (authRes != 0) {
+                                try {
+                                    authorities = base.getResources().getString(authRes);
+                                } catch (RuntimeException e) {
+                                    // Keep what the attribute gave.
+                                }
+                            }
+                            providers.add(new String[]{name, authorities,
                                     Boolean.toString(xml.getAttributeBooleanValue(NS, "exported", false)),
                                     Boolean.toString(xml.getAttributeBooleanValue(NS, "grantUriPermissions", false))});
                         }
