@@ -10,7 +10,8 @@
 # back with their flags and titles.
 #
 # The fixture also checks its MediaSession: a MediaController reads the metadata and playback
-# state it set and is told when they change, the session manager lists it as active, and the
+# state it set and is told when they change, the queue it set comes back item for item and
+# is gone when it is set to none, the session manager lists it as active, and the
 # controller's play, pause, skipToNext, seekTo and playFromMediaId reach its callback.
 #
 # Needs a host ART build (ACL_ART_HOME) and the AOSP toolchain. Exits 77 (skip) without them.
@@ -37,7 +38,7 @@ WANT = [
 
 
 # The session line comes when the main looper gets to it, so its place is not checked.
-SESSION = ("MEDIAHOST: session read=true told=3 active=1 "
+SESSION = ("MEDIAHOST: session read=true told=15 queued=true emptied=true active=1 "
            "commands=play pause next seek42000 id:track-1")
 
 

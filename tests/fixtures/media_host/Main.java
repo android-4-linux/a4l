@@ -104,11 +104,31 @@ public class Main extends Activity {
                 @Override public void onPlaybackStateChanged(PlaybackState st) {
                     if (st != null && st.getState() == PlaybackState.STATE_PAUSED) told[0] |= 2;
                 }
+                @Override public void onQueueChanged(java.util.List<MediaSession.QueueItem> q) {
+                    if (q != null && q.size() == 2) told[0] |= 4;
+                    if (q == null) told[0] |= 8;
+                }
             }, main);
             session.setMetadata(new MediaMetadata.Builder()
                     .putString(MediaMetadata.METADATA_KEY_TITLE, "Next").build());
             session.setPlaybackState(new PlaybackState.Builder()
                     .setState(PlaybackState.STATE_PAUSED, 0, 0f).build());
+            // The queue: two items in, the same two out and one callback; then none.
+            final java.util.List<MediaSession.QueueItem> queue = new ArrayList<>();
+            queue.add(new MediaSession.QueueItem(new MediaDescription.Builder()
+                    .setMediaId("q-1").setTitle("Queued 1").build(), 11));
+            queue.add(new MediaSession.QueueItem(new MediaDescription.Builder()
+                    .setMediaId("q-2").setTitle("Queued 2").build(), 12));
+            session.setQueue(queue);
+            session.setQueueTitle("Up next");
+            final java.util.List<MediaSession.QueueItem> back = controller.getQueue();
+            final boolean queued = back != null && back.size() == 2
+                    && back.get(0).getQueueId() == 11
+                    && "q-2".equals(back.get(1).getDescription().getMediaId())
+                    && "Queued 2".contentEquals(back.get(1).getDescription().getTitle())
+                    && "Up next".contentEquals(controller.getQueueTitle());
+            session.setQueue(null);
+            final boolean emptied = controller.getQueue() == null;
             final MediaController.TransportControls t = controller.getTransportControls();
             t.play();
             t.pause();
@@ -120,6 +140,7 @@ public class Main extends Activity {
             main.post(new Runnable() {
                 @Override public void run() {
                     Log.i("acl", "MEDIAHOST: session read=" + read + " told=" + told[0]
+                            + " queued=" + queued + " emptied=" + emptied
                             + " active=" + active + " commands=" + commands.toString().trim());
                 }
             });
