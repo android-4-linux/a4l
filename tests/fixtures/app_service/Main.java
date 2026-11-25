@@ -184,6 +184,23 @@ public class Main extends Activity {
         }
         log("image file decoded=" + decoded + " junk refused=" + refused);
         expect(decoded && refused, "ImageDecoder from a file");
+        // A base-context chain ends: from the Activity and from the Application, taking the
+        // base while it is a ContextWrapper reaches a Context that is not one, is not null,
+        // and still names the Application. An image loader walks the chain this way.
+        boolean ends = true;
+        for (android.content.Context start : new android.content.Context[]{
+                this, getApplicationContext()}) {
+            android.content.Context c = start;
+            int steps = 0;
+            while (c instanceof android.content.ContextWrapper && steps < 20) {
+                c = ((android.content.ContextWrapper) c).getBaseContext();
+                steps++;
+            }
+            ends &= steps < 20 && c != null && c.getApplicationContext() == getApplication()
+                    && getPackageName().equals(c.getPackageName());
+        }
+        log("base context chain ends=" + ends);
+        expect(ends, "base context chain");
         // The process has the package's name, from both places an app reads it.
         final String proc = android.os.Process.myProcessName();
         log("process name " + proc + " application " + android.app.Application.getProcessName());
