@@ -265,41 +265,67 @@ public class Main extends Activity {
                     }
                     log("clear task first home destroyed=" + (sHomesDestroyed == 1));
                     if (sHomesDestroyed != 1) System.exit(1);
-                    // Last, hit-testing: the test taps (50,150) and (50,450) in turn. Only the
-                    // second is on the moved view.
-                    final Runnable noTouch = new Runnable() {
+                    // A view Animation runs on the frame's drawing time. It has to end.
+                    final Runnable noEnd = new Runnable() {
                         @Override public void run() {
-                            log("FAIL no touch reached the moved view where it is drawn");
-                            System.exit(5);
+                            log("FAIL a view animation did not end");
+                            System.exit(6);
                         }
                     };
-                    h.postDelayed(noTouch, 12000);
-                    // The test's taps are injected from the frame loop, which idles while
-                    // nothing changes: keep it turning until the touch arrives.
-                    h.post(new Runnable() {
-                        @Override public void run() {
-                            if (group.onMovedTouched == null) return;
-                            group.invalidate();
-                            h.postDelayed(this, 50);
+                    h.postDelayed(noEnd, 5000);
+                    final android.view.animation.AlphaAnimation fade =
+                            new android.view.animation.AlphaAnimation(0f, 1f);
+                    fade.setDuration(200);
+                    fade.setAnimationListener(
+                            new android.view.animation.Animation.AnimationListener() {
+                        @Override public void onAnimationStart(
+                                android.view.animation.Animation a) {}
+                        @Override public void onAnimationRepeat(
+                                android.view.animation.Animation a) {}
+                        @Override public void onAnimationEnd(android.view.animation.Animation a) {
+                            h.removeCallbacks(noEnd);
+                            log("view animation ended");
+                            hitTest(h);
                         }
                     });
-                    group.onMovedTouched = new Runnable() {
-                        @Override public void run() {
-                            group.onMovedTouched = null;
-                            h.removeCallbacks(noTouch);
-                            h.postDelayed(new Runnable() {
-                                @Override public void run() {
-                                    log("FAIL the app kept running after its last Activity "
-                                            + "finished");
-                                    System.exit(4);
-                                }
-                            }, 3000);
-                            log("PASS");
-                            finish();
-                        }
-                    };
+                    group.moved.startAnimation(fade);
                 }
             }, 100);
+        }
+
+        /** Last: the test taps (50,150) and (50,450) in turn. Only the second is on the moved view. */
+        private void hitTest(final Handler h) {
+            final Runnable noTouch = new Runnable() {
+                @Override public void run() {
+                    log("FAIL no touch reached the moved view where it is drawn");
+                    System.exit(5);
+                }
+            };
+            h.postDelayed(noTouch, 12000);
+            // The test's taps are injected from the frame loop, which idles while
+            // nothing changes: keep it turning until the touch arrives.
+            h.post(new Runnable() {
+                @Override public void run() {
+                    if (group.onMovedTouched == null) return;
+                    group.invalidate();
+                    h.postDelayed(this, 50);
+                }
+            });
+            group.onMovedTouched = new Runnable() {
+                @Override public void run() {
+                    group.onMovedTouched = null;
+                    h.removeCallbacks(noTouch);
+                    h.postDelayed(new Runnable() {
+                        @Override public void run() {
+                            log("FAIL the app kept running after its last Activity "
+                                    + "finished");
+                            System.exit(4);
+                        }
+                    }, 3000);
+                    log("PASS");
+                    finish();
+                }
+            };
         }
     }
 }

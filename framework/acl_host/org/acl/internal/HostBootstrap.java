@@ -52,8 +52,33 @@ public final class HostBootstrap {
             observer.dispatchOnGlobalLayout();
         }
         if (observer.dispatchOnPreDraw()) return true;
+        stampDrawingTime(root);
         observer.dispatchOnDraw();
         return false;
+    }
+
+    // ViewRootImpl.draw sets AttachInfo.mDrawingTime for the frame, and a4l draws without it.
+    // View.getDrawingTime() reads it, and a view Animation (android.view.animation) takes its
+    // start time and its progress from it. Left at 0, such an animation starts at 0 and stays
+    // on its first frame: a fade-in holds its view at alpha 0.
+    private static java.lang.reflect.Field sViewAttachInfo;
+    private static java.lang.reflect.Field sAttachDrawingTime;
+    private static void stampDrawingTime(android.view.View root) {
+        try {
+            if (sViewAttachInfo == null) {
+                java.lang.reflect.Field v = android.view.View.class.getDeclaredField("mAttachInfo");
+                v.setAccessible(true);
+                java.lang.reflect.Field t = Class.forName("android.view.View$AttachInfo")
+                        .getDeclaredField("mDrawingTime");
+                t.setAccessible(true);
+                sAttachDrawingTime = t;
+                sViewAttachInfo = v;
+            }
+            Object info = sViewAttachInfo.get(root);
+            if (info != null) sAttachDrawingTime.setLong(info, android.os.SystemClock.uptimeMillis());
+        } catch (ReflectiveOperationException e) {
+            // The fields are the platform's; without them animations keep the old behavior.
+        }
     }
 
     // SurfaceView registers a pre-draw listener of its own that runs updateSurface(). a4l gives
@@ -4270,6 +4295,22 @@ public final class HostBootstrap {
           .append(" hscroll=").append(v.canScrollHorizontally(-1)).append(',').append(v.canScrollHorizontally(1))
           .append(" vscroll=").append(v.canScrollVertically(-1)).append(',').append(v.canScrollVertically(1))
           .append(" attached=").append(v.isAttachedToWindow());
+        // Only when set: a view can be laid out and visible and still show nothing.
+        if (v.getAlpha() != 1f) sb.append(" alpha=").append(v.getAlpha());
+        if (v.getTranslationX() != 0f || v.getTranslationY() != 0f) {
+            sb.append(" trans=").append(v.getTranslationX()).append(',').append(v.getTranslationY());
+        }
+        if (v.getScaleX() != 1f || v.getScaleY() != 1f) {
+            sb.append(" scale=").append(v.getScaleX()).append(',').append(v.getScaleY());
+        }
+        if (v instanceof android.widget.ImageView) {
+            android.graphics.drawable.Drawable d = ((android.widget.ImageView) v).getDrawable();
+            sb.append(" drawable=").append(d == null ? "null" : d.getClass().getSimpleName()
+                    + " " + d.getIntrinsicWidth() + "x" + d.getIntrinsicHeight());
+        }
+        if (v instanceof android.widget.TextView) {
+            sb.append(" textLen=").append(((android.widget.TextView) v).length());
+        }
         // A ViewPager with an adapter but no child views never populated its pages (nothing to swipe).
         if (v.getClass().getName().contains("ViewPager")) {
             try {
