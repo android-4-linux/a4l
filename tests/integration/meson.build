@@ -383,6 +383,24 @@ if py3.found() and have_gl and have_ffmpeg
       depends : [acl_exe],
       timeout : 300,
     )
+    # A notification with a large icon and an action reaches the notification daemon, and the
+    # action comes back. Runs a private session bus with a stand-in daemon on it, and a headless
+    # Weston. Needs host ART and sdbus-c++; SKIPs otherwise, which includes CI.
+    if have_sdbus
+      notify_stub = executable(
+        'acl-notify-stub',
+        files('notify_stub_main.cpp'),
+        dependencies : [sdbus_dep],
+        install : false,
+      )
+      test(
+        'notify-actions',
+        py3,
+        args : [files('run_notify_test.py'), acl_exe, framework_android_jar, notify_stub],
+        depends : [acl_exe, notify_stub],
+        timeout : 300,
+      )
+    endif
     # A view's ViewTreeObserver listeners (global layout, pre-draw, draw), for an Activity
     # started from another's onCreate whose view registers before it is in a window. Starts a
     # headless Weston for itself. Needs host ART; SKIPs otherwise, which includes CI.

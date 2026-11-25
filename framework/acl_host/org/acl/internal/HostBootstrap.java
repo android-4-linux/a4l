@@ -541,7 +541,7 @@ public final class HostBootstrap {
         return c;
     }
 
-    private static AppContext sAppContext;
+    static AppContext sAppContext;  // NotifyBridge loads a notification's icon with it
 
     /** Deliver an acl-sourced Intent to the app context's registered receivers (main thread). */
     public static void deliverBroadcast(android.content.Intent intent) {
@@ -675,7 +675,18 @@ public final class HostBootstrap {
             // (foss4g2024.schedule's main_layout) — matches nothing under an undefined config, so
             // getLayout() throws Resources$NotFoundException. A real orientation + screen size + density
             // lets the selector pick a variant.
-            return new Resources(am, appMetrics(), appConfiguration());
+            // Notification.Builder and NotificationManager shrink a notification's large icon
+            // to notification_right_icon_size, 48dp: the size of the icon in Android's shade.
+            // The desktop draws it larger, so that one dimension answers with NotifyBridge's
+            // limit. An app installed as splits takes the other path above and keeps 48dp.
+            final int iconSize = Resources.getSystem()
+                    .getIdentifier("notification_right_icon_size", "dimen", "android");
+            return new Resources(am, appMetrics(), appConfiguration()) {
+                @Override public int getDimensionPixelSize(int id) {
+                    return id == iconSize && id != 0 ? NotifyBridge.MAX_IMAGE_EDGE
+                            : super.getDimensionPixelSize(id);
+                }
+            };
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: app resources failed: " + t);
             return Resources.getSystem();
@@ -2130,6 +2141,90 @@ public final class HostBootstrap {
                 && (i.getFlags() & android.content.Intent.FLAG_ACTIVITY_NO_HISTORY) != 0;
     }
 
+    // The class of the first <activity>, or the target of the first <activity-alias>, with a
+    // MAIN/LAUNCHER intent filter. "" once the manifest has been read and names none.
+    private static String sLauncherActivity;
+    static synchronized String launcherActivityName() {
+        if (sLauncherActivity != null) return sLauncherActivity.isEmpty() ? null : sLauncherActivity;
+        String found = "";
+        final AppContext c = sAppContext;
+        if (c == null) return null;
+        android.content.res.XmlResourceParser xml = null;
+        try {
+            final String NS = "http://schemas.android.com/apk/res/android";
+            final String p = c.getPackageName();
+            xml = openBaseManifest(c.getResources().getAssets(),
+                    c.getApplicationInfo() != null ? c.getApplicationInfo().sourceDir : null);
+            String current = null;
+            boolean main = false, launcher = false;
+            for (int ev = xml.getEventType();
+                 ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
+                if (ev != android.content.res.XmlResourceParser.START_TAG) continue;
+                final String tag = xml.getName();
+                if ("activity".equals(tag)) {
+                    current = normalizeClass(xml.getAttributeValue(NS, "name"), p);
+                } else if ("activity-alias".equals(tag)) {
+                    current = xml.getAttributeBooleanValue(NS, "enabled", true)
+                            ? normalizeClass(xml.getAttributeValue(NS, "targetActivity"), p)
+                            : null;
+                } else if ("service".equals(tag) || "receiver".equals(tag)
+                        || "provider".equals(tag)) {
+                    current = null;
+                } else if ("intent-filter".equals(tag)) {
+                    main = launcher = false;
+                } else if ("action".equals(tag)) {
+                    main |= android.content.Intent.ACTION_MAIN
+                            .equals(xml.getAttributeValue(NS, "name"));
+                } else if ("category".equals(tag)) {
+                    launcher |= android.content.Intent.CATEGORY_LAUNCHER
+                            .equals(xml.getAttributeValue(NS, "name"));
+                }
+                if (current != null && main && launcher) {
+                    found = current;
+                    break;
+                }
+            }
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: launcher activity parse failed: " + t);
+        } finally {
+            if (xml != null) xml.close();
+        }
+        sLauncherActivity = found;
+        return found.isEmpty() ? null : found;
+    }
+
+    // The <application>'s android:label, a string or a string resource. "" once the manifest
+    // has been read and gives none.
+    private static String sAppLabel;
+    static synchronized String appLabel() {
+        if (sAppLabel != null) return sAppLabel.isEmpty() ? null : sAppLabel;
+        final AppContext c = sAppContext;
+        if (c == null) return null;
+        String found = "";
+        android.content.res.XmlResourceParser xml = null;
+        try {
+            final String NS = "http://schemas.android.com/apk/res/android";
+            xml = openBaseManifest(c.getResources().getAssets(),
+                    c.getApplicationInfo() != null ? c.getApplicationInfo().sourceDir : null);
+            for (int ev = xml.getEventType();
+                 ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
+                if (ev != android.content.res.XmlResourceParser.START_TAG
+                        || !"application".equals(xml.getName())) continue;
+                final int res = xml.getAttributeResourceValue(NS, "label", 0);
+                final CharSequence label = res != 0 ? c.getResources().getText(res)
+                        : xml.getAttributeValue(NS, "label");
+                if (label != null) found = label.toString();
+                break;
+            }
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: app label parse failed: " + t);
+        } finally {
+            if (xml != null) xml.close();
+        }
+        sAppLabel = found;
+        return found.isEmpty() ? null : found;
+    }
+
     private static java.util.Map<String, String> sParentActivity;
     private static String normalizeClass(String name, String pkg) {
         if (name == null) return null;
@@ -2290,6 +2385,17 @@ public final class HostBootstrap {
     static final class AppPackageManager extends StubPackageManager {
         private final String pkg;
         AppPackageManager(String pkg) { this.pkg = pkg; }
+        // The app's own launch intent, as a launcher would start it. A media app builds its
+        // notification's content intent from this, and PendingIntent.getActivity throws on null.
+        @Override public android.content.Intent getLaunchIntentForPackage(String packageName) {
+            if (packageName == null || !packageName.equals(pkg)) return null;
+            final String cls = launcherActivityName();
+            if (cls == null) return null;
+            return new android.content.Intent(android.content.Intent.ACTION_MAIN)
+                    .addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+                    .setClassName(pkg, cls)
+                    .setFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+        }
         // Report acl's portal-backed email handler for an email launch (Intent.resolveActivity() /
         // queryIntentActivities()) so callers that gate on a mail client being present proceed; the
         // launch itself is routed to the xdg Email portal. Everything else stays unresolved (null/empty),
@@ -4440,6 +4546,214 @@ public final class HostBootstrap {
                 (p, method, a) -> defaultValue(method.getReturnType()));
     }
 
+    // IBinders an app has written to a Parcel, by the handle written in their place (jvm_vm's
+    // Parcel natives). A Parcel does not leave the process, so the handle reads back as the
+    // same object. Kept for the life of the process: the bytes of a Parcel can be read long
+    // after they were written, and an app writes few distinct binders.
+    private static final java.util.IdentityHashMap<android.os.IBinder, Long> sBinderHandles =
+            new java.util.IdentityHashMap<android.os.IBinder, Long>();
+    private static final java.util.ArrayList<android.os.IBinder> sBindersByHandle =
+            new java.util.ArrayList<android.os.IBinder>();
+
+    /** The handle for a binder, never 0. Called from Parcel.nativeWriteStrongBinder. */
+    public static long binderHandle(android.os.IBinder binder) {
+        synchronized (sBinderHandles) {
+            Long handle = sBinderHandles.get(binder);
+            if (handle == null) {
+                sBindersByHandle.add(binder);
+                handle = Long.valueOf(sBindersByHandle.size());  // 1-based; 0 is null
+                sBinderHandles.put(binder, handle);
+            }
+            return handle;
+        }
+    }
+
+    /** The binder a handle was given for, or null. Called from Parcel.nativeReadStrongBinder. */
+    public static android.os.IBinder binderForHandle(long handle) {
+        synchronized (sBinderHandles) {
+            return handle >= 1 && handle <= sBindersByHandle.size()
+                    ? sBindersByHandle.get((int) (handle - 1)) : null;
+        }
+    }
+
+    // One PendingIntent the app made: what to send and how.
+    private static final class IntentSenderRecord {
+        int type;              // ActivityManager.INTENT_SENDER_*
+        int requestCode;
+        android.content.Intent intent;
+        Object sender;         // the IIntentSender handed to the app
+    }
+    // Guarded by itself. An app makes these from any thread.
+    private static final java.util.List<IntentSenderRecord> sIntentSenders =
+            new java.util.ArrayList<IntentSenderRecord>();
+    private static final int INTENT_SENDER_BROADCAST = 1, INTENT_SENDER_ACTIVITY = 2,
+            INTENT_SENDER_SERVICE = 4, INTENT_SENDER_FOREGROUND_SERVICE = 5;
+
+    // The notification id each foreground Service gave startForeground.
+    private static final java.util.Map<android.content.ComponentName, Integer> sForegroundIds =
+            new java.util.concurrent.ConcurrentHashMap<android.content.ComponentName, Integer>();
+
+    private static IntentSenderRecord intentSenderFor(Object sender) {
+        synchronized (sIntentSenders) {
+            for (IntentSenderRecord r : sIntentSenders) if (r.sender == sender) return r;
+        }
+        return null;
+    }
+
+    // PendingIntent.getActivity/getBroadcast/getService. Two requests of the same kind, request
+    // code and Intent (by filterEquals) are one PendingIntent, as on Android; the flags decide
+    // whether the existing one is returned, updated, replaced or required.
+    private static Object getIntentSender(Class<?> senderIface, int type, int requestCode,
+            android.content.Intent[] intents, int flags) {
+        if (intents == null || intents.length == 0 || intents[intents.length - 1] == null) {
+            return null;
+        }
+        final android.content.Intent intent = intents[intents.length - 1];
+        synchronized (sIntentSenders) {
+            IntentSenderRecord found = null;
+            for (IntentSenderRecord r : sIntentSenders) {
+                if (r.type == type && r.requestCode == requestCode
+                        && r.intent.filterEquals(intent)) {
+                    found = r;
+                    break;
+                }
+            }
+            if ((flags & android.app.PendingIntent.FLAG_NO_CREATE) != 0) {
+                return found != null ? found.sender : null;
+            }
+            if (found != null && (flags & android.app.PendingIntent.FLAG_CANCEL_CURRENT) != 0) {
+                sIntentSenders.remove(found);
+                found = null;
+            }
+            if (found != null) {
+                if ((flags & android.app.PendingIntent.FLAG_UPDATE_CURRENT) != 0) {
+                    found.intent = new android.content.Intent(intent);
+                }
+                return found.sender;
+            }
+            final IntentSenderRecord r = new IntentSenderRecord();
+            r.type = type;
+            r.requestCode = requestCode;
+            r.intent = new android.content.Intent(intent);
+            // PendingIntent compares and hashes the sender's binder, so each has its own.
+            final android.os.IBinder binder = new android.os.Binder();
+            r.sender = java.lang.reflect.Proxy.newProxyInstance(
+                    senderIface.getClassLoader(), new Class<?>[]{senderIface},
+                    (sp, sm, sa) -> {
+                        switch (sm.getName()) {
+                            case "asBinder": return binder;
+                            case "send":  // (code, intent, resolvedType, token, receiver, ...)
+                                sendIntentSender(sp, (android.content.Intent) sa[1]);
+                                return null;
+                            case "hashCode": return System.identityHashCode(sp);
+                            case "equals": return sp == sa[0];
+                            case "toString": return "IntentSender{" + binder + "}";
+                            default: return defaultValue(sm.getReturnType());
+                        }
+                    });
+            sIntentSenders.add(r);
+            return r.sender;
+        }
+    }
+
+    // PendingIntent.send. The Intent goes out on the main thread, to this app only: a4l runs one
+    // app, and every PendingIntent here is one the app made for itself. Returns false for a
+    // sender that is unknown or cancelled.
+    private static boolean sendIntentSender(Object sender, android.content.Intent fillIn) {
+        final IntentSenderRecord r = intentSenderFor(sender);
+        final android.content.Context ctx = sAppContext;
+        if (r == null || ctx == null) return false;
+        final android.content.Intent intent;
+        final int type;
+        synchronized (sIntentSenders) {
+            intent = new android.content.Intent(r.intent);
+            type = r.type;
+        }
+        if (fillIn != null) intent.fillIn(fillIn, 0);
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+            try {
+                switch (type) {
+                    case INTENT_SENDER_BROADCAST:
+                        ctx.sendBroadcast(intent);
+                        break;
+                    case INTENT_SENDER_ACTIVITY:
+                        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                        ctx.startActivity(intent);
+                        break;
+                    case INTENT_SENDER_SERVICE:
+                    case INTENT_SENDER_FOREGROUND_SERVICE:
+                        ctx.startService(intent);
+                        break;
+                    default:
+                        System.err.println("acl HostBootstrap: PendingIntent kind " + type
+                                + " not sent");
+                }
+            } catch (RuntimeException e) {
+                System.err.println("acl HostBootstrap: PendingIntent send failed: " + e);
+            }
+        });
+        return true;
+    }
+
+    // IActivityManager. PendingIntents are kept and sent in this process, and a foreground
+    // Service's notification goes to the desktop; everything else defaults (an empty process
+    // list and the like, enough for the probes apps make at start).
+    private static Object makeActivityManagerHandler(Class<?> iface) {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    switch (method.getName()) {
+                        case "getIntentSender":
+                            // (type, pkg, token, resultWho, requestCode, intents, types, flags, ...)
+                            return getIntentSender(method.getReturnType(), (Integer) a[0],
+                                    (Integer) a[4], (android.content.Intent[]) a[5],
+                                    (Integer) a[7]);
+                        case "getIntentSenderWithFeature":
+                            // (type, pkg, feature, token, resultWho, requestCode, intents, types,
+                            //  flags, ...)
+                            return getIntentSender(method.getReturnType(), (Integer) a[0],
+                                    (Integer) a[5], (android.content.Intent[]) a[6],
+                                    (Integer) a[8]);
+                        case "sendIntentSender":
+                            // (target, token, code, intent, ...). 0 is ActivityManager's
+                            // START_SUCCESS, -96 its START_CANCELED.
+                            return sendIntentSender(a[0], (android.content.Intent) a[3]) ? 0 : -96;
+                        case "cancelIntentSender": {
+                            final IntentSenderRecord r = intentSenderFor(a[0]);
+                            if (r != null) {
+                                synchronized (sIntentSenders) { sIntentSenders.remove(r); }
+                            }
+                            return null;
+                        }
+                        case "getPackageForIntentSender":
+                            return intentSenderFor(a[0]) != null && sAppContext != null
+                                    ? sAppContext.getPackageName() : null;
+                        case "isIntentSenderAnActivity": {
+                            final IntentSenderRecord r = intentSenderFor(a[0]);
+                            return r != null && r.type == INTENT_SENDER_ACTIVITY;
+                        }
+                        case "setServiceForeground": {
+                            // (component, token, id, notification, flags, type).
+                            // stopForeground sends id 0 and no notification; flag 1
+                            // (STOP_FOREGROUND_REMOVE) takes the notification down too.
+                            final android.content.ComponentName cn =
+                                    (android.content.ComponentName) a[0];
+                            final android.app.Notification n = (android.app.Notification) a[3];
+                            if (n != null) {
+                                sForegroundIds.put(cn, (Integer) a[2]);
+                                NotifyBridge.post(cn.getPackageName(), (Integer) a[2], n);
+                            } else if (((Integer) a[4] & 1) != 0) {
+                                final Integer id = sForegroundIds.remove(cn);
+                                if (id != null) NotifyBridge.cancel(id);
+                            }
+                            return null;
+                        }
+                        default:
+                            return defaultValue(method.getReturnType());
+                    }
+                });
+    }
+
     // IActivityTaskManager: getActivityClientController() hands back a controller whose finishActivity
     // (token, code, data, finishTask) drives acl's Activity task stack — Activity.finish() ->
     // ActivityClient.finishActivity(mToken,...) -> here. The toolbar Up arrow, the BACK key
@@ -4485,12 +4799,11 @@ public final class HostBootstrap {
     }
 
     // INotificationManager translated to the host notification daemon (svc/notify).
-    // enqueue → NotifyBridge.nNotify (host Notify), cancel → nClose; per-app-id → server-id
-    // map keeps replace/cancel coherent. The app's channels are kept, so it reads back what it
-    // created (an app checks a channel's importance before startForeground); nothing else is
-    // done with them. Everything else defaults.
+    // enqueue → NotifyBridge.post (host Notify), cancel → NotifyBridge.cancel. The app's
+    // channels are kept, so it reads back what it created (an app checks a channel's
+    // importance before startForeground); nothing else is done with them. Everything else
+    // defaults.
     private static Object makeNotificationHandler(Class<?> iface) {
-        final java.util.Map<Integer, Long> ids = new java.util.concurrent.ConcurrentHashMap<>();
         final java.util.Map<String, android.app.NotificationChannel> channels =
                 java.util.Collections.synchronizedMap(
                         new java.util.LinkedHashMap<String, android.app.NotificationChannel>());
@@ -4498,26 +4811,17 @@ public final class HostBootstrap {
                 iface.getClassLoader(), new Class<?>[]{iface},
                 (p, method, a) -> {
                     switch (method.getName()) {
-                        case "enqueueNotificationWithTag": {
+                        case "enqueueNotificationWithTag":
                             // (String pkg, String opPkg, String tag, int id, Notification n, int user)
-                            String pkg = (String) a[0];
-                            int id = (Integer) a[3];
-                            String[] tt = notificationTitleText(a[4]);
-                            long prev = ids.getOrDefault(id, 0L);
-                            long server = NotifyBridge.nNotify(pkg, (int) prev, tt[0], tt[1]);
-                            if (server != 0) ids.put(id, server);
+                            NotifyBridge.post((String) a[0], (Integer) a[3],
+                                    (android.app.Notification) a[4]);
                             return null;
-                        }
-                        case "cancelNotificationWithTag": {
-                            Long server = ids.remove((Integer) a[3]);
-                            if (server != null) NotifyBridge.nClose(server);
+                        case "cancelNotificationWithTag":
+                            NotifyBridge.cancel((Integer) a[3]);
                             return null;
-                        }
-                        case "cancelAllNotifications": {
-                            for (Long s : ids.values()) NotifyBridge.nClose(s);
-                            ids.clear();
+                        case "cancelAllNotifications":
+                            NotifyBridge.cancelAll();
                             return null;
-                        }
                         case "createNotificationChannels": {
                             // (String pkg, ParceledListSlice channels). Creating one that
                             // exists keeps the first, as Android keeps the user's settings.
@@ -4941,23 +5245,6 @@ public final class HostBootstrap {
 
     // Read android.title / android.text out of a Notification's extras Bundle (reflectively —
     // HostBootstrap compiles against the framework classes.jar).
-    private static String[] notificationTitleText(Object notification) {
-        String title = "", text = "";
-        try {
-            Object extras = notification.getClass().getField("extras").get(notification);
-            if (extras != null) {
-                java.lang.reflect.Method getCs =
-                        extras.getClass().getMethod("getCharSequence", String.class);
-                Object t = getCs.invoke(extras, "android.title");
-                Object x = getCs.invoke(extras, "android.text");
-                if (t != null) title = t.toString();
-                if (x != null) text = x.toString();
-            }
-        } catch (Throwable ignored) {
-        }
-        return new String[]{title, text};
-    }
-
     // Safe default when a proxied method's return type can't even be resolved (getReturnType()
     // may throw NoClassDefFoundError if the return class references a missing type). An
     // unresolvable return type is always a reference type (primitives always load) → null.
@@ -5103,6 +5390,7 @@ public final class HostBootstrap {
                                 : "power".equals(name) ? makePowerHandler(iface)
                                 : "media_session".equals(name) ? makeSessionManagerHandler(iface)
                                 : "activity_task".equals(name) ? makeActivityTaskHandler(iface)
+                                : "activity".equals(name) ? makeActivityManagerHandler(iface)
                                 : noop(iface);
                         final String descriptor = ifaceName;  // AIDL DESCRIPTOR == interface FQN
                         // Proxy IBinder (an interface) rather than new Binder() — the latter

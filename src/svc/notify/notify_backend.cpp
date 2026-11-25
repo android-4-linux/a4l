@@ -7,6 +7,7 @@
 #include "acl_config.h"
 #include "log/log.h"
 
+#include <cstddef>
 #include <mutex>
 #include <string_view>
 
@@ -25,12 +26,7 @@ constexpr std::string_view kTag = "svc.notify";
 class NullBackend final : public INotifyBackend {
  public:
   const char* name() const noexcept override { return "null"; }
-  uint32_t notify(const std::string&,
-                  uint32_t,
-                  const std::string&,
-                  const std::string&) override {
-    return 0;
-  }
+  uint32_t notify(const NotifyContent&) override { return 0; }
   void close(uint32_t) override {}
   void set_sink(std::function<void(const NotifyEvent&)>) override {}
 };
@@ -39,6 +35,16 @@ class NullBackend final : public INotifyBackend {
 constexpr const char* kService = "org.freedesktop.Notifications";
 constexpr const char* kPath = "/org/freedesktop/Notifications";
 constexpr const char* kIface = "org.freedesktop.Notifications";
+
+// The image is sent only when its size and its byte count agree and neither
+// edge is past the bound.
+bool image_ok(const NotifyContent& c) {
+  if (c.image_w <= 0 || c.image_h <= 0 || c.image_w > kMaxImageEdge ||
+      c.image_h > kMaxImageEdge)
+    return false;
+  return c.image.size() == static_cast<std::size_t>(c.image_w) *
+                               static_cast<std::size_t>(c.image_h) * 4;
+}
 
 class FreedesktopBackend final : public INotifyBackend {
  public:
@@ -61,22 +67,40 @@ class FreedesktopBackend final : public INotifyBackend {
 
   const char* name() const noexcept override { return "freedesktop"; }
 
-  uint32_t notify(const std::string& app,
-                  uint32_t replaces_id,
-                  const std::string& summary,
-                  const std::string& body) override {
-    std::vector<std::string> actions;  // no actions mapped yet
+  uint32_t notify(const NotifyContent& c) override {
+    // The spec's action list is flat: key, label, key, label.
+    std::vector<std::string> actions;
+    actions.reserve(c.actions.size() * 2);
+    for (const auto& [key, label] : c.actions) {
+      actions.push_back(key);
+      actions.push_back(label);
+    }
     std::map<std::string, sdbus::Variant> hints;
+    if (image_ok(c)) {
+      // image-data (iiibiiay): width, height, rowstride, has alpha, bits per
+      // sample, channels, pixels.
+      hints.emplace(
+          "image-data",
+          sdbus::Variant{sdbus::Struct<int32_t, int32_t, int32_t, bool, int32_t,
+                                       int32_t, std::vector<uint8_t>>{
+              c.image_w, c.image_h, c.image_w * 4, true, 8, 4, c.image}});
+    }
+    if (c.resident)
+      hints.emplace("resident", sdbus::Variant{true});
     uint32_t id = 0;
     try {
       proxy_->callMethod("Notify")
           .onInterface(sdbus::InterfaceName{kIface})
-          .withArguments(app, replaces_id, std::string{} /*icon*/, summary,
-                         body, actions, hints, int32_t{-1} /*default timeout*/)
+          .withArguments(c.app, c.replaces_id, std::string{} /*icon*/,
+                         c.summary, c.body, actions, hints,
+                         int32_t{-1} /*default timeout*/)
           .storeResultsTo(id);
     } catch (const sdbus::Error& e) {
       log::w(kTag, "Notify failed: {}", e.getMessage());
     }
+    log::i(kTag, "notify id={} replaces={} app={} actions={} image={}x{}", id,
+           c.replaces_id, c.app, c.actions.size(), image_ok(c) ? c.image_w : 0,
+           image_ok(c) ? c.image_h : 0);
     return id;
   }
 

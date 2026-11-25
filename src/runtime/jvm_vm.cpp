@@ -7034,6 +7034,88 @@ class ArtVm final : public JniVm {
       if (me != nullptr)
         env->DeleteLocalRef(me);
     }
+    // Parcel.writeStrongBinder / readStrongBinder. The framework's natives
+    // tell a Java Binder from a proxy with class ids its Binder registration
+    // sets; acl has no Binder and does not run that registration, so a write
+    // of any IBinder aborts the VM. A Parcel here never leaves the process:
+    // write a handle that HostBootstrap keeps for the object, and read the
+    // object back from the handle. A PendingIntent in a Notification or a
+    // RemoteViews is parcelled this way when the app copies either.
+    {
+      using WriteFn = int (*)(void* self, std::int64_t v);
+      using ReadFn = std::int64_t (*)(const void* self);
+      static WriteFn s_write = nullptr;
+      static ReadFn s_read = nullptr;
+      static jclass s_boot = nullptr;
+      static jmethodID s_handle = nullptr;
+      static jmethodID s_object = nullptr;
+      // libbinder is a dependency of libandroid_runtime, already loaded.
+      s_write = reinterpret_cast<WriteFn>(
+          ::dlsym(RTLD_DEFAULT, "_ZN7android6Parcel10writeInt64El"));
+      s_read = reinterpret_cast<ReadFn>(
+          ::dlsym(RTLD_DEFAULT, "_ZNK7android6Parcel9readInt64Ev"));
+      jclass boot = env->FindClass("org/acl/internal/HostBootstrap");
+      if (boot != nullptr) {
+        s_boot = static_cast<jclass>(env->NewGlobalRef(boot));
+        s_handle = env->GetStaticMethodID(s_boot, "binderHandle",
+                                          "(Landroid/os/IBinder;)J");
+        s_object = env->GetStaticMethodID(s_boot, "binderForHandle",
+                                          "(J)Landroid/os/IBinder;");
+        env->DeleteLocalRef(boot);
+      }
+      if (env->ExceptionCheck() == JNI_TRUE)
+        env->ExceptionClear();
+      jclass parcel = env->FindClass("android/os/Parcel");
+      if (parcel != nullptr && s_write != nullptr && s_read != nullptr &&
+          s_handle != nullptr && s_object != nullptr) {
+        const JNINativeMethod m[] = {
+            {const_cast<char*>("nativeWriteStrongBinder"),
+             const_cast<char*>("(JLandroid/os/IBinder;)V"),
+             reinterpret_cast<void*>(
+                 +[](JNIEnv* e, jclass, jlong ptr, jobject binder) {
+                   if (ptr == 0)
+                     return;
+                   const jlong handle =
+                       binder != nullptr
+                           ? e->CallStaticLongMethod(s_boot, s_handle, binder)
+                           : 0;
+                   if (e->ExceptionCheck() == JNI_TRUE)
+                     return;  // the caller sees HostBootstrap's exception
+                   s_write(reinterpret_cast<void*>(ptr), handle);
+                 })},
+            {const_cast<char*>("nativeReadStrongBinder"),
+             const_cast<char*>("(J)Landroid/os/IBinder;"),
+             reinterpret_cast<void*>(+[](JNIEnv* e, jclass,
+                                         jlong ptr) -> jobject {
+               if (ptr == 0)
+                 return nullptr;
+               const std::int64_t handle =
+                   s_read(reinterpret_cast<const void*>(ptr));
+               // 0 is a null binder; a number that is not a handle (the
+               // bytes were not written by the method above) is null too.
+               return handle != 0
+                          ? e->CallStaticObjectMethod(
+                                s_boot, s_object, static_cast<jlong>(handle))
+                          : nullptr;
+             })},
+        };
+        if (env->RegisterNatives(parcel, m, 2) != JNI_OK) {
+          log::w(kTag, "Parcel binder natives not registered");
+          if (env->ExceptionCheck() == JNI_TRUE)
+            env->ExceptionClear();
+        }
+      } else {
+        log::w(kTag, "Parcel binder natives not registered (no {})",
+               parcel == nullptr ? "Parcel class"
+               : s_write == nullptr || s_read == nullptr
+                   ? "libbinder Parcel symbols"
+                   : "HostBootstrap handle methods");
+        if (env->ExceptionCheck() == JNI_TRUE)
+          env->ExceptionClear();
+      }
+      if (parcel != nullptr)
+        env->DeleteLocalRef(parcel);
+    }
     // libandroid_runtime's host build omits graphics-buffer natives, so supply
     // acl's (the vendored android.hardware.HardwareBuffer's native underside
     // over a gbm dma-buf — Flutter external textures).
