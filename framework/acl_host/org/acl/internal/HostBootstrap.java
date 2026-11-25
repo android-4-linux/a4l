@@ -657,6 +657,7 @@ public final class HostBootstrap {
         // ResourcesManager so split-only resources resolve. Single-APK apps (no ACL_SPLIT_APKS) keep
         // the proven hand-rolled path below unchanged.
         String[] splits = splitApkPaths();
+        sizeSystemResources();
         if (splits.length > 0) {
             Resources r = appResourcesViaSplits(apkPath, splits);
             if (r != null) return r;
@@ -678,6 +679,34 @@ public final class HostBootstrap {
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: app resources failed: " + t);
             return Resources.getSystem();
+        }
+    }
+
+    // Give a Resources the display's size. Keeps what the Resources has that a4l does not set
+    // (locale, font scale, an activity's own override) and changes only what the size decides.
+    private static void applyDisplaySize(Resources r, android.content.res.Configuration cfg,
+            android.util.DisplayMetrics dm) {
+        android.content.res.Configuration c = new android.content.res.Configuration(r.getConfiguration());
+        c.screenWidthDp = cfg.screenWidthDp;
+        c.screenHeightDp = cfg.screenHeightDp;
+        c.smallestScreenWidthDp = cfg.smallestScreenWidthDp;
+        c.orientation = cfg.orientation;
+        c.screenLayout = cfg.screenLayout;
+        android.util.DisplayMetrics m = new android.util.DisplayMetrics();
+        m.setTo(r.getDisplayMetrics());
+        m.widthPixels = m.noncompatWidthPixels = dm.widthPixels;
+        m.heightPixels = m.noncompatHeightPixels = dm.heightPixels;
+        r.updateConfiguration(c, m);
+    }
+
+    // Resources.getSystem() starts with a 0x0 display. On Android it has the display's size like
+    // any other Resources, and apps read Resources.getSystem().getDisplayMetrics().widthPixels
+    // to size views. Called when the app's own Resources is built, after setDisplay.
+    private static void sizeSystemResources() {
+        try {
+            applyDisplaySize(Resources.getSystem(), appConfiguration(), appMetrics());
+        } catch (RuntimeException e) {
+            System.err.println("acl HostBootstrap: system resources keep no display size: " + e);
         }
     }
 
@@ -5226,21 +5255,7 @@ public final class HostBootstrap {
             for (ActivityRecord r : sTask) seen.add(r.activity.getResources());
             seen.add(Resources.getSystem());
             seen.remove(null);
-            for (Resources r : seen) {
-                // Keep what the Resources has that a4l does not set (locale, font scale, an
-                // activity's own override), and change only what the size decides.
-                android.content.res.Configuration c = new android.content.res.Configuration(r.getConfiguration());
-                c.screenWidthDp = cfg.screenWidthDp;
-                c.screenHeightDp = cfg.screenHeightDp;
-                c.smallestScreenWidthDp = cfg.smallestScreenWidthDp;
-                c.orientation = cfg.orientation;
-                c.screenLayout = cfg.screenLayout;
-                android.util.DisplayMetrics m = new android.util.DisplayMetrics();
-                m.setTo(r.getDisplayMetrics());
-                m.widthPixels = m.noncompatWidthPixels = dm.widthPixels;
-                m.heightPixels = m.noncompatHeightPixels = dm.heightPixels;
-                r.updateConfiguration(c, m);
-            }
+            for (Resources r : seen) applyDisplaySize(r, cfg, dm);
             // The frames a hollow ViewRootImpl answers getWindowVisibleDisplayFrame from.
             java.util.List<android.view.View> decors = new java.util.ArrayList<android.view.View>();
             if (decor != null) decors.add(decor);

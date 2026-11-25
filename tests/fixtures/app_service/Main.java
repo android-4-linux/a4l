@@ -74,6 +74,15 @@ public class Main extends Activity {
         // Activity.performCreate/Start/Resume and ActivityThread give this order.
         log("launch order " + launch);
         expect("csCrR".contentEquals(launch), "launch order " + launch);
+        // Resources.getSystem() has the display's size, as the app's own Resources does.
+        final android.util.DisplayMetrics sys =
+                android.content.res.Resources.getSystem().getDisplayMetrics();
+        final android.util.DisplayMetrics app = getResources().getDisplayMetrics();
+        final boolean sized = sys.widthPixels > 0 && sys.widthPixels == app.widthPixels
+                && sys.heightPixels == app.heightPixels;
+        log("system resources sized=" + sized);
+        expect(sized, "system resources " + sys.widthPixels + "x" + sys.heightPixels
+                + ", app " + app.widthPixels + "x" + app.heightPixels);
     }
 
     @Override
