@@ -11,9 +11,11 @@
 int main() {
   auto backend = acl::notify::make_notify_backend();
   std::printf("backend: %s\n", backend->name());
-  uint32_t id =
-      backend->notify("acl", 0, "acl notification bridge",
-                      "Hello from svc/notify → org.freedesktop.Notifications");
+  acl::notify::NotifyContent content;
+  content.app = "acl";
+  content.summary = "acl notification bridge";
+  content.body = "Hello from svc/notify → org.freedesktop.Notifications";
+  uint32_t id = backend->notify(content);
   std::printf("posted notification id=%u\n", id);
   return 0;
 }

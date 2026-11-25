@@ -15,8 +15,32 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace acl::notify {
+
+// The largest image edge a backend sends. A large icon can be a full-size
+// album cover, and the daemon takes the pixels in the Notify message.
+inline constexpr int kMaxImageEdge = 512;
+
+// One notification as the host daemon takes it.
+struct NotifyContent {
+  std::string app;           // the posting app's label
+  uint32_t replaces_id = 0;  // the server id to replace, 0 for a new one
+  std::string summary;       // title
+  std::string body;          // text
+  // (key, label) pairs. The key comes back in ActionInvoked; "default" is the
+  // click on the notification itself.
+  std::vector<std::pair<std::string, std::string>> actions;
+  // RGBA, 8 bits per channel, not premultiplied, image_w * 4 bytes per row.
+  // Empty for no image.
+  std::vector<uint8_t> image;
+  int image_w = 0;
+  int image_h = 0;
+  // Stays up after an action is invoked (transport controls).
+  bool resident = false;
+};
 
 // A host-side notification event routed back to the app layer.
 struct NotifyEvent {
@@ -33,13 +57,9 @@ class INotifyBackend {
   virtual ~INotifyBackend() = default;
   virtual const char* name() const noexcept = 0;
 
-  // Post (or replace, if replaces_id != 0) a notification; returns the server
-  // id (0 on failure / Null backend). app is the posting app label;
-  // summary/body are the notification title/text.
-  virtual uint32_t notify(const std::string& app,
-                          uint32_t replaces_id,
-                          const std::string& summary,
-                          const std::string& body) = 0;
+  // Post a notification, or replace content.replaces_id; returns the server
+  // id (0 on failure / Null backend).
+  virtual uint32_t notify(const NotifyContent& content) = 0;
   // Dismiss a previously posted notification by server id.
   virtual void close(uint32_t id) = 0;
   // Register the sink for ActionInvoked/NotificationClosed. At most one;
