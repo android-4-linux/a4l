@@ -3081,6 +3081,20 @@ jlong LightingColorFilter_native_Create(JNIEnv*, jclass, jint mul, jint add) {
   return reinterpret_cast<jlong>(
       cf.release());  // may be null; Java (ColorFilter) tolerates it
 }
+// ColorMatrixColorFilter.nativeColorMatrixFilter(float[20]): a 4x5 matrix,
+// row by row. Android gives the fifth column, the translation, on the 0..255
+// scale of a color component; Skia takes it on 0..1.
+jlong ColorMatrixColorFilter_nativeCreate(JNIEnv* env,
+                                          jclass,
+                                          jfloatArray array) {
+  if (array == nullptr || env->GetArrayLength(array) < 20)
+    return 0;
+  float m[20];
+  env->GetFloatArrayRegion(array, 0, 20, m);
+  for (const int i : {4, 9, 14, 19})
+    m[i] *= 1.0F / 255.0F;
+  return reinterpret_cast<jlong>(SkColorFilters::Matrix(m).release());
+}
 jlong Paint_nSetPathEffect(jlong p, jlong e) {
   // Apply the SkPathEffect (e.g. DashPathEffect) to the paint so dashed strokes
   // actually render; e==0 clears it. The effect is a ref-counted SkPathEffect*
@@ -6002,6 +6016,10 @@ const JNINativeMethod kBlendModeColorFilter[] = {
 const JNINativeMethod kLightingColorFilter[] = {
     {"native_CreateLightingFilter", "(II)J",
      reinterpret_cast<void*>(LightingColorFilter_native_Create)},
+};
+const JNINativeMethod kColorMatrixColorFilter[] = {
+    {"nativeColorMatrixFilter", "([F)J",
+     reinterpret_cast<void*>(ColorMatrixColorFilter_nativeCreate)},
 };
 
 const JNINativeMethod kNinePatch[] = {
@@ -10108,6 +10126,9 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
        ok;
   ok = reg(env, "android/graphics/LightingColorFilter", kLightingColorFilter,
            n(kLightingColorFilter)) &&
+       ok;
+  ok = reg(env, "android/graphics/ColorMatrixColorFilter",
+           kColorMatrixColorFilter, n(kColorMatrixColorFilter)) &&
        ok;
   ok = reg(env, "android/graphics/animation/NativeInterpolatorFactory",
            kNativeInterpolatorFactory, n(kNativeInterpolatorFactory)) &&

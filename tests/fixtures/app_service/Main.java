@@ -201,6 +201,26 @@ public class Main extends Activity {
         }
         log("base context chain ends=" + ends);
         expect(ends, "base context chain");
+        // ColorMatrixColorFilter: red drawn through a matrix that moves red into blue and
+        // adds 51 to green comes out (0, 51, 255). The 51 is the matrix's fifth column, which
+        // Android gives on the 0..255 scale.
+        final android.graphics.Bitmap tinted = android.graphics.Bitmap.createBitmap(
+                4, 4, android.graphics.Bitmap.Config.ARGB_8888);
+        final android.graphics.Paint matrixPaint = new android.graphics.Paint();
+        matrixPaint.setColor(0xFFFF0000);
+        matrixPaint.setColorFilter(new android.graphics.ColorMatrixColorFilter(new float[]{
+                0, 0, 0, 0, 0,
+                0, 0, 0, 0, 51,
+                1, 0, 0, 0, 0,
+                0, 0, 0, 1, 0}));
+        new android.graphics.Canvas(tinted).drawRect(0, 0, 4, 4, matrixPaint);
+        final int through = tinted.getPixel(2, 2);
+        final boolean filtered = android.graphics.Color.red(through) == 0
+                && Math.abs(android.graphics.Color.green(through) - 51) <= 1
+                && android.graphics.Color.blue(through) == 255
+                && android.graphics.Color.alpha(through) == 255;
+        log("color matrix filtered=" + filtered);
+        expect(filtered, String.format("ColorMatrixColorFilter gave %08x", through));
         // The process has the package's name, from both places an app reads it.
         final String proc = android.os.Process.myProcessName();
         log("process name " + proc + " application " + android.app.Application.getProcessName());
