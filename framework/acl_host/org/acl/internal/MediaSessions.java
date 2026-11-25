@@ -21,7 +21,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 /**
  * The app's media sessions: what the system's media session service keeps for it on Android.
  *
- * <p>A MediaSession's metadata, playback state, queue title, extras and flags are kept here,
+ * <p>A MediaSession's metadata, playback state, queue, queue title, extras and flags are kept here,
  * and a MediaController reads them back and is told when they change. A controller's transport
  * calls (play, pause, next, seekTo, playFromMediaId and the rest) reach the session's
  * callback, which is how the app is told to act. There is one app in the process, so every
@@ -61,6 +61,7 @@ final class MediaSessions {
         final Object controller;  // android.media.session.ISessionController
         volatile MediaMetadata metadata;
         volatile PlaybackState playbackState;
+        volatile List<Object> queue;  // MediaSession.QueueItem; null for none
         volatile CharSequence queueTitle;
         volatile Bundle extras;
         volatile android.app.PendingIntent launchIntent;
@@ -112,6 +113,21 @@ final class MediaSessions {
                     playbackState = (PlaybackState) a[0];
                     tell("onPlaybackStateChanged", PlaybackState.class, playbackState);
                     break;
+                case "getBinderForSetQueue": {
+                    // MediaSession.setQueue sends the items through this binder, in as many
+                    // transactions as they need; the framework's own receiver collects them.
+                    final java.util.function.Consumer<List<?>> got = items -> {
+                        queue = new ArrayList<Object>(items);
+                        tellQueue();
+                        watchers();
+                    };
+                    return Class.forName("android.media.session.ParcelableListBinder")
+                            .getConstructor(java.util.function.Consumer.class).newInstance(got);
+                }
+                case "resetQueue":
+                    queue = null;
+                    tellQueue();
+                    break;
                 case "setQueueTitle":
                     queueTitle = (CharSequence) a[0];
                     tell("onQueueTitleChanged", CharSequence.class, queueTitle);
@@ -150,6 +166,11 @@ final class MediaSessions {
                 default:
                     return defaultOf(m.getReturnType());
             }
+            watchers();
+            return null;
+        }
+
+        private void watchers() {
             for (Watcher w : sWatchers) {
                 try {
                     w.onSessionChanged(this);
@@ -157,7 +178,26 @@ final class MediaSessions {
                     android.util.Log.w("acl", "media session watcher: " + e);
                 }
             }
-            return null;
+        }
+
+        // The queue as a controller is given it: a ParceledListSlice, or null for none.
+        private Object queueSlice() throws Exception {
+            final List<Object> q = queue;
+            if (q == null) return null;
+            return Class.forName("android.content.pm.ParceledListSlice")
+                    .getConstructor(List.class).newInstance(q);
+        }
+
+        private void tellQueue() {
+            try {
+                final Class<?> slice = Class.forName("android.content.pm.ParceledListSlice");
+                final Object q = queueSlice();
+                for (Object cb : controllerCallbacks) {
+                    call(cb, "onQueueChanged", new Class<?>[]{slice}, q);
+                }
+            } catch (Exception e) {
+                android.util.Log.w("acl", "media session queue: " + e);
+            }
         }
 
         // ISessionController: a MediaController's side.
@@ -167,6 +207,8 @@ final class MediaSessions {
                     return metadata;
                 case "getPlaybackState":
                     return playbackState;
+                case "getQueue":
+                    return queueSlice();
                 case "getQueueTitle":
                     return queueTitle;
                 case "getExtras":
