@@ -19,6 +19,7 @@ package org.acl.internal;
 public final class AclOs extends libcore.io.ForwardingOs {
     // Android's first application uid (Process.FIRST_APPLICATION_UID). Any value >= this reads as a
     // normal, non-privileged app to the framework.
+    // src/runtime/jvm_vm.cpp's kAclAppUid is this value: Binder.getCallingUid() returns it.
     private static final int ACL_APP_UID = 10000;
 
     private AclOs(libcore.io.Os delegate) { super(delegate); }

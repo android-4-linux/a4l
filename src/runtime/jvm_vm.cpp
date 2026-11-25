@@ -1438,6 +1438,11 @@ std::uint64_t present_now_ns() {
 // the framework the app-launch path runs before any JIT warmup).
 const std::uint64_t g_proc_start_ns = present_now_ns();
 
+// The uid Java sees as its own: what Process.myUid() returns, and so what
+// Binder.getCallingUid() returns for a call made in the process.
+constexpr jint kAclAppUid = 10000;
+std::atomic<jint> g_java_uid{0};
+
 // The density (dpi) acl reports to apps, defaulting to the compositor-derived
 // svc value (160*scale). Apps choose phone vs tablet layouts from
 // smallestWidthDp = min(w,h)px / density: at density 1.0 a 1280x800 window is
@@ -4633,6 +4638,44 @@ class JniVm : public Vm {
     return false;
   }
 
+  // org.acl.internal.MediaHost binds the service with a framework MediaBrowser
+  // and browses its root. It needs the host layer and the app's Application.
+  Error host_media_browser(std::string_view service_class) {
+    // The service is bound as one of the app's own, so the Application runs
+    // first, as it does before an Activity.
+    ensure_application();
+    jclass host = env_->FindClass("org/acl/internal/MediaHost");
+    jmethodID fn =
+        host != nullptr
+            ? env_->GetStaticMethodID(host, "host",
+                                      "(Ljava/lang/String;)Ljava/lang/String;")
+            : nullptr;
+    if (fn == nullptr) {
+      clear_exception();
+      if (host != nullptr)
+        env_->DeleteLocalRef(host);
+      return Error::of(Status::NotApplicable,
+                       std::string(service_class) +
+                           " is not a MediaBrowserService(Compat) by name, "
+                           "and there is no host layer to bind it");
+    }
+    jstring name = env_->NewStringUTF(std::string(service_class).c_str());
+    auto why =
+        static_cast<jstring>(env_->CallStaticObjectMethod(host, fn, name));
+    env_->DeleteLocalRef(name);
+    env_->DeleteLocalRef(host);
+    if (env_->ExceptionCheck() == JNI_TRUE)
+      return fail_with_exception("host " + std::string(service_class));
+    if (why == nullptr)
+      return Error::ok();
+    const char* c = env_->GetStringUTFChars(why, nullptr);
+    std::string text = c != nullptr ? c : "?";
+    if (c != nullptr)
+      env_->ReleaseStringUTFChars(why, c);
+    env_->DeleteLocalRef(why);
+    return Error::of(Status::NotApplicable, text);
+  }
+
   Error call_media_browser(std::string_view service_class) override {
     if (env_ == nullptr) {
       return Error::of(Status::NotStarted, "call_media_browser before start()");
@@ -4645,9 +4688,9 @@ class JniVm : public Vm {
     if (!media_browser_api(cls, api)) {
       clear_exception();
       env_->DeleteLocalRef(cls);
-      return Error::of(
-          Status::NotApplicable,
-          std::string(service_class) + " is not a MediaBrowserService(Compat)");
+      // Not one of the two base classes by name. R8 renames androidx's, so
+      // bind the service through the framework's interface instead.
+      return host_media_browser(service_class);
     }
 
     Error result = Error::ok();
@@ -7705,20 +7748,33 @@ class ArtVm final : public JniVm {
     } else {
       env->ExceptionClear();
     }
-    // android.os.Binder identity statics: no Binder, so a single fixed
-    // in-process identity.
+    // android.os.Binder identity statics: no Binder, so every call is made
+    // in the process and the caller is the process itself, as it is on
+    // Android for a call that does not cross one. The uid and pid are the
+    // ones Process.myUid() and myPid() give; a service that checks a caller's
+    // package against its uid compares the two.
     //
     // The identity and StrictMode natives are @CriticalNative in Binder.java:
     // ART passes the declared arguments and nothing else, no JNIEnv and no
     // class. A function that takes those two reads its arguments from the
     // wrong registers (tools/audit-native-abi.py checks every table for
     // this).
+    // With the host layer, org.acl.internal.AclOs gives Java an application
+    // uid in place of the real one; kAclAppUid is its ACL_APP_UID.
+    if (jclass os = env->FindClass("org/acl/internal/AclOs")) {
+      g_java_uid = kAclAppUid;
+      env->DeleteLocalRef(os);
+    } else {
+      env->ExceptionClear();
+      g_java_uid = static_cast<jint>(::getuid());
+    }
     if (jclass c = env->FindClass("android/os/Binder")) {
       JNINativeMethod m[] = {
           {const_cast<char*>("getCallingUid"), const_cast<char*>("()I"),
-           reinterpret_cast<void*>(+[]() -> jint { return 1000; })},
+           reinterpret_cast<void*>(+[]() -> jint { return g_java_uid; })},
           {const_cast<char*>("getCallingPid"), const_cast<char*>("()I"),
-           reinterpret_cast<void*>(+[]() -> jint { return 0; })},
+           reinterpret_cast<void*>(
+               +[]() -> jint { return static_cast<jint>(::getpid()); })},
           {const_cast<char*>("clearCallingIdentity"), const_cast<char*>("()J"),
            reinterpret_cast<void*>(+[]() -> jlong { return 0; })},
           {const_cast<char*>("restoreCallingIdentity"),
