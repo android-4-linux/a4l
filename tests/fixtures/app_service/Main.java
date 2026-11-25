@@ -83,6 +83,10 @@ public class Main extends Activity {
         log("system resources sized=" + sized);
         expect(sized, "system resources " + sys.widthPixels + "x" + sys.heightPixels
                 + ", app " + app.widthPixels + "x" + app.heightPixels);
+        // The process has the package's name, from both places an app reads it.
+        final String proc = android.os.Process.myProcessName();
+        log("process name " + proc + " application " + android.app.Application.getProcessName());
+        expect(getPackageName().equals(proc), "Process.myProcessName() is " + proc);
     }
 
     @Override

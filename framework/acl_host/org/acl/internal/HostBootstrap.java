@@ -3069,6 +3069,16 @@ public final class HostBootstrap {
     // WorkManager requires it. acl has no real ActivityThread (ADR-2/3); this is a hollow
     // instance (Unsafe-allocated, no ctor) carrying only the process name + appInfo.
     static void seedActivityThread(String pkg) {
+        // Process.myProcessName() returns sArgV0, which ActivityThread sets with
+        // Process.setArgV0 when it binds the application. It is declared non-null, and
+        // Kotlin code that reads it throws on null.
+        try {
+            java.lang.reflect.Field argv0 = android.os.Process.class.getDeclaredField("sArgV0");
+            argv0.setAccessible(true);
+            if (argv0.get(null) == null) argv0.set(null, pkg);
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: process name not set: " + t);
+        }
         try {
             Class<?> at = Class.forName("android.app.ActivityThread");
             if (at.getMethod("currentActivityThread").invoke(null) != null) return;
