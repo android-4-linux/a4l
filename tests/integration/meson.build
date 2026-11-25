@@ -51,6 +51,17 @@ if py3.found()
     timeout : 300,
   )
 
+  # a4l's own libmediandk.so: AMediaFormat, the AMEDIAFORMAT_KEY_* names and an AMediaCodec
+  # with no codec behind it yet, driven from a bionic .so that links it. Needs a staged bionic
+  # ($AOSP); SKIPs (exit 77) when absent.
+  test(
+    'ndk-mediandk',
+    py3,
+    args : [files('run_ndk_mediandk_test.py'), ndk_probe_exe, meson.project_source_root()],
+    depends : [ndk_probe_exe],
+    timeout : 300,
+  )
+
   # APK signature policy as the CLI exposes it (ADR-0009 C1): `a4l verify` and `a4l run` under
   # each --verify mode, a pinned signer and the environment seams, asserted on exit codes. Needs
   # the signed fixtures (openssl) and a libcrypto build; --vm=null keeps a VM out of it.
