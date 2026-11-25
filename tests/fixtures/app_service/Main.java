@@ -150,6 +150,17 @@ public class Main extends Activity {
         final boolean uids = infoUid == android.os.Process.myUid()
                 && infoUid == android.os.Binder.getCallingUid()
                 && forUid != null && forUid.length == 1 && getPackageName().equals(forUid[0]);
+        // A manifest <property> that is not declared is a NameNotFoundException, and
+        // Environment.isExternalStorageLegacy(), which reads one, answers.
+        boolean noProperty = false;
+        try {
+            getPackageManager().getProperty("com.acl.svc.absent", getPackageName());
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            noProperty = true;
+        }
+        final boolean legacy = android.os.Environment.isExternalStorageLegacy();
+        log("absent property not found=" + noProperty + " legacy storage=" + legacy);
+        expect(noProperty, "getProperty for an absent property");
         log("package uid consistent=" + uids);
         expect(uids, "uid: info " + infoUid + " process " + android.os.Process.myUid()
                 + " caller " + android.os.Binder.getCallingUid());

@@ -49,6 +49,7 @@ CHECKS = [
     "SERVICE: system resources sized=true",
     "SERVICE: bitmap pixel set=true",
     "SERVICE: accounts stored=true token dropped=true removed=true",
+    "SERVICE: absent property not found=true legacy storage=",
     "SERVICE: package uid consistent=true",
     "SERVICE: image file decoded=true junk refused=true",
     "SERVICE: base context chain ends=true",
