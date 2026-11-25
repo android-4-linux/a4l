@@ -458,6 +458,16 @@ if py3.found() and have_gl and have_ffmpeg
       depends : [acl_exe],
       timeout : 300,
     )
+    # A content provider whose android:authorities is a string resource is reached under the
+    # string's value. The fixture is built with aapt2. Starts a headless Weston for itself.
+    # Needs host ART; SKIPs otherwise, which includes CI.
+    test(
+      'provider-authority',
+      py3,
+      args : [files('run_provider_authority_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+    )
     # A view's ViewTreeObserver listeners (global layout, pre-draw, draw), for an Activity
     # started from another's onCreate whose view registers before it is in a window. Starts a
     # headless Weston for itself. Needs host ART; SKIPs otherwise, which includes CI.

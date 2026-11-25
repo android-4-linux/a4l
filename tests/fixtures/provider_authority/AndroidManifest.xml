@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0
+     Provenance: original a4l test fixture. No GPL-3.0 sources. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.acl.authres">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="33" />
+    <application android:label="Example">
+        <activity android:name=".Main" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- The authority is a string resource, as an app that builds it from its
+             application id has it. -->
+        <provider
+            android:name=".Main$Files"
+            android:authorities="@string/authority"
+            android:exported="false" />
+    </application>
+</manifest>
