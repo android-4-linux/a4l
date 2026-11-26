@@ -147,7 +147,10 @@ public final class PresentDriver {
 
         // Re-posting traversal: runs in the TRAVERSAL phase, after Compose recomposes (ANIMATION).
         final Method postCallback = resolvePostCallback();
-        final Handler handler = new Handler(looper);
+        // Asynchronous, as Android's vsync is: it must not wait behind a sync barrier. A
+        // ViewRootImpl of an added window posts one when a view of it invalidates, and it stays
+        // until the next frame; a retry queued behind it would be the frame that never comes.
+        final Handler handler = Handler.createAsync(looper);
         final Runnable[] vsyncRetry = new Runnable[1];
         final Runnable[] traversal = new Runnable[1];
         traversal[0] = new Runnable() {
