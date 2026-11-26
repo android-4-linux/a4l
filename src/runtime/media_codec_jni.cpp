@@ -1773,6 +1773,14 @@ void register_media_codec_natives(JNIEnv* env) {
       {const_cast<char*>("getCanonicalName"),
        const_cast<char*>("()Ljava/lang/String;"),
        reinterpret_cast<void*>(&MC_getCanonicalName)},
+      // null: MediaCodec.getCodecInfo() then asks MediaCodecList for the info
+      // by the codec's name. Unbound, getCodecInfo() throws
+      // UnsatisfiedLinkError, and Chromium, which calls it for every video
+      // decoder it makes, ends the process.
+      {const_cast<char*>("getOwnCodecInfo"),
+       const_cast<char*>("()Landroid/media/MediaCodecInfo;"),
+       reinterpret_cast<void*>(
+           +[](JNIEnv*, jobject) -> jobject { return nullptr; })},
       {const_cast<char*>("native_setCallback"),
        const_cast<char*>("(Landroid/media/MediaCodec$Callback;)V"),
        reinterpret_cast<void*>(&MC_native_setCallback)},
