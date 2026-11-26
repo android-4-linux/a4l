@@ -44,6 +44,8 @@ CHECKS = [
     "TREE: clear task first home destroyed=true",
     "TREE: view animation ended",
     "TREE: added window pre-draw sized=true",
+    "TREE: redrawing added window: timed message ran",
+    "TREE: redrawing added window: attaches=1 accelerated=true visible=true",
     "TREE: touch reached the moved view",
     "TREE: PASS",
     "acl activity-stack: task empty (root finished) -> exit",

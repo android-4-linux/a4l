@@ -4190,6 +4190,24 @@ public final class HostBootstrap {
     // performClick/pressed-state runnables, so menu items dispatched (consumed=true) but never
     // selected. And because mTraversalScheduled ends up FALSE, doDie -> unscheduleTraversals skips its
     // removeSyncBarrier(mTraversalBarrier) (no stale-token throw), so overlay removal still works.
+    /**
+     * Cancels the traversal each added window's ViewRootImpl has scheduled. The present loop
+     * calls this every frame after the animation callbacks, which is where a view's
+     * postInvalidateOnAnimation schedules one, and before the traversal callbacks are taken
+     * up. A traversal that got to run would attach the window's views a second time with
+     * ViewRootImpl's own AttachInfo: not hardware accelerated, and in a window that is not
+     * visible, so a WebView there stops drawing.
+     */
+    static void cancelOverlayTraversals() {
+        try {
+            Class<?> wmgCls = Class.forName("android.view.WindowManagerGlobal");
+            Object wmg = wmgCls.getMethod("getInstance").invoke(null);
+            java.util.List<?> roots = (java.util.List<?>) getField(wmgCls, wmg, "mRoots");
+            if (roots == null || roots.isEmpty()) return;
+            for (Object root : new java.util.ArrayList<>(roots)) neuterViewRoot(root);
+        } catch (Throwable ignored) {}
+    }
+
     private static void neuterViewRoot(Object vri) {
         if (vri == null) return;
         try {
@@ -4202,7 +4220,7 @@ public final class HostBootstrap {
                 try {
                     java.lang.reflect.Method rm = choreo.getClass().getMethod(
                             "removeCallbacks", int.class, Runnable.class, Object.class);
-                    rm.invoke(choreo, 2 /*Choreographer.CALLBACK_TRAVERSAL*/, traversalRunnable, null);
+                    rm.invoke(choreo, 3 /*Choreographer.CALLBACK_TRAVERSAL*/, traversalRunnable, null);
                 } catch (Throwable ignored) {}
             }
             // Remove the sync barrier scheduleTraversals posted (else it strands sync messages).
