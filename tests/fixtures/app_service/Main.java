@@ -242,6 +242,17 @@ public class Main extends Activity {
         }
         log("base context chain ends=" + ends);
         expect(ends, "base context chain");
+        // The directories and the display context an app asks any Context for.
+        boolean dirs = true;
+        for (android.content.Context c : new android.content.Context[]{
+                this, getApplicationContext()}) {
+            final java.io.File[] media = c.getExternalMediaDirs();
+            dirs &= media != null && media.length == 1 && media[0].isDirectory()
+                    && c.getObbDir().isDirectory() && c.getObbDirs().length == 1
+                    && c.createDisplayContext(getWindowManager().getDefaultDisplay()) != null;
+        }
+        log("media and obb dirs, display context=" + dirs);
+        expect(dirs, "getExternalMediaDirs, getObbDir or createDisplayContext");
         // ColorMatrixColorFilter: red drawn through a matrix that moves red into blue and
         // adds 51 to green comes out (0, 51, 255). The 51 is the matrix's fifth column, which
         // Android gives on the 0..255 scale.
