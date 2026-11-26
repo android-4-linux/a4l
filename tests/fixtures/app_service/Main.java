@@ -253,6 +253,29 @@ public class Main extends Activity {
                 && android.graphics.Color.red(end) < 16;
         log("sweep gradient drawn=" + swept);
         expect(swept, String.format("sweep gradient %08x %08x %08x", start, half, end));
+        // A ComposeShader of a red shader (the destination) and a green one (the source):
+        // SRC is the green, DST the red, and MULTIPLY their product, black.
+        final android.graphics.Shader redShader = new android.graphics.LinearGradient(
+                0, 0, 8, 0, 0xFFFF0000, 0xFFFF0000, android.graphics.Shader.TileMode.CLAMP);
+        final android.graphics.Shader greenShader = new android.graphics.LinearGradient(
+                0, 0, 8, 0, 0xFF00FF00, 0xFF00FF00, android.graphics.Shader.TileMode.CLAMP);
+        final int[] composed = new int[3];
+        final android.graphics.PorterDuff.Mode[] modes = {
+            android.graphics.PorterDuff.Mode.SRC, android.graphics.PorterDuff.Mode.DST,
+            android.graphics.PorterDuff.Mode.MULTIPLY};
+        for (int i = 0; i < modes.length; i++) {
+            final android.graphics.Bitmap out = android.graphics.Bitmap.createBitmap(
+                    8, 8, android.graphics.Bitmap.Config.ARGB_8888);
+            final android.graphics.Paint both = new android.graphics.Paint();
+            both.setShader(new android.graphics.ComposeShader(redShader, greenShader, modes[i]));
+            new android.graphics.Canvas(out).drawRect(0, 0, 8, 8, both);
+            composed[i] = out.getPixel(4, 4);
+        }
+        final boolean compose = composed[0] == 0xFF00FF00 && composed[1] == 0xFFFF0000
+                && composed[2] == 0xFF000000;
+        log("compose shader blended=" + compose);
+        expect(compose, String.format("ComposeShader %08x %08x %08x", composed[0], composed[1],
+                composed[2]));
         // drawPoint, drawPoints and drawLines, with a 3-pixel square stroke: each mark is
         // where it was put, and a pixel between marks is untouched. drawPoints takes its
         // offset and count in floats; the first pair here is skipped.

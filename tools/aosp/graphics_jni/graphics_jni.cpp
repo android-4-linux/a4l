@@ -2560,6 +2560,30 @@ jlong SweepGradient_nativeCreate(JNIEnv* env,
   return reinterpret_cast<jlong>(sh.release());
 }
 
+// ComposeShader.nativeCreate(matrix, shaderA, shaderB, mode): the two shaders
+// blended, A as the destination and B as the source, which is the order
+// ComposeShader documents. The mode is a PorterDuff or BlendMode ordinal, the
+// same numbers as SkBlendMode.
+jlong ComposeShader_nativeCreate(JNIEnv*,
+                                 jclass,
+                                 jlong matrix,
+                                 jlong shader_a,
+                                 jlong shader_b,
+                                 jint blendmode) {
+  auto* a = reinterpret_cast<SkShader*>(shader_a);
+  auto* b = reinterpret_cast<SkShader*>(shader_b);
+  if (a == nullptr || b == nullptr)
+    return 0;
+  const SkBlendMode mode =
+      (blendmode >= 0 && blendmode <= static_cast<jint>(SkBlendMode::kLastMode))
+          ? static_cast<SkBlendMode>(blendmode)
+          : SkBlendMode::kSrcOver;
+  sk_sp<SkShader> sh = SkShaders::Blend(mode, sk_ref_sp(a), sk_ref_sp(b));
+  if (sh != nullptr && matrix != 0)
+    sh = sh->makeWithLocalMatrix(*reinterpret_cast<const SkMatrix*>(matrix));
+  return reinterpret_cast<jlong>(sh.release());
+}
+
 jlong Shader_nativeGetFinalizer(JNIEnv*, jclass) {
   return reinterpret_cast<jlong>(&free_shader);
 }
@@ -9348,6 +9372,10 @@ const JNINativeMethod kSweepGradient[] = {
     {"nativeCreate", "(JFF[J[FJ)J",
      reinterpret_cast<void*>(SweepGradient_nativeCreate)},
 };
+const JNINativeMethod kComposeShader[] = {
+    {"nativeCreate", "(JJJI)J",
+     reinterpret_cast<void*>(ComposeShader_nativeCreate)},
+};
 const JNINativeMethod kBitmapShader[] = {
     {"nativeCreate", "(JJIIZZ)J",
      reinterpret_cast<void*>(BitmapShader_nativeCreate)},
@@ -10217,6 +10245,9 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
        ok;
   ok = reg(env, "android/graphics/SweepGradient", kSweepGradient,
            n(kSweepGradient)) &&
+       ok;
+  ok = reg(env, "android/graphics/ComposeShader", kComposeShader,
+           n(kComposeShader)) &&
        ok;
   ok = reg(env, "android/graphics/BitmapShader", kBitmapShader,
            n(kBitmapShader)) &&
