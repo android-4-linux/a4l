@@ -389,6 +389,19 @@ public class Main extends Activity {
         log("pending intent " + creator);
         expect(creator.equals(getPackageName() + " uid true broadcast true/false immutable true"
                 + " activity true/false immutable false"), "PendingIntent info: " + creator);
+        // The native heap's sizes, which an app samples for its memory reports: what is in
+        // use and what is free are both within the whole, and an allocation shows.
+        final long heap = android.os.Debug.getNativeHeapSize();
+        final long used = android.os.Debug.getNativeHeapAllocatedSize();
+        final long free = android.os.Debug.getNativeHeapFreeSize();
+        final android.graphics.Bitmap held = android.graphics.Bitmap.createBitmap(1024, 1024,
+                android.graphics.Bitmap.Config.ARGB_8888);
+        final long usedAfter = android.os.Debug.getNativeHeapAllocatedSize();
+        final boolean heapOk = heap > 0 && used > 0 && used <= heap && free >= 0 && free <= heap
+                && usedAfter - used >= held.getByteCount();
+        log("native heap sane=" + heapOk);
+        expect(heapOk, "native heap " + heap + " used " + used + " free " + free + " after "
+                + usedAfter);
         // A SweepGradient from red to blue around the center: red just past the positive x
         // axis, an even mix opposite it, blue just before the axis again.
         final android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(

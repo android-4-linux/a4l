@@ -78,6 +78,7 @@
 #include "ndk/webview_functor_vk.h"  // WebView AwDrawFn Vulkan functor %fs-bridge wrappers
 #include "pkg/apk.h"  // AAssetManager provider: read+inflate app assets from the APK
 #include "runtime/audio_track_jni.h"  // the framework AudioTrack over audio::Track
+#include "runtime/debug_heap_jni.h"
 #include "runtime/framework_natives.h"
 #include "runtime/image_reader_jni.h"  // media_jni loadLibrary -> ImageReader natives (M3c)
 #include "runtime/media_codec_jni.h"  // media_jni loadLibrary -> MediaCodec natives (M5)
@@ -7943,6 +7944,7 @@ class ArtVm final : public JniVm {
       env->ExceptionClear();
     }
     register_process_proc_natives(env);
+    register_debug_heap_natives(env);
     log::i(kTag,
            "ART native floor: Binder/BinderInternal/Process stubbed (no "
            "Binder, ADR-3)");
