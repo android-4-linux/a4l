@@ -147,6 +147,17 @@ Java_com_acl_ndktest_Main_handlerKept(JNIEnv* e, jclass c) {
   if (now.handler == (void*)ndktest_own_handler) return 0;
   return now.handler == before.handler ? 1 : 2;
 }
+// Bound by name. Reads ro.build.version.sdk the way native code does. The symbol is libc's by
+// link; a4l's libacl_sysprops.so comes ahead of libc in the lookup, and answers from the table
+// the runtime gives android.os.SystemProperties. libc's own has no property area: 0.
+extern int __system_property_get(const char* name, char* value);
+JNIEXPORT jint JNICALL
+Java_com_acl_ndktest_Main_sdkProperty(JNIEnv* e, jclass c) {
+  char value[92] = "";
+  int n = __system_property_get("ro.build.version.sdk", value), sdk = 0;
+  for (int i = 0; i < n && value[i] >= '0' && value[i] <= '9'; i++) sdk = sdk * 10 + (value[i] - '0');
+  return sdk;
+}
 // Decoy for the bind-by-name path: an EXPORTED Java_<class>_answer, while JNI_OnLoad below ALSO
 // RegisterNatives-binds answer() to the_registered (4250). A RegisterNatives binding is the app's
 // explicit choice and must win, so acl's name binding has to skip methods JNI_OnLoad already

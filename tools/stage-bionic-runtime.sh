@@ -191,6 +191,15 @@ for pair in "libEGL.so:acl_egl_fwd.c:" "libGLESv2.so:acl_gles_fwd.c:$SYS/libEGL.
 done
 say "   libEGL.so / libGLESv2.so: host-Mesa forwarders (per-thread donors); libjnigraphics.so: shim"
 
+# 2d. System properties for native code (src/ndk/bionic/acl_system_properties.c). -z global: the
+# bionic linker searches such a library ahead of a library's own dependencies, libc among them, so
+# these __system_property_* are the ones every library loaded after it binds. An RTLD_GLOBAL dlopen
+# alone does not do that.
+"$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls \
+  -fvisibility=hidden -O2 -Wl,-soname,libacl_sysprops.so -Wl,-z,global -Wl,-z,now \
+  "${BIONIC_INC[@]}" -o "$SYS/libacl_sysprops.so" \
+  "$GLCRTB" "$HERE/../src/ndk/bionic/acl_system_properties.c" "$GLCRTE" "$BLIBC" -fuse-ld=lld
+
 # 3. the bionic PIE stub exe (must link + pull bionic libc; entry never runs).
 "$CLANG" --target=x86_64-linux-android31 -fPIC -pie -nostdlib \
   -o "$OUT/stub" "$CRTBEGIN" "$HERE/ndk-loader-spike/stub.c" "$CRTEND" \

@@ -98,15 +98,9 @@ static void acl_ndk_logger(const struct __android_log_message* m) {
   };
   (void)!writev(2, iov, 3);
 }
-// The Flutter engine gates its AHardwareBuffer external-texture import on
-// android_get_device_api_level() >= 26/29. bionic's returns -1 here (the
-// __system_property area is uninitialized and unwritable in acl's sandbox),
-// silently disabling the WHOLE external-texture path. acl vendors API 33, so
-// export our own — libandroid precedes libc in the engine's DT_NEEDED, so the
-// engine binds THESE — reporting 33. See [[flutter-texture-bridge]] M3c.
-__attribute__((visibility("default"))) int android_get_device_api_level(void) {
-  return 33;
-}
+// What the app was built for, as bionic reports it to native code. (The
+// device's own level, android_get_device_api_level, is in
+// acl_system_properties.c with the properties it is read from.)
 __attribute__((visibility("default"))) int
 android_get_application_target_sdk_version(void) {
   return 33;
