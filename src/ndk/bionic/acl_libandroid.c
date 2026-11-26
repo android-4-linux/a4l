@@ -158,7 +158,15 @@ struct ALooper {
                          // from other threads)
   AclFdEntry fds[ACL_MAX_FDS];
   int fd_count;
+  int told;  // acl_looper_used_hook has been called for this looper
 };
+
+// Set by the runtime: called once per looper, on the looper's own thread, when
+// that thread first gives it an fd. Nothing polls an ALooper on a thread that
+// runs a Java Looper (Chromium's JavaHandlerThread posts its native tasks to
+// one), so the runtime has that thread's MessageQueue watch epoll_fd and pump
+// it. %fs-aware on the runtime's side, like the other hooks.
+ACL_EXPORT void* acl_looper_used_hook = NULL;
 
 static pthread_key_t g_looper_key;
 static pthread_once_t g_looper_key_once = PTHREAD_ONCE_INIT;
@@ -320,7 +328,14 @@ ACL_EXPORT int ALooper_addFd(ALooper* looper,
   }
   if (adding)
     looper->fd_count++;
+  // Only from the looper's own thread: the watch goes on the caller's queue.
+  const int tell = !looper->told && acl_looper_used_hook != NULL &&
+                   pthread_getspecific(g_looper_key) == looper;
+  if (tell)
+    looper->told = 1;
   pthread_mutex_unlock(&looper->lock);
+  if (tell)
+    ((void (*)(int))acl_looper_used_hook)(looper->epoll_fd);
   return 1;
 }
 
