@@ -25,6 +25,11 @@ void register_media_codec_natives(JNIEnv* env);
 // before it creates a MediaCodec).
 void register_media_codec_list_natives(JNIEnv* env);
 
+// Register android.media.MediaMetadataRetriever over media::probe_media: a
+// file's duration, size, rotation and tracks. It makes no pictures. No-op
+// without FFmpeg.
+void register_media_metadata_retriever_natives(JNIEnv* env);
+
 }  // namespace acl::runtime
 
 #endif  // ACL_RUNTIME_MEDIA_CODEC_JNI_H

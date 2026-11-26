@@ -71,6 +71,29 @@ class VideoDecoder {
   std::unique_ptr<Impl> d_;
 };
 
+// What a media file is, without decoding it: what
+// android.media.MediaMetadataRetriever reports. A field the container does
+// not give is 0 or empty.
+struct MediaInfo {
+  std::int64_t duration_us = 0;
+  std::int64_t bitrate = 0;  // bits per second, of the whole file
+  int tracks = 0;
+  bool has_video = false;
+  bool has_audio = false;
+  int width = 0;  // of the video track, as coded (before rotation)
+  int height = 0;
+  int rotation = 0;  // degrees clockwise to show it upright: 0, 90, 180, 270
+  std::int64_t video_frames = 0;
+  double frame_rate = 0;
+  int sample_rate = 0;     // of the audio track
+  std::string mime;        // of the container ("video/mp4", "audio/mpeg", …)
+  std::string video_mime;  // of the video track ("video/avc", …)
+};
+
+// Reads `path`'s container and stream headers. False + *error if FFmpeg is
+// unavailable or the file is not one it can open.
+bool probe_media(const std::string& path, MediaInfo* out, std::string* error);
+
 // Demuxes a container into encoded access units + codec config —
 // android.media.MediaExtractor's role. The counterpart to CodecDecoder
 // (MediaCodec): Demuxer.read_sample() -> CodecDecoder.send_packet().

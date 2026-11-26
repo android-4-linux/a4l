@@ -669,6 +669,8 @@ bool supplement_media_jni(JNIEnv* env, const std::string& path) {
   register_media_codec_natives(env);
   // MediaCodecList: advertise acl's decoder (ExoPlayer gate)
   register_media_codec_list_natives(env);
+  // MediaMetadataRetriever loads the library from its initializer too
+  register_media_metadata_retriever_natives(env);
   log::i(kTag,
          "loadLibrary(media_jni): registered acl ImageReader + MediaCodec + "
          "MediaCodecList natives");
