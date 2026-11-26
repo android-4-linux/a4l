@@ -691,6 +691,24 @@ public class Main extends Activity {
         expect(("components explicit=1 action=.Main$MessengerService"
                 + " permission=android.permission.BIND_JOB_SERVICE disabled=0/1 other=0/null"
                 + " receiver=.Main$TickReceiver/0").equals(line), "components");
+        // A service the manifest does not have is not found; one it has is.
+        boolean undeclared = false;
+        boolean declared = false;
+        try {
+            getPackageManager().getServiceInfo(
+                    new android.content.ComponentName(this, getPackageName() + ".NoSuchService"),
+                    android.content.pm.PackageManager.GET_META_DATA);
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            undeclared = true;
+        }
+        try {
+            declared = getPackageManager().getServiceInfo(
+                    new android.content.ComponentName(this, LocalService.class), 0) != null;
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            declared = false;
+        }
+        log("undeclared service not found=" + undeclared + " declared found=" + declared);
+        expect(undeclared && declared, "getServiceInfo");
         next();
     }
 
