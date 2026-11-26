@@ -471,17 +471,16 @@ public final class HostBootstrap {
             // Add the WebView APK to the app's AssetManager as a shared library so it gets a resource
             // package id — WebViewDelegate.getPackageId("com.android.webview") reads that (chromium needs
             // its own resources). getProviderClass() normally does this; we bypassed it.
-            if (sApplication != null) {
-                try {
-                    android.content.res.AssetManager am = sApplication.getAssets();
-                    java.lang.reflect.Method addLib = android.content.res.AssetManager.class
-                            .getMethod("addAssetPathAsSharedLibrary", String.class);
-                    Object cookie = addLib.invoke(am, apkPath);
-                    System.err.println("acl WebView: added WebView APK to app assets (cookie=" + cookie + ")");
-                } catch (Throwable t) {
-                    System.err.println("acl WebView: addAssetPathAsSharedLibrary failed: " + t);
-                }
-            }
+            //
+            // Every Context of the app gets it, not the Application's alone. Chromium loads its
+            // resources through the Context a WebView was made with, an Activity as a rule, and
+            // each of a4l's has an AssetManager of its own. (WebViewDelegate.addWebViewAssetPath,
+            // which Chromium calls for this, goes through ResourcesManager and reaches none of
+            // them.) Without it an Activity's Resources do not know Chromium's ids:
+            // BitmapFactory.decodeResource returns null for the default video poster, and
+            // Chromium ends the process on the NullPointerException that follows.
+            addWebViewAssets(apkPath);
+            if (sApplication != null) addSharedLibraryAssets(sApplication.getAssets(), apkPath);
             // WebViewDelegate has a package-private no-arg ctor.
             java.lang.reflect.Constructor<?> dctor =
                     Class.forName("android.webkit.WebViewDelegate").getDeclaredConstructor();
@@ -697,7 +696,44 @@ public final class HostBootstrap {
         }
     }
 
+    // The AssetManagers made for the app's Contexts, and the WebView APK once Chromium is
+    // loaded: it is added to each as a shared library, those there and those made later.
+    private static final java.util.Set<android.content.res.AssetManager> sAppAssets =
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+    private static String sWebViewAssetPath;
+
+    private static void addWebViewAssets(String apkPath) {
+        synchronized (sAppAssets) {
+            sWebViewAssetPath = apkPath;
+            for (android.content.res.AssetManager am : sAppAssets) addSharedLibraryAssets(am, apkPath);
+        }
+    }
+
+    private static void addSharedLibraryAssets(android.content.res.AssetManager am, String apkPath) {
+        try {
+            Object cookie = android.content.res.AssetManager.class
+                    .getMethod("addAssetPathAsSharedLibrary", String.class).invoke(am, apkPath);
+            if (!(cookie instanceof Integer) || ((Integer) cookie).intValue() == 0) {
+                System.err.println("acl WebView: " + apkPath + " not added to an AssetManager");
+            }
+        } catch (Throwable t) {
+            System.err.println("acl WebView: addAssetPathAsSharedLibrary failed: " + t);
+        }
+    }
+
     private static Resources appResources(String apkPath, String frameworkResPath) {
+        final Resources r = buildAppResources(apkPath, frameworkResPath);
+        if (r != Resources.getSystem()) {
+            synchronized (sAppAssets) {
+                if (sAppAssets.add(r.getAssets()) && sWebViewAssetPath != null) {
+                    addSharedLibraryAssets(r.getAssets(), sWebViewAssetPath);
+                }
+            }
+        }
+        return r;
+    }
+
+    private static Resources buildAppResources(String apkPath, String frameworkResPath) {
         // App-bundle install (base + config splits): route through the framework's split-aware
         // ResourcesManager so split-only resources resolve. Single-APK apps (no ACL_SPLIT_APKS) keep
         // the proven hand-rolled path below unchanged.
