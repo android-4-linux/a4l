@@ -3984,6 +3984,17 @@ public final class HostBootstrap {
                         + " chars)" + (opened ? " + portal OpenURI " + url : ""));
                 return null;
             }
+            // A web link an Activity opens goes to the host's handler, as one opened from a
+            // Context does.
+            try {
+                final android.net.Uri d = intent.getData();
+                if (android.content.Intent.ACTION_VIEW.equals(intent.getAction()) && d != null
+                        && ("http".equalsIgnoreCase(d.getScheme())
+                                || "https".equalsIgnoreCase(d.getScheme()))
+                        && HostShare.openUri(d.toString())) {
+                    return null;
+                }
+            } catch (Throwable ignored) { }
             System.out.println("acl HostBootstrap: startActivity suppressed (no external-activity host): " + intent);
             return null;
         }
