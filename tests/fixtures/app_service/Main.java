@@ -70,7 +70,7 @@ public class Main extends Activity {
         if (!ok) fail(what);
     }
 
-    /** The launch callbacks in the order they came: c, s, C (post create), r, R (post resume). */
+    /** The launch callbacks in the order they came: a (attachBaseContext), c, s, C (post create), r, R (post resume). */
     private final StringBuilder launch = new StringBuilder();
 
     @Override
@@ -97,7 +97,7 @@ public class Main extends Activity {
         launch.append('R');
         // Activity.performCreate/Start/Resume and ActivityThread give this order.
         log("launch order " + launch);
-        expect("csCrR".contentEquals(launch), "launch order " + launch);
+        expect("acsCrR".contentEquals(launch), "launch order " + launch);
         // Resources.getSystem() has the display's size, as the app's own Resources does.
         final android.util.DisplayMetrics sys =
                 android.content.res.Resources.getSystem().getDisplayMetrics();
@@ -425,6 +425,12 @@ public class Main extends Activity {
         expect(canvasOps, "drawPaint " + painted + " clear " + cleared + " layer alpha "
                 + layered + " skew " + skewed + " ring " + ring + "/" + ringRadii
                 + " opaque " + opaque);
+    }
+
+    @Override
+    protected void attachBaseContext(Context base) {
+        super.attachBaseContext(base);
+        launch.append('a');
     }
 
     @Override

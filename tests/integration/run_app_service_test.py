@@ -45,7 +45,7 @@ RECEIVERS = [
 ]
 
 CHECKS = [
-    "SERVICE: launch order csCrR",
+    "SERVICE: launch order acsCrR",
     "SERVICE: application attached=true",
     "SERVICE: system resources sized=true",
     "SERVICE: bitmap pixel set=true",

@@ -865,6 +865,10 @@ public final class HostBootstrap {
         @Override public android.view.autofill.AutofillManager.AutofillClient getAutofillClient() {
             return null;
         }
+        // Activity.attachBaseContext hands its base the autofill client. There is no autofill
+        // to give it to, and no base under this context to pass it on to.
+        @Override public void setAutofillClient(
+                android.view.autofill.AutofillManager.AutofillClient client) {}
         // Another null-base ContextWrapper delegate: createPackageContext NPEs on mBase. acl runs one
         // app in-process; return self (own-package resources/classloader) as a best effort — enough for
         // e.g. audio_service (agersant.polaris) building a context for its notification/PendingIntent.
@@ -2960,7 +2964,24 @@ public final class HostBootstrap {
     /** Attach a real Activity: base context + mActivityInfo + PhoneWindow + the app Application. */
     public static void attachActivityContext(android.app.Activity a, android.content.Context ctx,
             android.app.Application app) throws Exception {
-        setField(ContextWrapper.class, a, "mBase", ctx);
+        // Activity.attach calls attachBaseContext, which an Activity overrides to wrap the
+        // context or to set itself up before onCreate (a base Activity that fills its injected
+        // fields there finds them null in onCreate otherwise). A failure there is the app's
+        // and is reported; the base is set either way.
+        try {
+            final java.lang.reflect.Method attach =
+                    ContextWrapper.class.getDeclaredMethod("attachBaseContext",
+                            android.content.Context.class);
+            attach.setAccessible(true);
+            attach.invoke(a, ctx);
+        } catch (Throwable t) {
+            final Throwable cause = t instanceof java.lang.reflect.InvocationTargetException
+                    && t.getCause() != null ? t.getCause() : t;
+            System.err.println("acl HostBootstrap: Activity.attachBaseContext incomplete for "
+                    + a.getClass().getName() + " (" + cause + ")");
+            cause.printStackTrace();
+        }
+        if (a.getBaseContext() == null) setField(ContextWrapper.class, a, "mBase", ctx);
         if (app != null) {
             try { setField(android.app.Activity.class, a, "mApplication", app); }
             catch (Throwable ignored) {}
