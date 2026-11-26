@@ -124,6 +124,11 @@ void set_asset_provider(
 int main_looper_bridge_fd();
 void main_looper_bridge_pump();
 
+// `used` is called on a thread whose NDK ALooper was just given its first fd,
+// with the looper's epoll fd. The runtime uses it to have that thread's Java
+// Looper, if it has one, watch the fd and pump the ALooper.
+void set_looper_used_hook(void (*used)(int epoll_fd));
+
 #if ACL_HAVE_JNI
 // The JNI function-table struct types, derived from the `functions` member so
 // this is portable across jni.h variants (OpenJDK names them

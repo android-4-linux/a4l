@@ -582,6 +582,40 @@ jclass find_class_optional(JNIEnv* env, const char* name) {
 #if ACL_HAVE_JNI
 acl::ndk::BionicRuntime* g_ndk_rt = nullptr;
 JavaVM* g_ndk_vm = nullptr;
+// org.acl.internal.PresentDriver, kept from when its natives were registered.
+// FindClass on a thread running an app's or the WebView's code looks in that
+// code's class loader, which does not hold a4l's classes.
+jclass g_present_driver_cls = nullptr;
+
+// A thread's NDK ALooper was given its first fd (libandroid, through
+// ndk::set_looper_used_hook). If the thread is a Java thread, PresentDriver
+// has its Looper watch the ALooper; a thread with no Java Looper polls its
+// ALooper itself and nothing is done.
+void ndk_looper_used(int epoll_fd) {
+  JNIEnv* env = nullptr;
+  if (g_ndk_vm == nullptr ||
+      g_ndk_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) !=
+          JNI_OK ||
+      env == nullptr)
+    return;  // not attached to the VM: not a Java thread
+  // Called from inside a native the thread is running: leave an exception it
+  // may have pending as it was.
+  jthrowable pending = env->ExceptionOccurred();
+  if (pending != nullptr)
+    env->ExceptionClear();
+  if (g_present_driver_cls != nullptr) {
+    if (jmethodID m = env->GetStaticMethodID(g_present_driver_cls,
+                                             "watchThreadLooper", "(I)V"))
+      env->CallStaticVoidMethod(g_present_driver_cls, m,
+                                static_cast<jint>(epoll_fd));
+  }
+  if (env->ExceptionCheck())
+    env->ExceptionClear();
+  if (pending != nullptr) {
+    env->Throw(pending);
+    env->DeleteLocalRef(pending);
+  }
+}
 acl::ndk::BionicConfig
     g_ndk_cfg;  // validated at boot; the linker bootstraps lazily from it
 bool g_ndk_have_cfg = false;
@@ -4137,6 +4171,8 @@ void register_present_driver_natives(JNIEnv* env) {
     env->ExceptionClear();
     return;
   }
+  if (g_present_driver_cls == nullptr)
+    g_present_driver_cls = static_cast<jclass>(env->NewGlobalRef(c));
   const JNINativeMethod m[] = {
       {const_cast<char*>("nGlOpen"),
        const_cast<char*>(
@@ -7745,6 +7781,7 @@ class ArtVm final : public JniVm {
     g_ndk_cfg = cfg;
     g_ndk_have_cfg = true;
     env->GetJavaVM(&g_ndk_vm);
+    acl::ndk::set_looper_used_hook(&ndk_looper_used);
     if (jclass c = env->FindClass("java/lang/Runtime")) {
       JNINativeMethod m[] = {
           {const_cast<char*>("nativeLoad"),

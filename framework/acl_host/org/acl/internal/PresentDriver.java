@@ -162,6 +162,30 @@ public final class PresentDriver {
         }
     }
 
+    /**
+     * Called by the runtime on a thread whose NDK ALooper was just given its first fd, with
+     * the ALooper's epoll fd. A thread that runs a Java Looper never polls its ALooper, so
+     * its MessageQueue watches the fd and pumps it. Chromium's JavaHandlerThread is such a
+     * thread: the one that answers a page's calls into an addJavascriptInterface object runs
+     * its native tasks this way, and without the watch such a call never returned.
+     */
+    public static void watchThreadLooper(int fd) {
+        final Looper looper = Looper.myLooper();
+        if (looper == null) return;  // the thread polls its ALooper itself
+        if (looper == Looper.getMainLooper()) {
+            if (sLoopStarted) bridgeNativeLooper();  // else the loop does it when it starts
+            return;
+        }
+        looper.getQueue().addOnFileDescriptorEventListener(makeFd(fd),
+            0x1 /*EVENT_INPUT*/ | 0x4 /*EVENT_ERROR*/,
+            new MessageQueue.OnFileDescriptorEventListener() {
+                @Override public int onFileDescriptorEvents(FileDescriptor fd, int events) {
+                    nGlAloopPump();
+                    return EVENT_INPUT;
+                }
+            });
+    }
+
     private static final int CALLBACK_INSETS_ANIMATION = 2;  // after ANIMATION, before TRAVERSAL (@hide)
     private static final int CALLBACK_TRAVERSAL = 3;  // Choreographer.CALLBACK_TRAVERSAL (@hide)
 

@@ -3780,6 +3780,24 @@ void set_asset_provider(int (*open_cb)(void*, const char*, void**, long*),
   g_asset_provider_user = user;
 }
 
+// A looper's first fd, from libandroid's ALooper_addFd on the looper's thread.
+// The host side calls into Java, so it runs under the thread's glibc %fs.
+void (*g_looper_used_fn)(int) = nullptr;
+void acl_looper_used_tramp(int epoll_fd) {
+  if (g_looper_used_fn == nullptr)
+    return;
+  const std::uintptr_t bionic_fs = ndk_get_fs();
+  const std::uintptr_t glibc_fs = ensure_paired_glibc_fs();
+  if (glibc_fs == 0)
+    return;  // pool exhausted: the looper goes unwatched rather than corrupt
+  ndk_set_fs(glibc_fs);
+  g_looper_used_fn(epoll_fd);
+  ndk_set_fs(bionic_fs);
+}
+void set_looper_used_hook(void (*used)(int)) {
+  g_looper_used_fn = used;
+}
+
 void set_ahb_ops(void (*describe)(const void*, void*),
                  void (*acquire)(void*),
                  void (*release)(void*)) {
@@ -3965,6 +3983,9 @@ void* BionicRuntime::load_library(const char* abs_path,
           // ANativeWindow producer hooks -> %fs-aware trampolines (self-guard
           // on g_anw_*_fn, set by the runtime via set_anw_ops to image_reader's
           // BufferQueue producer ops).
+          if (void** lu =
+                  static_cast<void**>(symbol(la, "acl_looper_used_hook")))
+            *lu = reinterpret_cast<void*>(&acl_looper_used_tramp);
           if (void** af = static_cast<void**>(symbol(la, "acl_anw_from_hook")))
             *af = reinterpret_cast<void*>(&acl_anw_from_tramp);
           if (void** al = static_cast<void**>(symbol(la, "acl_anw_lock_hook")))
