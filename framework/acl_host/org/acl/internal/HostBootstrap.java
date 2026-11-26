@@ -2501,6 +2501,36 @@ public final class HostBootstrap {
         return ri;
     }
 
+    // An ACTION_VIEW of an http or https URI that names no package and no component: what an
+    // app sends to open a link in the user's browser.
+    static boolean isWebLinkIntent(android.content.Intent intent) {
+        if (intent == null || !android.content.Intent.ACTION_VIEW.equals(intent.getAction())
+                || intent.getComponent() != null || intent.getPackage() != null) {
+            return false;
+        }
+        final android.net.Uri d = intent.getData();
+        final String scheme = d != null ? d.getScheme() : null;
+        return "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
+    }
+
+    // The handler such an intent resolves to. There is no browser Activity in the process: the
+    // start goes to the host's handler for the URI (NoopInstrumentation), and this entry is
+    // what tells an app that asks first that there is one.
+    static android.content.pm.ResolveInfo webLinkResolveInfo() {
+        android.content.pm.ResolveInfo ri = new android.content.pm.ResolveInfo();
+        android.content.pm.ActivityInfo ai = new android.content.pm.ActivityInfo();
+        ai.packageName = "org.acl.browser";
+        ai.name = "org.acl.browser.ViewActivity";
+        ai.exported = true;
+        ai.enabled = true;
+        android.content.pm.ApplicationInfo app = new android.content.pm.ApplicationInfo();
+        app.packageName = "org.acl.browser";
+        ai.applicationInfo = app;
+        ri.activityInfo = ai;
+        ri.resolvePackageName = "org.acl.browser";
+        return ri;
+    }
+
     static final class AppPackageManager extends StubPackageManager {
         private final String pkg;
         AppPackageManager(String pkg) { this.pkg = pkg; }
@@ -2539,10 +2569,18 @@ public final class HostBootstrap {
         // launch itself is routed to the xdg Email portal. Everything else stays unresolved (null/empty),
         // matching StubPackageManager -- acl hosts no other external Activities.
         @Override public android.content.pm.ResolveInfo resolveActivity(android.content.Intent intent, int flags) {
-            return isEmailIntent(intent) ? emailResolveInfo() : null;
+            if (isEmailIntent(intent)) return emailResolveInfo();
+            // A web link has a handler too, the host's: an app that asks before it opens one
+            // (and does nothing when there is none) goes on to start it.
+            return isWebLinkIntent(intent) ? webLinkResolveInfo() : null;
         }
         @Override public java.util.List<android.content.pm.ResolveInfo> queryIntentActivities(
                 android.content.Intent intent, int flags) {
+            if (isWebLinkIntent(intent)) {
+                java.util.List<android.content.pm.ResolveInfo> l = new java.util.ArrayList<>(1);
+                l.add(webLinkResolveInfo());
+                return l;
+            }
             if (isEmailIntent(intent)) {
                 java.util.List<android.content.pm.ResolveInfo> l = new java.util.ArrayList<>(1);
                 l.add(emailResolveInfo());

@@ -721,6 +721,18 @@ public class Main extends Activity {
         }
         log("undeclared service not found=" + undeclared + " declared found=" + declared);
         expect(undeclared && declared, "getServiceInfo");
+        // A web link has a handler, the host's; one aimed at a package that is not here does
+        // not, and neither does a scheme nothing handles.
+        final Intent link = new Intent(Intent.ACTION_VIEW,
+                android.net.Uri.parse("https://example.com/a"));
+        final boolean web = pm.resolveActivity(link, 0) != null
+                && pm.queryIntentActivities(link, 0).size() == 1
+                && link.resolveActivity(pm) != null
+                && pm.resolveActivity(new Intent(link).setPackage("com.example.other"), 0) == null
+                && pm.resolveActivity(new Intent(Intent.ACTION_VIEW,
+                        android.net.Uri.parse("nosuch://example")), 0) == null;
+        log("web link resolves=" + web);
+        expect(web, "resolveActivity for a web link");
         next();
     }
 
