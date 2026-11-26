@@ -33,6 +33,7 @@ THEME_MATERIAL = 0x01030224        # android:style/Theme.Material (dark)
 THEME_MATERIAL_LIGHT = 0x01030237  # android:style/Theme.Material.Light
 
 CHECKS = [
+    "TREE: render node recorded before the window=true",
     "TREE: theme launcher light=false second light=true",
     "TREE: global layout sized draws=0",
     "TREE: pre-draw cancelled one frame: draws then=0",

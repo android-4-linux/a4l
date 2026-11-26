@@ -68,6 +68,13 @@ public class Main extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         if (!(this instanceof Second)) {
+            // A RenderNode recorded before any window is up, as an app that draws into its
+            // own nodes at start does. The frame the test reads must still be the window's.
+            final android.graphics.RenderNode first = new android.graphics.RenderNode("first");
+            first.setPosition(0, 0, 4, 4);
+            first.beginRecording().drawColor(0xff00ff00);
+            first.endRecording();
+            log("render node recorded before the window=" + first.hasDisplayList());
             // The launcher: hand over to the real Activity before any frame, as a splash does.
             sLauncherLight = isLightTheme();
             startActivity(new Intent(this, Second.class));
