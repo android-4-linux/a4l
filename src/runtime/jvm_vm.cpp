@@ -82,6 +82,7 @@
 #include "runtime/image_reader_jni.h"  // media_jni loadLibrary -> ImageReader natives (M3c)
 #include "runtime/media_codec_jni.h"  // media_jni loadLibrary -> MediaCodec natives (M5)
 #include "runtime/ndk_audio.h"
+#include "runtime/process_proc_jni.h"
 #include "runtime/vsync_cap.h"
 #include "svc/svc.h"
 #include "wm/present.h"
@@ -7935,6 +7936,7 @@ class ArtVm final : public JniVm {
     } else {
       env->ExceptionClear();
     }
+    register_process_proc_natives(env);
     log::i(kTag,
            "ART native floor: Binder/BinderInternal/Process stubbed (no "
            "Binder, ADR-3)");

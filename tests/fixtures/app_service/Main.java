@@ -274,6 +274,50 @@ public class Main extends Activity {
         expect(attached, "Application calls " + App.calls + ", code path " + code);
         log("process name " + proc + " application " + android.app.Application.getProcessName());
         expect(getPackageName().equals(proc), "Process.myProcessName() is " + proc);
+        // Process.readProcFile and parseProcLine split a line by a format, as the framework
+        // and apps read /proc/self/stat: a number, a name in parentheses that has a space in
+        // it, a state letter, and a number after a run of spaces.
+        boolean parsed = false;
+        try {
+            final int space = 0x20, combine = 0x100, parens = 0x200, chr = 0x800;
+            final int outString = 0x1000, outLong = 0x2000;
+            final int[] format = {space | outLong, space | parens | outString,
+                    space | combine | outLong | chr, space | outLong, '\n' | outString};
+            final byte[] line = "42 (a b) R   7 tail\n".getBytes("US-ASCII");
+            final java.io.File f = new java.io.File(getCacheDir(), "stat");
+            try (java.io.FileOutputStream os = new java.io.FileOutputStream(f)) {
+                os.write(line);
+            }
+            parsed = true;
+            for (int pass = 0; pass < 2; pass++) {
+                final String[] strings = new String[5];
+                final long[] longs = new long[5];
+                final boolean ok = pass == 0
+                        ? (Boolean) android.os.Process.class.getMethod("readProcFile",
+                                String.class, int[].class, String[].class, long[].class,
+                                float[].class).invoke(null, f.getPath(), format, strings, longs,
+                                null)
+                        : (Boolean) android.os.Process.class.getMethod("parseProcLine",
+                                byte[].class, int.class, int.class, int[].class, String[].class,
+                                long[].class, float[].class).invoke(null, line, 0, line.length,
+                                format, strings, longs, null);
+                parsed &= ok && longs[0] == 42 && "a b".equals(strings[1]) && longs[2] == 'R'
+                        && longs[3] == 7 && "tail".equals(strings[4]);
+            }
+            // A format longer than the data, and a file that is not there.
+            parsed &= !(Boolean) android.os.Process.class.getMethod("parseProcLine", byte[].class,
+                    int.class, int.class, int[].class, String[].class, long[].class,
+                    float[].class).invoke(null, line, 0, 2, format, new String[5], new long[5],
+                    null);
+            parsed &= !(Boolean) android.os.Process.class.getMethod("readProcFile", String.class,
+                    int[].class, String[].class, long[].class, float[].class).invoke(null,
+                    f.getPath() + ".none", format, null, null, null);
+        } catch (Exception e) {
+            parsed = false;
+            Log.w(TAG, "readProcFile", e);
+        }
+        log("proc file parsed=" + parsed);
+        expect(parsed, "Process.readProcFile or parseProcLine");
         // A SweepGradient from red to blue around the center: red just past the positive x
         // axis, an even mix opposite it, blue just before the axis again.
         final android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(

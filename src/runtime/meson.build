@@ -12,7 +12,7 @@ runtime_deps = [fmt_dep]   # via log/log.h; split_vm.cpp uses acl_ipc (header-on
 # runtime, so it needs libdl.
 if have_jni
   runtime_sources += files('jvm_vm.cpp', 'framework_natives.cpp', 'audio_track_jni.cpp',
-                           'ndk_audio.cpp')
+                           'ndk_audio.cpp', 'process_proc_jni.cpp')
   if have_gl
     # android.media.ImageReader native underside over gfx::BufferQueue (Flutter external textures).
     runtime_sources += files('image_reader_jni.cpp')
