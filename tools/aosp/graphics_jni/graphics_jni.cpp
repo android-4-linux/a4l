@@ -688,6 +688,134 @@ void Bitmap_nativeSetPixels(JNIEnv* env,
       pixels, src, JNI_ABORT);  // src read-only; nothing to copy back
 }
 
+// The memory behind a java.nio.Buffer from its position on, for
+// Bitmap.copyPixelsToBuffer and copyPixelsFromBuffer, which take a ByteBuffer,
+// ShortBuffer or IntBuffer that is direct or backed by an array. For an array
+// the elements are pinned until the destructor; `write` says whether they were
+// changed.
+class BufferBytes {
+ public:
+  BufferBytes(JNIEnv* env, jobject buffer, bool write)
+      : env_(env), write_(write) {
+    if (buffer == nullptr)
+      return;
+    jclass cls = env->FindClass("java/nio/Buffer");
+    if (cls == nullptr)
+      return;
+    const jmethodID position = env->GetMethodID(cls, "position", "()I");
+    const jmethodID limit = env->GetMethodID(cls, "limit", "()I");
+    const jmethodID has_array = env->GetMethodID(cls, "hasArray", "()Z");
+    const jmethodID array =
+        env->GetMethodID(cls, "array", "()Ljava/lang/Object;");
+    const jmethodID array_offset = env->GetMethodID(cls, "arrayOffset", "()I");
+    env->DeleteLocalRef(cls);
+    if (position == nullptr || limit == nullptr || has_array == nullptr ||
+        array == nullptr || array_offset == nullptr)
+      return;
+    size_t element = 1;
+    if (is_a(buffer, "java/nio/ShortBuffer"))
+      element = 2;
+    else if (is_a(buffer, "java/nio/IntBuffer"))
+      element = 4;
+    const jint pos = env->CallIntMethod(buffer, position);
+    const jint lim = env->CallIntMethod(buffer, limit);
+    if (env->ExceptionCheck() || pos < 0 || lim < pos)
+      return;
+    size_ = static_cast<size_t>(lim - pos) * element;
+    if (void* direct = env->GetDirectBufferAddress(buffer)) {
+      bytes_ =
+          static_cast<uint8_t*>(direct) + static_cast<size_t>(pos) * element;
+      return;
+    }
+    if (env->CallBooleanMethod(buffer, has_array) != JNI_TRUE ||
+        env->ExceptionCheck())
+      return;
+    array_ = static_cast<jarray>(env->CallObjectMethod(buffer, array));
+    const jint offset = env->CallIntMethod(buffer, array_offset);
+    if (env->ExceptionCheck() || array_ == nullptr || offset < 0)
+      return;
+    pinned_ = env->GetPrimitiveArrayCritical(array_, nullptr);
+    if (pinned_ != nullptr)
+      bytes_ =
+          static_cast<uint8_t*>(pinned_) +
+          (static_cast<size_t>(offset) + static_cast<size_t>(pos)) * element;
+  }
+  ~BufferBytes() {
+    if (pinned_ != nullptr)
+      env_->ReleasePrimitiveArrayCritical(array_, pinned_,
+                                          write_ ? 0 : JNI_ABORT);
+    if (array_ != nullptr)
+      env_->DeleteLocalRef(array_);
+  }
+  BufferBytes(const BufferBytes&) = delete;
+  BufferBytes& operator=(const BufferBytes&) = delete;
+
+  uint8_t* bytes() const { return bytes_; }  // null if the buffer has no memory
+  size_t size() const { return size_; }      // from the position to the limit
+
+ private:
+  bool is_a(jobject o, const char* name) {
+    jclass c = env_->FindClass(name);
+    if (c == nullptr) {
+      env_->ExceptionClear();
+      return false;
+    }
+    const bool yes = env_->IsInstanceOf(o, c) == JNI_TRUE;
+    env_->DeleteLocalRef(c);
+    return yes;
+  }
+  JNIEnv* env_;
+  bool write_;
+  jarray array_ = nullptr;
+  void* pinned_ = nullptr;
+  uint8_t* bytes_ = nullptr;
+  size_t size_ = 0;
+};
+
+// How a bitmap's pixels lie in a buffer an app copies them to or from: as the
+// bitmap has them, except that Android's ARGB_8888 is R, G, B, A in memory and
+// a4l keeps such a bitmap as kN32 (B, G, R, A here).
+SkImageInfo buffer_info(const SkBitmap& bm) {
+  return bm.colorType() == kBGRA_8888_SkColorType
+             ? bm.info().makeColorType(kRGBA_8888_SkColorType)
+             : bm.info();
+}
+
+// Bitmap.copyPixelsToBuffer: the bitmap's rows, getRowBytes() apart, into the
+// buffer at its position. Bitmap has checked that they fit and moves the
+// position afterwards; the size is checked again here because this writes
+// memory.
+void Bitmap_nativeCopyPixelsToBuffer(JNIEnv* env,
+                                     jclass,
+                                     jlong ptr,
+                                     jobject dst) {
+  auto* w = reinterpret_cast<AclBitmap*>(ptr);
+  if (w == nullptr || w->bitmap.getPixels() == nullptr)
+    return;
+  const BufferBytes out(env, dst, true);
+  if (out.bytes() == nullptr || out.size() < w->bitmap.computeByteSize())
+    return;
+  w->bitmap.readPixels(buffer_info(w->bitmap), out.bytes(),
+                       w->bitmap.rowBytes(), 0, 0);
+}
+
+// Bitmap.copyPixelsFromBuffer: the reverse. An app that decodes or receives an
+// image itself fills its Bitmap this way.
+void Bitmap_nativeCopyPixelsFromBuffer(JNIEnv* env,
+                                       jclass,
+                                       jlong ptr,
+                                       jobject src) {
+  auto* w = reinterpret_cast<AclBitmap*>(ptr);
+  if (w == nullptr || w->bitmap.getPixels() == nullptr)
+    return;
+  const BufferBytes in(env, src, false);
+  if (in.bytes() == nullptr || in.size() < w->bitmap.computeByteSize())
+    return;
+  w->bitmap.writePixels(
+      SkPixmap(buffer_info(w->bitmap), in.bytes(), w->bitmap.rowBytes()), 0, 0);
+  w->bitmap.notifyPixelsChanged();
+}
+
 // Bitmap.setPixel: one unpremultiplied Color int, converted to the bitmap's
 // config and alpha as nativeSetPixels does. Bitmap.setPixel has checked the
 // bounds; an immutable bitmap is left alone here as there.
@@ -6330,6 +6458,10 @@ const JNINativeMethod kBitmap[] = {
      reinterpret_cast<void*>(Bitmap_nativeSetPixel)},
     {"nativeSetPixels", "(J[IIIIIII)V",
      reinterpret_cast<void*>(Bitmap_nativeSetPixels)},
+    {"nativeCopyPixelsToBuffer", "(JLjava/nio/Buffer;)V",
+     reinterpret_cast<void*>(Bitmap_nativeCopyPixelsToBuffer)},
+    {"nativeCopyPixelsFromBuffer", "(JLjava/nio/Buffer;)V",
+     reinterpret_cast<void*>(Bitmap_nativeCopyPixelsFromBuffer)},
     {"nativeGetAllocationByteCount", "(J)I",
      reinterpret_cast<void*>(Bitmap_nativeGetAllocationByteCount)},
     {"nativeSetHasAlpha", "(JZZ)V",
