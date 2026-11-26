@@ -146,8 +146,13 @@ public class Main extends Activity {
                 if (drawsAtFirstPass != 0) fail("the view was drawn before its first pre-draw");
                 if (drawCalls == 0 || probe.draws == 0) fail("no draw after pre-draw allowed it");
                 // Last, the task: Second is declared noHistory, so starting Home over it
-                // finishes it.
-                startActivity(new Intent(Main.this, Home.class));
+                // finishes it. Started from a worker thread, as an app that decides where to
+                // go next off the main thread does: the Activity is still made on the main one.
+                new Thread(new Runnable() {
+                    @Override public void run() {
+                        startActivity(new Intent(Main.this, Home.class));
+                    }
+                }, "starter").start();
             }
         }, 200);
     }
