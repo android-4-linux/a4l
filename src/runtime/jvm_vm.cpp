@@ -1445,6 +1445,17 @@ std::uint64_t present_now_ns() {
          static_cast<std::uint64_t>(ts.tv_nsec);
 }
 
+// The time an input event carries: milliseconds on CLOCK_MONOTONIC, which is
+// SystemClock.uptimeMillis(). MotionEvent keeps its times in nanoseconds as a
+// signed 64-bit count, so a time handed over in nanoseconds overflows there.
+// Where it lands depends on the uptime: far in the future, or in the past, and
+// then a GestureDetector's long-press message (sent "at down time + timeout")
+// runs at once and every tap is a long press.
+// maybe_unused: called only from the presenter-gated input paths.
+[[maybe_unused]] std::int64_t input_now_ms() {
+  return static_cast<std::int64_t>(present_now_ns() / 1000000ull);
+}
+
 // A monotonic anchor initialized at TU load (~process start), so the first
 // presented frame can report cold-start time-to-first-frame — the metric that
 // separates imageless-JIT from a boot-image (which AOT-compiles + preverifies
@@ -1542,9 +1553,10 @@ struct PresentSession {
   jmethodID dispatch_touch = nullptr, dispatch_key = nullptr;
   jclass hostbootstrap_cls = nullptr;  // global ref
   jmethodID route_overlay_touch =
-      nullptr;  // HostBootstrap.routeOverlayTouch(MotionEvent)Z
-  std::uint64_t down_time = 0;
-  std::uint64_t frames = 0;  // presented-frame count (progress evidence)
+      nullptr;                 // HostBootstrap.routeOverlayTouch(MotionEvent)Z
+  std::int64_t down_time = 0;  // of the touch in progress, input_now_ms()
+  std::int64_t key_down_time = 0;  // of the last key press, input_now_ms()
+  std::uint64_t frames = 0;        // presented-frame count (progress evidence)
   // Latest real wp_presentation feedback (present-clock ns / refresh ns / KIND
   // flags), sampled on the present thread (nDispatch, where OnPresented lands)
   // and read by the RenderThread to push into Chromium's WebView Viz output
@@ -2057,7 +2069,7 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
                         : p->action == wm::PointerInput::Action::Up ? 1
                                                                     : 2;
     if (action == 0) {
-      s->down_time = present_now_ns();
+      s->down_time = input_now_ms();
       s->sel_anchor = -1;
     }  // tap starts a fresh caret
     // Input-latency probe: stamp the first input (Down/Move) not yet reflected
@@ -2070,7 +2082,7 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
     }
     jobject me = env->CallStaticObjectMethod(
         s->motionevent_cls, s->me_obtain, static_cast<jlong>(s->down_time),
-        static_cast<jlong>(present_now_ns()), action, static_cast<jfloat>(p->x),
+        static_cast<jlong>(input_now_ms()), action, static_cast<jfloat>(p->x),
         static_cast<jfloat>(p->y), 0);
     if (me != nullptr) {
       // A Dialog/PopupWindow overlay, when present, takes input first (it is
@@ -2261,13 +2273,17 @@ void present_deliver_input(PresentSession* s, const wm::InputEvent& ev) {
     if (s->keyevent_cls == nullptr || s->dispatch_key == nullptr)
       return;
     const jint action = key_down ? 0 : 1;
+    // A key's down time is its own, not the last touch's.
+    const std::int64_t key_time = input_now_ms();
+    if (key_down)
+      s->key_down_time = key_time;
     // Build with the full ctor so metaState rides along (Shift+Arrow
     // selection). Fall back to the 2-arg ctor if the 6-arg id didn't resolve.
     jobject ke = s->ke_obtain_meta != nullptr
                      ? env->NewObject(s->keyevent_cls, s->ke_obtain_meta,
-                                      static_cast<jlong>(s->down_time),
-                                      static_cast<jlong>(present_now_ns()),
-                                      action, keycode, 0, s->meta_state)
+                                      static_cast<jlong>(s->key_down_time),
+                                      static_cast<jlong>(key_time), action,
+                                      keycode, 0, s->meta_state)
                      : (s->ke_obtain != nullptr
                             ? env->NewObject(s->keyevent_cls, s->ke_obtain,
                                              action, keycode)
@@ -5055,7 +5071,7 @@ class JniVm : public Vm {
         env_->NewGlobalRef(env_->FindClass("android/view/KeyEvent")));
     jmethodID ke_obtain = env_->GetMethodID(kecls, "<init>", "(II)V");
     clear_exception();
-    auto down_time = std::make_shared<std::uint64_t>(0);
+    auto down_time = std::make_shared<std::int64_t>(0);
 
     wm::GlPresentHooks hooks;
     hooks.configure = [this, gview, w, h, measure, layoutm](
@@ -5117,10 +5133,10 @@ class JniVm : public Vm {
                             : p->action == wm::PointerInput::Action::Up ? 1
                                                                         : 2;
         if (action == 0)
-          *down_time = present_now_ns();
+          *down_time = input_now_ms();
         jobject me = env_->CallStaticObjectMethod(
             mecls, me_obtain, static_cast<jlong>(*down_time),
-            static_cast<jlong>(present_now_ns()), action,
+            static_cast<jlong>(input_now_ms()), action,
             static_cast<jfloat>(p->x), static_cast<jfloat>(p->y), 0);
         if (me != nullptr) {
           const jboolean handled =

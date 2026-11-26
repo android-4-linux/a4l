@@ -202,6 +202,12 @@ public class Main extends Activity {
                         System.exit(1);
                     }
                     log("touch reached the moved view");
+                    // An event's times are SystemClock.uptimeMillis(): a GestureDetector
+                    // sends its long-press message "at down time + timeout", and with a down
+                    // time in the past every tap is a long press.
+                    final long now = android.os.SystemClock.uptimeMillis();
+                    log("touch times: down is event=" + (e.getDownTime() == e.getEventTime())
+                            + " near uptimeMillis=" + (Math.abs(now - e.getEventTime()) < 5000));
                     if (onMovedTouched != null) onMovedTouched.run();
                     return true;
                 }
