@@ -2178,6 +2178,8 @@ public final class HostBootstrap {
     // Fully-qualified class name -> the declaration. Written once by installContentProviders.
     static final java.util.Map<String, Declared> sDeclared =
             java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<String, Declared>());
+    // The manifest's components are in sDeclared: one that is not there is not in the app.
+    static volatile boolean sManifestRead;
 
     // Installed providers keyed by each declared authority — AppContentResolver.acquireProvider
     // resolves content:// lookups here so query/insert/openFile reach the live provider instead of
@@ -2760,6 +2762,15 @@ public final class HostBootstrap {
             si.applicationInfo = getApplicationInfo(pkg, 0);
             if (si.name != null) si.metaData = sServiceMeta.get(si.name);
             Declared d = si.name != null ? sDeclared.get(si.name) : null;
+            // A service the app does not declare is not found, as on Android. A library asks
+            // for one of its own that the app's build may have removed, and takes "not found"
+            // as the answer: appcompat reads autoStoreLocales from
+            // AppLocalesMetadataHolderService and fails on an info that has no meta-data.
+            if (sManifestRead && si.name != null && pkg.equals(si.packageName)
+                    && (d == null || !d.service)) {
+                throw new android.content.pm.PackageManager.NameNotFoundException(
+                        component.flattenToShortString());
+            }
             if (d != null && d.service) {
                 si.permission = d.permission;
                 si.enabled = d.enabled;
@@ -3171,6 +3182,7 @@ public final class HostBootstrap {
         } finally {
             if (xml != null) xml.close();
         }
+        sManifestRead = true;
         for (String[] p : providers) {
             String cls = p[0], auth = p[1];
             try {

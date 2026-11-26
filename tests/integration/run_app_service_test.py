@@ -74,6 +74,7 @@ CHECKS = [
     "SERVICE: components explicit=1 action=.Main$MessengerService"
     " permission=android.permission.BIND_JOB_SERVICE disabled=0/1 other=0/null"
     " receiver=.Main$TickReceiver/0",
+    "SERVICE: undeclared service not found=true declared found=true",
     "SERVICE: settings android_id=16 stable=true",
     "SERVICE: job network=true/false specifier=null scheduled=1",
     "SERVICE: artwork shared=3x2/ff336699/false parcel=3x2/ff336699 next=77 views=true"
