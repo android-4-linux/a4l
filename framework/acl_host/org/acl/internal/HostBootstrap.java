@@ -942,6 +942,10 @@ public final class HostBootstrap {
                 int type, android.os.Bundle options) {
             return this;
         }
+        // The same for a context on a given display: there is one display.
+        @Override public android.content.Context createDisplayContext(android.view.Display display) {
+            return this;
+        }
         // A null-base ContextWrapper NPEs on createConfigurationContext (delegates to mBase). androidx
         // AppCompat's ContextThemeWrapper.getResourcesInternal calls it to build config-specific
         // Resources for drawable loading; Glide's AppCompatResources.getDrawable (F-Droid's app-list
@@ -2069,6 +2073,16 @@ public final class HostBootstrap {
         }
         @Override public java.io.File[] getExternalCacheDirs() {
             return new java.io.File[] { getExternalCacheDir() };
+        }
+        // The same for the app's shared media and its expansion files.
+        @Override public java.io.File[] getExternalMediaDirs() {
+            return new java.io.File[] { ensure(new java.io.File(dataRoot(), "external/media")) };
+        }
+        @Override public java.io.File getObbDir() {
+            return ensure(new java.io.File(dataRoot(), "external/obb"));
+        }
+        @Override public java.io.File[] getObbDirs() {
+            return new java.io.File[] { getObbDir() };
         }
         // Room/SQLite (androidx WorkManager's WorkDatabase) back onto the host libsqlite under
         // the XDG data root's databases/ dir.

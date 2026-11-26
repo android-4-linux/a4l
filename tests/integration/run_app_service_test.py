@@ -55,6 +55,7 @@ CHECKS = [
     "SERVICE: package uid consistent=true",
     "SERVICE: image file decoded=true junk refused=true",
     "SERVICE: base context chain ends=true",
+    "SERVICE: media and obb dirs, display context=true",
     "SERVICE: color matrix filtered=true",
     f"SERVICE: process name {PACKAGE} application {PACKAGE}",
     "SERVICE: sweep gradient drawn=true",
