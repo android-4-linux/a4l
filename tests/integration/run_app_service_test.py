@@ -59,6 +59,7 @@ CHECKS = [
     "SERVICE: sweep gradient drawn=true",
     "SERVICE: compose shader blended=true",
     "SERVICE: points and lines drawn=true",
+    "SERVICE: canvas paint layer skew ring=true",
     "SERVICE: refused other=false implicit=false/null undeclared=false",
     "SERVICE: local connected .Main$LocalService add=5",
     "SERVICE: local after unbind created=1 unbound=1 destroyed=1",

@@ -1146,15 +1146,17 @@ inline void tick_draw() {
   g_draw_ops.fetch_add(1, std::memory_order_relaxed);
 }
 
-void Canvas_nDrawColor(JNIEnv*,
-                       jclass,
-                       jlong canvas,
-                       jint color,
-                       jint /*mode*/) {
+void Canvas_nDrawColor(JNIEnv*, jclass, jlong canvas, jint color, jint mode) {
   tick_draw();
   auto* c = canvas_sk(canvas);
+  // The mode is a PorterDuff or BlendMode ordinal, the same numbers as
+  // SkBlendMode: drawColor(0, CLEAR) erases, which src-over would not.
+  const SkBlendMode bm =
+      (mode >= 0 && mode <= static_cast<jint>(SkBlendMode::kLastMode))
+          ? static_cast<SkBlendMode>(mode)
+          : SkBlendMode::kSrcOver;
   if (c != nullptr)
-    c->drawColor(static_cast<SkColor>(color), SkBlendMode::kSrcOver);
+    c->drawColor(static_cast<SkColor>(color), bm);
 }
 
 void Canvas_nDrawRect(JNIEnv*,
@@ -1322,6 +1324,98 @@ void Canvas_nDrawRoundRect(JNIEnv*,
   SkPaint* p = ap != nullptr ? &ap->paint : nullptr;
   if (c != nullptr)
     c->drawRoundRect(SkRect::MakeLTRB(l, t, r, b), rx, ry, p ? *p : SkPaint());
+}
+
+// nDrawPaint: the paint over the whole clip.
+void Canvas_nDrawPaint(JNIEnv*, jclass, jlong canvas, jlong paint) {
+  tick_draw();
+  auto* c = canvas_sk(canvas);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  if (c != nullptr && ap != nullptr)
+    c->drawPaint(ap->paint);
+}
+
+// nDrawDoubleRoundRect: the area between an outer and an inner round rect,
+// with one x and y radius for each.
+void Canvas_nDrawDoubleRoundRectXY(JNIEnv*,
+                                   jclass,
+                                   jlong canvas,
+                                   jfloat ol,
+                                   jfloat ot,
+                                   jfloat oright,
+                                   jfloat ob,
+                                   jfloat orx,
+                                   jfloat ory,
+                                   jfloat il,
+                                   jfloat it,
+                                   jfloat ir,
+                                   jfloat ib,
+                                   jfloat irx,
+                                   jfloat iry,
+                                   jlong paint) {
+  tick_draw();
+  auto* c = canvas_sk(canvas);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  if (c == nullptr || ap == nullptr)
+    return;
+  c->drawDRRect(
+      SkRRect::MakeRectXY(SkRect::MakeLTRB(ol, ot, oright, ob), orx, ory),
+      SkRRect::MakeRectXY(SkRect::MakeLTRB(il, it, ir, ib), irx, iry),
+      ap->paint);
+}
+
+// The same with eight radii for each rect: x and y for the top-left,
+// top-right, bottom-right and bottom-left corners, the order SkRRect takes.
+void Canvas_nDrawDoubleRoundRectRadii(JNIEnv* env,
+                                      jclass,
+                                      jlong canvas,
+                                      jfloat ol,
+                                      jfloat ot,
+                                      jfloat oright,
+                                      jfloat ob,
+                                      jfloatArray outer_radii,
+                                      jfloat il,
+                                      jfloat it,
+                                      jfloat ir,
+                                      jfloat ib,
+                                      jfloatArray inner_radii,
+                                      jlong paint) {
+  tick_draw();
+  auto* c = canvas_sk(canvas);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  if (c == nullptr || ap == nullptr || outer_radii == nullptr ||
+      inner_radii == nullptr || env->GetArrayLength(outer_radii) < 8 ||
+      env->GetArrayLength(inner_radii) < 8)
+    return;
+  jfloat o[8];
+  jfloat i[8];
+  env->GetFloatArrayRegion(outer_radii, 0, 8, o);
+  env->GetFloatArrayRegion(inner_radii, 0, 8, i);
+  SkVector ov[4];
+  SkVector iv[4];
+  for (int k = 0; k < 4; ++k) {
+    ov[k].set(o[2 * k], o[2 * k + 1]);
+    iv[k].set(i[2 * k], i[2 * k + 1]);
+  }
+  SkRRect outer;
+  SkRRect inner;
+  outer.setRectRadii(SkRect::MakeLTRB(ol, ot, oright, ob), ov);
+  inner.setRectRadii(SkRect::MakeLTRB(il, it, ir, ib), iv);
+  c->drawDRRect(outer, inner, ap->paint);
+}
+
+// nDrawRegion: the region filled with the paint.
+void Canvas_nDrawRegion(JNIEnv*,
+                        jclass,
+                        jlong canvas,
+                        jlong region,
+                        jlong paint) {
+  tick_draw();
+  auto* c = canvas_sk(canvas);
+  auto* rgn = reinterpret_cast<SkRegion*>(region);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  if (c != nullptr && rgn != nullptr && ap != nullptr)
+    c->drawRegion(*rgn, ap->paint);
 }
 
 // nDrawText(String): draw text[start,end) at (x,y) using the Paint's SkFont +
@@ -1982,6 +2076,31 @@ jint Canvas_nSaveLayerAlpha(jlong canvas,
   recorder_note_save(canvas);
   const SkRect bounds = SkRect::MakeLTRB(l, t, r, b);
   return c->saveLayerAlpha(&bounds, static_cast<U8CPU>(alpha & 0xff));
+}
+// nSaveLayer(l, t, r, b, paint): a layer composited through the paint (its
+// alpha, blend mode and color filter) at restore. The paint may be 0.
+jint Canvas_nSaveLayer(jlong canvas,
+                       jfloat l,
+                       jfloat t,
+                       jfloat r,
+                       jfloat b,
+                       jlong paint) {
+  auto* c = canvas_sk(canvas);
+  if (c == nullptr)
+    return 0;
+  recorder_note_save(canvas);
+  const SkRect bounds = SkRect::MakeLTRB(l, t, r, b);
+  auto* ap = reinterpret_cast<AclPaint*>(paint);
+  return c->saveLayer(&bounds, ap != nullptr ? &ap->paint : nullptr);
+}
+void Canvas_nSkew(jlong canvas, jfloat sx, jfloat sy) {
+  auto* c = canvas_sk(canvas);
+  if (c != nullptr)
+    c->skew(sx, sy);
+}
+jboolean Canvas_nIsOpaque(jlong canvas) {
+  auto* c = canvas_sk(canvas);
+  return (c != nullptr && c->imageInfo().isOpaque()) ? JNI_TRUE : JNI_FALSE;
 }
 jboolean Canvas_nRestore(jlong canvas) {
   auto* c = canvas_sk(canvas);
@@ -8973,6 +9092,9 @@ const JNINativeMethod kCanvas[] = {
     {"nSave", "(JI)I", reinterpret_cast<void*>(Canvas_nSave)},
     {"nSaveLayerAlpha", "(JFFFFI)I",
      reinterpret_cast<void*>(Canvas_nSaveLayerAlpha)},
+    {"nSaveLayer", "(JFFFFJ)I", reinterpret_cast<void*>(Canvas_nSaveLayer)},
+    {"nSkew", "(JFF)V", reinterpret_cast<void*>(Canvas_nSkew)},
+    {"nIsOpaque", "(J)Z", reinterpret_cast<void*>(Canvas_nIsOpaque)},
     {"nRestore", "(J)Z", reinterpret_cast<void*>(Canvas_nRestore)},
     {"nRestoreToCount", "(JI)V",
      reinterpret_cast<void*>(Canvas_nRestoreToCount)},
@@ -9056,6 +9178,12 @@ const JNINativeMethod kBaseCanvas[] = {
     {"nDrawArc", "(JFFFFFFZJ)V", reinterpret_cast<void*>(Canvas_nDrawArc)},
     {"nDrawRoundRect", "(JFFFFFFJ)V",
      reinterpret_cast<void*>(Canvas_nDrawRoundRect)},
+    {"nDrawPaint", "(JJ)V", reinterpret_cast<void*>(Canvas_nDrawPaint)},
+    {"nDrawDoubleRoundRect", "(JFFFFFFFFFFFFJ)V",
+     reinterpret_cast<void*>(Canvas_nDrawDoubleRoundRectXY)},
+    {"nDrawDoubleRoundRect", "(JFFFF[FFFFF[FJ)V",
+     reinterpret_cast<void*>(Canvas_nDrawDoubleRoundRectRadii)},
+    {"nDrawRegion", "(JJJ)V", reinterpret_cast<void*>(Canvas_nDrawRegion)},
     {"nDrawText", "(JLjava/lang/String;IIFFIJ)V",
      reinterpret_cast<void*>(Canvas_nDrawText)},
     {"nDrawText", "(J[CIIFFIJ)V",
