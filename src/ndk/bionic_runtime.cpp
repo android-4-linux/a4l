@@ -3780,6 +3780,64 @@ void set_asset_provider(int (*open_cb)(void*, const char*, void**, long*),
   g_asset_provider_user = user;
 }
 
+// PCM output for libaaudio.so. The host side is an audio track: it allocates,
+// locks and logs, so each call runs under the thread's glibc %fs. The callers
+// are bionic-born threads (the shim's callback thread, Chromium's audio
+// thread), which are paired with a donor on their first call.
+const acl_audio_out_ops* g_audio_out = nullptr;
+template <typename R, typename F>
+R with_host_fs(R fail, F&& call) {
+  const std::uintptr_t bionic_fs = ndk_get_fs();
+  const std::uintptr_t glibc_fs = ensure_paired_glibc_fs();
+  if (glibc_fs == 0)
+    return fail;  // pool exhausted: fail the call rather than corrupt
+  ndk_set_fs(glibc_fs);
+  R r = call();
+  ndk_set_fs(bionic_fs);
+  return r;
+}
+void* acl_audio_open_tramp(int rate, int channels) {
+  if (g_audio_out == nullptr)
+    return nullptr;
+  return with_host_fs<void*>(nullptr,
+                             [&] { return g_audio_out->open(rate, channels); });
+}
+int acl_audio_write_tramp(void* out, const std::int16_t* pcm, int frames) {
+  return with_host_fs<int>(
+      0, [&] { return g_audio_out->write(out, pcm, frames); });
+}
+void acl_audio_start_tramp(void* out) {
+  with_host_fs<int>(0, [&] {
+    g_audio_out->start(out);
+    return 0;
+  });
+}
+void acl_audio_stop_tramp(void* out) {
+  with_host_fs<int>(0, [&] {
+    g_audio_out->stop(out);
+    return 0;
+  });
+}
+int acl_audio_timestamp_tramp(void* out,
+                              std::int64_t* frames,
+                              std::int64_t* time_ns) {
+  return with_host_fs<int>(
+      0, [&] { return g_audio_out->timestamp(out, frames, time_ns); });
+}
+void acl_audio_close_tramp(void* out) {
+  with_host_fs<int>(0, [&] {
+    g_audio_out->close(out);
+    return 0;
+  });
+}
+const acl_audio_out_ops kAudioOutTramps = {
+    &acl_audio_open_tramp, &acl_audio_write_tramp,     &acl_audio_start_tramp,
+    &acl_audio_stop_tramp, &acl_audio_timestamp_tramp, &acl_audio_close_tramp,
+};
+void set_audio_out_ops(const acl_audio_out_ops* ops) {
+  g_audio_out = ops;
+}
+
 // A looper's first fd, from libandroid's ALooper_addFd on the looper's thread.
 // The host side calls into Java, so it runs under the thread's glibc %fs.
 void (*g_looper_used_fn)(int) = nullptr;
@@ -3983,6 +4041,13 @@ void* BionicRuntime::load_library(const char* abs_path,
           // ANativeWindow producer hooks -> %fs-aware trampolines (self-guard
           // on g_anw_*_fn, set by the runtime via set_anw_ops to image_reader's
           // BufferQueue producer ops).
+          // libaaudio.so's output. Left NULL where the runtime gave none, and
+          // an AAudio stream then fails to open.
+          if (g_audio_out != nullptr) {
+            if (auto** ao = static_cast<const acl_audio_out_ops**>(
+                    symbol(la, "acl_audio_out_ops")))
+              *ao = &kAudioOutTramps;
+          }
           if (void** lu =
                   static_cast<void**>(symbol(la, "acl_looper_used_hook")))
             *lu = reinterpret_cast<void*>(&acl_looper_used_tramp);

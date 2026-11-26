@@ -40,6 +40,8 @@
 #include <time.h>  // clock_gettime (ASurfaceTransactionStats_getLatchTime)
 #include <unistd.h>
 
+#include "acl_audio_out.h"  // acl_audio_out_ops, for libaaudio.so
+
 #include <android/hardware_buffer.h>  // AHardwareBuffer + AHardwareBuffer_Desc (NDK contract)
 #include <android/hardware_buffer_jni.h>  // AHardwareBuffer_{from,to}HardwareBuffer
 #include <android/log.h>
@@ -160,6 +162,11 @@ struct ALooper {
   int fd_count;
   int told;  // acl_looper_used_hook has been called for this looper
 };
+
+// PCM output for a4l's libaaudio.so, which finds it here: the runtime sets it
+// when this library is loaded, and libaaudio.so is opened later by whoever
+// wants it. NULL until then (see acl_audio_out.h).
+ACL_EXPORT const struct acl_audio_out_ops* acl_audio_out_ops = NULL;
 
 // Set by the runtime: called once per looper, on the looper's own thread, when
 // that thread first gives it an fd. Nothing polls an ALooper on a thread that

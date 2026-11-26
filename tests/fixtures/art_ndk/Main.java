@@ -55,6 +55,10 @@ public class Main extends Activity {
     // Java_com_acl_ndktest_Main_sdkProperty in tools/build-ndk-repro.sh.
     public static native int sdkProperty();
 
+    // Bound by name. An AAudio output with a data callback, run for 300 ms; see
+    // Java_com_acl_ndktest_Main_aaudioPlay in tools/build-ndk-repro.sh.
+    public static native int aaudioPlay();
+
     // Up-called BY the native, from bionic %fs back into ART's glibc %fs.
     public static int helper(int a, int b) {
         return a + b;
@@ -72,6 +76,12 @@ public class Main extends Activity {
         // has detached, and takes a native call from Java.
         if (System.getenv("ACL_NDK_TEST_DONOR") != null) {
             Log.i("acl", "DONOR: second attached thread got " + donorReuse());
+        }
+
+        // Opt-in (run_ndk_art_test.py --aaudio): the library plays through libaaudio.so.
+        if (System.getenv("ACL_NDK_TEST_AAUDIO") != null) {
+            final int calls = aaudioPlay();
+            Log.i("acl", "AAUDIO: result=" + calls + " fed=" + (calls >= 2));
         }
 
         // Opt-in (run_ndk_art_test.py --handler): the library installs a fault handler of its

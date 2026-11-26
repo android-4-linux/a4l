@@ -786,6 +786,16 @@ if py3.found() and have_jni
         depends : [acl_exe, ndk_apk],
         timeout : 300,
       )
+      # An app library plays through libaaudio.so: an output stream with a data callback,
+      # into the null sink. Same fixture, ACL_NDK_TEST_AAUDIO=1.
+      test(
+        'run-apk-ndk-art-aaudio',
+        py3,
+        args : [files('run_ndk_art_test.py'), acl_exe,
+                meson.project_source_root(), framework_android_jar, ndk_apk, '--aaudio'],
+        depends : [acl_exe, ndk_apk],
+        timeout : 300,
+      )
       # ANativeWindow producer end-to-end ([[flutter-texture-bridge]] M3c): a bionic-ABI .so drives
       # one frame through the real NDK ANativeWindow C ABI (fromSurface -> lock -> unlockAndPost)
       # into an acl android.media.ImageReader, and the consumer acquires it. Runs the app through

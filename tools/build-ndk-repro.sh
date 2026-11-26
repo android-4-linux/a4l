@@ -158,6 +158,55 @@ Java_com_acl_ndktest_Main_sdkProperty(JNIEnv* e, jclass c) {
   for (int i = 0; i < n && value[i] >= '0' && value[i] <= '9'; i++) sdk = sdk * 10 + (value[i] - '0');
   return sdk;
 }
+// Bound by name. Plays through a4l's libaaudio.so the way an engine does: opens the library
+// itself, makes a 48 kHz stereo 16-bit output with a data callback, runs it for 300 ms and
+// stops it. The callback fills silence and counts. Returns the number of callbacks, which is
+// positive only if the stream opened, started and was fed; a negative step code otherwise.
+extern void* dlopen(const char* name, int flags);
+extern void* dlsym(void* handle, const char* name);
+static volatile int ndktest_aaudio_calls;
+static volatile int ndktest_aaudio_frames;
+static int ndktest_aaudio_cb(void* stream, void* user, void* data, int frames) {
+  (void)stream; (void)user;
+  short* pcm = (short*)data;
+  for (int i = 0; i < frames * 2; i++) pcm[i] = 0;
+  ndktest_aaudio_calls++;
+  ndktest_aaudio_frames += frames;
+  return 0;                                   // AAUDIO_CALLBACK_RESULT_CONTINUE
+}
+JNIEXPORT jint JNICALL
+Java_com_acl_ndktest_Main_aaudioPlay(JNIEnv* e, jclass c) {
+  void* lib = dlopen("libaaudio.so", 2);
+  if (!lib) return -1;
+#define NDKTEST_SYM(name) void* name = dlsym(lib, "AAudio" #name); if (!name) return -2
+  NDKTEST_SYM(_createStreamBuilder); NDKTEST_SYM(StreamBuilder_setSampleRate);
+  NDKTEST_SYM(StreamBuilder_setChannelCount); NDKTEST_SYM(StreamBuilder_setFormat);
+  NDKTEST_SYM(StreamBuilder_setDataCallback); NDKTEST_SYM(StreamBuilder_openStream);
+  NDKTEST_SYM(StreamBuilder_delete); NDKTEST_SYM(Stream_requestStart);
+  NDKTEST_SYM(Stream_requestStop); NDKTEST_SYM(Stream_getState);
+  NDKTEST_SYM(Stream_getFramesWritten); NDKTEST_SYM(Stream_close);
+#undef NDKTEST_SYM
+  void* builder = 0; void* stream = 0;
+  if (((int (*)(void**))_createStreamBuilder)(&builder) != 0) return -3;
+  ((void (*)(void*, int))StreamBuilder_setSampleRate)(builder, 48000);
+  ((void (*)(void*, int))StreamBuilder_setChannelCount)(builder, 2);
+  ((void (*)(void*, int))StreamBuilder_setFormat)(builder, 1);          // AAUDIO_FORMAT_PCM_I16
+  ((void (*)(void*, void*, void*))StreamBuilder_setDataCallback)(builder, ndktest_aaudio_cb, 0);
+  if (((int (*)(void*, void**))StreamBuilder_openStream)(builder, &stream) != 0) return -4;
+  ((int (*)(void*))StreamBuilder_delete)(builder);
+  if (((int (*)(void*))Stream_requestStart)(stream) != 0) return -5;
+  if (((int (*)(void*))Stream_getState)(stream) != 4) return -6;        // STARTED
+  usleep(300000);
+  if (((int (*)(void*))Stream_requestStop)(stream) != 0) return -7;
+  if (((int (*)(void*))Stream_getState)(stream) != 10) return -8;       // STOPPED
+  const int calls = ndktest_aaudio_calls;
+  // Everything the callback supplied was queued, and nothing came after the stop.
+  if (((long long (*)(void*))Stream_getFramesWritten)(stream) != ndktest_aaudio_frames) return -9;
+  usleep(50000);
+  if (ndktest_aaudio_calls != calls) return -10;
+  if (((int (*)(void*))Stream_close)(stream) != 0) return -11;
+  return calls;
+}
 // Decoy for the bind-by-name path: an EXPORTED Java_<class>_answer, while JNI_OnLoad below ALSO
 // RegisterNatives-binds answer() to the_registered (4250). A RegisterNatives binding is the app's
 // explicit choice and must win, so acl's name binding has to skip methods JNI_OnLoad already
