@@ -5084,6 +5084,12 @@ public final class HostBootstrap {
                             case "requestAudioFocus":
                             case "abandonAudioFocus":
                                 return 1;  // AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+                            // AudioManager.getAvailableCommunicationDevices() walks this array
+                            // without a null check. Chromium calls it when a page starts media
+                            // (AudioManagerAndroid.getAudioInputDeviceNames), and ends the
+                            // process on the NullPointerException. No devices, not null.
+                            case "getAvailableCommunicationDeviceIds":
+                                return new int[0];
                             default:
                                 return defaultValue(method.getReturnType());
                         }
