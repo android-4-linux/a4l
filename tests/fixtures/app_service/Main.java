@@ -321,6 +321,14 @@ public class Main extends Activity {
         expect(attached, "Application calls " + App.calls + ", code path " + code);
         log("process name " + proc + " application " + android.app.Application.getProcessName());
         expect(getPackageName().equals(proc), "Process.myProcessName() is " + proc);
+        // Native libraries are extracted to nativeLibraryDir, and the flags say so: a loader
+        // that reads the flag clear expects to load them out of the APK instead.
+        final android.content.pm.ApplicationInfo self = getApplicationInfo();
+        final boolean extracted = (self.flags
+                & android.content.pm.ApplicationInfo.FLAG_EXTRACT_NATIVE_LIBS) != 0
+                && self.nativeLibraryDir != null;
+        log("native libs extracted=" + extracted);
+        expect(extracted, "ApplicationInfo.flags is 0x" + Integer.toHexString(self.flags));
         // Process.readProcFile and parseProcLine split a line by a format, as the framework
         // and apps read /proc/self/stat: a number, a name in parentheses that has a space in
         // it, a state letter, and a number after a run of spaces.
