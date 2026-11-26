@@ -310,12 +310,51 @@ public class Main extends Activity {
                         @Override public void onAnimationEnd(android.view.animation.Animation a) {
                             h.removeCallbacks(noEnd);
                             log("view animation ended");
-                            hitTest(h);
+                            addedWindow(h);
                         }
                     });
                     group.moved.startAnimation(fade);
                 }
             }, 100);
+        }
+
+        /**
+         * A window added with WindowManager.addView: its tree observer's pre-draw listener is
+         * called, as a viewer that starts its opening animation from one needs. The window is
+         * removed again before the taps.
+         */
+        private void addedWindow(final Handler h) {
+            final Runnable none = new Runnable() {
+                @Override public void run() {
+                    log("FAIL no pre-draw for a window added with addView");
+                    System.exit(7);
+                }
+            };
+            h.postDelayed(none, 5000);
+            final android.view.WindowManager wm = getWindowManager();
+            final View panel = new View(this);
+            panel.getViewTreeObserver().addOnPreDrawListener(
+                    new ViewTreeObserver.OnPreDrawListener() {
+                boolean seen;
+                @Override public boolean onPreDraw() {
+                    if (seen) return true;
+                    seen = true;
+                    h.removeCallbacks(none);
+                    log("added window pre-draw sized=" + (panel.getWidth() == 50));
+                    h.post(new Runnable() {
+                        @Override public void run() {
+                            wm.removeView(panel);
+                            hitTest(h);
+                        }
+                    });
+                    return true;
+                }
+            });
+            wm.addView(panel, new android.view.WindowManager.LayoutParams(50, 50,
+                    android.view.WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                    android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                    android.graphics.PixelFormat.TRANSLUCENT));
         }
 
         /** Last: the test taps (50,150) and (50,450) in turn. Only the second is on the moved view. */

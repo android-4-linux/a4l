@@ -4108,11 +4108,13 @@ public final class HostBootstrap {
             sTopOverlay = top; sTopOverlayRect = topRect; sTopOverlayModal = topModal;
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: presentOverlays: " + t);
+            if (sOverlayFailures++ < 3) t.printStackTrace();
         }
     }
 
     // The topmost drawn overlay + where acl placed it on screen, for input routing. Written by
     // presentOverlays and read by routeOverlayTouch — both run on the present/main thread.
+    private static int sOverlayFailures;
     private static volatile android.view.View sTopOverlay;
     private static volatile android.graphics.Rect sTopOverlayRect;
     private static volatile boolean sTopOverlayModal;
@@ -4195,6 +4197,7 @@ public final class HostBootstrap {
         final int MATCH = -1, WRAP = -2;
         int wspec = measureSpec(lp.width, w, MATCH, WRAP);
         int hspec = measureSpec(lp.height, h, MATCH, WRAP);
+        final boolean didLayout = v.isLayoutRequested();
         v.measure(wspec, hspec);
         int mw = v.getMeasuredWidth(), mh = v.getMeasuredHeight();
         if (OVERLAY_DIAG) {
@@ -4214,6 +4217,10 @@ public final class HostBootstrap {
         int gravity = lp.gravity == 0 ? android.view.Gravity.CENTER : lp.gravity;
         android.graphics.Rect out = new android.graphics.Rect();
         android.view.Gravity.apply(gravity, mw, mh, new android.graphics.Rect(0, 0, w, h), lp.x, lp.y, out);
+        // The window's tree observer, as for the Activity's decor: a window that starts its
+        // opening animation from a pre-draw listener never starts it otherwise. A listener that
+        // cancels the draw leaves the window out of this frame.
+        if (dispatchTreeObserver(v, didLayout)) return out;
         int save = canvas.save();
         canvas.translate(out.left, out.top);
         v.draw(canvas);
