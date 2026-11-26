@@ -1034,7 +1034,16 @@ static bool gl_forwarder_mapped(const char* sysroot) {
 #endif
 }
 
-void install_gl_forwarders(BionicRuntime* rt) {
+// Whether `path` is a library known to dlopen the GL libraries on a thread of
+// its own instead of naming them as dependencies: Chromium's WebView, whose GPU
+// thread opens them at its first use.
+static bool opens_gl_on_demand(const char* path) {
+  const char* base = std::strrchr(path, '/');
+  base = base != nullptr ? base + 1 : path;
+  return std::strcmp(base, "libwebviewchromium.so") == 0;
+}
+
+void install_gl_forwarders(BionicRuntime* rt, bool opens_gl_itself) {
 #if defined(__x86_64__)
   const char* sysroot = getenv("ACL_BIONIC_SYSROOT");
   if (sysroot == nullptr)
@@ -1047,7 +1056,13 @@ void install_gl_forwarders(BionicRuntime* rt) {
   // intro faulting in glGetShaderiv). Checking the mapping makes GL "just work"
   // with no flag, while non-GL apps (which never map a forwarder) still skip
   // the Mesa dlopen + donor-thread pool.
-  if (getenv("ACL_GL_FORWARD") == nullptr && !gl_forwarder_mapped(sysroot))
+  //
+  // A library that opens libEGL.so and libGLESv2.so with dlopen has neither
+  // mapped when it is loaded, and by the time it has, nothing calls this
+  // again: its first GL call would go through an unwired stub. For such a
+  // library (opens_gl_itself) the bridge is wired now.
+  if (getenv("ACL_GL_FORWARD") == nullptr && !opens_gl_itself &&
+      !gl_forwarder_mapped(sysroot))
     return;
   static std::atomic<bool> done{false};
   if (done.exchange(true))
@@ -3968,7 +3983,7 @@ void* BionicRuntime::load_library(const char* abs_path,
   // If this lib pulled in the bionic libEGL.so/libGLESv2.so forwarders (they
   // are its NEEDED deps, loaded by the line above), point them at host Mesa now
   // — before any GL call. Gated internally.
-  install_gl_forwarders(this);
+  install_gl_forwarders(this, opens_gl_on_demand(abs_path));
   // Wrap unconditionally, not just for JNI_OnLoad: a lib whose natives are all
   // bound by NAME has no JNI_OnLoad, and its down-call trampolines still need
   // the wrapped env + the %fs pair that wrap_java_vm establishes (see
