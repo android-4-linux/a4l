@@ -49,6 +49,7 @@ public class Main extends Activity {
                 try {
                     trackA();
                     trackB();
+                    tone();
                     Log.i(TAG, "AT: done");
                     rc = 0;
                 } catch (Throwable e) {
@@ -141,6 +142,24 @@ public class Main extends Activity {
         if (t.getPlayState() != AudioTrack.PLAYSTATE_STOPPED)
             throw new IllegalStateException("play state after stop " + t.getPlayState());
         t.release();
+    }
+
+    /**
+     * A ToneGenerator plays a tone that ends by itself: 1200 Hz, 100 ms on and 100 ms off,
+     * twice. The sink's frame count on release says the whole tone went out.
+     */
+    static void tone() throws Exception {
+        android.media.ToneGenerator tg = new android.media.ToneGenerator(
+                android.media.AudioManager.STREAM_MUSIC, 80);
+        boolean bad = tg.startTone(999);
+        boolean started = tg.startTone(android.media.ToneGenerator.TONE_PROP_ACK);
+        Thread.sleep(1000);
+        tg.stopTone();
+        int session = tg.getAudioSessionId();
+        tg.release();
+        tg.stopTone(); // after release: ignored
+        Log.i(TAG, "AT: tone started " + started + ", unknown " + bad + ", session "
+                + (session != 0) + ", after release " + tg.startTone(0));
     }
 
     static void trackB() throws Exception {

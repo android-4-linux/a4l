@@ -83,6 +83,7 @@
 #include "runtime/media_codec_jni.h"  // media_jni loadLibrary -> MediaCodec natives (M5)
 #include "runtime/ndk_audio.h"
 #include "runtime/process_proc_jni.h"
+#include "runtime/tone_generator_jni.h"
 #include "runtime/vsync_cap.h"
 #include "svc/svc.h"
 #include "wm/present.h"
@@ -7380,6 +7381,9 @@ class ArtVm final : public JniVm {
     // its natives (it has no audio HAL), so the first call an app makes on
     // it is an UnsatisfiedLinkError. a4l's own, over audio::Track.
     register_audio_track_natives(env);
+    // android.media.ToneGenerator, likewise: an app that makes one (a dialer,
+    // for its key tones) gets an UnsatisfiedLinkError from the constructor.
+    register_tone_generator_natives(env);
     // androidx.media3 / MediaSessionCompat build AudioAttributes from a legacy
     // stream type (setPlaybackToLocal ->
     // AudioAttributes.Builder.setLegacyStreamType), which consults
