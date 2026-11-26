@@ -50,6 +50,8 @@ CHECKS = [
     "SERVICE: system resources sized=true",
     "SERVICE: bitmap pixel set=true",
     "SERVICE: bitmap copied through buffers=true",
+    "SERVICE: extract alpha ALPHA_8 8x8 alpha 128/0 blurred larger true offset negative true"
+    " spread true",
     "SERVICE: mask filter blurred=true",
     "SERVICE: accounts stored=true token dropped=true removed=true",
     "SERVICE: absent property not found=true legacy storage=",
