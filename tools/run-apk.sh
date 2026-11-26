@@ -317,6 +317,12 @@ if [ -z "${ACL_NO_SYSTEM:-}" ] && command -v bwrap >/dev/null 2>&1; then
     if [ -n "${ACL_WEBVIEW_VULKAN:-}" ]; then
       case "$WV_ARGS" in *webview-draw-functor-uses-vulkan*) ;; *) WV_ARGS="$WV_ARGS --webview-draw-functor-uses-vulkan" ;; esac
       case "$WV_ARGS" in *disable-vulkan-surface*) ;; *) WV_ARGS="$WV_ARGS --disable-vulkan-surface" ;; esac
+      # Video is decoded by Chromium's own software decoders, not through MediaCodec. With MediaCodec
+      # a stream plays (the clock runs) and the picture stays black: the frames go to a SurfaceTexture
+      # that Chromium's compositor does not get them from here. Opt out with ACL_WEBVIEW_HW_VIDEO=1.
+      if [ -z "${ACL_WEBVIEW_HW_VIDEO:-}" ]; then
+        case "$WV_ARGS" in *disable-accelerated-video-decode*) ;; *) WV_ARGS="$WV_ARGS --disable-accelerated-video-decode" ;; esac
+      fi
       # Reduce the checkerboard/blank-tile churn during zoom/scroll (opt out with ACL_NO_TILE_TUNING):
       #   --enable-low-res-tiling      with GPU raster cc disables low-res tiles, so a raster burst it
       #                                can't keep up with shows blank; force the low-res fallback back on
