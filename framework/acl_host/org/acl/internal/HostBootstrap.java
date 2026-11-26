@@ -4001,6 +4001,13 @@ public final class HostBootstrap {
         // who to return a result to (consumed in registerActivity). Cleared if the launch is suppressed.
         private android.app.Instrumentation.ActivityResult suppress(android.content.Intent intent,
                 android.os.IBinder callerToken, int requestCode) {
+            // startActivity may be called from any thread, and the Activity is made on the main
+            // one: an Activity cannot be constructed on a thread that has no Looper.
+            if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(
+                        () -> suppress(intent, callerToken, requestCode));
+                return null;
+            }
             sPendingCallerToken = callerToken;
             sPendingRequestCode = requestCode;
             if (routeInternal(intent)) return null;  // internal transition handled
