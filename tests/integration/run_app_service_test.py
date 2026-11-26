@@ -49,6 +49,7 @@ CHECKS = [
     "SERVICE: application attached=true",
     "SERVICE: system resources sized=true",
     "SERVICE: bitmap pixel set=true",
+    "SERVICE: bitmap copied through buffers=true",
     "SERVICE: mask filter blurred=true",
     "SERVICE: accounts stored=true token dropped=true removed=true",
     "SERVICE: absent property not found=true legacy storage=",

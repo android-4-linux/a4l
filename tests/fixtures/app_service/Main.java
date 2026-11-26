@@ -119,6 +119,42 @@ public class Main extends Activity {
         log("bitmap pixel set=" + set);
         expect(set, String.format("setPixel read back %08x %08x %08x", dots.getPixel(1, 2),
                 dots.getPixel(3, 0), dots.getPixel(2, 2)));
+        // Bitmap.copyPixelsFromBuffer and copyPixelsToBuffer: ARGB_8888 is R, G, B, A in the
+        // buffer. A direct buffer, an array-backed one, and an IntBuffer whose position is not
+        // zero; the position moves past what was copied.
+        boolean copied = true;
+        final byte[] rgba = new byte[4 * 4 * 4];
+        rgba[4 * (2 * 4 + 1)] = 0x11;      // (1, 2): R
+        rgba[4 * (2 * 4 + 1) + 1] = 0x22;  // G
+        rgba[4 * (2 * 4 + 1) + 2] = 0x33;  // B
+        rgba[4 * (2 * 4 + 1) + 3] = (byte) 0xff;
+        for (int pass = 0; pass < 2; pass++) {
+            final java.nio.ByteBuffer in = pass == 0
+                    ? java.nio.ByteBuffer.allocateDirect(rgba.length)
+                    : java.nio.ByteBuffer.allocate(rgba.length);
+            in.put(rgba).rewind();
+            final android.graphics.Bitmap bm = android.graphics.Bitmap.createBitmap(
+                    4, 4, android.graphics.Bitmap.Config.ARGB_8888);
+            bm.copyPixelsFromBuffer(in);
+            copied &= bm.getPixel(1, 2) == 0xFF112233 && bm.getPixel(0, 0) == 0
+                    && in.position() == rgba.length;
+            final java.nio.ByteBuffer out = pass == 0
+                    ? java.nio.ByteBuffer.allocate(rgba.length)
+                    : java.nio.ByteBuffer.allocateDirect(rgba.length);
+            bm.copyPixelsToBuffer(out);
+            out.rewind();
+            final byte[] back = new byte[rgba.length];
+            out.get(back);
+            copied &= java.util.Arrays.equals(rgba, back);
+        }
+        final java.nio.IntBuffer ints = java.nio.IntBuffer.allocate(3 + 16);
+        ints.position(3);
+        dots.copyPixelsToBuffer(ints);
+        // (1, 2) of dots is 0xFF336699: bytes 33 66 99 ff, a little-endian int ff996633.
+        copied &= ints.position() == 19 && ints.get(3 + 2 * 4 + 1) == 0xFF996633
+                && ints.get(0) == 0 && ints.get(3) == 0;
+        log("bitmap copied through buffers=" + copied);
+        expect(copied, "copyPixelsFromBuffer or copyPixelsToBuffer");
         // A BlurMaskFilter on the paint: a square's edge spreads past where it was drawn, the
         // middle stays opaque, and a corner well away is untouched.
         final android.graphics.Bitmap soft = android.graphics.Bitmap.createBitmap(
