@@ -43,6 +43,7 @@ CHECKS = [
     "TREE: no history second destroyed=true",
     "TREE: clear task first home destroyed=true",
     "TREE: view animation ended",
+    "TREE: added window pre-draw sized=true",
     "TREE: touch reached the moved view",
     "TREE: PASS",
     "acl activity-stack: task empty (root finished) -> exit",
