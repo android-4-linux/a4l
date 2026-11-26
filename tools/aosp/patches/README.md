@@ -41,7 +41,7 @@ rebuilt. The CPU-render path (S3b) is unaffected.
 Applies to the **Chromium** checkout (`/mnt/dev/chromium/src`, the `system_webview_apk` build), not
 AOSP. Lets Chromium's WebView `AwDrawFn` **Vulkan functor** composite directly into a4l's
 Ganesh-Vulkan present frame (direct mode: viz + functor share a4l's `VkDevice`, no AHardwareBuffer
-round-trip). Six changes across the render, GPU-raster, shared-image, and shared-memory paths:
+round-trip). Eight changes across the render, GPU-raster, shared-image, and shared-memory paths:
 
 - `aw_draw_fn_impl.cc` — `CreateDrawContext` derives the `SkColorType` from `params->format` instead
   of hardcoded `MakeN32Premul` (a4l's present target is **BGRA**, the Wayland/DRM-native byte order;
@@ -68,6 +68,16 @@ round-trip). Six changes across the render, GPU-raster, shared-image, and shared
   DCHECK never anticipated. The representation reads via the backing's own `context_state_` and the
   `VkImage` is device-level shareable, so it is safe. (Pairs with the factory change above; together
   they are what make tile pixels reach the composite.)
+- `gpu/command_buffer/service/shared_image/external_vk_image_backing.cc` — two more changes, for
+  what a page writes through GL: video frames, a 2D canvas, WebGL. `UseSeparateGLTexture` returns
+  true, so such an image has a GL texture of its own instead of one that aliases the `VkImage`'s
+  memory. Aliasing needs GL and Vulkan synchronized through an external semaphore, and on host Mesa
+  the export of that semaphore (`vkGetSemaphoreFdKHR`, `SYNC_FD`) did not return: the GPU thread
+  stayed in `drmSyncobjTimelineWait`, a video's frames were never uploaded, and
+  `getContext('webgl')` hung the page. And `EndAccess` copies the GL texture to the `VkImage` when
+  a GL write ends, on the GPU thread. Upstream copies at the next Vulkan read, which under a4l is
+  the display compositor's on a4l's render thread, where that GL context cannot be made current.
+  The copy is a `glReadPixels` per written frame.
 (An earlier `cc/trees/presentation_time_callback_buffer.cc` bound-workaround was **removed**: it
 guarded a `DCHECK_LE(size, kMaxBufferSize)` FATAL from a buffer that grew unbounded when the WebView
 was not swapping — a symptom of the pre-`on_sync` render path. With the `on_sync` frame-pull wired,

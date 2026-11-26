@@ -80,10 +80,37 @@ index 001e0ec867c13..50118d5fd3673 100644
      base::NativeLibrary vulkan_loader_library = base::LoadNativeLibrary(
          base::FilePath("libvulkan.so"), &native_library_load_error);
 diff --git a/gpu/command_buffer/service/shared_image/external_vk_image_backing.cc b/gpu/command_buffer/service/shared_image/external_vk_image_backing.cc
-index f8db3498cbecf..6256ba69e6ade 100644
+index f8db3498cbecf..91c6d55a00055 100644
 --- a/gpu/command_buffer/service/shared_image/external_vk_image_backing.cc
 +++ b/gpu/command_buffer/service/shared_image/external_vk_image_backing.cc
-@@ -765,7 +765,12 @@ std::unique_ptr<SkiaImageRepresentation> ExternalVkImageBacking::ProduceSkia(
+@@ -108,6 +108,13 @@ class ScopedDedicatedMemoryObject {
+ 
+ bool UseSeparateGLTexture(SharedContextState* context_state,
+                           viz::SharedImageFormat format) {
++  // acl: always a separate GL texture, copied to the VkImage (see EndAccess).
++  // Aliasing one memory object from GL and Vulkan needs the two synchronized
++  // with an external semaphore. On host Mesa the export of that semaphore
++  // (vkGetSemaphoreFdKHR, SYNC_FD) never returned: the GPU thread sat in
++  // drmSyncobjTimelineWait, and nothing a page writes through GL (video
++  // frames, 2D canvas, WebGL) reached the display.
++  return true;
+   if (!context_state->support_vulkan_external_object())
+     return true;
+ 
+@@ -460,6 +467,12 @@ void ExternalVkImageBacking::EndAccess(bool readonly,
+   if (!readonly) {
+     if (use_separate_gl_texture()) {
+       latest_content_ = is_gl ? kInGLTexture : kInVkImage;
++      // acl: copy to the VkImage now, on the thread that has the GL context.
++      // Upstream copies at the next Vulkan read. Under acl that read is the
++      // display compositor's, on acl's render thread, where this GL context
++      // cannot be made current.
++      if (is_gl)
++        UpdateContent(kInVkImage);
+     } else {
+       latest_content_ = kInVkImage;
+     }
+@@ -765,7 +778,12 @@ std::unique_ptr<SkiaImageRepresentation> ExternalVkImageBacking::ProduceSkia(
      scoped_refptr<SharedContextState> context_state) {
    // This backing type is only used when vulkan is enabled, so SkiaRenderer
    // should also be using Vulkan.
