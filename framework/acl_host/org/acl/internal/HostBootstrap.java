@@ -4867,6 +4867,7 @@ public final class HostBootstrap {
         int type;              // ActivityManager.INTENT_SENDER_*
         int requestCode;
         android.content.Intent intent;
+        boolean immutable;     // made with FLAG_IMMUTABLE
         Object sender;         // the IIntentSender handed to the app
     }
     // Guarded by itself. An app makes these from any thread.
@@ -4921,6 +4922,7 @@ public final class HostBootstrap {
             r.type = type;
             r.requestCode = requestCode;
             r.intent = new android.content.Intent(intent);
+            r.immutable = (flags & android.app.PendingIntent.FLAG_IMMUTABLE) != 0;
             // PendingIntent compares and hashes the sender's binder, so each has its own.
             final android.os.IBinder binder = new android.os.Binder();
             r.sender = java.lang.reflect.Proxy.newProxyInstance(
@@ -5014,6 +5016,18 @@ public final class HostBootstrap {
                         case "getPackageForIntentSender":
                             return intentSenderFor(a[0]) != null && sAppContext != null
                                     ? sAppContext.getPackageName() : null;
+                        case "getInfoForIntentSender": {
+                            // What PendingIntent.getCreatorPackage, getCreatorUid, isImmutable
+                            // and isActivity/isBroadcast/isService read. Every PendingIntent
+                            // here is the app's own, so one that was cancelled still names the
+                            // app; its kind is no longer known (0, INTENT_SENDER_UNKNOWN).
+                            final IntentSenderRecord r = intentSenderFor(a[0]);
+                            final String pkg =
+                                    sAppContext != null ? sAppContext.getPackageName() : null;
+                            return new android.app.ActivityManager.PendingIntentInfo(pkg,
+                                    android.os.Process.myUid(), r != null && r.immutable,
+                                    r != null ? r.type : 0);
+                        }
                         case "isIntentSenderAnActivity": {
                             final IntentSenderRecord r = intentSenderFor(a[0]);
                             return r != null && r.type == INTENT_SENDER_ACTIVITY;
