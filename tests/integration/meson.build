@@ -488,6 +488,17 @@ if py3.found() and have_gl and have_ffmpeg
       depends : [acl_exe],
       timeout : 300,
     )
+    # A WebView made after the app is up, in an app with no native code of its own: the page
+    # loads, its script runs, and the Activity's Resources hold the WebView's. Starts a
+    # headless Weston for itself. Needs host ART and a WebView APK (the AOSP prebuilt);
+    # SKIPs otherwise, which includes CI.
+    test(
+      'webview-late',
+      py3,
+      args : [files('run_webview_late_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+    )
     # Video on a TextureView: a fixture app decodes an H.264 clip onto
     # new Surface(surfaceTexture), and the test reads back the frame a4l rendered and checks the
     # picture inside the TextureView, with the frame imported on the GPU and with its pixels
