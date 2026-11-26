@@ -2607,7 +2607,24 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env,
           env->ExceptionClear();
         }
         if (node != nullptr && env->ExceptionCheck() == JNI_FALSE) {
-          jobject c = env->CallObjectMethod(node, beginRec, w, h);
+          // The root's canvas is made new, not taken with beginRecording:
+          // that hands out a pooled RecordingCanvas when the app has already
+          // recorded a RenderNode, and a pooled one is reset in place, so the
+          // graphics natives never see the root's canvas being created and
+          // the frame they present stays empty.
+          jobject c = nullptr;
+          if (jclass rcC = env->FindClass("android/graphics/RecordingCanvas")) {
+            if (jmethodID rcCtor = env->GetMethodID(
+                    rcC, "<init>", "(Landroid/graphics/RenderNode;II)V"))
+              c = env->NewObject(rcC, rcCtor, node, w, h);
+            env->DeleteLocalRef(rcC);
+          }
+          if (env->ExceptionCheck() == JNI_TRUE) {
+            env->ExceptionClear();
+            c = nullptr;
+          }
+          if (c == nullptr)
+            c = env->CallObjectMethod(node, beginRec, w, h);
           if (c != nullptr && env->ExceptionCheck() == JNI_FALSE) {
             s->canvas = env->NewGlobalRef(c);
             s->root_node = env->NewGlobalRef(node);
