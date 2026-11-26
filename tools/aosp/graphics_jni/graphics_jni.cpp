@@ -62,6 +62,7 @@
 #include "SkImageFilter.h"
 #include "SkImageInfo.h"
 #include "SkJpegEncoder.h"  // Bitmap.compress -> JPEG
+#include "SkMaskFilter.h"
 #include "SkMatrix.h"
 #include "SkPaint.h"
 #include "SkPath.h"
@@ -3312,8 +3313,38 @@ jlong Paint_nSetPathEffect(jlong p, jlong e) {
     ap->paint.setPathEffect(sk_ref_sp(reinterpret_cast<SkPathEffect*>(e)));
   return e;
 }
-jlong Paint_nSetMaskFilter(jlong /*p*/, jlong f) {
+// The filter is a ref-counted SkMaskFilter* (see
+// BlurMaskFilter_nativeConstructor); 0 clears it.
+jlong Paint_nSetMaskFilter(jlong p, jlong f) {
+  ACLP(p);
+  if (ap != nullptr)
+    ap->paint.setMaskFilter(sk_ref_sp(reinterpret_cast<SkMaskFilter*>(f)));
   return f;
+}
+// BlurMaskFilter(radius, style): the style is NORMAL 0, SOLID 1, OUTER 2,
+// INNER 3, the same numbers as SkBlurStyle. The sigma is the one Android
+// derives from the radius.
+jlong BlurMaskFilter_nativeConstructor(JNIEnv*,
+                                       jclass,
+                                       jfloat radius,
+                                       jint style) {
+  if (!(radius > 0.0f) || style < 0 || style > 3)
+    return 0;
+  const float sigma = 0.57735f * radius + 0.5f;
+  return reinterpret_cast<jlong>(
+      SkMaskFilter::MakeBlur(static_cast<SkBlurStyle>(style), sigma).release());
+}
+// EmbossMaskFilter: no emboss here; 0 is a paint with no mask filter.
+jlong EmbossMaskFilter_nativeConstructor(JNIEnv*,
+                                         jclass,
+                                         jfloatArray,
+                                         jfloat,
+                                         jfloat,
+                                         jfloat) {
+  return 0;
+}
+void MaskFilter_nativeDestructor(JNIEnv*, jclass, jlong filter) {
+  SkSafeUnref(reinterpret_cast<SkMaskFilter*>(filter));
 }
 void Paint_nSetShadowLayer(jlong, jfloat, jfloat, jfloat, jlong, jlong) {}
 void Paint_nSetDither(jlong p, jboolean d) {
@@ -9508,6 +9539,18 @@ const JNINativeMethod kBitmapShader[] = {
     {"nativeCreate", "(JJIIZZ)J",
      reinterpret_cast<void*>(BitmapShader_nativeCreate)},
 };
+const JNINativeMethod kBlurMaskFilter[] = {
+    {"nativeConstructor", "(FI)J",
+     reinterpret_cast<void*>(BlurMaskFilter_nativeConstructor)},
+};
+const JNINativeMethod kEmbossMaskFilter[] = {
+    {"nativeConstructor", "([FFFF)J",
+     reinterpret_cast<void*>(EmbossMaskFilter_nativeConstructor)},
+};
+const JNINativeMethod kMaskFilter[] = {
+    {"nativeDestructor", "(J)V",
+     reinterpret_cast<void*>(MaskFilter_nativeDestructor)},
+};
 #define RNM(name, sig, fn) {name, sig, reinterpret_cast<void*>(fn)}
 const JNINativeMethod kRenderNode[] = {
     // normal (env, jclass)
@@ -10379,6 +10422,14 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
        ok;
   ok = reg(env, "android/graphics/BitmapShader", kBitmapShader,
            n(kBitmapShader)) &&
+       ok;
+  ok = reg(env, "android/graphics/MaskFilter", kMaskFilter, n(kMaskFilter)) &&
+       ok;
+  ok = reg(env, "android/graphics/BlurMaskFilter", kBlurMaskFilter,
+           n(kBlurMaskFilter)) &&
+       ok;
+  ok = reg(env, "android/graphics/EmbossMaskFilter", kEmbossMaskFilter,
+           n(kEmbossMaskFilter)) &&
        ok;
   ok = reg(env, "android/graphics/ColorSpace$Rgb", kColorSpaceRgb,
            n(kColorSpaceRgb)) &&
