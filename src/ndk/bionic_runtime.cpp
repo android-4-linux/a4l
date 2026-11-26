@@ -450,9 +450,9 @@ struct GlBridge {
   // offset 8: host-Mesa function pointers, indexed to match the forwarders.
   // Sized with headroom over the current symbol counts so adding entries to
   // gl-forwarders.py does not silently overflow.
-  void* fns[384];
+  void* fns[512];
 };
-static_assert(kEglSymCount <= 384 && kGlesSymCount <= 384,
+static_assert(kEglSymCount <= 512 && kGlesSymCount <= 512,
               "GlBridge::fns too small for symbol table");
 
 // A POOL of parked glibc threads whose %fs the app's GL threads borrow (one
@@ -1218,7 +1218,8 @@ void install_gl_forwarders(BionicRuntime* rt, bool opens_gl_itself) {
   log::i(kTag,
          "GL forwarders wired: EGL {}/{} GLES {}/{} donor-pool={} pick={} "
          "(egl={} gles={})",
-         20 - em, 20, 109 - gm, 109, npub, g_gl_pick_donor != nullptr, e, g);
+         kEglSymCount - em, kEglSymCount, kGlesSymCount - gm, kGlesSymCount,
+         npub, g_gl_pick_donor != nullptr, e, g);
 
   // Vulkan forwarder: the staged bionic libvulkan.so forwards
   // vkGetInstanceProcAddr to acl_vk_get_instance_proc_addr (bridge fns[0]),
