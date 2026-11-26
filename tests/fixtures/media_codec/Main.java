@@ -35,9 +35,57 @@ public class Main extends Activity {
         return null;
     }
 
+    private static String meta(android.media.MediaMetadataRetriever r, int key) {
+        return r.extractMetadata(key);
+    }
+
+    // MediaMetadataRetriever: what a player reads before it plays a file, and a gallery
+    // before it shows one.
+    private void retriever() {
+        try {
+            final java.io.File f = new java.io.File(getCacheDir(), "clip.mp4");
+            try (InputStream in = getAssets().open("clip.mp4");
+                    java.io.FileOutputStream os = new java.io.FileOutputStream(f)) {
+                final byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+            }
+            android.media.MediaMetadataRetriever r = new android.media.MediaMetadataRetriever();
+            r.setDataSource(f.getPath());
+            // 18, 19: video width and height; 9: duration in ms; 24: rotation; 12: MIME type;
+            // 40: video codec MIME type; 17, 16: has video, has audio; 32: frame count.
+            Log.i("acl", "MC retriever: file " + meta(r, 18) + "x" + meta(r, 19)
+                    + " duration=" + meta(r, 9) + " rotation=" + meta(r, 24)
+                    + " mime=" + meta(r, 12) + " codec=" + meta(r, 40)
+                    + " video=" + meta(r, 17) + " audio=" + meta(r, 16)
+                    + " frames=" + meta(r, 32) + " picture=" + r.getFrameAtTime());
+            r.release();
+            r = new android.media.MediaMetadataRetriever();
+            try (android.content.res.AssetFileDescriptor afd = getAssets().openFd("turned.mp4")) {
+                r.setDataSource(afd.getFileDescriptor(), afd.getStartOffset(), afd.getLength());
+            }
+            Log.i("acl", "MC retriever: asset " + meta(r, 18) + "x" + meta(r, 19)
+                    + " duration=" + meta(r, 9) + " rotation=" + meta(r, 24));
+            r.release();
+            r.release();  // a second release does nothing
+            boolean refused = false;
+            r = new android.media.MediaMetadataRetriever();
+            try {
+                r.setDataSource(f.getPath() + ".none");
+            } catch (RuntimeException e) {
+                refused = meta(r, 9) == null;
+            }
+            r.release();
+            Log.i("acl", "MC retriever: missing file refused=" + refused);
+        } catch (Throwable t) {
+            Log.e("acl", "MC retriever: FAIL " + t, t);
+        }
+    }
+
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        retriever();
         try {
             // The whole raw Annex-B H.264 elementary stream (SPS/PPS in-band) — bundled as an asset.
             InputStream is = getAssets().open("raw.h264");

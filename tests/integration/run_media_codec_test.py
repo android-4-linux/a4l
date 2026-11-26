@@ -20,6 +20,12 @@ SKIP = 77
 
 # Two run modes off the same classes.dex: synchronous (Main) and asynchronous setCallback (MainAsync).
 SYNC_CHECKS = [
+    # MediaMetadataRetriever on a file path, then on an asset inside the APK (an offset and a
+    # length into a larger file) whose track is rotated, then on a file that is not there.
+    "MC retriever: file 320x240 duration=1000 rotation=0 mime=video/mp4 codec=video/avc"
+    " video=yes audio=null frames=10 picture=null",
+    "MC retriever: asset 320x240 duration=1000 rotation=270",
+    "MC retriever: missing file refused=true",
     "MC decode: findDecoderForFormat=acl.h264.decoder",  # MediaCodecList discovery (ExoPlayer's gate)
     "native_start: decoder up",              # MediaCodec.start -> CodecDecoder configured
     "MC decode: output format 320x240",      # INFO_OUTPUT_FORMAT_CHANGED -> getOutputFormat (ExoPlayer path)
@@ -101,6 +107,12 @@ def main() -> int:
         os.makedirs(os.path.join(app, "assets"))
         run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", clip, "-c:v", "copy",
              "-bsf:v", "h264_mp4toannexb", "-f", "h264", os.path.join(app, "assets/raw.h264")])
+        # The clip itself, and a copy whose track header asks for a rotation, for
+        # MediaMetadataRetriever. FFmpeg's display_rotation is counterclockwise: 90 there is
+        # 270 as Android counts it.
+        shutil.copyfile(clip, os.path.join(app, "assets/clip.mp4"))
+        run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-display_rotation", "90",
+             "-i", clip, "-c", "copy", os.path.join(app, "assets/turned.mp4")])
         cropped = os.path.join(work, "cropped.h264")
         run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
              "-i", "color=c=0x40A060:s=352x272:d=1:r=10", "-c:v", "libx264",
@@ -125,7 +137,8 @@ def main() -> int:
             unaligned = os.path.join(work, f"u-{tag}.apk"); apk = os.path.join(work, f"mc-{tag}.apk")
             run(["zip", "-X", "-0", "-j", "-q", unaligned,
                  os.path.join(app, "AndroidManifest.xml"), os.path.join(app, "classes.dex")])
-            run(["zip", "-X", "-0", "-q", unaligned, "assets/raw.h264"], cwd=app)
+            run(["zip", "-X", "-0", "-q", unaligned, "assets/raw.h264", "assets/clip.mp4",
+                 "assets/turned.mp4"], cwd=app)
             run([zipalign, "-f", "4", unaligned, apk])
             env = dict(os.environ, XDG_CACHE_HOME=os.path.join(work, f"cache-{tag}"))
             p = subprocess.run([os.path.join(src_root, "tools/run-apk.sh"), apk],

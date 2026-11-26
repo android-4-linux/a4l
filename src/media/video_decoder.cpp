@@ -708,6 +708,104 @@ const char* mime_for_codec_id(enum AVCodecID id) {
 }
 }  // namespace
 
+namespace {
+
+// The container's MIME as Android names it, from FFmpeg's demuxer name (a
+// comma-separated list of the formats one demuxer reads).
+std::string container_mime(const char* format, bool has_video) {
+  const std::string f = format != nullptr ? format : "";
+  auto is = [&](const char* name) { return f.find(name) != std::string::npos; };
+  if (is("mp4") || is("mov") || is("3gp"))
+    return has_video ? "video/mp4" : "audio/mp4";
+  if (is("webm") || is("matroska"))
+    return has_video ? "video/webm" : "audio/webm";
+  if (is("ogg"))
+    return has_video ? "video/ogg" : "audio/ogg";
+  if (is("mp3"))
+    return "audio/mpeg";
+  if (is("wav"))
+    return "audio/x-wav";
+  if (is("flac"))
+    return "audio/flac";
+  if (is("aac"))
+    return "audio/aac";
+  if (is("amr"))
+    return "audio/amr";
+  if (is("mpegts"))
+    return "video/mp2ts";
+  return "";
+}
+
+// The rotation a video track's display matrix asks for, as Android gives it:
+// degrees clockwise, a multiple of 90. The matrix is 3x3 in 16.16 fixed point,
+// rows first; a phone held upright while recording writes (0, 1, -1, 0), which
+// is 90.
+int rotation_of(const AVStream* st) {
+  const AVCodecParameters* par = st->codecpar;
+  for (int i = 0; i < par->nb_coded_side_data; ++i) {
+    const AVPacketSideData& sd = par->coded_side_data[i];
+    if (sd.type != AV_PKT_DATA_DISPLAYMATRIX ||
+        sd.size < 9 * sizeof(std::int32_t) || sd.data == nullptr)
+      continue;
+    std::int32_t m[2];
+    std::memcpy(m, sd.data, sizeof(m));
+    const int quarter = m[0] == 0 ? (m[1] > 0 ? 1 : 3) : (m[0] > 0 ? 0 : 2);
+    return quarter * 90;
+  }
+  return 0;
+}
+
+}  // namespace
+
+bool probe_media(const std::string& path, MediaInfo* out, std::string* error) {
+  auto fail = [&](const char* m) {
+    if (error)
+      *error = m;
+    return false;
+  };
+  if (out == nullptr)
+    return fail("no result");
+  if (!load_ffmpeg())
+    return fail("FFmpeg unavailable");
+  AVFormatContext* fmt = nullptr;
+  if (g_ff.avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0)
+    return fail("open_input failed");
+  if (g_ff.avformat_find_stream_info(fmt, nullptr) < 0) {
+    g_ff.avformat_close_input(&fmt);
+    return fail("find_stream_info failed");
+  }
+  MediaInfo info;
+  info.tracks = static_cast<int>(fmt->nb_streams);
+  if (fmt->duration != AV_NOPTS_VALUE && fmt->duration > 0)
+    info.duration_us = fmt->duration;  // AV_TIME_BASE is microseconds
+  info.bitrate = fmt->bit_rate > 0 ? fmt->bit_rate : 0;
+  const int v =
+      g_ff.av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+  if (v >= 0) {
+    const AVStream* st = fmt->streams[v];
+    info.has_video = true;
+    info.width = st->codecpar->width;
+    info.height = st->codecpar->height;
+    info.rotation = rotation_of(st);
+    info.video_frames = st->nb_frames > 0 ? st->nb_frames : 0;
+    if (st->avg_frame_rate.num > 0 && st->avg_frame_rate.den > 0)
+      info.frame_rate =
+          static_cast<double>(st->avg_frame_rate.num) / st->avg_frame_rate.den;
+    info.video_mime = mime_for_codec_id(st->codecpar->codec_id);
+  }
+  const int a =
+      g_ff.av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+  if (a >= 0) {
+    info.has_audio = true;
+    info.sample_rate = fmt->streams[a]->codecpar->sample_rate;
+  }
+  info.mime = container_mime(fmt->iformat != nullptr ? fmt->iformat->name : "",
+                             info.has_video);
+  g_ff.avformat_close_input(&fmt);
+  *out = info;
+  return true;
+}
+
 struct Demuxer::DImpl {
   AVFormatContext* fmt = nullptr;
   AVPacket* pkt = nullptr;

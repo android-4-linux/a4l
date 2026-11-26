@@ -24,6 +24,8 @@ if have_jni
     runtime_sources += files('media_codec_jni.cpp')
     # MediaCodecList: advertise acl's HW decoder to ExoPlayer's codec discovery (no FFmpeg dep).
     runtime_sources += files('media_codec_list_jni.cpp')
+    # MediaMetadataRetriever: a media file's duration, size and rotation (FFmpeg, guarded inside).
+    runtime_sources += files('media_metadata_retriever_jni.cpp')
   endif
   runtime_deps += jni_dep
   runtime_deps += meson.get_compiler('cpp').find_library('dl', required : false)
