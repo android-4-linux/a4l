@@ -365,6 +365,30 @@ public class Main extends Activity {
         }
         log("proc file parsed=" + parsed);
         expect(parsed, "Process.readProcFile or parseProcLine");
+        // A PendingIntent says who made it and what it is. Apps check the creator of one
+        // before trusting it, from any thread.
+        String creator;
+        try {
+            final android.app.PendingIntent sent = android.app.PendingIntent.getBroadcast(this,
+                    41, new Intent("com.acl.svc.INFO").setPackage(getPackageName()),
+                    android.app.PendingIntent.FLAG_IMMUTABLE);
+            final android.app.PendingIntent shown = android.app.PendingIntent.getActivity(this,
+                    42, new Intent(this, Main.class), android.app.PendingIntent.FLAG_MUTABLE);
+            creator = sent.getCreatorPackage() + " uid "
+                    + (sent.getCreatorUid() == android.os.Process.myUid())
+                    + " broadcast " + sent.isBroadcast() + "/" + sent.isActivity()
+                    + " immutable " + sent.isImmutable()
+                    + " activity " + shown.isActivity() + "/" + shown.isService()
+                    + " immutable " + shown.isImmutable();
+            sent.cancel();
+            shown.cancel();
+        } catch (Throwable t) {
+            Log.w(TAG, "PendingIntent info", t);
+            creator = t.toString();
+        }
+        log("pending intent " + creator);
+        expect(creator.equals(getPackageName() + " uid true broadcast true/false immutable true"
+                + " activity true/false immutable false"), "PendingIntent info: " + creator);
         // A SweepGradient from red to blue around the center: red just past the positive x
         // axis, an even mix opposite it, blue just before the axis again.
         final android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
