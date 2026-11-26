@@ -237,8 +237,11 @@ jint JNICALL MCL_findCodecByName(JNIEnv* env, jclass, jstring name) {
   const char* s = env->GetStringUTFChars(name, nullptr);
   int idx = -1;
   if (s != nullptr) {
+    // A codec made with createDecoderByType reports the type as its name, and
+    // MediaCodec.getCodecInfo() looks the info up by that.
     for (int i = 0; i < codec_count(); ++i)
-      if (std::strcmp(s, codecs()[i].name) == 0) {
+      if (std::strcmp(s, codecs()[i].name) == 0 ||
+          std::strcmp(s, codecs()[i].mime) == 0) {
         idx = i;
         break;
       }
