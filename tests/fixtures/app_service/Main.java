@@ -272,6 +272,54 @@ public class Main extends Activity {
                 && marks.getPixel(20, 14) == 0;
         log("points and lines drawn=" + marked);
         expect(marked, "drawPoint, drawPoints, drawLines");
+        // drawPaint fills the clip and no more; drawColor with CLEAR erases; a layer saved
+        // with a half-transparent paint comes back at half alpha; skew moves a row sideways
+        // by its y; a double round rect is a ring; isOpaque follows the bitmap's config.
+        final android.graphics.Bitmap sheet = android.graphics.Bitmap.createBitmap(
+                40, 40, android.graphics.Bitmap.Config.ARGB_8888);
+        final android.graphics.Canvas sc = new android.graphics.Canvas(sheet);
+        final android.graphics.Paint blue = new android.graphics.Paint();
+        blue.setColor(0xFF0000FF);
+        sc.save();
+        sc.clipRect(0, 0, 20, 40);
+        sc.drawPaint(blue);
+        sc.restore();
+        final boolean painted = sheet.getPixel(10, 20) == 0xFF0000FF
+                && sheet.getPixel(30, 20) == 0;
+        sc.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR);
+        final boolean cleared = sheet.getPixel(10, 20) == 0;
+        final android.graphics.Paint halfPaint = new android.graphics.Paint();
+        halfPaint.setAlpha(128);
+        final int layer = sc.saveLayer(0, 0, 40, 40, halfPaint);
+        sc.drawRect(0, 0, 40, 40, blue);
+        sc.restoreToCount(layer);
+        final int layered = sheet.getPixel(20, 20) >>> 24;
+        sc.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR);
+        sc.save();
+        sc.skew(1, 0);
+        sc.drawRect(0, 20, 4, 24, blue);
+        sc.restore();
+        final boolean skewed = sheet.getPixel(23, 21) == 0xFF0000FF
+                && sheet.getPixel(2, 21) == 0;
+        sc.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR);
+        sc.drawDoubleRoundRect(new android.graphics.RectF(0, 0, 40, 40), 4, 4,
+                new android.graphics.RectF(10, 10, 30, 30), 2, 2, blue);
+        final boolean ring = sheet.getPixel(5, 20) == 0xFF0000FF && sheet.getPixel(20, 20) == 0;
+        sc.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR);
+        final float[] corners = {4, 4, 4, 4, 4, 4, 4, 4};
+        sc.drawDoubleRoundRect(new android.graphics.RectF(0, 0, 40, 40), corners,
+                new android.graphics.RectF(10, 10, 30, 30), corners, blue);
+        final boolean ringRadii = sheet.getPixel(20, 35) == 0xFF0000FF
+                && sheet.getPixel(20, 20) == 0;
+        final boolean opaque = !sc.isOpaque() && new android.graphics.Canvas(
+                android.graphics.Bitmap.createBitmap(
+                        2, 2, android.graphics.Bitmap.Config.RGB_565)).isOpaque();
+        final boolean canvasOps = painted && cleared && layered > 120 && layered < 136
+                && skewed && ring && ringRadii && opaque;
+        log("canvas paint layer skew ring=" + canvasOps);
+        expect(canvasOps, "drawPaint " + painted + " clear " + cleared + " layer alpha "
+                + layered + " skew " + skewed + " ring " + ring + "/" + ringRadii
+                + " opaque " + opaque);
     }
 
     @Override
