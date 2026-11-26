@@ -43,7 +43,14 @@ public class Main extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         // A plain background, so a test can find the TextureView in the rendered window.
-        FrameLayout root = new FrameLayout(this);
+        // The group draws its video view only once a frame is up, as a viewer that shows a
+        // thumbnail until then does. The view still has to be given its surface.
+        final FrameLayout root = new FrameLayout(this) {
+            @Override protected boolean drawChild(android.graphics.Canvas c, android.view.View child, long t) {
+                if (child instanceof TextureView && updated == 0) return false;
+                return super.drawChild(c, child, t);
+            }
+        };
         root.setBackgroundColor(Color.rgb(0x20, 0x30, 0x40));
         TextureView tv = new TextureView(this);
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(W, H);
@@ -67,6 +74,7 @@ public class Main extends Activity {
                 return true;
             }
             public void onSurfaceTextureUpdated(SurfaceTexture st) {
+                if (updated == 0) root.invalidate();  // from here on the group draws it
                 updated++;
                 timestamp = st.getTimestamp();
             }

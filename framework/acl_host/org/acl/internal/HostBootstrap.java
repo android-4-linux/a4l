@@ -4306,6 +4306,7 @@ public final class HostBootstrap {
         // opening animation from a pre-draw listener never starts it otherwise. A listener that
         // cancels the draw leaves the window out of this frame.
         if (dispatchTreeObserver(v, didLayout)) return out;
+        prepareTextureViews(v);
         int save = canvas.save();
         canvas.translate(out.left, out.top);
         v.draw(canvas);
@@ -5761,6 +5762,50 @@ public final class HostBootstrap {
 
     /** Forget the injected video SurfaceView (activity transition): the next screen re-arms fresh. */
     public static void forgetVideoSurface() { sVideoSv = null; }
+
+    // A TextureView makes its SurfaceTexture, and tells its listener the surface is available,
+    // the first time it is drawn (TextureView.draw -> getTextureLayer). On Android that draw
+    // comes from the display-list pass, which visits every visible child of a ViewGroup whether
+    // or not the group's own drawChild draws it (ViewGroup.dispatchGetDisplayList). a4l draws a
+    // tree with View.draw, which only reaches the children drawChild lets through. A group
+    // that keeps its TextureView out of drawChild until the first frame is up never got a
+    // surface, so the first frame never came.
+    //
+    // Called for each window before it is drawn: a visible, attached TextureView that has no
+    // surface yet has its display list updated, as that pass would.
+    static void prepareTextureViews(android.view.View root) {
+        if (!(root instanceof android.view.ViewGroup)) {
+            if (root instanceof android.view.TextureView) prepareTextureView((android.view.TextureView) root);
+            return;
+        }
+        final android.view.ViewGroup group = (android.view.ViewGroup) root;
+        for (int i = 0, n = group.getChildCount(); i < n; i++) {
+            final android.view.View child = group.getChildAt(i);
+            if (child == null || child.getVisibility() != android.view.View.VISIBLE) continue;
+            if (child instanceof android.view.TextureView) {
+                prepareTextureView((android.view.TextureView) child);
+            } else if (child instanceof android.view.ViewGroup) {
+                prepareTextureViews(child);
+            }
+        }
+    }
+
+    private static java.lang.reflect.Method sUpdateDisplayList;
+
+    private static void prepareTextureView(android.view.TextureView tv) {
+        if (tv.isAvailable() || !tv.isAttachedToWindow() || tv.getWidth() <= 0 || tv.getHeight() <= 0) {
+            return;
+        }
+        try {
+            if (sUpdateDisplayList == null) {
+                sUpdateDisplayList = android.view.View.class.getMethod("updateDisplayListIfDirty");
+            }
+            tv.invalidate();  // dirty, so that the update records (and so draws) it
+            sUpdateDisplayList.invoke(tv);
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: TextureView not prepared: " + t);
+        }
+    }
 
     // Back a video SurfaceView (media3 PlayerView's content SurfaceView) with a REAL,
     // MediaCodec-decodable Surface in the Skia/Compose present path, and fire surfaceCreated so the
