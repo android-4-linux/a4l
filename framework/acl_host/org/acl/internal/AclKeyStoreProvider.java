@@ -74,6 +74,20 @@ public final class AclKeyStoreProvider extends Provider {
         put("KeyPairGenerator.RSA", RsaKeyPairGenSpi.class.getName());
     }
 
+    // The provider that makes the keys this one stores: the first that has the algorithm and
+    // is not this one. getInstance(algorithm) alone takes the first provider in the app's
+    // order, and where that is this provider (an app that asks by algorithm with no provider
+    // name, or that moved the others) the generator called itself until the stack ran out.
+    static Provider implementer(String type, String algorithm) throws NoSuchAlgorithmException {
+        final Provider[] all = java.security.Security.getProviders(type + "." + algorithm);
+        if (all != null) {
+            for (Provider p : all) {
+                if (!(p instanceof AclKeyStoreProvider)) return p;
+            }
+        }
+        throw new NoSuchAlgorithmException(type + " " + algorithm);
+    }
+
     /** Register the provider once, before any app touches KeyStore.getInstance("AndroidKeyStore"). */
     public static void install() {
         try {
@@ -280,7 +294,8 @@ public final class AclKeyStoreProvider extends Provider {
 
         @Override protected SecretKey engineGenerateKey() {
             try {
-                KeyGenerator kg = KeyGenerator.getInstance(algorithm);  // default provider (conscrypt)
+                KeyGenerator kg = KeyGenerator.getInstance(algorithm,
+                        implementer("KeyGenerator", algorithm));
                 if (keySize > 0) {
                     if (random != null) kg.init(keySize, random); else kg.init(keySize);
                 } else if (random != null) {
@@ -340,7 +355,8 @@ public final class AclKeyStoreProvider extends Provider {
 
         @Override public KeyPair generateKeyPair() {
             try {
-                KeyPairGenerator kpg = KeyPairGenerator.getInstance(keyAlgo);  // default provider
+                KeyPairGenerator kpg = KeyPairGenerator.getInstance(keyAlgo,
+                        implementer("KeyPairGenerator", keyAlgo));
                 if (random != null) kpg.initialize(keySize, random); else kpg.initialize(keySize);
                 KeyPair kp = kpg.generateKeyPair();
                 if (alias != null) {

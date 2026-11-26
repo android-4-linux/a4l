@@ -82,6 +82,7 @@ CHECKS = [
     "SERVICE: artwork shared=3x2/ff336699/false parcel=3x2/ff336699 next=77 views=true"
     " notification=true sdk=24/33",
     "SERVICE: PASS",
+    "SERVICE: keystore generators made keys=true",
 ]
 
 
