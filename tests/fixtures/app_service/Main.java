@@ -413,6 +413,7 @@ public class Main extends Activity {
             case 9: androidId(); break;
             case 10: job(); break;
             case 11: artwork(); break;
+            case 12: keyGenerators(); break;
             default:
                 log("PASS");
                 System.exit(0);
@@ -690,6 +691,35 @@ public class Main extends Activity {
 
     // 11. Artwork as a playing app hands it on: Bitmap.asShared(), a Bitmap through a Parcel,
     //     and a notification's RemoteViews, bitmap included, cloned through a Parcel.
+    // 12. A key generator of the AndroidKeyStore provider makes a key, with that provider
+    //     where an app has put it: last, and first. First is the order in which a generator
+    //     that asks for the algorithm alone gets the keystore's own.
+    void keyGenerators() {
+        boolean made = true;
+        final java.security.Provider ks = java.security.Security.getProvider("AndroidKeyStore");
+        try {
+            for (int pass = 0; pass < 2 && ks != null; pass++) {
+                if (pass == 1) {
+                    java.security.Security.removeProvider("AndroidKeyStore");
+                    java.security.Security.insertProviderAt(ks, 1);
+                }
+                final javax.crypto.KeyGenerator kg =
+                        javax.crypto.KeyGenerator.getInstance("AES", "AndroidKeyStore");
+                kg.init(256);  // no alias: nothing is stored
+                made &= kg.generateKey().getEncoded().length == 32;
+                final java.security.KeyPairGenerator kpg =
+                        java.security.KeyPairGenerator.getInstance("EC", "AndroidKeyStore");
+                made &= kpg.generateKeyPair().getPrivate() != null;
+            }
+        } catch (Throwable t) {
+            made = false;
+            Log.w(TAG, "key generators", t);
+        }
+        log("keystore generators made keys=" + (made && ks != null));
+        expect(made && ks != null, "AndroidKeyStore KeyGenerator or KeyPairGenerator");
+        next();
+    }
+
     void artwork() {
         android.graphics.Bitmap src = android.graphics.Bitmap.createBitmap(3, 2,
                 android.graphics.Bitmap.Config.ARGB_8888);
