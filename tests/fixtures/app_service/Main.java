@@ -104,6 +104,21 @@ public class Main extends Activity {
         log("bitmap pixel set=" + set);
         expect(set, String.format("setPixel read back %08x %08x %08x", dots.getPixel(1, 2),
                 dots.getPixel(3, 0), dots.getPixel(2, 2)));
+        // A BlurMaskFilter on the paint: a square's edge spreads past where it was drawn, the
+        // middle stays opaque, and a corner well away is untouched.
+        final android.graphics.Bitmap soft = android.graphics.Bitmap.createBitmap(
+                48, 48, android.graphics.Bitmap.Config.ARGB_8888);
+        final android.graphics.Paint blur = new android.graphics.Paint();
+        blur.setColor(0xFFFF0000);
+        blur.setMaskFilter(new android.graphics.BlurMaskFilter(
+                4, android.graphics.BlurMaskFilter.Blur.NORMAL));
+        new android.graphics.Canvas(soft).drawRect(16, 16, 32, 32, blur);
+        final int edge = soft.getPixel(14, 24) >>> 24;
+        final boolean blurred = edge > 0 && edge < 255 && (soft.getPixel(24, 24) >>> 24) > 200
+                && soft.getPixel(1, 1) == 0;
+        log("mask filter blurred=" + blurred);
+        expect(blurred, String.format("blur edge alpha %d middle %08x corner %08x", edge,
+                soft.getPixel(24, 24), soft.getPixel(1, 1)));
         // The app's own accounts: added with a password and user data, listed by type,
         // changed, and removed. The file they are kept in is the owner's alone.
         final android.accounts.AccountManager am = android.accounts.AccountManager.get(this);
