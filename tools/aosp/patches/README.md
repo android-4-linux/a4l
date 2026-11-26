@@ -85,7 +85,8 @@ the output device swaps and `PopPendingCallbacks` drains the buffer normally —
 over 840 frames — so the workaround is no longer needed.)
 
 Runtime (see `tools/run-apk.sh`): `ACL_WEBVIEW_VULKAN=1` auto-adds `--webview-draw-functor-uses-vulkan
---disable-vulkan-surface`. On a multi-ICD host, pin the loader to the GPU's ICD via
+--disable-vulkan-surface --disable-accelerated-video-decode` (video is decoded in software; set
+`ACL_WEBVIEW_HW_VIDEO=1` to leave MediaCodec decode on). On a multi-ICD host, pin the loader to the GPU's ICD via
 `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json` (a non-matching ICD can crash
 `vkCreateInstance`).
 
