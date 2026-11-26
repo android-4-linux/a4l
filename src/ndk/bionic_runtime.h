@@ -13,6 +13,8 @@
 #if ACL_HAVE_JNI
 #include <jni.h>
 #include <type_traits>
+
+#include "ndk/bionic/acl_audio_out.h"
 #endif
 
 namespace acl::ndk {
@@ -123,6 +125,10 @@ void set_asset_provider(
 // ALooper exists. Returns -1 if unavailable.
 int main_looper_bridge_fd();
 void main_looper_bridge_pump();
+
+// PCM output for the staged libaaudio.so (see ndk/bionic/acl_audio_out.h). The
+// calls arrive on the app's threads with the host %fs restored.
+void set_audio_out_ops(const acl_audio_out_ops* ops);
 
 // `used` is called on a thread whose NDK ALooper was just given its first fd,
 // with the looper's epoll fd. The runtime uses it to have that thread's Java

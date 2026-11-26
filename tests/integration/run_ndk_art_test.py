@@ -67,6 +67,12 @@ HANDLER_CHECKS = [
     "HANDLER: a4l's fault handler back=1",
 ]
 
+# --aaudio: the library opens libaaudio.so and plays a silent stream through a data callback.
+AAUDIO_CHECKS = [
+    "acl.audio.ndk: output: 48000 Hz, 2 ch",
+    "fed=true",
+]
+
 CHECKS = [
     "NDK bionic loader armed",   # the gated nativeLoad hook installed (bootstraps lazily)
     "loaded bionic native lib",   # routed as bionic (not glibc dlopen)
@@ -99,10 +105,13 @@ def main() -> int:
     handler = "--handler" in argv         # fault-handler keeper mode; see HANDLER_CHECKS
     if handler:
         argv.remove("--handler")
+    aaudio = "--aaudio" in argv           # libaaudio.so output; see AAUDIO_CHECKS
+    if aaudio:
+        argv.remove("--aaudio")
     if len(argv) != 4:
         sys.stderr.write(
             "usage: run_ndk_art_test.py <acl> <src_root> <android.jar> <ndk.apk> "
-            "[--worker|--donor|--handler]\n")
+            "[--worker|--donor|--handler|--aaudio]\n")
         return 2
     acl, src_root, android_jar, ndk_apk = argv
 
@@ -200,6 +209,9 @@ def main() -> int:
             env["ACL_NDK_TEST_WORKER"] = "1"  # the fixture also calls the native off-main-thread
         if donor:
             env["ACL_NDK_TEST_DONOR"] = "1"
+        if aaudio:
+            env["ACL_NDK_TEST_AAUDIO"] = "1"
+            env["ACL_AUDIO"] = "null"  # no sound device needed, and none made to sound
         if handler:
             env["ACL_NDK_TEST_HANDLER"] = "1"
             env.pop("ACL_NO_CRASHPAD_SHIM_KEEPER", None)
@@ -213,7 +225,15 @@ def main() -> int:
         subprocess.run(["rm", "-rf", work], check=False)
 
     ok = True
-    if handler:
+    if aaudio:
+        if p.returncode != 0:
+            sys.stderr.write(f"FAIL: AAudio output: acl exit {p.returncode}\n")
+            ok = False
+        for c in AAUDIO_CHECKS:
+            if c not in out:
+                sys.stderr.write(f"FAIL: missing '{c}'\n")
+                ok = False
+    elif handler:
         if p.returncode != 0:
             sys.stderr.write(f"FAIL: fault-handler keeper: acl exit {p.returncode}\n")
             ok = False
@@ -253,7 +273,10 @@ def main() -> int:
     if not ok:
         sys.stderr.write("--- captured output ---\n" + out + "\n")
         return 1
-    if handler:
+    if aaudio:
+        sys.stdout.write("OK: an AAudio output stream opened, ran its data callback and "
+                         "stopped\n")
+    elif handler:
         sys.stdout.write("OK: a4l's fault handler was back in place after an app library "
                          "installed its own\n")
     elif donor:

@@ -81,6 +81,7 @@
 #include "runtime/framework_natives.h"
 #include "runtime/image_reader_jni.h"  // media_jni loadLibrary -> ImageReader natives (M3c)
 #include "runtime/media_codec_jni.h"  // media_jni loadLibrary -> MediaCodec natives (M5)
+#include "runtime/ndk_audio.h"
 #include "runtime/vsync_cap.h"
 #include "svc/svc.h"
 #include "wm/present.h"
@@ -7766,6 +7767,7 @@ class ArtVm final : public JniVm {
     g_ndk_have_cfg = true;
     env->GetJavaVM(&g_ndk_vm);
     acl::ndk::set_looper_used_hook(&ndk_looper_used);
+    register_ndk_audio();  // what the staged libaaudio.so plays through
     if (jclass c = env->FindClass("java/lang/Runtime")) {
       JNINativeMethod m[] = {
           {const_cast<char*>("nativeLoad"),
