@@ -720,6 +720,17 @@ jstring JNICALL ndk_native_load(JNIEnv* env,
     if (bound > 0)
       log::i(kTag, "bound {} native(s) by name across the lib's classes",
              bound);
+    // The present loop watches the main thread's NDK ALooper; tell it there is
+    // one now, in case this is the app's first native library and the loop is
+    // already running.
+    if (jclass pd = env->FindClass("org/acl/internal/PresentDriver")) {
+      if (jmethodID m =
+              env->GetStaticMethodID(pd, "onNativeLibraryLoaded", "()V"))
+        env->CallStaticVoidMethod(pd, m);
+      env->DeleteLocalRef(pd);
+    }
+    if (env->ExceptionCheck())
+      env->ExceptionClear();
     return nullptr;
   }
   if (supplement_media_jni(env, path))
