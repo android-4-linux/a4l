@@ -28,6 +28,21 @@ import android.os.RemoteException;
 import android.util.Log;
 
 public class Main extends Activity {
+    /** The manifest's Application: records that attachBaseContext came before onCreate. */
+    public static class App extends android.app.Application {
+        static final StringBuilder calls = new StringBuilder();
+
+        @Override protected void attachBaseContext(Context base) {
+            super.attachBaseContext(base);
+            calls.append('a');
+        }
+
+        @Override public void onCreate() {
+            super.onCreate();
+            calls.append('c');
+        }
+    }
+
     static final String TAG = "acl";
     static Main sMain;
     final Handler main = new Handler(Looper.getMainLooper());
@@ -234,6 +249,14 @@ public class Main extends Activity {
         expect(filtered, String.format("ColorMatrixColorFilter gave %08x", through));
         // The process has the package's name, from both places an app reads it.
         final String proc = android.os.Process.myProcessName();
+        // The Application's attachBaseContext ran, before its onCreate, and the context
+        // names the APK the code is in.
+        final String code = getPackageCodePath();
+        final boolean attached = "ac".contentEquals(App.calls) && code != null
+                && new java.io.File(code).isFile() && code.equals(getPackageResourcePath())
+                && code.equals(getApplicationInfo().sourceDir);
+        log("application attached=" + attached);
+        expect(attached, "Application calls " + App.calls + ", code path " + code);
         log("process name " + proc + " application " + android.app.Application.getProcessName());
         expect(getPackageName().equals(proc), "Process.myProcessName() is " + proc);
         // A SweepGradient from red to blue around the center: red just past the positive x

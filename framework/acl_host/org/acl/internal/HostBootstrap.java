@@ -855,6 +855,9 @@ public final class HostBootstrap {
         // InspectorApp.getAssets()), which otherwise leaves the app uninitialized -> blank window.
         @Override public android.content.res.AssetManager getAssets() { return res.getAssets(); }
         @Override public String getPackageName() { return pkg; }
+        // The APK the app's code and resources are read from; one file holds both.
+        @Override public String getPackageCodePath() { return apkPath; }
+        @Override public String getPackageResourcePath() { return apkPath; }
         @Override public String getOpPackageName() { return pkg; }  // ContentResolver.<init> reads it
         @Override public int getUserId() { return 0; }              // single-user (system user)
         @Override public String getAttributionTag() { return null; }
@@ -2949,8 +2952,24 @@ public final class HostBootstrap {
         }
         if (app == null) app = new android.app.Application();
         sApplication = app;  // process Application — the fallback for any unwired AppContext
-        setField(ContextWrapper.class, app, "mBase", base);
         if (base instanceof AppContext) ((AppContext) base).setApplication(app);
+        // Application.attach calls attachBaseContext, which an app overrides to set itself up
+        // before its providers and onCreate run. A failure there leaves the base set, as a
+        // failure in onCreate leaves the Application attached.
+        try {
+            final java.lang.reflect.Method attach =
+                    ContextWrapper.class.getDeclaredMethod("attachBaseContext",
+                            android.content.Context.class);
+            attach.setAccessible(true);
+            attach.invoke(app, base);
+        } catch (Throwable t) {
+            final Throwable cause = t instanceof java.lang.reflect.InvocationTargetException
+                    && t.getCause() != null ? t.getCause() : t;
+            System.err.println("acl HostBootstrap: Application.attachBaseContext incomplete for "
+                    + app.getClass().getName() + " (" + cause + ")");
+            cause.printStackTrace();
+        }
+        if (app.getBaseContext() == null) setField(ContextWrapper.class, app, "mBase", base);
         seedActivityThread(pkg);
         // ActivityThread.currentApplication() (read by e.g. AutofillManager) → mInitialApplication.
         try {
@@ -2977,6 +2996,7 @@ public final class HostBootstrap {
             System.err.println("acl HostBootstrap: Application.onCreate incomplete for "
                     + (appClass == null || appClass.isEmpty() ? "(default)" : appClass)
                     + " (" + t + "); continuing with the Application attached");
+            t.printStackTrace();
         }
         // DIAG (ACL_FORCE_STATIC_TRUE="pkg.Class:FIELD[,pkg.Class:FIELD]"): reflectively set boolean
         // static field(s) to true after the app's classloader is up — e.g. to force an app's debug/

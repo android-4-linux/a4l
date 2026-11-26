@@ -46,6 +46,7 @@ RECEIVERS = [
 
 CHECKS = [
     "SERVICE: launch order csCrR",
+    "SERVICE: application attached=true",
     "SERVICE: system resources sized=true",
     "SERVICE: bitmap pixel set=true",
     "SERVICE: accounts stored=true token dropped=true removed=true",
@@ -157,7 +158,8 @@ def main():
         run(["cp", os.path.join(dexdir, "classes.dex"), app])
         with open(os.path.join(app, "AndroidManifest.xml"), "wb") as fh:
             fh.write(build_axml(utf8=True, package=PACKAGE, launcher=f"{PACKAGE}.Main",
-                                services=SERVICES, receivers=RECEIVERS))
+                                services=SERVICES, receivers=RECEIVERS,
+                                application=f"{PACKAGE}.Main$App"))
         unaligned = os.path.join(work, "u.apk")
         apk = os.path.join(work, "app-service.apk")
         run(["zip", "-X", "-0", "-j", "-q", unaligned,
