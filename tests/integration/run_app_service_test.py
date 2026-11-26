@@ -57,6 +57,7 @@ CHECKS = [
     "SERVICE: base context chain ends=true",
     "SERVICE: color matrix filtered=true",
     f"SERVICE: process name {PACKAGE} application {PACKAGE}",
+    "SERVICE: proc file parsed=true",
     "SERVICE: sweep gradient drawn=true",
     "SERVICE: compose shader blended=true",
     "SERVICE: points and lines drawn=true",
