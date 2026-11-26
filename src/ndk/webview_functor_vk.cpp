@@ -41,6 +41,16 @@ void resolve() {
     acl::log::w(kTag, "no ACL_BIONIC_SYSROOT");
     return;
   }
+  // The load below runs bionic code, and this can be the thread's first: the
+  // render thread attaches when it starts, which is before the runtime exists
+  // in an app that makes its first WebView later.
+  if (acl::ndk::BionicRuntime::current_thread_fs() == 0) {
+    std::string why;
+    if (rt->attach_current_thread(&why) == 0) {
+      acl::log::w(kTag, "attach failed: {}", why);
+      return;
+    }
+  }
   std::string err;
   void* h = rt->load(
       (std::string(sysroot) + "/libwebviewchromium_plat_support.so").c_str(),
