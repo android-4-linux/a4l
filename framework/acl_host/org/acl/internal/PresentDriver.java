@@ -208,6 +208,7 @@ public final class PresentDriver {
                 // the traversal, so the surfaceCreated it fires is reflected this frame.
                 HostBootstrap.maybeInjectVideoSurface(decor);
                 HostBootstrap.maybeLogVideoPlayer(decor);
+                HostBootstrap.prepareTextureViews(decor);
                 nTraverse(s);
                 postTraversal(choreo, postCallback, traversal[0]);
                 // A pre-draw listener cancelled the draw (a splash screen holding its first
