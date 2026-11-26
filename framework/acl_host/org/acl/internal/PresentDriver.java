@@ -162,6 +162,7 @@ public final class PresentDriver {
         }
     }
 
+    private static final int CALLBACK_INSETS_ANIMATION = 2;  // after ANIMATION, before TRAVERSAL (@hide)
     private static final int CALLBACK_TRAVERSAL = 3;  // Choreographer.CALLBACK_TRAVERSAL (@hide)
 
     // The current window's native session, for HostBootstrap's InputMethodManager show/hide
@@ -215,6 +216,21 @@ public final class PresentDriver {
                 if (nDrawCancelled(s)) clockVsync(s, handler, vsyncRetry[0]);
             }
         };
+
+        // Added windows keep a real ViewRootImpl, which must not traverse: a4l lays them out and
+        // draws them. Its scheduled traversal is cancelled in the phase before traversals, on
+        // every frame, whether or not this loop's own traversal draws.
+        if (postCallback != null) {
+            final Runnable[] cancel = new Runnable[1];
+            cancel[0] = new Runnable() {
+                @Override public void run() {
+                    HostBootstrap.cancelOverlayTraversals();
+                    try { postCallback.invoke(choreo, CALLBACK_INSETS_ANIMATION, cancel[0], null); }
+                    catch (Throwable ignored) { /* the pass in presentOverlays is what is left */ }
+                }
+            };
+            cancel[0].run();
+        }
 
         // Retry for a vsync the rate cap held back (clockVsync).
         vsyncRetry[0] = new Runnable() {

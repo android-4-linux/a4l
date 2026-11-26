@@ -351,7 +351,7 @@ public class Main extends Activity {
                     h.post(new Runnable() {
                         @Override public void run() {
                             wm.removeView(panel);
-                            hitTest(h);
+                            redrawingWindow(h);
                         }
                     });
                     return true;
@@ -362,6 +362,51 @@ public class Main extends Activity {
                     android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                             | android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
                     android.graphics.PixelFormat.TRANSLUCENT));
+        }
+
+        /**
+         * An added window whose view asks for the next frame from its own draw, as a WebView
+         * or anything animated does. That reaches the window's ViewRootImpl, which posts a
+         * sync barrier and a traversal. Neither may get in the way: a timed message on the
+         * main looper still runs, and the view stays attached as a4l attached it, once,
+         * hardware accelerated and in a visible window.
+         */
+        private void redrawingWindow(final Handler h) {
+            // Not on the main looper: a barrier that is never lifted would hold it back too.
+            final java.util.Timer stuck = new java.util.Timer(true);
+            stuck.schedule(new java.util.TimerTask() {
+                @Override public void run() {
+                    log("FAIL the main looper stopped under a redrawing added window");
+                    System.exit(8);
+                }
+            }, 5000);
+            final android.view.WindowManager wm = getWindowManager();
+            final int[] attaches = new int[1];
+            final View panel = new View(this) {
+                @Override protected void onAttachedToWindow() {
+                    super.onAttachedToWindow();
+                    attaches[0]++;
+                }
+                @Override protected void onDraw(Canvas c) {
+                    postInvalidateOnAnimation();
+                }
+            };
+            wm.addView(panel, new android.view.WindowManager.LayoutParams(50, 50,
+                    android.view.WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                    android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                    android.graphics.PixelFormat.TRANSLUCENT));
+            h.postDelayed(new Runnable() {
+                @Override public void run() {
+                    stuck.cancel();
+                    log("redrawing added window: timed message ran");
+                    log("redrawing added window: attaches=" + attaches[0]
+                            + " accelerated=" + panel.isHardwareAccelerated()
+                            + " visible=" + (panel.getWindowVisibility() == View.VISIBLE));
+                    wm.removeView(panel);
+                    hitTest(h);
+                }
+            }, 600);
         }
 
         /** Last: the test taps (50,150) and (50,450) in turn. Only the second is on the moved view. */
