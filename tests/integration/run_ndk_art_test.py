@@ -75,6 +75,8 @@ CHECKS = [
     # answer()=4250: load+OnLoad+down-call+up-call all ran (RegisterNatives path)
     # nativeAnswer()=42: the name-bound native ran (bind-by-name path)
     "Main.onCreate: bionic native answer()=4250 nativeAnswer()=42",
+    # native code reads the system properties a4l reports, not libc's empty ones
+    "PROPS: native ro.build.version.sdk=33",
 ]
 
 

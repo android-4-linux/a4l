@@ -3904,6 +3904,12 @@ void* BionicRuntime::load_library(const char* abs_path,
     if (!log_routed.exchange(true)) {
       if (const char* sysroot = getenv("ACL_BIONIC_SYSROOT")) {
         std::string lerr;
+        // System properties for the app's native code, before any library
+        // that would read them. The library is linked -z global, so loading
+        // it is all there is to do (see acl_system_properties.c).
+        if (load((std::string(sysroot) + "/libacl_sysprops.so").c_str(), &lerr,
+                 /*global=*/true) == nullptr)
+          log::w(kTag, "native system properties unavailable: {}", lerr);
         if (void* la = load((std::string(sysroot) + "/libandroid.so").c_str(),
                             &lerr, /*global=*/true)) {
           if (void* init = symbol(la, "acl_ndk_log_init")) {

@@ -51,6 +51,10 @@ public class Main extends Activity {
     // Java_com_acl_ndktest_Main_handlerKept in tools/build-ndk-repro.sh.
     public static native int handlerKept();
 
+    // Bound by name. ro.build.version.sdk as the library's native code reads it; see
+    // Java_com_acl_ndktest_Main_sdkProperty in tools/build-ndk-repro.sh.
+    public static native int sdkProperty();
+
     // Up-called BY the native, from bionic %fs back into ART's glibc %fs.
     public static int helper(int a, int b) {
         return a + b;
@@ -61,6 +65,8 @@ public class Main extends Activity {
         super.onCreate(savedInstanceState);
         Log.i("acl", "Main.onCreate: bionic native answer()=" + answer()
                      + " nativeAnswer()=" + nativeAnswer());
+
+        Log.i("acl", "PROPS: native ro.build.version.sdk=" + sdkProperty());
 
         // Opt-in (run_ndk_art_test.py --donor): a native thread that attaches after another
         // has detached, and takes a native call from Java.
