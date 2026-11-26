@@ -8,6 +8,7 @@
 # (as short[], byte[] and a direct ByteBuffer) and 0.5 s at 44.1 kHz mono float. The test
 # asserts, in both modes:
 #   - every frame written reached the audio sink, and the playback position reached the end;
+#   - a ToneGenerator's tone reached the sink whole, and an unknown tone type was refused;
 #   - the blocking writes took about as long as the audio they wrote. A track whose writes
 #     return at once plays nothing in time and lets a player run through its whole stream in
 #     an instant, so this is the property a media player depends on.
@@ -32,6 +33,7 @@ import time
 SKIP = 77
 A_FRAMES = 96000  # track A: 2 s at 48 kHz (Main.trackA)
 B_FRAMES = 22050  # track B: 0.5 s at 44.1 kHz (Main.trackB)
+TONE_FRAMES = 19200  # TONE_PROP_ACK: 400 ms at the tone player's 48 kHz (Main.tone)
 
 
 def first(*paths):
@@ -178,7 +180,9 @@ def main() -> int:
             if not 0 < int(ah.group(3)) <= A_FRAMES:
                 return f"track A's timestamp was {ah.group(3)}", None
             counts = [int(n) for n in re.findall(rf"sink={sink} close: (\d+) frames", out)]
-            if counts != [A_FRAMES, B_FRAMES]:
+            if "AT: tone started true, unknown false, session true, after release false" not in out:
+                return "ToneGenerator did not start, refuse and release as it should", None
+            if counts != [A_FRAMES, B_FRAMES, TONE_FRAMES]:
                 return f"the {sink} sink closed with {counts}", None
             return None, f"{tag}: writes took {a_ms} ms and {b_ms} ms"
 
@@ -215,8 +219,9 @@ def main() -> int:
             return fail(f"the broker rejected {rejected} message(s)", out)
         if dropped != 0:
             return fail(f"the broker dropped {dropped} audio frame(s)", out)
-        if got != A_FRAMES + B_FRAMES:
-            return fail(f"the broker's sink got {got} of {A_FRAMES + B_FRAMES} frames", out)
+        sent = A_FRAMES + B_FRAMES + TONE_FRAMES
+        if got != sent:
+            return fail(f"the broker's sink got {got} of {sent} frames", out)
         sys.stdout.write(f"OK: {A_FRAMES} + {B_FRAMES} frames through AudioTrack; {single}; "
                          f"{split}, {got} frames at the broker's sink, 0 dropped, 0 rejected\n")
         return 0
