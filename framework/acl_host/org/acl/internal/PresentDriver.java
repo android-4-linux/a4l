@@ -115,6 +115,53 @@ public final class PresentDriver {
     private static native int nGlAloopFd();
     private static native void nGlAloopPump();
 
+    // Whether the main thread's NDK ALooper is watched by the main MessageQueue, and whether
+    // the present loop has reached the point of asking for that.
+    private static volatile boolean sAloopBridged;
+    private static volatile boolean sLoopStarted;
+
+    /**
+     * Watches the main thread's NDK ALooper from the main MessageQueue, once. False while the
+     * app has no native runtime, which is until its first native library is loaded. Called on
+     * the main thread.
+     */
+    private static boolean bridgeNativeLooper() {
+        sLoopStarted = true;
+        if (sAloopBridged) return true;
+        final int fd = nGlAloopFd();
+        if (fd < 0) return false;
+        sAloopBridged = true;
+        Looper.getMainLooper().getQueue().addOnFileDescriptorEventListener(makeFd(fd),
+            0x1 /*EVENT_INPUT*/ | 0x4 /*EVENT_ERROR*/,
+            new MessageQueue.OnFileDescriptorEventListener() {
+                @Override public int onFileDescriptorEvents(FileDescriptor fd, int events) {
+                    nGlAloopPump();
+                    return EVENT_INPUT;
+                }
+            });
+        nGlAloopPump();  // what was queued before anything watched
+        return true;
+    }
+
+    /**
+     * Called by the runtime after it loads a native library. The first one may be loaded long
+     * after the present loop started (a WebView made when a screen opens), and the loop found
+     * no ALooper to watch then: Chromium's main-thread tasks would never run, and a page would
+     * stay at 10 percent.
+     */
+    public static void onNativeLibraryLoaded() {
+        if (!sLoopStarted || sAloopBridged) return;
+        final Looper main = Looper.getMainLooper();
+        if (main == null) return;
+        if (Looper.myLooper() == main) {
+            bridgeNativeLooper();
+        } else {
+            new Handler(main).post(new Runnable() {
+                @Override public void run() { bridgeNativeLooper(); }
+            });
+        }
+    }
+
     private static final int CALLBACK_TRAVERSAL = 3;  // Choreographer.CALLBACK_TRAVERSAL (@hide)
 
     // The current window's native session, for HostBootstrap's InputMethodManager show/hide
@@ -205,17 +252,7 @@ public final class PresentDriver {
         // thread async completions (the ServiceWorker registration lookup, navigation URLLoader
         // callbacks) never run and every navigation hangs at progress=10. Watch the ALooper's epoll
         // fd and drain it when it signals; pump once now to flush anything queued during WebView init.
-        final int aloopFd = nGlAloopFd();
-        if (aloopFd >= 0) {
-            mq.addOnFileDescriptorEventListener(makeFd(aloopFd), 0x1 /*EVENT_INPUT*/ | 0x4 /*EVENT_ERROR*/,
-                new MessageQueue.OnFileDescriptorEventListener() {
-                    @Override public int onFileDescriptorEvents(FileDescriptor fd, int events) {
-                        nGlAloopPump();
-                        return EVENT_INPUT;
-                    }
-                });
-            nGlAloopPump();
-        }
+        bridgeNativeLooper();
 
         // Video HW-plane wake fd: the decode thread signals it after a frame is ready, so we commit
         // video frames as they arrive instead of only on UI frames / input events (idle-UI video
@@ -339,17 +376,7 @@ public final class PresentDriver {
         // Looper.loop() below does not otherwise service — so Dart's warm-up frame never runs. Watch
         // the ALooper's epoll fd and drain it when it signals, then pump once now to flush the tasks
         // (warm-up frame, binding microtasks) already queued during engine startup before we park.
-        final int aloopFd = nGlAloopFd();
-        if (aloopFd >= 0) {
-            mq.addOnFileDescriptorEventListener(makeFd(aloopFd), 0x1 /*EVENT_INPUT*/ | 0x4 /*EVENT_ERROR*/,
-                new MessageQueue.OnFileDescriptorEventListener() {
-                    @Override public int onFileDescriptorEvents(FileDescriptor fd, int events) {
-                        nGlAloopPump();
-                        return EVENT_INPUT;
-                    }
-                });
-            nGlAloopPump();
-        } else {
+        if (!bridgeNativeLooper()) {
             android.util.Log.w("acl.present", "PresentDriver.runGl: NDK ALooper bridge unavailable "
                     + "(fd=-1); Flutter UI tasks will not pump");
         }
