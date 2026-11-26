@@ -93,6 +93,13 @@ cp -f "$LDANDROID" "$SYS/ld-android.so"
 [ -f "$BLIBDLANDROID" ] && cp -f "$BLIBDLANDROID" "$SYS/libdl_android.so"
 cp -f "$BLIBCXX" "$SYS/libc++.so"
 cp -f "$BLIBZ" "$SYS/libz.so"    # real bionic zlib; app libs (crashlytics/webp) NEED it
+# An app may carry a zlib of its own inside one of its libraries and export it. libz.so calls
+# its own functions through the PLT (deflateInit2_ calls deflateReset), and with both in one
+# linker namespace such a call went to the app's copy, whose stream state has another layout:
+# WhatsApp crashed in the deflateReset of its libar-bundle3.so, called from the system
+# deflateInit2_. Symbolic, libz.so binds its own symbols to itself.
+chmod u+w "$SYS/libz.so"
+"$HERE/elf-set-symbolic.sh" "$SYS/libz.so" || echo "stage-bionic-runtime: libz.so left non-symbolic" >&2
 # Android ICU (libandroidicu.so + libicuuc/libicui18n): lives in the com.android.i18n APEX, not
 # /system/lib64. /system/lib64/libmedia.so DT_NEEDEDs libandroidicu.so, so an app native lib that
 # transitively pulls in libmedia (YouTube's libelements.so) fails to load with UnsatisfiedLinkError
