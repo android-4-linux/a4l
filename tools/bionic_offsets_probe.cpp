@@ -92,6 +92,10 @@ void acl_bionic_offsets() {
   DEF(TLS_SLOT_STACK_GUARD_, TLS_SLOT_STACK_GUARD);
   DEF(TLS_SLOT_DTV_, TLS_SLOT_DTV);
   DEF(TLS_SLOT_BIONIC_TLS_, TLS_SLOT_BIONIC_TLS);
+  // Bionic keeps this slot for ART and uses it for nothing itself. ART is a
+  // glibc program here, so the arm64 down-call keeps a pointer of its own in
+  // it.
+  DEF(TLS_SLOT_ART_THREAD_SELF_, TLS_SLOT_ART_THREAD_SELF);
   // The thread pointer is static_tls + offset_bionic_tcb only while
   // MIN_TLS_SLOT is 0 (x86_64). arm64's is negative:
   // StaticTlsLayout::offset_thread_pointer() is offset_bionic_tcb_ +

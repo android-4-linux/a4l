@@ -192,6 +192,34 @@ void tp_set(std::uintptr_t v) {
 constexpr std::uint8_t kRetInsn[] = {0xC0, 0x03, 0x5F, 0xD6};  // ret
 #endif
 
+// The thread pointer read and written in place: one instruction, no call and
+// no clobbered register beyond the operand. x86_64 has FSGSBASE for it.
+[[maybe_unused]] inline std::uintptr_t tp_read() {
+  std::uintptr_t v;
+#if defined(__x86_64__)
+  asm volatile("rdfsbase %0" : "=r"(v));
+#else
+  asm volatile("mrs %0, tpidr_el0" : "=r"(v));
+#endif
+  return v;
+}
+[[maybe_unused]] inline void tp_write(std::uintptr_t v) {
+#if defined(__x86_64__)
+  asm volatile("wrfsbase %0" : : "r"(v));
+#else
+  asm volatile("msr tpidr_el0, %0" : : "r"(v));
+#endif
+}
+
+// The program counter a signal interrupted.
+[[maybe_unused]] std::uintptr_t uc_pc(const ucontext_t& uc) {
+#if defined(__x86_64__)
+  return static_cast<std::uintptr_t>(uc.uc_mcontext.gregs[REG_RIP]);
+#else
+  return static_cast<std::uintptr_t>(uc.uc_mcontext.pc);
+#endif
+}
+
 // The page size is the host's: 4 KiB on x86_64, and 4, 16 or 64 KiB on arm64.
 std::uintptr_t boot_page() {
   static const auto size = static_cast<std::uintptr_t>(::sysconf(_SC_PAGESIZE));
@@ -611,9 +639,15 @@ alignas(16) char g_zero_dtv[ACL_BIONIC_SIZEOF_TLSDTV] = {};
 
 }  // namespace
 
+#if defined(__aarch64__) && ACL_BIONIC_OFFSETS_AVAILABLE
+// Defined with the arm64 down-call, further down; set where the thread-local
+// it measures is first seen.
+extern "C" __attribute__((visibility("hidden"))) std::int64_t acl_ndk_tls_disp;
+#endif
+
 #endif  // x86_64 || aarch64
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
 
 // The x86_64 bootstrap. Kept in an anonymous namespace so nothing here is
 // inlined into callers compiled with a stack protector.
@@ -1025,6 +1059,11 @@ size_t g_gl_jit_used = 0, g_gl_jit_cap = 0;
 void* gl_jit_wrap(void* mesa) {
   if (mesa == nullptr || g_gl_pick_donor == nullptr)
     return nullptr;
+#if !defined(__x86_64__)
+  // The stub below is x86_64 machine code. No GL forwarder is built for arm64
+  // yet, so nothing sets g_gl_pick_donor there and this is not reached.
+  return nullptr;
+#else
   std::lock_guard<std::mutex> lk(g_gl_jit_mu);
   auto it = g_gl_jit_cache.find(mesa);
   if (it != g_gl_jit_cache.end())
@@ -1088,6 +1127,7 @@ void* gl_jit_wrap(void* mesa) {
   g_gl_jit_used += kStub;
   g_gl_jit_cache.emplace(mesa, p);
   return p;
+#endif
 }
 
 // Replacement for eglGetProcAddress installed into the EGL bridge slot: resolve
@@ -1322,7 +1362,7 @@ unsigned int acl_native_egl_swap_buffers(void* dpy, void* surface) {
 // the app's GL lib, so they are mapped by the time load_library() (which then
 // calls install_gl_forwarders) returns. Scans /proc/self/maps.
 static bool gl_forwarder_mapped(const char* sysroot) {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
   if (sysroot == nullptr)
     return false;
   FILE* f = std::fopen("/proc/self/maps", "re");
@@ -1362,7 +1402,7 @@ static bool opens_gl_on_demand(const char* path) {
 }
 
 void install_gl_forwarders(BionicRuntime* rt, bool opens_gl_itself) {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
   const char* sysroot = getenv("ACL_BIONIC_SYSROOT");
   if (sysroot == nullptr)
     return;
@@ -1585,10 +1625,7 @@ void acl_signal_trampoline(int sig, siginfo_t* info, void* uctx) {
   if (fault_dbg && (sig == SIGSEGV || sig == SIGBUS) &&
       fdbg.fetch_add(1) < 64) {
     const auto* uc = static_cast<const ucontext_t*>(uctx);
-    const std::uintptr_t rip =
-        uc != nullptr
-            ? static_cast<std::uintptr_t>(uc->uc_mcontext.gregs[REG_RIP])
-            : 0;
+    const std::uintptr_t rip = uc != nullptr ? uc_pc(*uc) : 0;
     auto hex = [](char* p, std::uintptr_t v) {  // 0x + 16 hex, returns end
       *p++ = '0';
       *p++ = 'x';
@@ -1868,10 +1905,7 @@ void maybe_install_crashpad_shim_keeper(const char* lib) {
 std::atomic<bool> g_wv_caught{false};
 void acl_wv_fault_catch(int sig, siginfo_t* info, void* uctx) {
   const auto* uc = static_cast<const ucontext_t*>(uctx);
-  const std::uintptr_t rip =
-      uc != nullptr
-          ? static_cast<std::uintptr_t>(uc->uc_mcontext.gregs[REG_RIP])
-          : 0;
+  const std::uintptr_t rip = uc != nullptr ? uc_pc(*uc) : 0;
   // Scan /proc/self/maps for the line covering rip; capture it and decide if
   // it's a chromium/GPU lib.
   char covline[512];
@@ -2033,8 +2067,7 @@ extern "C" void acl_gl_run_on_donor(void (*fn)(void*), void* arg) {
     fn(arg);
     return;
   }
-  std::uintptr_t glibc;
-  asm volatile("rdfsbase %0" : "=r"(glibc));
+  const std::uintptr_t glibc = tp_read();
   std::uintptr_t bionic = bionic_fs_for(glibc);
   if (bionic == 0) {
     // The app's Java GL setup (loadTexture) runs BEFORE this thread first calls
@@ -2052,18 +2085,15 @@ extern "C" void acl_gl_run_on_donor(void (*fn)(void*), void* arg) {
     fn(arg);
     return;
   }  // still not attachable -> can't route
-  asm volatile(
-      "wrfsbase %0" ::"r"(bionic));  // key pick_donor by the bionic %fs
+  tp_write(bionic);  // key pick_donor by the bionic %fs
   const std::uintptr_t donor =
       reinterpret_cast<std::uintptr_t (*)()>(g_gl_pick_donor)();
-  asm volatile(
-      "wrfsbase %0" ::"r"(donor));  // Mesa's per-thread TLS home for native GL
+  tp_write(donor);  // Mesa's per-thread TLS home for native GL
   fn(arg);
-  asm volatile("wrfsbase %0" ::"r"(glibc));  // restore
+  tp_write(glibc);  // restore
 }
 extern "C" void acl_gl_donor_route_set(int on) {
-  std::uintptr_t glibc;
-  asm volatile("rdfsbase %0" : "=r"(glibc));
+  const std::uintptr_t glibc = tp_read();
   std::lock_guard<std::mutex> lk(g_gl_route_mu);
   for (std::uintptr_t& r : g_gl_route)
     if (r == (on ? 0u : glibc)) {
@@ -2072,8 +2102,7 @@ extern "C" void acl_gl_donor_route_set(int on) {
     }
 }
 extern "C" int acl_gl_donor_route_get(void) {
-  std::uintptr_t glibc;
-  asm volatile("rdfsbase %0" : "=r"(glibc));
+  const std::uintptr_t glibc = tp_read();
   for (std::uintptr_t r : g_gl_route)
     if (r == glibc)
       return 1;
@@ -2119,7 +2148,12 @@ extern "C" __attribute__((visibility("default"))) int pthread_getattr_np(
   }
   static int (*real)(pthread_t, pthread_attr_t*) = nullptr;
   if (real == nullptr) {
+    // The version glibc first had the symbol at on this architecture.
+#if defined(__x86_64__)
     void* p = dlvsym(RTLD_NEXT, "pthread_getattr_np", "GLIBC_2.2.5");
+#else
+    void* p = dlvsym(RTLD_NEXT, "pthread_getattr_np", "GLIBC_2.17");
+#endif
     if (p == nullptr)
       p = dlsym(RTLD_NEXT, "pthread_getattr_np");
     real = reinterpret_cast<int (*)(pthread_t, pthread_attr_t*)>(p);
@@ -2239,6 +2273,11 @@ BionicRuntime* BionicRuntime::instance(const BionicConfig& cfg,
   register_fs_pair(
       fs,
       rt.glibc_fs_);  // so this thread's up-calls find their way back to glibc
+#endif
+#if defined(__aarch64__) && ACL_BIONIC_OFFSETS_AVAILABLE
+  acl_ndk_tls_disp = static_cast<std::int64_t>(
+                         reinterpret_cast<std::uintptr_t>(&t_bionic_fs)) -
+                     static_cast<std::int64_t>(rt.glibc_fs_);
 #endif
 #if defined(__x86_64__)
   // Measure the slot's fixed displacement from the thread pointer for the
@@ -2539,7 +2578,7 @@ void* BionicRuntime::symbol(void* handle, const char* name) {
 
 // --- bidirectional-boundary self-test (the JNI up-call mechanism, in
 // miniature) ---
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
 namespace {
 int (*g_glibc_cb)(int) = nullptr;
 std::uintptr_t g_up_glibc_fs = 0, g_up_bionic_fs = 0;
@@ -2558,7 +2597,7 @@ int upcall_trampoline(int x) {
 int BionicRuntime::run_boundary_selftest(void* bionic_fn,
                                          int (*cb)(int),
                                          int x) {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
   if (!bionic_fn || !cb)
     return -1;
   g_glibc_cb = cb;
@@ -2580,7 +2619,7 @@ int BionicRuntime::run_boundary_selftest(void* bionic_fn,
 // GetEnv/FindClass/RegisterNatives across the boundary. Only the
 // JNI_OnLoad/RegisterNatives slots are thunked so far. ---
 #if ACL_HAVE_JNI
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
 namespace {
 // Wrapper handles: first member is the fn table (JNIEnv/JavaVM ABI), then the
 // real object.
@@ -2838,6 +2877,7 @@ extern "C" std::uintptr_t acl_ndk_attach_now() {
   return fs;
 }
 
+#if defined(__x86_64__)
 // The trampoline's slow path, called once per thread. It must preserve every
 // argument register across the attach call, because the trampoline is
 // signature-agnostic — it cannot know which of rdi/rsi/rdx/rcx/r8/r9 or xmm0-7
@@ -2890,6 +2930,8 @@ acl_ndk_attach_thunk:
     .size acl_ndk_attach_thunk,.-acl_ndk_attach_thunk
 )");
 extern "C" std::uintptr_t acl_ndk_attach_thunk();
+
+#endif  // __x86_64__
 
 // ── JNI down-call profiler (ACL_NDK_CALLPROF)
 // ────────────────────────────────────────────────── A gated per-call counter
@@ -2991,6 +3033,7 @@ int downcall_stack_slots(const char* sig) {
   return slots;
 }
 
+#if defined(__x86_64__)
 // Down-call trampoline: ART invokes a registered native under GLIBC %fs, but
 // the native is bionic code expecting bionic %fs + a wrapped JNIEnv. We emit,
 // per native, a tiny stub that gives the calling thread its wrapped env, swaps
@@ -3126,6 +3169,175 @@ void* make_downcall(void* real_native, int stack_slots = kDowncallMaxSlots) {
                           reinterpret_cast<char*>(p + o));
   return p;
 }
+#else  // arm64
+// ── The arm64 down-call ──────────────────────────────────────────────────
+// ART calls a native through a stub of five words: it loads the native's
+// address and jumps to acl_ndk_downcall_common, which every native shares.
+// The common code swaps to the thread's bionic thread pointer, calls the
+// native and swaps back.
+//
+// The native's arguments are not touched and the stack pointer is the one ART
+// called with, so arguments ART passed on the stack are where the native looks
+// for them; nothing is copied. The return address and the glibc thread
+// pointer cannot go on the stack for that reason. They go in a small stack
+// beside it (DowncallBlock) in the glibc TLS the thread runs on. The return
+// path, on the bionic thread pointer, finds the block through
+// TLS_SLOT_ART_THREAD_SELF: a slot bionic keeps for ART, which is free here
+// because ART is not a bionic program. Every call writes the slot, so a thread
+// that attaches again on another donor's glibc thread pointer uses that
+// donor's block and not the one it left. A native that calls back into Java,
+// which calls another native, nests in the block.
+//
+// A native that leaves by longjmp or pthread_exit does not pop its entry.
+//
+// Only x9 to x17 are used: the registers a caller may not rely on across a
+// call. x8, the indirect result register, is left alone.
+#if ACL_BIONIC_OFFSETS_AVAILABLE
+#define ACL_NDK_DOWNCALL_DEPTH 128
+struct DowncallBlock {
+  std::uintptr_t depth;  // entries in use
+  std::uintptr_t pad;
+  // Return address, glibc thread pointer.
+  std::uintptr_t entries[2 * ACL_NDK_DOWNCALL_DEPTH];
+};
+static_assert(offsetof(DowncallBlock, depth) == 0 &&
+                  offsetof(DowncallBlock, entries) == 16,
+              "acl_ndk_downcall_common reads depth at 0 and entries at 16");
+// Zero to begin with and never constructed, so the common code can use it
+// without a first-use check.
+thread_local DowncallBlock t_downcall_block;
+
+extern "C" {
+// Read by acl_ndk_downcall_common, which cannot name what is in the anonymous
+// namespace: the distance from the glibc thread pointer to t_bionic_fs, to
+// t_wrap_env and to t_downcall_block, and the wrapped JNIEnv's function table.
+__attribute__((visibility("hidden"))) std::int64_t acl_ndk_tls_disp = 0;
+__attribute__((visibility("hidden"))) std::int64_t acl_ndk_wrap_disp = 0;
+__attribute__((visibility("hidden"))) std::int64_t acl_ndk_block_disp = 0;
+__attribute__((visibility("hidden"))) const void* acl_ndk_env_tbl_ptr = nullptr;
+
+// More natives nested on one thread than the block holds. Reached on the
+// glibc thread pointer, before the swap.
+[[noreturn]] __attribute__((visibility("hidden"))) void
+acl_ndk_downcall_overflow() {
+  log::e(kTag, "native calls nested deeper than {} on one thread",
+         ACL_NDK_DOWNCALL_DEPTH);
+  std::abort();
+}
+}  // extern "C"
+
+#define ACL_NDK_STR2(x) #x
+#define ACL_NDK_STR(x) ACL_NDK_STR2(x)
+#define ACL_NDK_BLOCK_SLOT \
+  "#(" ACL_NDK_STR(ACL_BIONIC_TLS_SLOT_ART_THREAD_SELF_) "*8)"
+asm(R"(
+    .text
+    .globl acl_ndk_downcall_common
+    .hidden acl_ndk_downcall_common
+    .type acl_ndk_downcall_common,%function
+acl_ndk_downcall_common:
+    // x17: the native. x0-x8, v0-v7 and the stack: its arguments.
+    mrs   x9, tpidr_el0                    // glibc thread pointer
+    adrp  x10, acl_ndk_tls_disp
+    ldr   x10, [x10, :lo12:acl_ndk_tls_disp]
+    ldr   x11, [x9, x10]                   // this thread's bionic one, or 0
+    cbz   x11, 2f
+1:
+    // The wrapped JNIEnv of this thread, around the real one in x0.
+    adrp  x10, acl_ndk_wrap_disp
+    ldr   x10, [x10, :lo12:acl_ndk_wrap_disp]
+    add   x13, x9, x10
+    adrp  x14, acl_ndk_env_tbl_ptr
+    ldr   x14, [x14, :lo12:acl_ndk_env_tbl_ptr]
+    str   x14, [x13]
+    str   x0, [x13, #8]
+    mov   x0, x13
+    // Remember where to go back to, and as what.
+    adrp  x10, acl_ndk_block_disp
+    ldr   x10, [x10, :lo12:acl_ndk_block_disp]
+    add   x12, x9, x10                     // the block
+    ldr   x13, [x12]
+    cmp   x13, #)" ACL_NDK_STR(ACL_NDK_DOWNCALL_DEPTH) R"(
+    b.hs  3f
+    add   x14, x12, x13, lsl #4
+    stp   x30, x9, [x14, #16]
+    add   x13, x13, #1
+    str   x13, [x12]
+    str   x12, [x11, )" ACL_NDK_BLOCK_SLOT R"(]
+    msr   tpidr_el0, x11
+    blr   x17
+    // x0, x1 and v0-v3 are the native's result from here on.
+    mrs   x9, tpidr_el0
+    ldr   x12, [x9, )" ACL_NDK_BLOCK_SLOT R"(]
+    ldr   x13, [x12]
+    sub   x13, x13, #1
+    str   x13, [x12]
+    add   x14, x12, x13, lsl #4
+    ldp   x30, x10, [x14, #16]
+    msr   tpidr_el0, x10
+    ret
+2:
+    // First native on this thread: attach it. Every argument register is kept.
+    sub   sp, sp, #0xE0
+    stp   q0, q1, [sp, #0x00]
+    stp   q2, q3, [sp, #0x20]
+    stp   q4, q5, [sp, #0x40]
+    stp   q6, q7, [sp, #0x60]
+    stp   x0, x1, [sp, #0x80]
+    stp   x2, x3, [sp, #0x90]
+    stp   x4, x5, [sp, #0xA0]
+    stp   x6, x7, [sp, #0xB0]
+    stp   x8, x17, [sp, #0xC0]
+    str   x30, [sp, #0xD0]
+    bl    acl_ndk_attach_now
+    mov   x11, x0
+    ldp   q0, q1, [sp, #0x00]
+    ldp   q2, q3, [sp, #0x20]
+    ldp   q4, q5, [sp, #0x40]
+    ldp   q6, q7, [sp, #0x60]
+    ldp   x0, x1, [sp, #0x80]
+    ldp   x2, x3, [sp, #0x90]
+    ldp   x4, x5, [sp, #0xA0]
+    ldp   x6, x7, [sp, #0xB0]
+    ldp   x8, x17, [sp, #0xC0]
+    ldr   x30, [sp, #0xD0]
+    add   sp, sp, #0xE0
+    mrs   x9, tpidr_el0
+    b     1b
+3:
+    bl    acl_ndk_downcall_overflow
+    .size acl_ndk_downcall_common,.-acl_ndk_downcall_common
+)");
+extern "C" void acl_ndk_downcall_common();
+
+// The stub ART is given for one native: load its address, go to the common
+// code. The stack slot count is x86_64's concern.
+void* make_downcall(void* real_native, int stack_slots = kDowncallMaxSlots) {
+  (void)stack_slots;
+  const std::size_t page = boot_page();
+  auto* p = static_cast<std::uint32_t*>(
+      ::mmap(nullptr, page, PROT_READ | PROT_WRITE | PROT_EXEC,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  if (p == MAP_FAILED)
+    return nullptr;
+  p[0] = 0x58000071;  // ldr x17, .+12   (the native)
+  p[1] = 0x58000090;  // ldr x16, .+16   (the common code)
+  p[2] = 0xD61F0200;  // br  x16
+  const std::uintptr_t words[2] = {
+      reinterpret_cast<std::uintptr_t>(real_native),
+      reinterpret_cast<std::uintptr_t>(&acl_ndk_downcall_common)};
+  std::memcpy(p + 3, words, sizeof(words));
+  __builtin___clear_cache(reinterpret_cast<char*>(p),
+                          reinterpret_cast<char*>(p + 7));
+  return p;
+}
+#else
+// The block's slot is one of the measured offsets.
+void* make_downcall(void*, int = kDowncallMaxSlots) {
+  return nullptr;
+}
+#endif
+#endif
 
 // What a JNI_OnLoad explicitly bound, so later name resolution can leave those
 // methods alone (see BionicRuntime::was_registered). Global refs: these outlive
@@ -3568,7 +3780,7 @@ jint JNICALL w_DetachCurrentThread(JavaVM* vm) {
 #endif  // __x86_64__
 
 JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
   if (!real_vm || !real_env)
     return nullptr;
   // Parked glibc %fs donors for bionic threads that AttachCurrentThread later.
@@ -3585,10 +3797,19 @@ JavaVM* BionicRuntime::wrap_java_vm(JavaVM* real_vm, JNIEnv* real_env) {
   g_wrap_disp =
       static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(&t_wrap_env)) -
       static_cast<std::int64_t>(ndk_get_fs());
+#if defined(__x86_64__)
   if (g_wrap_disp < INT32_MIN || g_wrap_disp > INT32_MAX) {
     log::e(kTag, "wrapped-env TLS displacement does not fit a disp32");
     return nullptr;
   }
+#elif ACL_BIONIC_OFFSETS_AVAILABLE
+  acl_ndk_wrap_disp = g_wrap_disp;
+  acl_ndk_block_disp =
+      static_cast<std::int64_t>(
+          reinterpret_cast<std::uintptr_t>(&t_downcall_block)) -
+      static_cast<std::int64_t>(ndk_get_fs());
+  acl_ndk_env_tbl_ptr = &g_env_tbl;
+#endif
 
   g_env_tbl = *real_env->functions;  // start from the real table, then thunk
                                      // every slot below
@@ -4033,7 +4254,7 @@ bool ensure_looper_bridge_syms() {
 }  // namespace
 
 int main_looper_bridge_fd() {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
   // The caller is the main thread, and nothing has attached it when the app's
   // first native library was loaded on another thread (a WebView made off the
   // main thread before the first frame). load() and the bridge calls run
@@ -4054,7 +4275,7 @@ int main_looper_bridge_fd() {
 #endif
 }
 void main_looper_bridge_pump() {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
   if (g_bridge_pump_fn == nullptr)
     return;  // fd side resolves the symbols first
   BionicRuntime::RunScope scope(*BionicRuntime::get());
@@ -4063,7 +4284,7 @@ void main_looper_bridge_pump() {
 }
 
 void BionicRuntime::set_app_class_loader(JNIEnv* real_env, jobject loader) {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
   if (real_env == nullptr)
     return;
   if (g_app_class_loader != nullptr) {
@@ -4082,7 +4303,7 @@ void* BionicRuntime::load_library(const char* abs_path,
                                   JavaVM* real_vm,
                                   JNIEnv* real_env,
                                   std::string* error) {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
   // Wrap ART/libsigchain's signal handlers BEFORE running this lib's
   // constructors: a lib like libflutter.so spawns engine threads in its
   // .init_array, and a signal landing on one of those bionic-spawned threads (a
@@ -4252,7 +4473,7 @@ void* BionicRuntime::load_library(const char* abs_path,
 void* BionicRuntime::downcall_symbol(void* handle,
                                      const char* sym,
                                      const char* sig) {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
   void* raw = symbol(handle, sym);
   if (raw == nullptr)
     return nullptr;  // not exported by name — the common, non-error case
@@ -4271,7 +4492,7 @@ bool BionicRuntime::was_registered(JNIEnv* env,
                                    jclass klass,
                                    const char* name,
                                    const char* sig) const {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
   const std::lock_guard<std::mutex> lock(g_registered_mu);
   for (const Registered& r : g_registered)
     if (r.name == name && r.sig == sig && env->IsSameObject(r.cls, klass))
