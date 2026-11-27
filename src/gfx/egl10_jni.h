@@ -64,6 +64,17 @@ struct AclEgl10Hooks {
   // to route the bind to the native-GL donor %fs (mixed Java-EGL/native-GL
   // context bridging).
   bool (*is_surfacetexture_surface)(void* egl_surface, void* user) = nullptr;
+  // An offscreen surface of `width` x `height` for `config` of `display`, a
+  // display that has no pbuffer configs: Mesa's gbm platform, which the display
+  // is on whenever a4l renders to dma-bufs, offers window configs only. With
+  // this set, eglChooseConfig answers a request for a pbuffer config that
+  // matched nothing with a window config, and eglCreatePbufferSurface on a
+  // config that cannot make a pbuffer comes here. EGL_NO_SURFACE on failure.
+  EGLSurface (*create_offscreen_surface)(EGLDisplay display,
+                                         EGLConfig config,
+                                         int width,
+                                         int height,
+                                         void* user) = nullptr;
   void* user = nullptr;
 };
 

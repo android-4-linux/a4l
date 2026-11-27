@@ -16,10 +16,13 @@
 // glgen JNI files use.
 #pragma GCC diagnostic ignored "-Wwrite-strings"
 
+#include <algorithm>
+#include <mutex>
 #include <vector>
 
 #include <sys/syscall.h>
 #include <unistd.h>
+#include "gfx/egl_attribs.h"
 #include "gfx/gl_egl.h"
 #include "log/log.h"
 
@@ -152,6 +155,28 @@ jboolean _eglInitialize(JNIEnv* e,
   }
   return to_jbool(ok);
 }
+// The surfaces create_offscreen_surface made (see _eglCreatePbufferSurface).
+// eglMakeCurrent binds one of these where the app's native GL finds it.
+std::mutex g_offscreen_mutex;
+std::vector<EGLSurface> g_offscreen_surfaces;
+void remember_offscreen_surface(EGLSurface s) {
+  if (s == EGL_NO_SURFACE)
+    return;
+  const std::lock_guard<std::mutex> lock(g_offscreen_mutex);
+  g_offscreen_surfaces.push_back(s);
+}
+void forget_offscreen_surface(EGLSurface s) {
+  const std::lock_guard<std::mutex> lock(g_offscreen_mutex);
+  std::erase(g_offscreen_surfaces, s);
+}
+bool is_offscreen_surface(EGLSurface s) {
+  if (s == EGL_NO_SURFACE)
+    return false;
+  const std::lock_guard<std::mutex> lock(g_offscreen_mutex);
+  return std::find(g_offscreen_surfaces.begin(), g_offscreen_surfaces.end(),
+                   s) != g_offscreen_surfaces.end();
+}
+
 jboolean _eglTerminate(JNIEnv* e, jobject, jobject display) {
   // acl owns the display's lifetime (the GlDevice) — the app terminating it
   // would tear the device down under acl. Treat as a no-op success; the device
@@ -172,17 +197,47 @@ jboolean _eglChooseConfig(JNIEnv* e,
     return JNI_FALSE;
   }
   const std::vector<EGLint> a = attribs_of(e, attrib_list);
-  const jint want = configs != nullptr ? config_size : 0;
-  std::vector<EGLConfig> native(static_cast<std::size_t>(want));
+  const jint want = configs != nullptr && config_size > 0 ? config_size : 0;
+  // Mesa is asked for more configs than the app wants, so that the ordering
+  // below can put one a gbm window can be made for first even for an app
+  // that asks for a single config.
+  constexpr EGLint kAskAtLeast = 128;
+  const EGLint ask = want > 0 ? std::max<EGLint>(want, kAskAtLeast) : 0;
+  std::vector<EGLConfig> native(static_cast<std::size_t>(ask));
   EGLint num = 0;
-  const EGLBoolean ok =
-      eglChooseConfig(get_display(e, display), a.data(),
-                      want > 0 ? native.data() : nullptr, want, &num);
+  EGLBoolean ok = eglChooseConfig(get_display(e, display), a.data(),
+                                  ask > 0 ? native.data() : nullptr, ask, &num);
+  // An engine that renders offscreen first (Godot's, which Waze draws its map
+  // with) asks for a pbuffer config. On Android one config serves a window
+  // and a pbuffer; Mesa's gbm platform has window configs only. Where nothing
+  // matched and a pbuffer was asked for, ask again for a window config: the
+  // pbuffer the app goes on to make is an offscreen window (see
+  // _eglCreatePbufferSurface).
+  if (ok == EGL_TRUE && num == 0 &&
+      g_hooks.create_offscreen_surface != nullptr) {
+    const std::vector<int> retry =
+        egl_surface_type_swapped(a.data(), EGL_PBUFFER_BIT, EGL_WINDOW_BIT);
+    if (!retry.empty()) {
+      ok = eglChooseConfig(get_display(e, display), retry.data(),
+                           ask > 0 ? native.data() : nullptr, ask, &num);
+      static std::once_flag logged;
+      if (ok == EGL_TRUE && num > 0) {
+        std::call_once(logged, [] {
+          log::i(kTag,
+                 "eglChooseConfig: no pbuffer configs on this display; "
+                 "answering with a window config");
+        });
+      }
+    }
+  }
+  if (ok == EGL_TRUE && configs != nullptr) {
+    order_window_configs(get_display(e, display), native.data(),
+                         std::min(num, ask));
+    num = std::min<EGLint>(num, want);  // what the app is handed
+  }
   if (num_config != nullptr)
     e->SetIntArrayRegion(num_config, 0, 1, &num);
-  if (ok && configs != nullptr) {
-    order_window_configs(get_display(e, display), native.data(),
-                         num < want ? num : want);
+  if (ok == EGL_TRUE && configs != nullptr) {
     for (jint i = 0; i < num && i < want; ++i) {
       jobject o = e->NewObject(g_config_class, g_config_ctor,
                                reinterpret_cast<jlong>(native[i]));
@@ -295,6 +350,27 @@ jlong _eglCreatePbufferSurface(JNIEnv* e,
     return 0;
   }
   const std::vector<EGLint> a = attribs_of(e, attrib_list);
+  // A config that cannot make a pbuffer is one eglChooseConfig answered a
+  // pbuffer request with (above): the surface is an offscreen window.
+  EGLint surface_type = 0;
+  if (g_hooks.create_offscreen_surface != nullptr &&
+      eglGetConfigAttrib(get_display(e, display), get_config(e, config),
+                         EGL_SURFACE_TYPE, &surface_type) == EGL_TRUE &&
+      (surface_type & EGL_PBUFFER_BIT) == 0) {
+    // A pbuffer's size defaults to 0 x 0; a window has to have some.
+    int width = 1, height = 1;
+    for (std::size_t i = 0; i + 1 < a.size() && a[i] != EGL_NONE; i += 2) {
+      if (a[i] == EGL_WIDTH && a[i + 1] > 0)
+        width = a[i + 1];
+      else if (a[i] == EGL_HEIGHT && a[i + 1] > 0)
+        height = a[i + 1];
+    }
+    const EGLSurface offscreen = g_hooks.create_offscreen_surface(
+        get_display(e, display), get_config(e, config), width, height,
+        g_hooks.user);
+    remember_offscreen_surface(offscreen);
+    return reinterpret_cast<jlong>(offscreen);
+  }
   EGLSurface s = eglCreatePbufferSurface(get_display(e, display),
                                          get_config(e, config), a.data());
   return reinterpret_cast<jlong>(s);
@@ -342,11 +418,17 @@ jlong _eglCreateWindowSurfaceTexture(JNIEnv* e,
 // -fno-stack-protector TU).
 extern "C" void acl_gl_run_on_donor(void (*fn)(void*), void* arg);
 extern "C" void acl_gl_donor_route_set(int on);
+extern "C" int acl_gl_donor_route_get(void);
 struct AclMakeCurrentArgs {
   EGLDisplay dpy;
   EGLSurface draw;
   EGLSurface read;
   EGLContext ctx;
+  EGLBoolean ok;
+};
+struct AclSwapArgs {
+  EGLDisplay dpy;
+  EGLSurface surface;
   EGLBoolean ok;
 };
 jboolean _eglMakeCurrent(JNIEnv* e,
@@ -362,9 +444,15 @@ jboolean _eglMakeCurrent(JNIEnv* e,
   // A SurfaceTexture producer surface: the app renders it in NATIVE GL (on the
   // bionic-%fs donor), so bind the context on THAT donor %fs — else the native
   // GL has no current context. Mark the thread donor-routed so GLUtils uploads
-  // textures on the same donor.
-  if (g_hooks.is_surfacetexture_surface != nullptr && d != EGL_NO_SURFACE &&
-      g_hooks.is_surfacetexture_surface(d, g_hooks.user)) {
+  // textures on the same donor. The same for an offscreen surface made for a
+  // pbuffer: an engine that sets EGL up here and then draws in native code
+  // (Godot in Waze) otherwise compiles its shaders with no context. And a
+  // thread that is routed stays routed, so that a later bind or unbind
+  // replaces the context where native GL looks for it.
+  const bool st_surface = g_hooks.is_surfacetexture_surface != nullptr &&
+                          d != EGL_NO_SURFACE &&
+                          g_hooks.is_surfacetexture_surface(d, g_hooks.user);
+  if (st_surface || is_offscreen_surface(d) || acl_gl_donor_route_get() != 0) {
     AclMakeCurrentArgs a{dpy, d, r, c, EGL_FALSE};
     acl_gl_run_on_donor(
         +[](void* p) {
@@ -372,7 +460,8 @@ jboolean _eglMakeCurrent(JNIEnv* e,
           a->ok = eglMakeCurrent(a->dpy, a->draw, a->read, a->ctx);
         },
         &a);
-    if (a.ok == EGL_TRUE)
+    // Once per thread: each call that sets it takes a slot of the table.
+    if (a.ok == EGL_TRUE && acl_gl_donor_route_get() == 0)
       acl_gl_donor_route_set(1);
     return to_jbool(a.ok);
   }
@@ -386,6 +475,18 @@ jboolean _eglSwapBuffers(JNIEnv* e, jobject, jobject display, jobject surface) {
   if (g_hooks.swap_surfacetexture != nullptr &&
       g_hooks.swap_surfacetexture(s, g_hooks.user))
     return JNI_TRUE;
+  // On a thread whose context is bound on the donor, the swap has to be made
+  // there too: Mesa swaps the surface that is current where it is called.
+  if (acl_gl_donor_route_get() != 0) {
+    AclSwapArgs a{get_display(e, display), s, EGL_FALSE};
+    acl_gl_run_on_donor(
+        +[](void* p) {
+          auto* a = static_cast<AclSwapArgs*>(p);
+          a->ok = eglSwapBuffers(a->dpy, a->surface);
+        },
+        &a);
+    return to_jbool(a.ok);
+  }
   // Mesa's Wayland WSI attaches/commits/throttles acl's wl_surface here.
   return to_jbool(eglSwapBuffers(get_display(e, display), s));
 }
@@ -400,6 +501,7 @@ jboolean _eglDestroySurface(JNIEnv* e,
                             jobject,
                             jobject display,
                             jobject surface) {
+  forget_offscreen_surface(get_surface(e, surface));
   return to_jbool(
       eglDestroySurface(get_display(e, display), get_surface(e, surface)));
 }

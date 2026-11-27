@@ -5,7 +5,9 @@
 # Offscreen GL through android.opengl.EGL14 on the default display, as a player's placeholder
 # surface sets it up. Mesa's default display is its build's default platform, which fails to
 # initialize where that platform's server is not running; a4l then gives EGL14 Mesa's
-# surfaceless platform. Two runs, each must clear a pbuffer and read the pixel back:
+# surfaceless platform. Two runs, each must clear a pbuffer and read the pixel back, through
+# EGL14 and then through EGL10 (whose display is a4l's own, on Mesa's gbm platform here, where
+# a pbuffer is an offscreen window):
 #   - a display server named, but EGL_PLATFORM=x11 and no X server (a board that runs only a
 #     Wayland compositor under a Mesa that defaults to X11);
 #   - no display server in the environment at all (a --split app process).
@@ -110,7 +112,16 @@ def main() -> int:
             if not m.group(1).startswith("OK") or not m.group(1).endswith("0,255,0"):
                 sys.stderr.write(f"FAIL ({label}): {m.group(1)}\n{out[-6000:]}\n")
                 return 1
-            notes.append(f"{label}: {m.group(1)[3:]}")
+            # The same offscreen setup through EGL10, on a4l's own display: with no
+            # GLSurfaceView that is Mesa's gbm platform, which has no pbuffer configs.
+            m10 = re.search(r"EGL10: (OK .*|FAILED .*)", out)
+            if not m10:
+                sys.stderr.write(f"FAIL ({label}): no EGL10 report\n{out[-6000:]}\n")
+                return 1
+            if not m10.group(1).startswith("OK") or not m10.group(1).endswith("0,255,0"):
+                sys.stderr.write(f"FAIL ({label}): EGL10: {m10.group(1)}\n{out[-6000:]}\n")
+                return 1
+            notes.append(f"{label}: {m.group(1)[3:]}; EGL10 {m10.group(1)[3:]}")
         sys.stdout.write("OK: " + "; ".join(notes) + "\n")
         return 0
     except subprocess.CalledProcessError as e:
