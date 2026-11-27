@@ -52,10 +52,11 @@ class LocationSource {
   virtual void stop() = 0;
 };
 
-// Pick the best available source: an ACL_LOCATION_LATLON override (synthetic,
-// for tests) wins; otherwise the host GeoClue2 source when sdbus-c++ is
-// compiled in and the service is reachable; otherwise a null source that yields
-// no fixes. Never returns null.
+// Pick the source: an ACL_LOCATION_LATLON override (synthetic, for tests)
+// wins; then what ACL_LOCATION names ("gpsd": a receiver behind gpsd at
+// ACL_GPSD, default localhost:2947; "geoclue"; "none"); not set, the host
+// GeoClue2 source when sdbus-c++ is compiled in; otherwise a null source that
+// yields no fixes. Never returns null.
 std::unique_ptr<LocationSource> make_location_source();
 
 // Process-wide owner of the source and the last known fix, behind

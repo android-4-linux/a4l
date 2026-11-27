@@ -1228,6 +1228,17 @@ if have_secret and have_jni
   )
 endif
 
+# The gpsd location source against a stand-in gpsd (a TCP server in the test): the ?WATCH
+# handshake, a report split across packets, a dropped connection and the reconnection, and
+# no daemon at all. Needs nothing but the probe.
+test(
+  'location-gpsd',
+  py3,
+  args : [files('run_location_gpsd_test.py'), location_probe],
+  depends : [location_probe],
+  timeout : 120,
+)
+
 # A backend finds a service the bus has not started: a private bus standing in for the system
 # bus starts a stand-in UPower on demand, and acl-battery-probe must find and read it. Needs
 # sdbus-c++ and dbus-daemon; SKIPs without the latter.

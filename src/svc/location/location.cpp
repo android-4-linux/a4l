@@ -13,9 +13,13 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 
 #include "acl_config.h"
 #include "log/log.h"
+#include "svc/location/gpsd_source.h"
+#include "svc/location/gpsd_tpv.h"
 
 #if ACL_HAVE_SDBUS
 #include <sdbus-c++/sdbus-c++.h>
@@ -251,6 +255,31 @@ std::unique_ptr<LocationSource> make_location_source() {
            synth.latitude, synth.longitude, synth.accuracy_m);
     return std::make_unique<SyntheticSource>(synth);
   }
+  // ACL_LOCATION names the source: "gpsd" (a GNSS receiver behind gpsd, at
+  // ACL_GPSD or localhost:2947), "geoclue", or "none". Not set, it is GeoClue2
+  // where a4l was built with sdbus-c++. gpsd is not looked for unasked: a
+  // desktop has its socket listening with no receiver behind it.
+  const char* chosen = std::getenv("ACL_LOCATION");
+  const std::string_view want = chosen != nullptr ? chosen : "";
+  if (want == "gpsd") {
+    const char* at = std::getenv("ACL_GPSD");
+    std::string host, port;
+    if (!parse_gpsd_endpoint(at != nullptr ? at : "", &host, &port)) {
+      log::w(kTag, "ACL_GPSD='{}' is not host[:port]; using localhost:2947",
+             std::string(at != nullptr ? at : ""));
+      host = "localhost";
+      port = "2947";
+    }
+    log::i(kTag, "location source: gpsd at {}:{}", host, port);
+    return make_gpsd_source(std::move(host), std::move(port));
+  }
+  if (want == "none") {
+    log::i(kTag, "location source: none (ACL_LOCATION=none)");
+    return std::make_unique<NullSource>();
+  }
+  if (!want.empty() && want != "geoclue")
+    log::w(kTag, "ACL_LOCATION='{}' is not gpsd, geoclue or none; ignored",
+           want);
 #if ACL_HAVE_SDBUS
   return std::make_unique<GeoClue2Source>();
 #else
