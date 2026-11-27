@@ -573,6 +573,17 @@ public class Main extends Activity {
         log("network requested=" + requested);
         expect(requested, "requestNetwork: online " + online + " met " + met + " best " + best
                 + " bluetooth " + got[1] + " timed out " + timedOut);
+        // The data directory can be measured, as an app does to size its caches, and it is
+        // in the user's data directory, not a path inside the runtime's install.
+        String dataDir = android.os.Environment.getDataDirectory().getPath();
+        boolean measured = false;
+        try {
+            measured = new android.os.StatFs(dataDir).getBlockCountLong() > 0;
+        } catch (RuntimeException e) {
+            dataDir += " (" + e + ")";
+        }
+        log("data directory measured=" + measured + " at " + dataDir);
+        expect(measured, "StatFs of the data directory " + dataDir);
         // A SweepGradient from red to blue around the center: red just past the positive x
         // axis, an even mix opposite it, blue just before the axis again.
         final android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(

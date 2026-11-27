@@ -28,6 +28,8 @@
 
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
+#include <system_error>
 
 #include <dlfcn.h>
 #include <jni.h>
@@ -6758,7 +6760,35 @@ class ArtVm final : public JniVm {
     ::setenv("ANDROID_I18N_ROOT", (home + "/com.android.i18n").c_str(), 1);
     ::setenv("ANDROID_TZDATA_ROOT", (home + "/com.android.tzdata").c_str(), 1);
     if (std::getenv("ANDROID_DATA") == nullptr) {
-      ::setenv("ANDROID_DATA", (home + "/acl-android-data").c_str(), 1);
+      // What Environment.getDataDirectory() names. It has to exist: an app
+      // measures it with StatFs to learn how much room its data has. So it is
+      // made here, in the user's data directory, which is where the apps'
+      // files are kept: $XDG_DATA_HOME/a4l/android-data. It used to be a path
+      // inside the ART install, which nothing made and which an installed
+      // runtime would not let a user make.
+      std::string data;
+      // An XDG path must be absolute; a relative one is ignored, as the spec
+      // says.
+      if (const char* x = std::getenv("XDG_DATA_HOME");
+          x != nullptr && x[0] == '/') {
+        data = x;
+      } else if (const char* h = std::getenv("HOME");
+                 h != nullptr && h[0] == '/') {
+        data = std::string(h) + "/.local/share";
+      }
+      if (!data.empty()) {
+        data += "/a4l/android-data";
+        std::error_code ec;
+        std::filesystem::create_directories(data, ec);
+        if (!std::filesystem::is_directory(data, ec)) {
+          log::w(kTag, "cannot make {} for ANDROID_DATA; using the ART home",
+                 data);
+          data.clear();
+        }
+      }
+      if (data.empty())
+        data = home + "/acl-android-data";
+      ::setenv("ANDROID_DATA", data.c_str(), 1);
     }
 
     // libart.so carries RUNPATH=$ORIGIN, so its lib64/ siblings resolve without
