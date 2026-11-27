@@ -258,10 +258,18 @@ host supplies the thread pointer (`%fs` through `arch_prctl`, or `TPIDR_EL0` thr
 its page size, and the instruction that makes `linker_debuggerd_init` return. On arm64 the thread
 that bootstraps the linker can `load()` a library and call into it under a `RunScope`.
 `tools/stage-bionic-runtime.sh` with `ACL_BIONIC_ARCH=arm64` stages the linker, libc, libm, libdl,
-liblog, libc++ and the stub from the tree's `linux_bionic_arm64` outputs. Not ported yet, each
-still x86_64 only: `attach_current_thread` (the TCB layout in `bionic_offsets.h` is measured for
-x86_64), the JNI boundary and its up-call thunks, the down-call trampolines, the signal shim, the
-GL forwarders, and the shim libraries (`libandroid.so` and the rest). `ndk-bootstrap` is the test.
+liblog, libc++ and the stub from the tree's `linux_bionic_arm64` outputs. `ndk-bootstrap` is the
+test.
+
+**arm64, second step (2026-11-26).** `attach_current_thread` is one piece of code for both hosts.
+`bionic_offsets.h` is measured for the architecture a4l is built for
+(`tools/gen-bionic-offsets.sh <out> <cpu family>`). On arm64 the TCB's first slot is at index
+`MIN_TLS_SLOT` = -1 (the `bionic_tls` pointer), the DTV at 0 and the thread struct at 1; the thread
+pointer is the TCB's address plus one slot, and the slots are indexed from it. There is no
+`TLS_SLOT_SELF`: arm64 reads thread-locals through the DTV. The pairing registry
+(`register_fs_pair` and its lookups) and the exit-time release are shared too. Not ported yet, each
+still x86_64 only: the JNI boundary and its up-call thunks, the down-call trampolines, the signal
+shim, the GL forwarders, and the shim libraries (`libandroid.so` and the rest).
 
 **Rung 4a — the bidirectional %fs boundary, PROVEN (2026-07-16).** `acl-ndk-probe --boundary` →
 `boundary selftest = 1010 (PASS)`. A bionic `.so` under bionic `%fs` writes a bionic thread-local,
