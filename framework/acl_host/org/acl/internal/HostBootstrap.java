@@ -387,6 +387,17 @@ public final class HostBootstrap {
         }
     }
 
+    // The Android ABI directory for a JVM os.arch value, or null for a host no WebView APK has an
+    // engine for.
+    static String webViewAbi(String osArch) {
+        if (osArch == null) return null;
+        switch (osArch) {
+            case "x86_64": case "amd64": return "x86_64";
+            case "aarch64": case "arm64": return "arm64-v8a";
+            default: return null;
+        }
+    }
+
     // Heavy body (run lazily by LazyWebViewProvider): extract the engine, load it under the WebView
     // classloader, build the chromium provider, publish it as sProviderInstance, and RETURN it (null on
     // failure). Publishing the real provider means getProvider() no longer routes through the proxy.
@@ -397,8 +408,13 @@ public final class HostBootstrap {
                 System.err.println("acl WebView: ACL_WEBVIEW_APK not found: " + apkPath);
                 return null;
             }
-            // Host is x86_64; match the APK's lib/<abi>/.
-            final String abi = "x86_64";
+            // The APK's lib/<abi>/ for this host: the engine is native code.
+            final String abi = webViewAbi(System.getProperty("os.arch"));
+            if (abi == null) {
+                System.err.println("acl WebView: no engine for host architecture "
+                        + System.getProperty("os.arch"));
+                return null;
+            }
             java.io.File libDir = new java.io.File(System.getProperty("java.io.tmpdir"), "acl-webview-lib");
             libDir.mkdirs();
             // Extract the native engine (+ chromium linker/crashpad, best-effort) next to it.
