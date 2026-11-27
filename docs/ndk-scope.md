@@ -22,7 +22,7 @@ these on a glibc/Wayland host breaks into: (1) find/extract the right ABI, (2) C
   (x86_64 → `{x86_64, x86}`, arm64 → `{arm64-v8a, armeabi-v7a, armeabi}`); `Apk::select_abi(apkAbis)`
   returns the first host-compatible ABI present, else "".
 - **`a4l run`**: when the APK has native libs, extract `lib/<abi>/*.so` for the selected ABI to a
-  per-app dir (`$XDG_CACHE_HOME/acl/<pkg>/lib`) and add `-Djava.library.path=<dir>` so host ART's
+  per-app dir (`$XDG_CACHE_HOME/a4l/<pkg>/lib`) and add `-Djava.library.path=<dir>` so host ART's
   `System.loadLibrary` resolves them. An ABI mismatch (e.g. an arm-only app on an x86_64 host) is
   reported, not extracted.
 

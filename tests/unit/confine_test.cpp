@@ -160,7 +160,7 @@ TEST_CASE("confine: the bubblewrap command line", "[confine]") {
   plan.bwrap = "/usr/bin/bwrap";
   plan.ro = {"/usr", "/opt/art", "/opt/art/lib64"};
   plan.ro_optional = {"/etc/fonts"};
-  plan.rw = {"/home/u/.local/share/acl/org.example"};
+  plan.rw = {"/home/u/.local/share/a4l/org.example"};
   plan.devices = {"/dev/dri/renderD128"};
   plan.symlinks = {{"usr/lib64", "/lib64"}};
 
@@ -198,10 +198,10 @@ TEST_CASE("confine: the bubblewrap command line", "[confine]") {
   CHECK(pos("--ro-bind", "/") < 0);
   CHECK(pos("--dev-bind", "/dev") < 0);
   CHECK(std::count(a.begin(), a.end(), "--bind") == 1);
-  CHECK(pos("--bind", "/home/u/.local/share/acl/org.example") >
+  CHECK(pos("--bind", "/home/u/.local/share/a4l/org.example") >
         pos("--ro-bind", "/usr"));
   CHECK(pos("--remount-ro", "/") >
-        pos("--bind", "/home/u/.local/share/acl/org.example"));
+        pos("--bind", "/home/u/.local/share/a4l/org.example"));
 
   plan.share_net = true;
   plan.disable_userns = false;

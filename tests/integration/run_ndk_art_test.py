@@ -9,7 +9,7 @@
 #
 # The chain under test:
 #   acl run ndk.apk --vm=art
-#     -> pkg extracts lib/x86_64/*.so -> $XDG_CACHE_HOME/acl/<pkg>/lib, exports ACL_BIONIC_APP_LIBS
+#     -> pkg extracts lib/x86_64/*.so -> $XDG_CACHE_HOME/a4l/<pkg>/lib, exports ACL_BIONIC_APP_LIBS
 #     -> ART boots; ACL_BIONIC_LINKER set => Runtime.nativeLoad is routed to acl (jvm_vm)
 #     -> Main.<clinit> System.loadLibrary("ndktest") -> nativeLoad -> is_bionic_elf => true
 #     -> in-process bionic linker dlopens it, JNI_OnLoad runs across the %fs boundary,

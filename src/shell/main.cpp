@@ -511,6 +511,10 @@ int run_split(const acl::pkg::Apk& apk,
   if (auto mbytes = apk.read("AndroidManifest.xml", merr))
     (void)acl::pkg::parse_manifest(*mbytes, manifest);
   const std::string package_dir = acl::pkg::safe_package_dir(manifest.package);
+  // Data this app has from an a4l that kept it under "acl" comes along,
+  // before anything below makes the directory under the new name.
+  if (acl::pkg::adopt_legacy_data_dir(package_dir))
+    acl::log::i(kTag, "moved {}'s data to the a4l data directory", package_dir);
 
   // Confinement (ADR-0009 C4): the plan for bubblewrap, which becomes the
   // program this process starts, and the child's environment as an allowlist.
@@ -979,6 +983,13 @@ int cmd_run(const std::vector<std::string>& args) {
     acl::log::w(kTag, "no AndroidManifest.xml: [{}] {}",
                 acl::pkg::zip_status_name(merr.status), merr.message);
   }
+
+  // Data this app has from an a4l that kept it under "acl" comes along,
+  // before the runtime makes the directory under the new name. (A --split
+  // run did this before it started this process.)
+  if (const std::string dir = acl::pkg::safe_package_dir(manifest.package);
+      acl::pkg::adopt_legacy_data_dir(dir))
+    acl::log::i(kTag, "moved {}'s data to the a4l data directory", dir);
 
   // Resolve the launch class: explicit --main wins, else the manifest launcher.
   if (main_class.empty()) {

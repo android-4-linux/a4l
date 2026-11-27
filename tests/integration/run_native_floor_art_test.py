@@ -121,7 +121,7 @@ def main() -> int:
 
         env = dict(os.environ)
         # Keep this run's caches inside the sandbox: meson runs tests in parallel, and several
-        # exercise `acl run`, so a shared ~/.cache/acl makes them race each other.
+        # exercise `acl run`, so a shared ~/.cache/a4l makes them race each other.
         env["XDG_CACHE_HOME"] = os.path.join(work, "cache")
         env["ACL_ART_BOOTCLASSPATH"] = framework  # P2.1: framework on the bootclasspath
         env["ACL_ART_NATIVE"] = "1"
