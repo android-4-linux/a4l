@@ -5104,6 +5104,28 @@ public final class HostBootstrap {
     // IActivityManager. PendingIntents are kept and sent in this process, and a foreground
     // Service's notification goes to the desktop; everything else defaults (an empty process
     // list and the like, enough for the probes apps make at start).
+    // IWindowManager. The animation scales are 1: WindowManagerGlobal hands
+    // getCurrentAnimatorScale() to ValueAnimator.setDurationScale the first time anything asks
+    // for the window manager, and the default 0 made every animator in the app end on its
+    // first frame. A window drew the first frame of its opening transition and then its last:
+    // WhatsApp's overflow menu showed for one frame as a grey sliver over the toolbar, where
+    // its reveal starts from, before it appeared whole. Everything else defaults as before.
+    private static Object makeWindowManagerHandler(Class<?> iface) {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> {
+                    switch (method.getName()) {
+                        case "getCurrentAnimatorScale":
+                        case "getAnimationScale":   // (which)
+                            return 1.0f;
+                        case "getAnimationScales":
+                            return new float[] {1.0f, 1.0f, 1.0f};  // window, transition, animator
+                        default:
+                            return defaultValue(method.getReturnType());
+                    }
+                });
+    }
+
     private static Object makeActivityManagerHandler(Class<?> iface) {
         return java.lang.reflect.Proxy.newProxyInstance(
                 iface.getClassLoader(), new Class<?>[]{iface},
@@ -5781,6 +5803,7 @@ public final class HostBootstrap {
                                 : "media_session".equals(name) ? makeSessionManagerHandler(iface)
                                 : "activity_task".equals(name) ? makeActivityTaskHandler(iface)
                                 : "activity".equals(name) ? makeActivityManagerHandler(iface)
+                                : "window".equals(name) ? makeWindowManagerHandler(iface)
                                 : noop(iface);
                         final String descriptor = ifaceName;  // AIDL DESCRIPTOR == interface FQN
                         // Proxy IBinder (an interface) rather than new Binder() — the latter
