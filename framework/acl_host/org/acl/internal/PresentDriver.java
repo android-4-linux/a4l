@@ -43,14 +43,16 @@ public final class PresentDriver {
         final long s = sSession;
         if (s != 0L && text != null) nSetClipboard(s, text);
     }
-    private static native void nSetContentView(long s, View decor);      // swap presented decor (activity transition)
+    // Swap the presented decor (activity transition). keepPlane: the video plane is still in use.
+    private static native void nSetContentView(long s, View decor, boolean keepPlane);
 
     /** Swap the presented decor to a newly-launched Activity's (internal splash -> main transition). */
     public static boolean setContentView(View decor) {
         final long s = sSession;
         if (s == 0L || decor == null) return false;
-        HostBootstrap.forgetVideoSurface();  // the old screen's video SurfaceView is gone; re-arm fresh
-        nSetContentView(s, decor);
+        // The old screen's SurfaceView is gone, and the next one is given its own surface:
+        // unless its Activity is still on screen, under a translucent one or after it.
+        nSetContentView(s, decor, HostBootstrap.dropHiddenPlanes());
         return true;
     }
 
@@ -242,12 +244,11 @@ public final class PresentDriver {
                 // ExoPlayer stops rendering to a PlaceholderSurface (which skips every frame) — before
                 // the traversal, so the surfaceCreated it fires is reflected this frame.
                 // The Activity on top now, which is not the one this loop was started
-                // with once the app has started another: its SurfaceView is the one to back.
+                // with once the app has started another: its SurfaceView is the one to back,
+                // or that of an Activity on screen under it.
                 final View shown = HostBootstrap.currentTopDecorView();
                 final View top = shown != null ? shown : decor;
-                HostBootstrap.maybeInjectVideoSurface(top);
-                HostBootstrap.maybeLogVideoPlayer(top);
-                HostBootstrap.prepareTextureViews(top);
+                HostBootstrap.prepareWindows(top);
                 nTraverse(s);
                 postTraversal(choreo, postCallback, traversal[0]);
                 // A pre-draw listener cancelled the draw (a splash screen holding its first

@@ -3458,8 +3458,27 @@ public final class HostBootstrap {
         final int requestCode;                 // -1 unless started for a result
         int resultCode = android.app.Activity.RESULT_CANCELED;
         android.content.Intent resultData;
+        // Its theme has windowIsTranslucent or windowIsFloating: the Activity under it stays
+        // on screen, as ActivityInfo.isTranslucentOrFloating decides on Android.
+        final boolean translucent;
+        boolean stopped;  // onStop has been called, and onRestart has not been since
         ActivityRecord(android.app.Activity a, android.os.IBinder t, android.os.IBinder caller, int rc) {
             activity = a; token = t; callerToken = caller; requestCode = rc;
+            translucent = translucentOrFloating(a);
+        }
+    }
+
+    private static boolean translucentOrFloating(android.app.Activity a) {
+        android.content.res.TypedArray t = null;
+        try {
+            // In ascending order, as obtainStyledAttributes wants its attributes.
+            t = a.getTheme().obtainStyledAttributes(new int[] {
+                    android.R.attr.windowIsFloating, android.R.attr.windowIsTranslucent});
+            return t.getBoolean(0, false) || t.getBoolean(1, false);
+        } catch (Throwable e) {
+            return false;  // no theme to read: an ordinary, opaque Activity
+        } finally {
+            if (t != null) t.recycle();
         }
     }
     static final java.util.ArrayDeque<ActivityRecord> sTask = new java.util.ArrayDeque<>();  // head = top
@@ -3475,12 +3494,166 @@ public final class HostBootstrap {
     // onCreate — before the presenter opens — so the entry activity is already gone and its decor
     // would show a frozen splash. Presenting the live top shows the real screen.
     public static android.view.View currentTopDecorView() {
-        ActivityRecord top = sTask.peek();
-        if (top == null || top.activity == null) return null;
+        return decorOf(sTask.peek());
+    }
+
+    private static android.view.View decorOf(ActivityRecord r) {
+        if (r == null || r.activity == null) return null;
         try {
-            android.view.Window w = top.activity.getWindow();
+            android.view.Window w = r.activity.getWindow();
             return w != null ? w.getDecorView() : null;
         } catch (Throwable t) { return null; }
+    }
+
+    // ── Activities on screen under a translucent one ──────────────────────────────────────────
+    // An Activity whose theme is translucent, or floating, does not hide the one under it: a
+    // sign-in card over a map, a dialog-themed Activity over a list. On Android the one under
+    // it is paused and not stopped, its window stays on screen with any SurfaceView surface it
+    // has, and it is resumed with no restart when the one over it finishes. a4l draws every
+    // Activity into the one surface, so the windows on screen are drawn bottom one first, each
+    // a full traversal (layoutUnderlays, drawUnderlays), and the top one over them.
+
+    // How many Activities are on screen, counted from the top of the task: the top one, and
+    // each one that has only translucent ones over it.
+    private static int shownCount() {
+        int n = 0;
+        for (ActivityRecord r : sTask) {  // top first
+            n++;
+            if (!r.translucent) break;
+        }
+        return n;
+    }
+
+    private static final java.util.List<android.view.View> NO_VIEWS =
+            java.util.Collections.emptyList();
+
+    // The windows of the Activities on screen under the top one, bottom one first. Empty
+    // unless the top one is translucent, which is nearly always.
+    private static java.util.List<android.view.View> decorsUnderTop() {
+        final ActivityRecord top = sTask.peek();
+        if (top == null || !top.translucent || sTask.size() < 2) return NO_VIEWS;
+        final java.util.ArrayList<android.view.View> out = new java.util.ArrayList<>(2);
+        for (ActivityRecord r : sTask) {
+            if (r == top) continue;
+            final android.view.View decor = decorOf(r);
+            if (decor != null) out.add(decor);
+            if (!r.translucent) break;
+        }
+        java.util.Collections.reverse(out);
+        return out;
+    }
+
+    private static boolean onScreen(android.view.View v) {
+        final android.view.View root = v.getRootView();
+        int left = shownCount();
+        for (ActivityRecord r : sTask) {
+            if (left-- <= 0) break;
+            if (decorOf(r) == root) return true;
+        }
+        return false;
+    }
+
+    // After the task changed: stops each Activity an opaque one now covers, and starts again
+    // each one that is back on screen. Resuming the top one is the caller's.
+    private static void syncShown() {
+        final int shown = shownCount();
+        int i = 0;
+        // A copy: an Activity may start or finish another from the callback.
+        for (ActivityRecord r : new java.util.ArrayList<ActivityRecord>(sTask)) {
+            final boolean visible = i++ < shown;
+            if (!sByToken.containsKey(r.token)) continue;
+            if (!visible && !r.stopped) {
+                r.stopped = true;
+                safeLifecycle(r.activity, "onStop");
+            } else if (visible && r.stopped) {
+                r.stopped = false;
+                safeLifecycle(r.activity, "onRestart");
+                safeLifecycle(r.activity, "onStart");
+            }
+        }
+    }
+
+    // The windows under the top one that layoutUnderlays laid out for this frame and whose
+    // draw no pre-draw listener cancelled, bottom one first. Main thread.
+    private static java.util.List<android.view.View> sUnderlays = NO_VIEWS;
+    private static int sUnderlayFailures;
+
+    /**
+     * Lays out the window of each Activity on screen under the top one, at the size of the
+     * screen, and runs its tree observer, as the present loop does for the top one. Returns
+     * whether there are any to draw. Called by the present loop once a frame.
+     */
+    public static boolean layoutUnderlays(int w, int h) {
+        final java.util.List<android.view.View> under = decorsUnderTop();
+        if (under.isEmpty()) {
+            sUnderlays = NO_VIEWS;
+            return false;
+        }
+        final java.util.ArrayList<android.view.View> drawn =
+                new java.util.ArrayList<>(under.size());
+        final int wspec = android.view.View.MeasureSpec.makeMeasureSpec(
+                w, android.view.View.MeasureSpec.EXACTLY);
+        final int hspec = android.view.View.MeasureSpec.makeMeasureSpec(
+                h, android.view.View.MeasureSpec.EXACTLY);
+        for (android.view.View decor : under) {
+            try {
+                // One the app covered before its first frame has not been attached yet.
+                if (!decor.isAttachedToWindow()) attachDecorToWindow(decor);
+                final boolean didLayout = decor.isLayoutRequested();
+                decor.measure(wspec, hspec);
+                decor.layout(0, 0, decor.getMeasuredWidth(), decor.getMeasuredHeight());
+                if (!dispatchTreeObserver(decor, didLayout)) drawn.add(decor);
+            } catch (Throwable t) {
+                if (sUnderlayFailures++ < 3) {
+                    System.err.println("acl HostBootstrap: layoutUnderlays: " + t);
+                    t.printStackTrace();
+                }
+            }
+        }
+        sUnderlays = drawn;
+        return true;
+    }
+
+    /**
+     * Draws the windows layoutUnderlays laid out, bottom one first, then the dim the top
+     * window asks for behind itself (FLAG_DIM_BEHIND). The present loop draws the top one
+     * over them.
+     */
+    public static void drawUnderlays(android.graphics.Canvas canvas) {
+        if (canvas == null) return;
+        try {
+            for (android.view.View decor : sUnderlays) decor.draw(canvas);
+            final ActivityRecord top = sTask.peek();
+            final android.view.Window w = top != null ? top.activity.getWindow() : null;
+            final android.view.WindowManager.LayoutParams lp = w != null ? w.getAttributes() : null;
+            if (lp != null
+                    && (lp.flags & android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND) != 0) {
+                final int a = (int) (Math.max(0f, Math.min(1f, lp.dimAmount)) * 255f);
+                if (a > 0) canvas.drawColor(a << 24);
+            }
+        } catch (Throwable t) {
+            if (sUnderlayFailures++ < 3) {
+                System.err.println("acl HostBootstrap: drawUnderlays: " + t);
+                t.printStackTrace();
+            }
+        }
+    }
+
+    /**
+     * Before a frame: gives the SurfaceView on screen its surface and the TextureViews
+     * theirs, in the top Activity's window and in each one on screen under it. There is one
+     * plane: it goes to the SurfaceView nearest the top that can take it.
+     */
+    static void prepareWindows(android.view.View top) {
+        boolean surfaced = maybeInjectVideoSurface(top);
+        maybeLogVideoPlayer(top);
+        prepareTextureViews(top);
+        final java.util.List<android.view.View> under = decorsUnderTop();
+        for (int i = under.size() - 1; i >= 0; i--) {
+            final android.view.View decor = under.get(i);
+            if (!surfaced) surfaced = maybeInjectVideoSurface(decor);
+            prepareTextureViews(decor);
+        }
     }
 
     // Give an activity a real token and push it as the task's new top. Called from attachActivity, so
@@ -3695,7 +3868,17 @@ public final class HostBootstrap {
             safeLifecycle(rec.activity, "onDestroy");
             sTask.remove(rec);
             sByToken.remove(rec.token);
-            if (!wasTop) return;  // a below-top finish: no foreground change
+            if (!wasTop) {  // a below-top finish: no foreground change
+                // Unless it was on screen under a translucent top one: then what is under
+                // the top one has changed, and a plane it had goes with it.
+                final ActivityRecord top = sTask.peek();
+                final android.view.View topDecor = decorOf(top);
+                if (top != null && top.translucent && topDecor != null) {
+                    syncShown();
+                    PresentDriver.setContentView(topDecor);
+                }
+                return;
+            }
             final ActivityRecord next = sTask.peek();
             if (next == null) {  // the root finished -> the task (and this single-app process) is done
                 System.out.println("acl activity-stack: task empty (root finished) -> exit");
@@ -3704,8 +3887,9 @@ public final class HostBootstrap {
             }
             if (rec.requestCode >= 0 && rec.callerToken == next.token)
                 deliverActivityResult(next.activity, rec.requestCode, rec.resultCode, rec.resultData);
-            safeLifecycle(next.activity, "onRestart");
-            safeLifecycle(next.activity, "onStart");
+            // Started again if it was stopped, which one under a translucent Activity was
+            // not; and with it the ones on screen under it, if it is translucent itself.
+            syncShown();
             // Paused when the finished one was started over it, so resumed now, which
             // brings onPostResume with it: a FragmentActivity resumes its fragments there.
             safeLifecycle(next.activity, "onResume");
@@ -3928,7 +4112,7 @@ public final class HostBootstrap {
                     }
                     try { setField(android.app.Activity.class, existing.activity, "mIntent", intent); } catch (Throwable ignored) {}
                     invokeActivityLifecycle(existing.activity, "onNewIntent", android.content.Intent.class, intent);
-                    safeLifecycle(existing.activity, "onRestart"); safeLifecycle(existing.activity, "onStart");
+                    syncShown();  // onRestart and onStart, if it was stopped
                     invokeActivityLifecycle(existing.activity, "onResume", null, null); ensureResumed(existing.activity);
                     android.view.Window ew = existing.activity.getWindow();
                     android.view.View ed = ew != null ? ew.getDecorView() : null;
@@ -3958,7 +4142,9 @@ public final class HostBootstrap {
             if (decor == null) { android.util.Log.w("acl", "launchInternalActivity: no decor for " + targetCls); return false; }
             attachDecorToWindow(decor);
             boolean shown = PresentDriver.setContentView(decor);
-            if (prev != null) safeLifecycle(prev.activity, "onStop");  // outgoing fully stopped once the new shows
+            // The outgoing one is stopped once the new one shows, unless the new one is
+            // translucent: then it stays on screen under it, paused.
+            syncShown();
             // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK: the Activities already in the task
             // are finished and the new one becomes its root. An app's router screen starts its
             // home screen this way; kept underneath, the router would come back when home finishes.
@@ -6206,10 +6392,20 @@ public final class HostBootstrap {
     // The size the app was last told its video surface has.
     private static int sVideoW, sVideoH;
 
-    /** Forget the injected video SurfaceView (activity transition): the next screen re-arms fresh. */
-    public static void forgetVideoSurface() {
-        sVideoSv = null;
-        releaseGlPlane();
+    /**
+     * An Activity transition: forgets the video SurfaceView and releases the GL plane of an
+     * Activity that is no longer on screen, so the next screen is given its own. Returns
+     * true when one is still in use, by an Activity that is on screen under a translucent
+     * one or that the translucent one has just left.
+     */
+    public static boolean dropHiddenPlanes() {
+        final android.view.SurfaceView video = sVideoSv != null ? sVideoSv.get() : null;
+        final boolean keepVideo = video != null && onScreen(video);
+        if (!keepVideo) sVideoSv = null;
+        final android.view.SurfaceView gl = sGlPlaneSv != null ? sGlPlaneSv.get() : null;
+        final boolean keepGl = gl != null && onScreen(gl);
+        if (!keepGl) releaseGlPlane();
+        return keepVideo || keepGl;
     }
 
     // A SurfaceView that an engine draws GL into, in an app that is on the View-tree present:
@@ -6336,10 +6532,17 @@ public final class HostBootstrap {
     // the SurfaceView's Surface.mNativeObject to an acl ReaderCtx whose queue the codec decodes into,
     // and route those frames to the wl_subsurface HW plane. Called each present frame (view appears
     // lazily via AndroidView after navigation); injects once, then just refreshes the plane bounds.
-    public static void maybeInjectVideoSurface(android.view.View decor) {
+    // Returns whether the window has a SurfaceView that the plane now backs.
+    public static boolean maybeInjectVideoSurface(android.view.View decor) {
+        final android.view.SurfaceView sv = findSurfaceView(decor);
+        if (sv == null) return false;
+        injectVideoSurface(sv);
+        return (sVideoSv != null && sVideoSv.get() == sv)
+                || (sGlPlaneSv != null && sGlPlaneSv.get() == sv);
+    }
+
+    private static void injectVideoSurface(android.view.SurfaceView sv) {
         try {
-            android.view.SurfaceView sv = findSurfaceView(decor);
-            if (sv == null) return;
             final int w = sv.getWidth(), h = sv.getHeight();
             if (w <= 0 || h <= 0) return;  // not laid out yet — wait for real bounds
             final int[] loc = new int[2];

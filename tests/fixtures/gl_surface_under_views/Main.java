@@ -68,13 +68,16 @@ public class Main extends Activity {
         }
     }
 
-    /** What an engine's view is: a SurfaceView subclass that draws GL when it has a surface. */
-    static class MapView extends SurfaceView implements SurfaceHolder.Callback, Runnable {
+    /**
+     * What an engine's view is: a SurfaceView subclass that draws GL when it has a surface.
+     * Public for the translucent Activity fixture, which lays one under its own views.
+     */
+    public static class MapView extends SurfaceView implements SurfaceHolder.Callback, Runnable {
         private volatile boolean mRunning;
         private volatile int mWidth, mHeight;
         private Thread mThread;
 
-        MapView(Activity a) {
+        public MapView(Activity a) {
             super(a);
             getHolder().addCallback(this);
         }
@@ -97,6 +100,16 @@ public class Main extends Activity {
         @Override public void surfaceDestroyed(SurfaceHolder holder) {
             log("surfaceDestroyed");
             mRunning = false;
+            // The surface is gone when this returns, so the thread must be done with it. The
+            // next surface gets a thread of its own.
+            final Thread t = mThread;
+            mThread = null;
+            if (t == null) return;
+            try {
+                t.join(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
 
         private static String fail(EGL10 egl, String step) {
