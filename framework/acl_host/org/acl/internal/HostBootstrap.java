@@ -1789,6 +1789,18 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("telephony_registry".equals(name)) {
+                // TelephonyManager.registerTelephonyCallback() takes its registry from here and
+                // throws IllegalStateException("telephony service is null.") without one, which
+                // ended Waze's Application.onCreate part way. The manager's ITelephonyRegistry
+                // is the no-op "telephony.registry" seeded below: a callback registers and, with
+                // no telephony on the host, is never called.
+                try {
+                    return new android.telephony.TelephonyRegistryManager(this);
+                } catch (Throwable t) {
+                    return null;
+                }
+            }
             if ("phone".equals(name)) {
                 // TelephonyManager(Context): Chromium's AndroidNetworkLibrary /
                 // NetworkChangeNotifierAutoDetect classify the connection via TelephonyManager
@@ -1884,6 +1896,8 @@ public final class HostBootstrap {
             if (serviceClass == android.media.session.MediaSessionManager.class) return "media_session";
             if (serviceClass == android.app.WallpaperManager.class) return "wallpaper";
             if (serviceClass == android.telephony.TelephonyManager.class) return "phone";
+            if (serviceClass == android.telephony.TelephonyRegistryManager.class)
+                return "telephony_registry";
             if (serviceClass == android.hardware.input.InputManager.class) return "input";
             // ViewRootImpl.<init> reads getSystemService(AudioManager.class) (navigation sound
             // effects); map it so the Dialog/PopupWindow add path gets a real AudioManager.
@@ -5923,6 +5937,9 @@ public final class HostBootstrap {
         // KeyguardManager's ctor does ServiceManager.getServiceOrThrow("trust") (throws without it);
         // a no-op ITrustManager proxy is enough (isDeviceLocked/isKeyguardLocked → false).
         svc.put("trust", "android.app.trust.ITrustManager");
+        // TelephonyRegistryManager (getSystemService("telephony_registry")) registers telephony
+        // callbacks and listeners with ITelephonyRegistry; a no-op one takes them and never calls.
+        svc.put("telephony.registry", "com.android.internal.telephony.ITelephonyRegistry");
         // WebView provider init reads IWebViewUpdateService.isMultiProcessEnabled() etc.; a no-op proxy
         // (multiprocess=false, no updates) is enough — acl installs the provider directly (see
         // installWebViewProvider), so the update-service is only queried for these secondary flags.

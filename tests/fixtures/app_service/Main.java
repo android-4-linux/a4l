@@ -57,6 +57,11 @@ public class Main extends Activity {
         }
     }
 
+    static final class CallStateCallback extends android.telephony.TelephonyCallback
+            implements android.telephony.TelephonyCallback.CallStateListener {
+        @Override public void onCallStateChanged(int state) {}
+    }
+
     static void log(String s) {
         Log.i(TAG, "SERVICE: " + s);
     }
@@ -296,6 +301,23 @@ public class Main extends Activity {
             contextCalls = e.toString();
         }
         log("context calls " + contextCalls);
+        // A telephony callback registers on a host with no telephony (and is never called):
+        // registerTelephonyCallback() throws "telephony service is null." without a registry.
+        String telephony;
+        try {
+            final android.telephony.TelephonyManager tm =
+                    getSystemService(android.telephony.TelephonyManager.class);
+            final android.telephony.TelephonyCallback cb = new CallStateCallback();
+            tm.registerTelephonyCallback(getMainExecutor(), cb);
+            tm.unregisterTelephonyCallback(cb);
+            tm.listen(new android.telephony.PhoneStateListener(),
+                    android.telephony.PhoneStateListener.LISTEN_CALL_STATE);
+            telephony = "registered=true";
+        } catch (RuntimeException e) {
+            telephony = e.toString();
+        }
+        log("telephony callback " + telephony);
+        expect("registered=true".equals(telephony), "telephony callback " + telephony);
         expect("locked=false enforced=true".equals(contextCalls), "context calls " + contextCalls);
         expect(noProperty, "getProperty for an absent property");
         log("package uid consistent=" + uids);
