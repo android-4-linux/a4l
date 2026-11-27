@@ -316,6 +316,26 @@ public class Main extends Activity {
         }
         log("media and obb dirs, display context=" + dirs);
         expect(dirs, "getExternalMediaDirs, getObbDir or createDisplayContext");
+        // What a call's network probe reads of the Wi-Fi link. The host reports one rate and
+        // no standard, security type or beacon, and each getter says so instead of missing.
+        final android.net.wifi.WifiInfo wifi = ((android.net.wifi.WifiManager)
+                getApplicationContext().getSystemService(WIFI_SERVICE)).getConnectionInfo();
+        final android.net.wifi.ScanResult scan = new android.net.wifi.ScanResult();
+        String link;
+        try {
+            final int rate = wifi.getLinkSpeed() > 0 ? wifi.getLinkSpeed() : -1;
+            link = (wifi.getTxLinkSpeedMbps() == rate)
+                    + " " + wifi.getRxLinkSpeedMbps() + "/" + wifi.getMaxSupportedTxLinkSpeedMbps()
+                    + "/" + wifi.getMaxSupportedRxLinkSpeedMbps() + " standard "
+                    + wifi.getWifiStandard() + " security " + wifi.getCurrentSecurityType()
+                    + " scan " + scan.channelWidth + "/" + scan.getInformationElements().size()
+                    + "/" + scan.getWifiStandard();
+        } catch (Throwable t) {
+            link = t.toString();
+        }
+        log("wifi link " + link);
+        expect("true -1/-1/-1 standard 0 security -1 scan 0/0/0".equals(link),
+                "WifiInfo and ScanResult: " + link);
         // ColorMatrixColorFilter: red drawn through a matrix that moves red into blue and
         // adds 51 to green comes out (0, 51, 255). The 51 is the matrix's fifth column, which
         // Android gives on the 0..255 scale.

@@ -59,6 +59,7 @@ CHECKS = [
     "SERVICE: image file decoded=true junk refused=true",
     "SERVICE: base context chain ends=true",
     "SERVICE: media and obb dirs, display context=true",
+    "SERVICE: wifi link true -1/-1/-1 standard 0 security -1 scan 0/0/0",
     "SERVICE: color matrix filtered=true",
     f"SERVICE: process name {PACKAGE} application {PACKAGE}",
     "SERVICE: native libs extracted=true",
