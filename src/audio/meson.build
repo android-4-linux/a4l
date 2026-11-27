@@ -10,15 +10,19 @@ audio_deps = [fmt_dep]   # via log/log.h
 if have_pipewire
   # PipeWire AudioTrack sink + the master-volume controller (default-sink tracking) and its
   # JNI seam backing org.acl.internal.AudioBridge → android.media.AudioManager.
-  audio_sources += files('pipewire_sink.cpp', 'pipewire_source.cpp', 'pw_volume.cpp',
-                         'audio_jni.cpp')
-  audio_deps += [pw_dep, jni_dep]  # jni_dep = jni.h only (calls go through the passed JNIEnv*)
+  audio_sources += files('pipewire_sink.cpp', 'pipewire_source.cpp', 'pw_volume.cpp')
+  audio_deps += [pw_dep]
+endif
+if have_pipewire or have_alsa
+  # The AudioBridge seam: the master volume of whichever backend is in use.
+  audio_sources += files('audio_jni.cpp')
+  audio_deps += [jni_dep]  # jni.h only (calls go through the passed JNIEnv*)
 endif
 
 
 if have_alsa
   # The ALSA sink and source: audio on a system with no PipeWire daemon.
-  audio_sources += files('alsa_sink.cpp', 'alsa_source.cpp')
+  audio_sources += files('alsa_sink.cpp', 'alsa_source.cpp', 'alsa_volume.cpp')
   audio_deps += [alsa_dep]
 endif
 
@@ -74,6 +78,18 @@ if have_pipewire
     include_directories : [config_inc, core_inc],
     link_with : [audio_lib, acl_log],
     dependencies : [fmt_dep, pw_dep],
+    install : false,
+  )
+endif
+
+if have_alsa
+  # Dev tool: print the ALSA master volume a4l would use, and set it when given a value.
+  executable(
+    'acl-alsa-volume-probe',
+    files('alsa_volume_probe_main.cpp'),
+    include_directories : [config_inc, core_inc],
+    link_with : [audio_lib, acl_log],
+    dependencies : [fmt_dep, alsa_dep],
     install : false,
   )
 endif
