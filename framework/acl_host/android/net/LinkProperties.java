@@ -77,7 +77,76 @@ public final class LinkProperties {
     }
 
     public String getDomains() { return null; }
-    public String getInterfaceName() { return null; }
+    /** The interface the default route leaves by, or null when the host has no route. */
+    public String getInterfaceName() {
+        final java.net.NetworkInterface nif = routeInterface();
+        return nif != null ? nif.getName() : null;
+    }
+
+    /** That interface's addresses with their prefix lengths; empty when there is none. */
+    public java.util.List<LinkAddress> getLinkAddresses() {
+        final java.util.List<LinkAddress> out = new java.util.ArrayList<LinkAddress>();
+        final java.net.NetworkInterface nif = routeInterface();
+        if (nif == null) return out;
+        try {
+            for (java.net.InterfaceAddress a : nif.getInterfaceAddresses()) {
+                if (a.getAddress() != null) {
+                    out.add(new LinkAddress(a.getAddress(), a.getNetworkPrefixLength()));
+                }
+            }
+        } catch (RuntimeException ignored) {}
+        return out;
+    }
+
+    /** That interface's MTU, or 0 (unset, as Android reports it) when it is not known. */
+    public int getMtu() {
+        final java.net.NetworkInterface nif = routeInterface();
+        try {
+            return nif != null ? Math.max(nif.getMTU(), 0) : 0;
+        } catch (java.io.IOException e) {
+            return 0;
+        }
+    }
+
+    // The interface of the IPv4 default route (/proc/net/route: destination and mask both
+    // zero, lowest metric), else of the IPv6 one (/proc/net/ipv6_route: prefix length 0).
+    private static java.net.NetworkInterface routeInterface() {
+        String name = null;
+        long best = Long.MAX_VALUE;
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.FileReader("/proc/net/route"))) {
+            String line = r.readLine();  // header
+            while ((line = r.readLine()) != null) {
+                final String[] f = line.trim().split("\\s+");
+                if (f.length < 8 || !"00000000".equals(f[1]) || !"00000000".equals(f[7])) continue;
+                final long metric = Long.parseLong(f[6]);
+                if (metric < best) {
+                    best = metric;
+                    name = f[0];
+                }
+            }
+        } catch (java.io.IOException | RuntimeException ignored) {}
+        if (name == null) {
+            try (java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.FileReader("/proc/net/ipv6_route"))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    final String[] f = line.trim().split("\\s+");
+                    if (f.length < 10 || !"00".equals(f[1]) || "lo".equals(f[9])) continue;
+                    final long metric = Long.parseLong(f[5], 16);
+                    if (metric < best) {
+                        best = metric;
+                        name = f[9];
+                    }
+                }
+            } catch (java.io.IOException | RuntimeException ignored) {}
+        }
+        try {
+            return name != null ? java.net.NetworkInterface.getByName(name) : null;
+        } catch (java.io.IOException e) {
+            return null;
+        }
+    }
     public boolean isPrivateDnsActive() { return false; }
     public String getPrivateDnsServerName() { return null; }
 }

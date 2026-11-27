@@ -382,6 +382,32 @@ public class Main extends Activity {
                 && android.graphics.Color.alpha(through) == 255;
         log("color matrix filtered=" + filtered);
         expect(filtered, String.format("ColorMatrixColorFilter gave %08x", through));
+        // LinkProperties names the interface of the host's default route, with its addresses
+        // and MTU, or says there is none. Checked against the interface itself.
+        String linkProps;
+        try {
+            final android.net.LinkProperties lp = new android.net.LinkProperties();
+            final String ifName = lp.getInterfaceName();
+            final java.util.List<android.net.LinkAddress> addrs = lp.getLinkAddresses();
+            if (ifName == null) {
+                linkProps = "consistent=" + (addrs.isEmpty() && lp.getMtu() == 0);
+            } else {
+                final java.net.NetworkInterface nif = java.net.NetworkInterface.getByName(ifName);
+                boolean ok = nif != null && !nif.isLoopback() && lp.getMtu() == nif.getMTU()
+                        && addrs.size() == nif.getInterfaceAddresses().size();
+                for (android.net.LinkAddress a : addrs) {
+                    ok &= a.getAddress() != null && a.getPrefixLength() > 0
+                            && a.getPrefixLength() <= 128;
+                }
+                linkProps = "consistent=" + ok;
+                Log.i(TAG, "link " + ifName + " " + addrs + " mtu " + lp.getMtu());
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "LinkProperties", t);
+            linkProps = t.toString();
+        }
+        log("link properties " + linkProps);
+        expect("consistent=true".equals(linkProps), "LinkProperties: " + linkProps);
         // The process has the package's name, from both places an app reads it.
         final String proc = android.os.Process.myProcessName();
         // The Application's attachBaseContext ran, before its onCreate, and the context
