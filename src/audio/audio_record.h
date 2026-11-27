@@ -6,10 +6,12 @@
 // The engine under android.media.AudioRecord: 16-bit PCM read from an
 // audio::Source at the stream's own rate.
 //
-// A Source is where the samples come from. The only one so far is silence,
-// produced by the clock: a4l opens no microphone yet. An app that records
-// gets a stream that starts, paces a blocking read as a device would, and
-// stops, with nothing in it.
+// A Source is where the samples come from. There are two: silence, produced
+// by the clock, and a PipeWire input stream. make_source() gives the input
+// stream only with ACL_AUDIO=pipewire and behind the capture gate, which the
+// runtime sets to the desktop's microphone permission for the app. Anything
+// else records silence: a stream that starts, paces a blocking read as a
+// device would, and stops, with nothing in it.
 #ifndef ACL_AUDIO_AUDIO_RECORD_H
 #define ACL_AUDIO_AUDIO_RECORD_H
 
@@ -17,8 +19,10 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include "audio/audio.h"
 
@@ -40,11 +44,30 @@ class Source {
   virtual void close() = 0;
 };
 
-// The configured source. Silence: see the note at the top.
+// The configured source: see the note at the top.
 std::unique_ptr<Source> make_source();
 
 // Silence at the format's rate by the monotonic clock.
 std::unique_ptr<Source> make_silent_source();
+
+// What decides whether a recording hears the device, and the name the device
+// stream carries on the desktop. Process-wide; set by the runtime before the
+// app runs. With none set no recording hears the device.
+struct Capture {
+  // Asked each time a recording starts. May block (it asks the desktop).
+  std::function<bool()> allowed;
+  std::string app_name;
+};
+void set_capture(Capture capture);
+
+// `device` while `allowed` says so at start(), silence otherwise. The choice
+// holds until the next start().
+std::unique_ptr<Source> make_gated_source(std::unique_ptr<Source> device,
+                                          std::function<bool()> allowed);
+
+// The PipeWire input stream (pipewire_source.cpp). Only in a build with
+// PipeWire (ACL_HAVE_PIPEWIRE). Not gated: make_source() does that.
+std::unique_ptr<Source> make_pipewire_source(std::string app_name);
 
 class Recorder {
  public:

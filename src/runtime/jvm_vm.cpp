@@ -55,11 +55,13 @@
 // ACL_HAVE_SDBUS.
 #include "svc/location/location_jni.h"
 #include "svc/permission/permission_jni.h"
+#include "svc/permission/permission_store.h"
 #include "svc/sensor/sensor_jni.h"
 #if ACL_HAVE_PIPEWIRE
 #include "audio/audio_jni.h"
 #endif
 #include "audio/audio.h"
+#include "audio/audio_record.h"
 #include "gfx/gfx.h"
 #if ACL_HAVE_VULKAN
 #include "gfx/gfx_vk.h"  // S3b: VkRenderTarget import_pixels_to_dmabuf
@@ -7388,6 +7390,17 @@ class ArtVm final : public JniVm {
     // for its key tones) gets an UnsatisfiedLinkError from the constructor.
     register_tone_generator_natives(env);
     register_audio_record_natives(env);
+    // A recording hears the microphone only while the desktop's permission
+    // store allows this package one; it is asked at each start. The package
+    // is also the name the input stream carries on the desktop.
+    if (!config_.package_name.empty()) {
+      audio::Capture capture;
+      capture.app_name = config_.package_name;
+      capture.allowed = [pkg = config_.package_name] {
+        return acl::permission::device_allowed("microphone", pkg);
+      };
+      audio::set_capture(std::move(capture));
+    }
     // androidx.media3 / MediaSessionCompat build AudioAttributes from a legacy
     // stream type (setPlaybackToLocal ->
     // AudioAttributes.Builder.setLegacyStreamType), which consults
