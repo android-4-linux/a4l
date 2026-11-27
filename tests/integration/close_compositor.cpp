@@ -54,6 +54,7 @@ wl_resource* g_fractional_scale =
 bool g_repeat_mode = false;  // hold a key (repeat_info) and delay the close
 int g_output_w = 1920, g_output_h = 1080,
     g_output_scale = 1;  // wl_output mode + scale
+int g_output_transform = WL_OUTPUT_TRANSFORM_NORMAL;
 wl_event_source* g_close_timer = nullptr;
 wl_event_source* g_scale_timer =
     nullptr;          // dynamic mode: fire the mid-run scale change
@@ -518,7 +519,7 @@ void bind_output(wl_client* c, void*, uint32_t version, uint32_t id) {
                                       static_cast<int>(version), id);
   wl_resource_set_implementation(r, &output_impl, nullptr, nullptr);
   wl_output_send_geometry(r, 0, 0, 340, 190 /*mm*/, WL_OUTPUT_SUBPIXEL_UNKNOWN,
-                          "acl", "test", WL_OUTPUT_TRANSFORM_NORMAL);
+                          "acl", "test", g_output_transform);
   wl_output_send_mode(r, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
                       g_output_w, g_output_h, 60000 /*mHz*/);
   if (version >= WL_OUTPUT_SCALE_SINCE_VERSION)
@@ -619,10 +620,12 @@ int main(int argc, char** argv) {
   g_dynamic = mode == "dynamic";
   g_output_scale =
       mode == "outputscale" ? 2 : 1;  // integer HiDPI via wl_output.scale
-  if (mode == "display") {
+  if (mode == "display" || mode == "display-rotated") {
     g_output_w = 1280;
     g_output_h = 720;
   }  // distinct display metrics
+  if (mode == "display-rotated")
+    g_output_transform = WL_OUTPUT_TRANSFORM_90;
 
   // Compile the default (RMLVO) xkb keymap once, to send to clients.
   if (xkb_context* ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS)) {
