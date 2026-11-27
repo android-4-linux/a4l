@@ -220,8 +220,9 @@ class SecretBackend final : public IKeystoreBackend {
   }
 };
 
-// Probe: can we reach the Secret Service (a session bus + a secret backend)? If
-// get_sync succeeds, use it; otherwise fall back to memory. Done once here so
+// Probe: can we reach the Secret Service (a session bus + a secret backend),
+// and has it a default keyring to store in? If so, use it; otherwise fall back
+// to memory. Done once here so
 // make_* never blocks on a dead bus twice.
 bool secret_service_reachable() {
   GError* err = nullptr;
@@ -234,7 +235,46 @@ bool secret_service_reachable() {
       g_error_free(err);
     return false;
   }
+  // A keyring daemon with no default keyring takes the connection and then
+  // refuses every store: gnome-keyring started outside a desktop login has only
+  // its session collection. Keys would be lost one failed store at a time, so
+  // say it once and keep them in memory.
+  SecretCollection* def = secret_collection_for_alias_sync(
+      svc, SECRET_COLLECTION_DEFAULT, SECRET_COLLECTION_NONE, nullptr, &err);
+  if (def == nullptr) {
+    g_object_unref(svc);
+    log::w(
+        kTag,
+        "the Secret Service has no default keyring ({}); using in-memory "
+        "keystore. On a system with no desktop login, create and unlock "
+        "one with: printf %s \"$PASSWORD\" | gnome-keyring-daemon --replace "
+        "--unlock --components=secrets",
+        err != nullptr && err->message != nullptr ? err->message : "none set");
+    if (err != nullptr)
+      g_error_free(err);
+    return false;
+  }
+  // A locked keyring refuses a store too. Ask for it to be unlocked: a desktop
+  // prompts for the password, here instead of at the app's first key. Where
+  // nothing can prompt the keyring stays locked.
+  bool locked = secret_collection_get_locked(def) != FALSE;
+  if (locked) {
+    GList* objects = g_list_append(nullptr, def);
+    GList* unlocked = nullptr;
+    secret_service_unlock_sync(svc, objects, nullptr, &unlocked, nullptr);
+    locked = unlocked == nullptr;
+    g_list_free_full(unlocked, g_object_unref);
+    g_list_free(objects);
+  }
+  g_object_unref(def);
   g_object_unref(svc);
+  if (locked) {
+    log::w(kTag,
+           "the default keyring is locked and was not unlocked; using "
+           "in-memory keystore. Unlock it with: printf %s \"$PASSWORD\" | "
+           "gnome-keyring-daemon --replace --unlock --components=secrets");
+    return false;
+  }
   return true;
 }
 #endif  // ACL_HAVE_SECRET
