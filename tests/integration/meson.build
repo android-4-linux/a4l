@@ -447,6 +447,26 @@ if py3.found() and have_gl and have_ffmpeg
         timeout : 300,
       )
     endif
+    # The microphone permission follows the desktop's permission store: denied while the
+    # store has no entry for the app, granted a moment after it says yes, at every place an
+    # app reads it. Runs a private session bus with a stand-in store and a headless Weston.
+    # Needs host ART and sdbus-c++; SKIPs otherwise, which includes CI.
+    if have_sdbus
+      permission_stub = executable(
+        'acl-permission-stub',
+        files('permission_stub_main.cpp'),
+        dependencies : [sdbus_dep],
+        install : false,
+      )
+      test(
+        'permission-store',
+        py3,
+        args : [files('run_permission_test.py'), acl_exe, framework_android_jar,
+                permission_stub],
+        depends : [acl_exe, permission_stub],
+        timeout : 300,
+      )
+    endif
     # An exception no thread catches is logged as "FATAL EXCEPTION", thrown or handed to the
     # handler directly, and the app goes on; and ACL_EXIT_STACKS names a
     # thread that calls System.exit. Starts a headless Weston for itself. Needs host ART;

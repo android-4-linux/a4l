@@ -54,6 +54,7 @@
 // are gated inside the modules -- so their headers must not sit behind
 // ACL_HAVE_SDBUS.
 #include "svc/location/location_jni.h"
+#include "svc/permission/permission_jni.h"
 #include "svc/sensor/sensor_jni.h"
 #if ACL_HAVE_PIPEWIRE
 #include "audio/audio_jni.h"
@@ -7651,6 +7652,9 @@ class ArtVm final : public JniVm {
     // point). The GeoClue2 source is gated inside the module, so registration
     // itself is unconditional (the synthetic/null source always builds).
     acl::svc::location::register_location_natives(env);
+    // Bind org.acl.internal.HostPermissions to svc/permission (the desktop's
+    // permission store). Its D-Bus half is gated inside the module too.
+    acl::permission::register_permission_natives(env);
 #if ACL_HAVE_PIPEWIRE
     // Bind org.acl.internal.AudioBridge (AudioManager master volume) to the
     // host PipeWire default sink.

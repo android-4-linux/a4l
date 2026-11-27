@@ -45,6 +45,10 @@ if have_jni
   # keyring via the freedesktop Secret Service (libsecret). Gated on ACL_HAVE_SECRET inside the
   # module; without libsecret it is the in-memory Null backend. Needs JNI for the KeystoreBridge seam.
   subdir('keystore')
+  # svc/permission: whether the app may use a device (the microphone), from the desktop's
+  # permission store. The D-Bus half is gated inside the module, so it also builds without
+  # sdbus (ACL_ALLOW_DEVICES only). Needs JNI for the HostPermissions seam.
+  subdir('permission')
 endif
 
 # Automotive vehicle services (svc/car) compile in ONLY under the automotive

@@ -22,6 +22,7 @@ unit_test_sources = files(
   'audio_track_test.cpp',
   'tone_generator_test.cpp',
   'audio_record_test.cpp',
+  'permission_test.cpp',
   'audio_codec_test.cpp',
   'timed_release_test.cpp',
   'confine_test.cpp',

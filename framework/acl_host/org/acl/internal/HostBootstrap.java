@@ -1167,11 +1167,16 @@ public final class HostBootstrap {
         // The single acl user (ADR-3). WorkManager's PendingIntent.getBroadcast path calls
         // Context.getUser() on a background thread; without this it delegates to the null base.
         @Override public android.os.UserHandle getUser() { return android.os.Process.myUserHandle(); }
-        // Grant everything — a single-app host with no permission enforcement (ADR-3).
-        @Override public int checkPermission(String perm, int pid, int uid) { return 0; }  // GRANTED
-        @Override public int checkSelfPermission(String perm) { return 0; }
-        @Override public int checkCallingPermission(String perm) { return 0; }
-        @Override public int checkCallingOrSelfPermission(String perm) { return 0; }
+        // A single-app host with no permission enforcement (ADR-3): everything is granted, except
+        // a device the desktop keeps a decision for (HostPermissions).
+        @Override public int checkPermission(String perm, int pid, int uid) {
+            return HostPermissions.check(perm, pkg);
+        }
+        @Override public int checkSelfPermission(String perm) { return HostPermissions.check(perm, pkg); }
+        @Override public int checkCallingPermission(String perm) { return HostPermissions.check(perm, pkg); }
+        @Override public int checkCallingOrSelfPermission(String perm) {
+            return HostPermissions.check(perm, pkg);
+        }
         private android.content.ContentResolver resolver;  // one per context (PhoneWindow, apps)
         @Override public android.content.ContentResolver getContentResolver() {
             if (resolver == null) resolver = new AppContentResolver(this);
@@ -2545,6 +2550,13 @@ public final class HostBootstrap {
     static final class AppPackageManager extends StubPackageManager {
         private final String pkg;
         AppPackageManager(String pkg) { this.pkg = pkg; }
+        // The one package is this app; the store is not asked about a name the app made up.
+        @Override public int checkPermission(String permName, String packageName) {
+            if (pkg.equals(packageName)) return HostPermissions.check(permName, pkg);
+            return HostPermissions.device(permName) == null
+                    ? android.content.pm.PackageManager.PERMISSION_GRANTED
+                    : android.content.pm.PackageManager.PERMISSION_DENIED;
+        }
         // A <property> the manifest does not declare is a NameNotFoundException, which is
         // what callers catch: Environment.isExternalStorageLegacy() reads one and takes the
         // exception for "not set". The base class throws UnsupportedOperationException, which
@@ -2729,9 +2741,9 @@ public final class HostBootstrap {
                 pi.firstInstallTime = written;
                 pi.lastUpdateTime = written;
             } catch (Throwable ignored) { }
-            // The app's <uses-permission> names, with every one marked granted. Granting at
-            // checkSelfPermission() is NOT enough: permission libraries first verify the permission
-            // is DECLARED, by reading getPackageInfo(GET_PERMISSIONS).requestedPermissions. A null
+            // The app's <uses-permission> names, each marked as checkSelfPermission() answers
+            // for it. Granting at checkSelfPermission() is NOT enough: permission libraries first
+            // verify the permission is DECLARED, by reading getPackageInfo(GET_PERMISSIONS).requestedPermissions. A null
             // there reads as "not in the manifest", which is a hard denial no runtime grant can undo
             // -- Expo's PermissionsService does exactly
             //   getPackageInfo(pkg, GET_PERMISSIONS).requestedPermissions?.contains(perm) ?: false
@@ -2741,15 +2753,17 @@ public final class HostBootstrap {
             if (perms.length > 0) {
                 pi.requestedPermissions = perms;
                 int[] flags = new int[perms.length];
-                for (int i = 0; i < flags.length; i++)
-                    flags[i] = android.content.pm.PackageInfo.REQUESTED_PERMISSION_GRANTED;
+                for (int i = 0; i < flags.length; i++) {
+                    if (HostPermissions.check(perms[i], pkg)
+                            == android.content.pm.PackageManager.PERMISSION_GRANTED)
+                        flags[i] = android.content.pm.PackageInfo.REQUESTED_PERMISSION_GRANTED;
+                }
                 pi.requestedPermissionsFlags = flags;
             }
             return pi;
         }
 
-        // Parsed once from AndroidManifest.xml; acl grants every permission (checkSelfPermission
-        // returns GRANTED), so this only has to report what the app asked for.
+        // Parsed once from AndroidManifest.xml: what the app asked for.
         private static String[] sPerms;
         // The <manifest> tag's version, read in the same pass: 0 and null when it states none.
         private static long sVersionCode;
@@ -4182,10 +4196,10 @@ public final class HostBootstrap {
         // intent and startActivityForResult()s the permission controller, then waits for the result to
         // come back through onRequestPermissionsResult(). acl has no permission controller to launch, so
         // suppressing it silently leaves the app waiting forever: castlab's first screen requests
-        // permissions inside a coroutine and sits on its loading spinner. acl grants every permission
-        // (checkSelfPermission returns GRANTED), so answer the request directly with GRANTED for each
-        // name asked. Posted rather than called inline because the framework finishes bookkeeping in
-        // requestPermissions() after this returns.
+        // permissions inside a coroutine and sits on its loading spinner. Answer the request
+        // directly with what checkSelfPermission returns for each name asked: there is no dialog, so
+        // a permission the desktop has not allowed stays denied. Posted rather than called inline
+        // because the framework finishes bookkeeping in requestPermissions() after this returns.
         //
         // The answer goes in through Activity.dispatchActivityResult, as the permission
         // controller's does: that is what ends the request. Activity refuses a second request
@@ -4202,7 +4216,12 @@ public final class HostBootstrap {
             if (names == null || names.length == 0) return false;
             final android.app.Activity a = (android.app.Activity) who;
             final int[] grants = new int[names.length];
-            java.util.Arrays.fill(grants, android.content.pm.PackageManager.PERMISSION_GRANTED);
+            int granted = 0;
+            for (int i = 0; i < names.length; i++) {
+                grants[i] = HostPermissions.check(names[i], who.getPackageName());
+                if (grants[i] == android.content.pm.PackageManager.PERMISSION_GRANTED) granted++;
+            }
+            final int grantedCount = granted;
             final android.content.Intent result =
                     new android.content.Intent("android.content.pm.action.REQUEST_PERMISSIONS");
             result.putExtra("android.content.pm.extra.REQUEST_PERMISSIONS_NAMES", names);
@@ -4232,7 +4251,8 @@ public final class HostBootstrap {
                     }
                 }
             });
-            android.util.Log.i("acl", "requestPermissions: granted " + names.length + " permission(s)");
+            android.util.Log.i("acl", "requestPermissions: granted " + grantedCount + " of "
+                    + names.length + " permission(s)");
             return true;
         }
         @Override public android.app.Instrumentation.ActivityResult execStartActivity(
