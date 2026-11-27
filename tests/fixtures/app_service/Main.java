@@ -279,6 +279,24 @@ public class Main extends Activity {
         }
         final boolean legacy = android.os.Environment.isExternalStorageLegacy();
         log("absent property not found=" + noProperty + " legacy storage=" + legacy);
+        // Two calls an app's context has to answer without a base context behind it:
+        // KeyguardManager.isDeviceLocked() asks it for getAssociatedDisplayId(), and the
+        // enforce forms of the permission checks (LocationManager.getProvider() calls one)
+        // return for a permission the app holds.
+        String contextCalls;
+        try {
+            final boolean locked = ((android.app.KeyguardManager)
+                    getApplicationContext().getSystemService(KEYGUARD_SERVICE)).isDeviceLocked();
+            getApplicationContext().enforceCallingOrSelfPermission(
+                    android.Manifest.permission.INTERNET, "fixture");
+            getApplicationContext().enforcePermission(android.Manifest.permission.INTERNET,
+                    android.os.Process.myPid(), android.os.Process.myUid(), "fixture");
+            contextCalls = "locked=" + locked + " enforced=true";
+        } catch (RuntimeException e) {
+            contextCalls = e.toString();
+        }
+        log("context calls " + contextCalls);
+        expect("locked=false enforced=true".equals(contextCalls), "context calls " + contextCalls);
         expect(noProperty, "getProperty for an absent property");
         log("package uid consistent=" + uids);
         expect(uids, "uid: info " + infoUid + " process " + android.os.Process.myUid()
