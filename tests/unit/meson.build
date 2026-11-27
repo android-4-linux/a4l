@@ -25,6 +25,7 @@ unit_test_sources = files(
   'timed_release_test.cpp',
   'confine_test.cpp',
   'runtime_test.cpp',
+  'debug_heap_test.cpp',
   'pkg_test.cpp',
   'apk_stage_test.cpp',
   'apk_verify_test.cpp',
