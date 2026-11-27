@@ -5,6 +5,7 @@
 // spec. No GPL-3.0 sources.
 #include "svc/share/share_jni.h"
 
+#include <chrono>
 #include <map>
 #include <string>
 #include <string_view>
@@ -53,6 +54,11 @@ jboolean JNICALL n_compose_email(JNIEnv* env,
 }
 #else
 
+// The portal answers these with a request handle at once; the work is done
+// after. A portal that is on the bus and never answers must not hold the app's
+// thread for sd-bus's default 25 s.
+constexpr std::chrono::seconds kPortalTimeout{5};
+
 // Ask the host's desktop portal to open a URI. The portal shows the user's
 // default handler (a browser for http/https) — the sandbox-correct alternative
 // to the (unavailable) Android chooser. One-shot: create a session-bus
@@ -71,6 +77,7 @@ bool open_uri(const std::string& uri) {
     // window (empty), no options.
     sdbus::ObjectPath handle;
     proxy->callMethod("OpenURI")
+        .withTimeout(kPortalTimeout)
         .onInterface(sdbus::InterfaceName{"org.freedesktop.portal.OpenURI"})
         .withArguments(std::string{} /*parent_window*/, uri,
                        std::map<std::string, sdbus::Variant>{} /*options*/)
@@ -128,6 +135,7 @@ bool compose_email(const std::string& address,
       options.emplace("attachment_fds", sdbus::Variant{attachments});
     sdbus::ObjectPath handle;
     proxy->callMethod("ComposeEmail")
+        .withTimeout(kPortalTimeout)
         .onInterface(sdbus::InterfaceName{"org.freedesktop.portal.Email"})
         .withArguments(std::string{} /*parent_window*/, options)
         .storeResultsTo(handle);

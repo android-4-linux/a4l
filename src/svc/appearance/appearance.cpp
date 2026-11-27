@@ -8,6 +8,8 @@
 #include "acl_config.h"
 #include "log/log.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -23,7 +25,19 @@ constexpr std::string_view kTag = "svc.appearance";
 
 #if ACL_HAVE_SDBUS
 
+namespace {
+// A portal that is on the bus but never answers costs the caller the whole
+// call timeout: on a board with no desktop the bus can start
+// xdg-desktop-portal, which then has no backend to ask. sd-bus waits 25 s by
+// default, and a4l asks twice while an app starts. So the wait is short, and a
+// query that failed is not made again.
+constexpr std::chrono::seconds kPortalTimeout{2};
+std::atomic<bool> g_unavailable{false};
+}  // namespace
+
 int query_color_scheme() noexcept {
+  if (g_unavailable.load(std::memory_order_relaxed))
+    return -1;
   try {
     auto conn = sdbus::createSessionBusConnection();  // the portal lives on the
                                                       // session bus
@@ -33,6 +47,7 @@ int query_color_scheme() noexcept {
     sdbus::Variant value;
     portal->callMethod("Read")
         .onInterface(sdbus::InterfaceName{"org.freedesktop.portal.Settings"})
+        .withTimeout(kPortalTimeout)
         .withArguments(std::string{"org.freedesktop.appearance"},
                        std::string{"color-scheme"})
         .storeResultsTo(value);
@@ -48,8 +63,10 @@ int query_color_scheme() noexcept {
     return static_cast<int>(scheme);
   } catch (const sdbus::Error& e) {
     log::i(kTag, "color-scheme unavailable ({}); keeping default", e.getName());
+    g_unavailable.store(true, std::memory_order_relaxed);
     return -1;
   } catch (...) {
+    g_unavailable.store(true, std::memory_order_relaxed);
     return -1;
   }
 }
