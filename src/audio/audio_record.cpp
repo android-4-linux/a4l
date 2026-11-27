@@ -10,6 +10,9 @@
 #include <utility>
 
 #include "acl_config.h"
+#if ACL_HAVE_ALSA
+#include "audio/alsa_device.h"
+#endif
 #include "log/log.h"
 
 namespace acl::audio {
@@ -212,20 +215,27 @@ void set_capture(Capture capture) {
 }
 
 std::unique_ptr<Source> make_source() {
-#if ACL_HAVE_PIPEWIRE
-  const char* backend = std::getenv("ACL_AUDIO");
-  if (backend != nullptr && std::strcmp(backend, "pipewire") == 0) {
+  const DeviceBackend backend = device_backend();
+  if (backend != DeviceBackend::kNone) {
     Capture capture;
     {
       const std::lock_guard<std::mutex> lock(g_capture_mu);
       capture = g_capture;
     }
     // No gate, no device: nothing is made that could hear one.
-    if (capture.allowed)
-      return make_gated_source(make_pipewire_source(capture.app_name),
-                               std::move(capture.allowed));
-  }
+    if (capture.allowed) {
+#if ACL_HAVE_PIPEWIRE
+      if (backend == DeviceBackend::kPipeWire)
+        return make_gated_source(make_pipewire_source(capture.app_name),
+                                 std::move(capture.allowed));
 #endif
+#if ACL_HAVE_ALSA
+      if (backend == DeviceBackend::kAlsa)
+        return make_gated_source(make_alsa_source(),
+                                 std::move(capture.allowed));
+#endif
+    }
+  }
   return make_silent_source();
 }
 

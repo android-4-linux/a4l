@@ -8,7 +8,8 @@
 # always terminate quickly and account for all 44100 frames:
 #   * when a PipeWire daemon socket is present -> it actually streams (sink=pipewire);
 #   * when no daemon is reachable -> open() fails within a bounded budget and falls
-#     back to the deterministic null sink (never hangs).
+#     back to the deterministic null sink (never hangs), or, in a build with ALSA, the
+#     stream goes there (run_audio_alsa_test.py covers that).
 # This exercises the pulled-forward audio slice the media bridge (G1.5a) depends on.
 #
 # Usage: run_audio_pipewire_test.py <acl_binary> <audio.apk> <framework_dir>
@@ -53,8 +54,10 @@ def main() -> int:
             ok = False
         msg = "streamed to the PipeWire daemon"
     else:
-        # No daemon: the backend must fail-open gracefully to the null sink.
-        if "falling back to null sink" not in out and "built without PipeWire" not in out:
+        # No daemon: the backend must fail-open gracefully to the null sink, or hand the
+        # stream to ALSA in a build that has it.
+        if ("falling back to null sink" not in out and "built without PipeWire" not in out
+                and "audio goes to ALSA" not in out):
             sys.stderr.write("FAIL: no daemon but no graceful fallback\n"); ok = False
         msg = "no daemon; fell back to null sink cleanly"
 

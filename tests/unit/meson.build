@@ -41,6 +41,11 @@ unit_test_sources = files(
   'ff_open_test.cpp',
 )
 
+# The ALSA sink and source exist only in a build with alsa-lib.
+if have_alsa
+  unit_test_sources += files('audio_alsa_test.cpp')
+endif
+
 # Automotive-only: the media bridge (hosts/media) is compiled out under the phone
 # profile, so its unit tests only build when the profile is ON.
 if profile_automotive

@@ -10,16 +10,21 @@
 #include "audio/audio.h"
 
 #include <dlfcn.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <string>
 #include <string_view>
 #include <vector>
 
 #include "acl_config.h"
+#if ACL_HAVE_ALSA
+#include "audio/alsa_device.h"
+#endif
 #include "log/log.h"
 
 namespace acl::audio {
@@ -68,6 +73,63 @@ std::unique_ptr<Sink> make_null_sink() {
 #if ACL_HAVE_PIPEWIRE
 std::unique_ptr<Sink> make_pipewire_sink();  // defined in pipewire_sink.cpp
 #endif
+
+namespace {
+
+// Whether a PipeWire daemon's socket is where a client would look for it:
+// PIPEWIRE_REMOTE (a path, or a name under the runtime directory), default
+// "pipewire-0". A socket left by a daemon that has died still counts; the
+// stream then fails to connect as it did before.
+[[maybe_unused]] bool pipewire_socket_present() {
+  const char* remote = std::getenv("PIPEWIRE_REMOTE");
+  const std::string name =
+      remote != nullptr && remote[0] != '\0' ? remote : "pipewire-0";
+  if (name[0] == '/')
+    return ::access(name.c_str(), F_OK) == 0;
+  for (const char* var : {"PIPEWIRE_RUNTIME_DIR", "XDG_RUNTIME_DIR"}) {
+    const char* dir = std::getenv(var);
+    if (dir != nullptr && dir[0] != '\0')
+      return ::access((std::string(dir) + "/" + name).c_str(), F_OK) == 0;
+  }
+  return false;
+}
+
+DeviceBackend choose_device_backend() {
+  const char* backend = std::getenv("ACL_AUDIO");
+  if (backend == nullptr)
+    return DeviceBackend::kNone;
+  if (std::strcmp(backend, "alsa") == 0) {
+#if ACL_HAVE_ALSA
+    return DeviceBackend::kAlsa;
+#else
+    log::w(kTag, "built without ALSA (ACL_HAVE_ALSA=0); no audio device");
+    return DeviceBackend::kNone;
+#endif
+  }
+  if (std::strcmp(backend, "pipewire") != 0)
+    return DeviceBackend::kNone;
+#if ACL_HAVE_PIPEWIRE && ACL_HAVE_ALSA
+  if (pipewire_socket_present())
+    return DeviceBackend::kPipeWire;
+  log::i(kTag, "no PipeWire daemon; audio goes to ALSA");
+  return DeviceBackend::kAlsa;
+#elif ACL_HAVE_PIPEWIRE
+  return DeviceBackend::kPipeWire;
+#elif ACL_HAVE_ALSA
+  log::i(kTag, "built without PipeWire; audio goes to ALSA");
+  return DeviceBackend::kAlsa;
+#else
+  log::w(kTag, "built without PipeWire and ALSA; no audio device");
+  return DeviceBackend::kNone;
+#endif
+}
+
+}  // namespace
+
+DeviceBackend device_backend() {
+  static const DeviceBackend chosen = choose_device_backend();
+  return chosen;
+}
 
 namespace {
 
@@ -166,20 +228,18 @@ std::unique_ptr<Sink> make_sink() {
 }
 
 std::unique_ptr<Sink> make_device_sink() {
-  const char* backend = std::getenv("ACL_AUDIO");
+  switch (device_backend()) {
 #if ACL_HAVE_PIPEWIRE
-  if (backend != nullptr && std::strcmp(backend, "pipewire") == 0) {
-    if (auto s = make_pipewire_sink())
-      return s;
-    log::w(kTag, "PipeWire sink unavailable; falling back to null sink");
-  }
-#else
-  if (backend != nullptr && std::strcmp(backend, "pipewire") == 0) {
-    log::w(kTag,
-           "built without PipeWire (ACL_HAVE_PIPEWIRE=0); using null sink");
-  }
+    case DeviceBackend::kPipeWire:
+      return make_pipewire_sink();
 #endif
-  return std::make_unique<NullSink>();
+#if ACL_HAVE_ALSA
+    case DeviceBackend::kAlsa:
+      return make_alsa_sink();
+#endif
+    default:
+      return std::make_unique<NullSink>();
+  }
 }
 
 std::uint64_t play_tone(const ToneSpec& spec) {
@@ -211,22 +271,26 @@ std::uint64_t play_tone(const ToneSpec& spec) {
   const char* backend = std::getenv("ACL_AUDIO");
   const bool force_null =
       backend != nullptr && std::strcmp(backend, "null") == 0;
+  // ACL_AUDIO=alsa asks for ALSA by name; otherwise PipeWire is tried first.
+  [[maybe_unused]] const bool only_alsa =
+      backend != nullptr && std::strcmp(backend, "alsa") == 0;
 #if ACL_HAVE_PIPEWIRE
-  if (!force_null) {
+  if (!force_null && !only_alsa) {
     sink = make_pipewire_sink();
     device = sink->open(fmt);
-    if (!device)
-      log::w(kTag,
-             "tone: no PipeWire daemon reachable; using silent null sink "
-             "(nothing to hear)");
   }
-#else
-  if (!force_null)
-    log::w(kTag,
-           "tone: built without PipeWire; using silent null sink (nothing to "
-           "hear)");
 #endif
-  if (!device) {  // ACL_AUDIO=null, no PipeWire, or open failed
+#if ACL_HAVE_ALSA
+  if (!force_null && !device) {
+    sink = make_alsa_sink();
+    device = sink->open(fmt);
+  }
+#endif
+  if (!force_null && !device)
+    log::w(kTag,
+           "tone: no PipeWire daemon and no ALSA device; using silent null "
+           "sink (nothing to hear)");
+  if (!device) {  // ACL_AUDIO=null, or no device opened
     sink = make_null_sink();
     sink->open(fmt);
   }

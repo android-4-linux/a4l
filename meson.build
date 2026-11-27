@@ -74,6 +74,10 @@ endif
 # otherwise audio/ builds with only the counting/null sink (headless, deterministic).
 pw_dep = dependency('libpipewire-0.3', required : false)
 have_pipewire = pw_dep.found()
+# ALSA: the device backend for a system with no PipeWire (an embedded board). alsa-lib is
+# LGPL-2.1, linked dynamically. Chosen at run time; see make_device_sink() in audio/audio.cpp.
+alsa_dep = dependency('alsa', required : false)
+have_alsa = alsa_dep.found()
 
 # FFmpeg (LGPL, dynamic link — permitted per plan.md license policy): decodes SoundPool
 # samples (OGG/WAV/MP3/…) to PCM. Built only when all four libs are present. We take only the
@@ -357,6 +361,7 @@ conf.set('ACL_VERSION', '"' + meson.project_version() + '"')
 conf.set10('ACL_PROFILE_AUTOMOTIVE', profile_automotive)
 conf.set10('ACL_HAVE_JNI', have_jni)
 conf.set10('ACL_HAVE_PIPEWIRE', have_pipewire)
+conf.set10('ACL_HAVE_ALSA', have_alsa)
 conf.set10('ACL_HAVE_DRM_CXX', have_drm_cxx)
 conf.set10('ACL_HAVE_FFMPEG', have_ffmpeg)
 conf.set10('ACL_HAVE_GST', have_gst)
