@@ -10,12 +10,18 @@
 // arm64 bionic tags that pointer's top byte, and the kernel refuses it with
 // EFAULT on a thread that does not have the tagged address ABI on.
 //
+// acl_ndk_time_env reads the three variables bionic's time zone code looks
+// tzdata up under, then converts a time: a bionic built for a host aborts in
+// gmtime_r when one of them is not in its environment. 42 if ANDROID_DATA is
+// what the test set, the other two are set, and the date is right.
+//
 // Java_com_acl_ndktest_Main_nativeAnswer is the name `acl-ndk-probe --thread`
 // calls on a second thread it has attached; it is the same function.
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 static __thread int t_counter = 40;
@@ -41,6 +47,23 @@ int acl_ndk_heap_path(unsigned* top_byte) {
   int r = access(p, F_OK) == 0 ? 0 : errno;
   free(p);
   return r;
+}
+
+int acl_ndk_time_env(void* a, void* b) {
+  (void)a;
+  (void)b;
+  const char* data = getenv("ANDROID_DATA");
+  if (!data || strcmp(data, "/acl-ndk-test/data") != 0)
+    return 1;
+  if (!getenv("ANDROID_TZDATA_ROOT"))
+    return 2;
+  if (!getenv("ANDROID_ROOT"))
+    return 3;
+  const time_t day_400 = 400 * 86400;  // 1971-02-05
+  struct tm tm;
+  if (!gmtime_r(&day_400, &tm))
+    return 4;
+  return tm.tm_year == 71 && tm.tm_mon == 1 && tm.tm_mday == 5 ? 42 : 5;
 }
 
 int Java_com_acl_ndktest_Main_nativeAnswer(void* env, void* cls) {
