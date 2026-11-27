@@ -349,6 +349,19 @@ if py3.found() and have_gl and have_ffmpeg
         timeout : 300,
       )
     endif
+    # A SurfaceView that an engine draws GL into, under the app's other views and in its
+    # second Activity: the picture is read off a headless Weston's screen, under a banner
+    # view, the right way up, with the render thread held to a swap a refresh. Needs host
+    # ART, Weston's kiosk shell and weston-screenshooter, and a render node; SKIPs
+    # otherwise, which includes CI. is_parallel off: it reads the screen.
+    test(
+      'gl-surfaceview-under-views',
+      py3,
+      args : [files('run_gl_surfaceview_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 240,
+      is_parallel : false,
+    )
     # Offscreen GL through android.opengl.EGL14 on the default display, as a player's
     # placeholder surface sets it up, where Mesa's default platform has no server running and
     # where there is no display server at all. Needs host ART, Mesa and a render node; SKIPs

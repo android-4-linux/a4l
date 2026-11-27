@@ -102,6 +102,17 @@ public final class PresentDriver {
         if (s != 0L) nSetVideoBounds(s, x, y, w, h);
     }
 
+    // Where a SurfaceView that an engine draws GL into sits in the window, and its size: the
+    // size of the surface eglCreateWindowSurface makes for it, and the place of the plane its
+    // frames are shown on under the view tree. 0 x 0: there is no such view any more.
+    private static native void nSetGlPlane(long s, int x, int y, int w, int h);
+
+    /** See {@link #nSetGlPlane}. */
+    public static void setGlPlane(int x, int y, int w, int h) {
+        final long s = sSession;
+        if (s != 0L) nSetGlPlane(s, x, y, w, h);
+    }
+
     // GL present (Flutter / SurfaceView): Mesa renders + commits the toplevel; acl owns the Looper
     // and clocks the real Choreographer's vsync from a timerfd (armed with wp_presentation feedback).
     private static native long nGlOpen(View decor, int w, int h, String title, String appId);
@@ -230,9 +241,13 @@ public final class PresentDriver {
                 // Back a lazily-created video SurfaceView (media3 PlayerView) with a real Surface so
                 // ExoPlayer stops rendering to a PlaceholderSurface (which skips every frame) — before
                 // the traversal, so the surfaceCreated it fires is reflected this frame.
-                HostBootstrap.maybeInjectVideoSurface(decor);
-                HostBootstrap.maybeLogVideoPlayer(decor);
-                HostBootstrap.prepareTextureViews(decor);
+                // The Activity on top now, which is not the one this loop was started
+                // with once the app has started another: its SurfaceView is the one to back.
+                final View shown = HostBootstrap.currentTopDecorView();
+                final View top = shown != null ? shown : decor;
+                HostBootstrap.maybeInjectVideoSurface(top);
+                HostBootstrap.maybeLogVideoPlayer(top);
+                HostBootstrap.prepareTextureViews(top);
                 nTraverse(s);
                 postTraversal(choreo, postCallback, traversal[0]);
                 // A pre-draw listener cancelled the draw (a splash screen holding its first

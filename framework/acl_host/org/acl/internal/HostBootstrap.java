@@ -6204,7 +6204,82 @@ public final class HostBootstrap {
     private static int sVideoW, sVideoH;
 
     /** Forget the injected video SurfaceView (activity transition): the next screen re-arms fresh. */
-    public static void forgetVideoSurface() { sVideoSv = null; }
+    public static void forgetVideoSurface() {
+        sVideoSv = null;
+        releaseGlPlane();
+    }
+
+    // A SurfaceView that an engine draws GL into, in an app that is on the View-tree present:
+    // a map under the app's own views (Waze), a game board beside its menus. The whole window
+    // is not the GL surface, as it is for an app whose first Activity is one (runGl), and the
+    // view is not a video. Its EGL window is an offscreen one (PresentDriver.setGlPlane, and
+    // eglCreateWindowSurface's hook in the runtime) whose frames are shown on the plane under
+    // the view tree, through a hole punched where the view is.
+    private static java.lang.ref.WeakReference<android.view.SurfaceView> sGlPlaneSv;
+    private static int sGlPlaneW, sGlPlaneH;
+
+    // The Activity that holds the view is no longer the one shown: its surface goes, as it
+    // does on Android when an Activity stops, and comes back with surfaceCreated when the
+    // view is found again (maybeInjectGlPlane). Main thread.
+    private static void releaseGlPlane() {
+        final android.view.SurfaceView sv = sGlPlaneSv != null ? sGlPlaneSv.get() : null;
+        sGlPlaneSv = null;
+        if (sv == null) return;
+        try {
+            Class<?> c = android.view.SurfaceView.class;
+            android.view.SurfaceHolder holder = sv.getHolder();
+            for (android.view.SurfaceHolder.Callback cb : snapshotCallbacks(c, sv)) {
+                if (cb != null) cb.surfaceDestroyed(holder);
+            }
+            setField(c, sv, "mSurfaceCreated", Boolean.FALSE);
+        } catch (Throwable t) {
+            android.util.Log.w("acl", "releaseGlPlane failed: " + t);
+        }
+        PresentDriver.setGlPlane(0, 0, 0, 0);
+    }
+
+    private static void maybeInjectGlPlane(android.view.SurfaceView sv, int[] loc, int w, int h)
+            throws Exception {
+        Class<?> c = android.view.SurfaceView.class;
+        if (sGlPlaneSv != null && sGlPlaneSv.get() == sv) {  // backed: keep the plane where it is
+            PresentDriver.setGlPlane(loc[0], loc[1], w, h);
+            if (w != sGlPlaneW || h != sGlPlaneH) {
+                sGlPlaneW = w;
+                sGlPlaneH = h;
+                setIntField(c, sv, "mSurfaceWidth", w);
+                setIntField(c, sv, "mSurfaceHeight", h);
+                int fmt = getIntField(c, sv, "mFormat", android.graphics.PixelFormat.RGBX_8888);
+                android.view.SurfaceHolder holder = sv.getHolder();
+                for (android.view.SurfaceHolder.Callback cb : snapshotCallbacks(c, sv)) {
+                    if (cb != null) cb.surfaceChanged(holder, fmt, w, h);
+                }
+            }
+            return;
+        }
+        releaseGlPlane();  // another view's, in an Activity that is still on top
+        PresentDriver.setGlPlane(loc[0], loc[1], w, h);
+        int fmt = getIntField(c, sv, "mRequestedFormat", android.graphics.PixelFormat.RGBX_8888);
+        // mHaveFrame stays false, as for a video view (maybeInjectVideoSurface).
+        setField(c, sv, "mVisible", Boolean.TRUE);
+        setField(c, sv, "mRequestedVisible", Boolean.TRUE);
+        setField(c, sv, "mSurfaceCreated", Boolean.TRUE);
+        setIntField(c, sv, "mSurfaceWidth", w);
+        setIntField(c, sv, "mSurfaceHeight", h);
+        setIntField(c, sv, "mFormat", fmt);
+        sGlPlaneSv = new java.lang.ref.WeakReference<>(sv);
+        sGlPlaneW = w;
+        sGlPlaneH = h;
+        android.view.SurfaceHolder holder = sv.getHolder();
+        for (android.view.SurfaceHolder.Callback cb : snapshotCallbacks(c, sv)) {
+            if (cb == null) continue;
+            cb.surfaceCreated(holder);
+            cb.surfaceChanged(holder, fmt, w, h);
+        }
+        final int punched = punchPlaneHole(sv);
+        android.util.Log.i("acl", "maybeInjectGlPlane: " + sv.getClass().getName()
+                + " surfaceCreated (" + w + "x" + h + " @" + loc[0] + "," + loc[1]
+                + ") punchHole nodes=" + punched);
+    }
 
     // A TextureView makes its SurfaceTexture, and tells its listener the surface is available,
     // the first time it is drawn (TextureView.draw -> getTextureLayer). On Android that draw
@@ -6266,6 +6341,10 @@ public final class HostBootstrap {
             if (w <= 0 || h <= 0) return;  // not laid out yet — wait for real bounds
             final int[] loc = new int[2];
             sv.getLocationInWindow(loc);
+            if (isGlSurfaceView(sv)) {  // an engine's view, not a player's
+                maybeInjectGlPlane(sv, loc, w, h);
+                return;
+            }
             if (sVideoSv != null && sVideoSv.get() == sv) {  // already backed — keep the plane aligned
                 PresentDriver.setVideoBounds(loc[0], loc[1], w, h);
                 if (w != sVideoW || h != sVideoH) {
@@ -6322,31 +6401,7 @@ public final class HostBootstrap {
                 cb.surfaceCreated(holder);
                 cb.surfaceChanged(holder, fmt, w, h);
             }
-            // Punch a transparent hole where the video is, so the video plane (stacked below the ARGB
-            // toplevel) shows through while the app UI composites on top. Compose does NOT draw the
-            // SurfaceView's own RenderNode into the walked tree (it draws the hosting Android view as a
-            // unit), so register the punch on the SurfaceView AND each Android-view ancestor up to the
-            // Compose boundary — whichever node the walk actually draws gets cleared. These are the
-            // PlayerView subtree (video only, no UI), so clearing their rect is safe.
-            int punched = 0;
-            for (Object v = sv; v instanceof android.view.View; v = ((android.view.View) v).getParent()) {
-                String cn = v.getClass().getName();
-                if (cn.contains("androidx.compose.ui.platform")) break;  // reached the Compose host
-                long rn = renderNodeHandle((android.view.View) v);
-                if (rn != 0L) { PresentDriver.setVideoPunchHole(rn, true); punched++; }
-            }
-            // And let the SurfaceView punch its own hole, as it does on Android once its surface
-            // has drawn (mDrawFinished): SurfaceView.draw/dispatchDraw then calls
-            // Canvas.punchHole() over its bounds. That hole lands after the ancestors' backgrounds,
-            // which the node punches above do not survive: an ancestor's background is drawn after
-            // its node is cleared. Without this a video over an opaque background stays hidden.
-            setField(c, sv, "mDrawFinished", Boolean.TRUE);
-            sv.invalidate();
-            // The parent recorded this child while it had nothing to draw, and a4l records such
-            // a child inline instead of by reference. Record the parent again so that it refers
-            // to the SurfaceView's node, which now holds the hole.
-            if (sv.getParent() instanceof android.view.View)
-                ((android.view.View) sv.getParent()).invalidate();
+            final int punched = punchPlaneHole(sv);
             sVideoSv = new java.lang.ref.WeakReference<>(sv);
             sVideoW = w;
             sVideoH = h;
@@ -6355,6 +6410,38 @@ public final class HostBootstrap {
         } catch (Throwable t) {
             android.util.Log.w("acl", "maybeInjectVideoSurface failed: " + t);
         }
+    }
+
+    // Punch a transparent hole where a SurfaceView is, so the plane under the ARGB toplevel
+    // (a video's, or a GL view's) shows through while the app's views composite on top.
+    // Returns how many render nodes were marked.
+    private static int punchPlaneHole(android.view.SurfaceView sv) throws Exception {
+        Class<?> c = android.view.SurfaceView.class;
+        // Compose does NOT draw the SurfaceView's own RenderNode into the walked tree (it draws
+        // the hosting Android view as a unit), so register the punch on the SurfaceView AND each
+        // Android-view ancestor up to the Compose boundary — whichever node the walk actually
+        // draws gets cleared. For a player these are the PlayerView subtree (video only, no UI),
+        // so clearing their rect is safe.
+        int punched = 0;
+        for (Object v = sv; v instanceof android.view.View; v = ((android.view.View) v).getParent()) {
+            String cn = v.getClass().getName();
+            if (cn.contains("androidx.compose.ui.platform")) break;  // reached the Compose host
+            long rn = renderNodeHandle((android.view.View) v);
+            if (rn != 0L) { PresentDriver.setVideoPunchHole(rn, true); punched++; }
+        }
+        // And let the SurfaceView punch its own hole, as it does on Android once its surface
+        // has drawn (mDrawFinished): SurfaceView.draw/dispatchDraw then calls
+        // Canvas.punchHole() over its bounds. That hole lands after the ancestors' backgrounds,
+        // which the node punches above do not survive: an ancestor's background is drawn after
+        // its node is cleared. Without this a plane under an opaque background stays hidden.
+        setField(c, sv, "mDrawFinished", Boolean.TRUE);
+        sv.invalidate();
+        // The parent recorded this child while it had nothing to draw, and a4l records such
+        // a child inline instead of by reference. Record the parent again so that it refers
+        // to the SurfaceView's node, which now holds the hole.
+        if (sv.getParent() instanceof android.view.View)
+            ((android.view.View) sv.getParent()).invalidate();
+        return punched;
     }
 
     // ACL_MC_DIAG: poll the media3 Player's state/position so we can see WHY video frames render vs
