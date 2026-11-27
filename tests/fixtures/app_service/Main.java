@@ -711,6 +711,7 @@ public class Main extends Activity {
             case 11: artwork(); break;
             case 12: keyGenerators(); break;
             case 13: permissions(); break;
+            case 14: coveredDialog(); break;
             default:
                 log("PASS");
                 System.exit(0);
@@ -719,6 +720,74 @@ public class Main extends Activity {
 
     void later(Runnable r) {
         main.postDelayed(r, 100);
+    }
+
+    // A Dialog left open by an Activity that starts another is under the new Activity: it is
+    // not drawn while that one is on top, and is drawn again when it finishes. The dialog's
+    // view counts its draws and asks for another each time, so it is drawn on every frame it
+    // is shown in.
+    static int sDialogDraws;
+    static int sCoveredDraws = -1;
+
+    static final class DrawCounter extends android.view.View {
+        DrawCounter(Context c) { super(c); }
+        @Override protected void onDraw(android.graphics.Canvas canvas) {
+            sDialogDraws++;
+            canvas.drawColor(0xff336699);
+            invalidate();
+        }
+    }
+
+    /** Covers Main for a while, counts the dialog's draws meanwhile, and finishes. */
+    public static class Cover extends Activity {
+        @Override protected void onCreate(Bundle b) {
+            super.onCreate(b);
+            setContentView(new android.view.View(this));
+            final Handler h = new Handler(Looper.getMainLooper());
+            // After the frames that were under way when this was started.
+            h.postDelayed(new Runnable() {
+                @Override public void run() {
+                    final int before = sDialogDraws;
+                    h.postDelayed(new Runnable() {
+                        @Override public void run() {
+                            sCoveredDraws = sDialogDraws - before;
+                            finish();
+                            sMain.main.postDelayed(new Runnable() {
+                                @Override public void run() { sMain.afterCover(); }
+                            }, 300);
+                        }
+                    }, 400);
+                }
+            }, 300);
+        }
+    }
+
+    private android.app.Dialog coverDialog;
+    private int shownDraws;
+
+    void coveredDialog() {
+        coverDialog = new android.app.Dialog(this);
+        coverDialog.setContentView(new DrawCounter(this),
+                new android.view.ViewGroup.LayoutParams(200, 100));
+        coverDialog.show();
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                shownDraws = sDialogDraws;
+                startActivity(new Intent(Main.this, Cover.class));
+            }
+        }, 400);
+    }
+
+    void afterCover() {
+        final int before = sDialogDraws;
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                log("dialog drawn=" + (shownDraws > 0) + " while covered=" + sCoveredDraws
+                        + " back=" + (sDialogDraws > before));
+                coverDialog.dismiss();
+                next();
+            }
+        }, 400);
     }
 
     // A second requestPermissions is answered like the first. Activity refuses a request
