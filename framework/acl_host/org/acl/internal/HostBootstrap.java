@@ -5072,6 +5072,35 @@ public final class HostBootstrap {
         return true;
     }
 
+    // ActivityManager.getMemoryInfo: the host's memory, from /proc/meminfo. Left to the default
+    // every field was 0, and an app that checks for room before a large allocation found none:
+    // WhatsApp sizes its speech model against availMem and gave up on every transcription
+    // ("transcription failed status=17"). The low-memory threshold is a sixteenth of the total;
+    // the host has no figure of its own for it.
+    private static void fillMemoryInfo(android.app.ActivityManager.MemoryInfo info) {
+        if (info == null) return;
+        long total = 0, avail = 0;
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.FileReader("/proc/meminfo"))) {
+            String line;
+            while ((line = r.readLine()) != null && (total == 0 || avail == 0)) {
+                final boolean isTotal = line.startsWith("MemTotal:");
+                if (!isTotal && !line.startsWith("MemAvailable:")) continue;
+                // "MemTotal:       63365608 kB"
+                final String[] f = line.trim().split("\\s+");
+                if (f.length < 2) continue;
+                final long bytes = Long.parseLong(f[1]) * 1024L;
+                if (isTotal) total = bytes; else avail = bytes;
+            }
+        } catch (java.io.IOException | NumberFormatException e) {
+            android.util.Log.w("acl", "getMemoryInfo: /proc/meminfo: " + e);
+        }
+        info.totalMem = total;
+        info.availMem = avail;
+        info.threshold = total / 16;
+        info.lowMemory = avail < info.threshold;
+    }
+
     // IActivityManager. PendingIntents are kept and sent in this process, and a foreground
     // Service's notification goes to the desktop; everything else defaults (an empty process
     // list and the like, enough for the probes apps make at start).
@@ -5080,6 +5109,9 @@ public final class HostBootstrap {
                 iface.getClassLoader(), new Class<?>[]{iface},
                 (p, method, a) -> {
                     switch (method.getName()) {
+                        case "getMemoryInfo":
+                            fillMemoryInfo((android.app.ActivityManager.MemoryInfo) a[0]);
+                            return null;
                         case "getIntentSender":
                             // (type, pkg, token, resultWho, requestCode, intents, types, flags, ...)
                             return getIntentSender(method.getReturnType(), (Integer) a[0],
