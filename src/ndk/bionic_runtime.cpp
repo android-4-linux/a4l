@@ -483,10 +483,12 @@ bool bootstrap_linker(const BionicConfig& cfg,
 namespace {
 
 constexpr std::size_t kPage = 4096;
-std::uintptr_t page_down(std::uintptr_t v) {
+// maybe_unused: attach is their one user, and it is compiled out in a build
+// without the bionic offsets.
+[[maybe_unused]] std::uintptr_t page_down(std::uintptr_t v) {
   return v & ~(std::uintptr_t{kPage} - 1);
 }
-std::uintptr_t page_up(std::uintptr_t v) {
+[[maybe_unused]] std::uintptr_t page_up(std::uintptr_t v) {
   return page_down(v + kPage - 1);
 }
 
