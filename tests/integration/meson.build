@@ -30,6 +30,17 @@ if py3.found()
     timeout : 300,
   )
 
+  # The bionic linker bootstraps in-process and a library it loads answers, on the
+  # architecture a4l is built for (x86_64, or arm64 under qemu-user when cross built).
+  # Needs a built AOSP; SKIPs (exit 77) without one.
+  test(
+    'ndk-bootstrap',
+    py3,
+    args : [files('run_ndk_bootstrap_test.py'), ndk_probe_exe, meson.project_source_root()],
+    depends : [ndk_probe_exe],
+    timeout : 300,
+  )
+
   # Per-thread attach-as-bionic: a glibc-created thread, handed a hand-built bionic TCB, runs real
   # bionic code as itself (own TCB + pthread_internal_t + tid). Needs a staged bionic + the offsets
   # header; SKIPs (exit 77) when absent. See docs/ndk-scope.md.

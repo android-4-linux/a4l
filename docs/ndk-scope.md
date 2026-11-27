@@ -252,6 +252,17 @@ the `%fs` swap (the swap confined to the `-fno-stack-protector` TU). Arch-guarde
 a clean "arm64 TLS port pending" error so cross builds stay green. Verified via `acl-ndk-probe`
 (`nativeAnswer()=42 (PASS)`, logging through a4l's `log/`).
 
+**arm64, first step (2026-11-26).** The bootstrap is shared by x86_64 and arm64: mapping the
+linker, the kernel argument block and the call into `__linker_init` are the same code, and the
+host supplies the thread pointer (`%fs` through `arch_prctl`, or `TPIDR_EL0` through `mrs`/`msr`),
+its page size, and the instruction that makes `linker_debuggerd_init` return. On arm64 the thread
+that bootstraps the linker can `load()` a library and call into it under a `RunScope`.
+`tools/stage-bionic-runtime.sh` with `ACL_BIONIC_ARCH=arm64` stages the linker, libc, libm, libdl,
+liblog, libc++ and the stub from the tree's `linux_bionic_arm64` outputs. Not ported yet, each
+still x86_64 only: `attach_current_thread` (the TCB layout in `bionic_offsets.h` is measured for
+x86_64), the JNI boundary and its up-call thunks, the down-call trampolines, the signal shim, the
+GL forwarders, and the shim libraries (`libandroid.so` and the rest). `ndk-bootstrap` is the test.
+
 **Rung 4a — the bidirectional %fs boundary, PROVEN (2026-07-16).** `acl-ndk-probe --boundary` →
 `boundary selftest = 1010 (PASS)`. A bionic `.so` under bionic `%fs` writes a bionic thread-local,
 calls **back into glibc** (which writes glibc `errno` under glibc `%fs`) through an internal up-call

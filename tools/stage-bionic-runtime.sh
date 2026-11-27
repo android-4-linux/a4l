@@ -39,6 +39,43 @@ say() { [ "$PRINT_ENV" = 1 ] || echo "$@"; }
 
 CLANG="$AOSP/prebuilts/clang/host/linux-x86/clang-r450784d/bin/clang"
 INT="$AOSP/out/soong/.intermediates"
+
+# ACL_BIONIC_ARCH=arm64: the runtime for an arm64 host, from the tree's linux_bionic_arm64
+# outputs (bionic built for a Linux arm64 host; the tree has no Android arm64 target built).
+# What a4l's loader does on arm64 so far needs the linker, the C library and its neighbours,
+# and the stub: none of the shim libraries below are built for it yet.
+if [ "${ACL_BIONIC_ARCH:-x86_64}" = "arm64" ]; then
+  V=linux_bionic_arm64
+  A_LINKER="$INT/bionic/linker/linker/$V/linker64"
+  A_CRTB="$INT/bionic/libc/crtbegin_dynamic/$V/crtbegin_dynamic.o"
+  A_CRTE="$INT/bionic/libc/crtend_android/$V/obj/bionic/libc/arch-common/bionic/crtend.o"
+  A_LIBS=(bionic/libc/libc:libc.so bionic/libm/libm:libm.so bionic/libdl/libdl:libdl.so
+          system/logging/liblog/liblog:liblog.so bionic/linker/ld-android:ld-android.so
+          external/libcxx/libc++:libc++.so)
+  for f in "$CLANG" "$A_LINKER" "$A_CRTB" "$A_CRTE"; do
+    [ -e "$f" ] || { echo "MISSING: $f  (no $V outputs in \$AOSP)" >&2; exit 1; }
+  done
+  say "== staging bionic runtime (arm64) -> $OUT =="
+  cp -f "$A_LINKER" "$OUT/linker64"
+  SYS="$OUT/bionic"
+  mkdir -p "$SYS"
+  for l in "${A_LIBS[@]}"; do
+    src="$INT/${l%%:*}/${V}_shared/${l##*:}"
+    [ -e "$src" ] || { echo "MISSING: $src" >&2; exit 1; }
+    cp -f "$src" "$SYS/${l##*:}"
+  done
+  "$CLANG" --target=aarch64-linux-android31 -fPIC -pie -nostdlib \
+    -o "$OUT/stub" "$A_CRTB" "$HERE/ndk-loader-spike/stub.c" "$A_CRTE" \
+    "$SYS/libc.so" "$SYS/libdl.so" -fuse-ld=lld
+  if [ "$PRINT_ENV" = 1 ]; then
+    echo "export ACL_BIONIC_LINKER=$OUT/linker64"
+    echo "export ACL_BIONIC_SYSROOT=$SYS"
+    echo "export ACL_BIONIC_STUB=$OUT/stub"
+    exit 0
+  fi
+  echo "== staged (arm64: linker, libc, libm, libdl, liblog, libc++, stub) =="
+  exit 0
+fi
 LINKER="$AOSP/out/target/product/generic_x86_64/apex/com.android.runtime/bin/linker64"
 BLIBC="$INT/bionic/libc/libc/android_x86_64_shared/libc.so"
 BLIBM="$INT/bionic/libm/libm/android_x86_64_shared/libm.so"
