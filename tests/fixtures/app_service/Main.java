@@ -710,6 +710,7 @@ public class Main extends Activity {
             case 10: job(); break;
             case 11: artwork(); break;
             case 12: keyGenerators(); break;
+            case 13: permissions(); break;
             default:
                 log("PASS");
                 System.exit(0);
@@ -718,6 +719,25 @@ public class Main extends Activity {
 
     void later(Runnable r) {
         main.postDelayed(r, 100);
+    }
+
+    // A second requestPermissions is answered like the first. Activity refuses a request
+    // while an earlier one is open, and answers it with no names.
+    private String asked = "";
+
+    void permissions() {
+        requestPermissions(new String[] {"android.permission.INTERNET"}, 5);
+    }
+
+    @Override public void onRequestPermissionsResult(int code, String[] names, int[] grants) {
+        asked += " " + code + "/" + names.length + "/" + (grants.length > 0 ? grants[0] : -9);
+        if (code == 5) {
+            requestPermissions(new String[] {"android.permission.INTERNET",
+                                             "android.permission.VIBRATE"}, 6);
+            return;
+        }
+        log("permissions asked twice" + asked);
+        next();
     }
 
     static final ServiceConnection NONE = new ServiceConnection() {

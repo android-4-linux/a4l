@@ -4174,7 +4174,7 @@ public final class HostBootstrap {
         @Override public android.app.Instrumentation.ActivityResult execStartActivity(
                 android.content.Context who, android.os.IBinder contextThread, android.os.IBinder token,
                 String target, android.content.Intent intent, int requestCode, android.os.Bundle options) {
-            if (grantPermissionRequest(who, intent, requestCode)) return null;
+            if (grantPermissionRequest(who, target, intent, requestCode)) return null;
             return suppress(intent, token, requestCode);
         }
 
@@ -4186,7 +4186,14 @@ public final class HostBootstrap {
         // (checkSelfPermission returns GRANTED), so answer the request directly with GRANTED for each
         // name asked. Posted rather than called inline because the framework finishes bookkeeping in
         // requestPermissions() after this returns.
-        private boolean grantPermissionRequest(android.content.Context who,
+        //
+        // The answer goes in through Activity.dispatchActivityResult, as the permission
+        // controller's does: that is what ends the request. Activity refuses a second request
+        // while one is open ("Can request only one set of permissions at a time") and answers it
+        // with no names at all, so a result handed straight to onRequestPermissionsResult left
+        // every later request refused. `target` says whose request it is, the activity's or one
+        // of its fragments'.
+        private boolean grantPermissionRequest(android.content.Context who, final String target,
                                                android.content.Intent intent, final int requestCode) {
             if (intent == null || !(who instanceof android.app.Activity)) return false;
             if (!"android.content.pm.action.REQUEST_PERMISSIONS".equals(intent.getAction())) return false;
@@ -4196,12 +4203,32 @@ public final class HostBootstrap {
             final android.app.Activity a = (android.app.Activity) who;
             final int[] grants = new int[names.length];
             java.util.Arrays.fill(grants, android.content.pm.PackageManager.PERMISSION_GRANTED);
+            final android.content.Intent result =
+                    new android.content.Intent("android.content.pm.action.REQUEST_PERMISSIONS");
+            result.putExtra("android.content.pm.extra.REQUEST_PERMISSIONS_NAMES", names);
+            result.putExtra("android.content.pm.extra.REQUEST_PERMISSIONS_RESULTS", grants);
             new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
                 @Override public void run() {
+                    java.lang.reflect.Method dispatch = null;
                     try {
-                        a.onRequestPermissionsResult(requestCode, names, grants);
+                        dispatch = android.app.Activity.class.getDeclaredMethod(
+                                "dispatchActivityResult", String.class, int.class, int.class,
+                                android.content.Intent.class, String.class);
+                        dispatch.setAccessible(true);
                     } catch (Throwable t) {
-                        android.util.Log.w("acl", "onRequestPermissionsResult failed: " + t);
+                        android.util.Log.w("acl", "no Activity.dispatchActivityResult: " + t);
+                    }
+                    try {
+                        if (dispatch != null && target != null) {
+                            dispatch.invoke(a, target, requestCode,
+                                    android.app.Activity.RESULT_OK, result, "permissions");
+                        } else {
+                            a.onRequestPermissionsResult(requestCode, names, grants);
+                        }
+                    } catch (Throwable t) {
+                        android.util.Log.w("acl", "onRequestPermissionsResult failed: "
+                                + (t instanceof java.lang.reflect.InvocationTargetException
+                                        ? t.getCause() : t));
                     }
                 }
             });
