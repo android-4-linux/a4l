@@ -7,6 +7,9 @@
 
 #include "acl_config.h"
 #include "log/log.h"
+#if ACL_HAVE_SDBUS
+#include "svc/bus_names.h"
+#endif
 
 #include <cmath>
 #include <cstdint>
@@ -81,22 +84,6 @@ std::string map_technology(std::uint32_t tech) {
   }
 }
 
-bool name_has_owner(sdbus::IConnection& conn, const char* bus_name) {
-  try {
-    auto dbus =
-        sdbus::createProxy(conn, sdbus::ServiceName{"org.freedesktop.DBus"},
-                           sdbus::ObjectPath{"/org/freedesktop/DBus"});
-    bool owned = false;
-    dbus->callMethod("NameHasOwner")
-        .onInterface(sdbus::InterfaceName{"org.freedesktop.DBus"})
-        .withArguments(std::string{bus_name})
-        .storeResultsTo(owned);
-    return owned;
-  } catch (const sdbus::Error&) {
-    return false;
-  }
-}
-
 // UPower backend: read the composite DisplayDevice (GetDisplayDevice) — a
 // virtual device that aggregates the system's power supplies, always present —
 // and map its org.freedesktop.UPower.Device properties to AndroidBatteryState.
@@ -156,6 +143,11 @@ class UPowerBackend : public IBatteryBackend {
       const bool present =
           dev_->getProperty("IsPresent").onInterface(dev).get<bool>();
 
+      // A machine with no battery still has a display device: not present,
+      // 0 %, state unknown. Handing that on tells an app its battery is flat.
+      // It gets what a system with no UPower gets: a present, full cell.
+      if (!present)
+        return s;
       s.level = static_cast<int>(std::lround(pct));
       s.scale = 100;
       s.temperature_dc = static_cast<int>(std::lround(temp * 10.0));
@@ -215,7 +207,7 @@ std::unique_ptr<IBatteryBackend> make_battery_backend() {
   const char* env = std::getenv("ACL_BATTERY_BACKEND");
   const std::string_view pref = env != nullptr ? env : "";
   if ((pref.empty() || pref == "upower") &&
-      name_has_owner(*conn, "org.freedesktop.UPower")) {
+      svc::bus_name_available(*conn, "org.freedesktop.UPower")) {
     log::i(kTag, "battery backend: upower");
     return std::make_unique<UPowerBackend>(std::move(conn));
   }

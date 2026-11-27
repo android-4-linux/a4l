@@ -1218,3 +1218,22 @@ if have_secret and have_jni
     timeout : 120,
   )
 endif
+
+# A backend finds a service the bus has not started: a private bus standing in for the system
+# bus starts a stand-in UPower on demand, and acl-battery-probe must find and read it. Needs
+# sdbus-c++ and dbus-daemon; SKIPs without the latter.
+if have_sdbus
+  upower_stub = executable(
+    'acl-upower-stub',
+    files('upower_stub_main.cpp'),
+    dependencies : [sdbus_dep],
+    install : false,
+  )
+  test(
+    'bus-activation',
+    py3,
+    args : [files('run_bus_activation_test.py'), battery_probe, upower_stub],
+    depends : [battery_probe, upower_stub],
+    timeout : 120,
+  )
+endif

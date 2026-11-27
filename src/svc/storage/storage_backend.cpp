@@ -8,6 +8,9 @@
 
 #include "acl_config.h"
 #include "log/log.h"
+#if ACL_HAVE_SDBUS
+#include "svc/bus_names.h"
+#endif
 
 #include <cstdint>
 #include <cstdlib>
@@ -92,20 +95,23 @@ std::string first_mount_point(const PropMap& p) {
   }
 }
 
-bool name_has_owner(sdbus::IConnection& conn, const char* bus_name) {
-  try {
-    auto dbus =
-        sdbus::createProxy(conn, sdbus::ServiceName{"org.freedesktop.DBus"},
-                           sdbus::ObjectPath{"/org/freedesktop/DBus"});
-    bool owned = false;
-    dbus->callMethod("NameHasOwner")
-        .onInterface(sdbus::InterfaceName{"org.freedesktop.DBus"})
-        .withArguments(std::string{bus_name})
-        .storeResultsTo(owned);
-    return owned;
-  } catch (const sdbus::Error&) {
+// Whether `where` is among a filesystem's MountPoints.
+bool mounted_at(const PropMap& p, std::string_view where) {
+  auto it = p.find("MountPoints");
+  if (it == p.end())
     return false;
+  try {
+    for (const auto& b :
+         it->second.get<std::vector<std::vector<std::uint8_t>>>()) {
+      std::size_t n = b.size();
+      while (n > 0 && b[n - 1] == 0)
+        --n;
+      if (std::string_view(reinterpret_cast<const char*>(b.data()), n) == where)
+        return true;
+    }
+  } catch (...) {
   }
+  return false;
 }
 
 // UDisks2 backend: snapshot the object tree via ObjectManager.GetManagedObjects
@@ -189,6 +195,19 @@ class UDisks2Backend : public IStorageBackend {
           .onInterface(
               sdbus::InterfaceName{"org.freedesktop.DBus.ObjectManager"})
           .storeResultsTo(objs);
+      // The drive the system runs from is not a volume to offer an app,
+      // removable or not: a Raspberry Pi boots from an SD card, and its root
+      // and boot partitions would otherwise be listed.
+      std::string system_drive;
+      for (const auto& [path, ifaces] : objs) {
+        auto fs = ifaces.find("org.freedesktop.UDisks2.Filesystem");
+        auto blk = ifaces.find("org.freedesktop.UDisks2.Block");
+        if (fs != ifaces.end() && blk != ifaces.end() &&
+            mounted_at(fs->second, "/")) {
+          system_drive = get_objpath(blk->second, "Drive");
+          break;
+        }
+      }
       for (const auto& [path, ifaces] : objs) {
         auto fs = ifaces.find("org.freedesktop.UDisks2.Filesystem");
         auto blk = ifaces.find("org.freedesktop.UDisks2.Block");
@@ -202,6 +221,9 @@ class UDisks2Backend : public IStorageBackend {
           continue;  // root/system
         if (!drive_is_removable(objs, get_objpath(b, "Drive")))
           continue;  // fixed disk
+        if (!system_drive.empty() && system_drive != "/" &&
+            get_objpath(b, "Drive") == system_drive)
+          continue;  // the system's own drive
 
         StorageVol v;
         v.path = mount;
@@ -262,7 +284,7 @@ std::unique_ptr<IStorageBackend> make_storage_backend() {
   const char* env = std::getenv("ACL_STORAGE_BACKEND");
   const std::string_view pref = env != nullptr ? env : "";
   if ((pref.empty() || pref == "udisks2") &&
-      name_has_owner(*conn, "org.freedesktop.UDisks2")) {
+      svc::bus_name_available(*conn, "org.freedesktop.UDisks2")) {
     log::i(kTag, "storage backend: udisks2");
     return std::make_unique<UDisks2Backend>(std::move(conn));
   }
