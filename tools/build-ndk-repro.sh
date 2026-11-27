@@ -19,11 +19,23 @@ mkdir -p "$OUT"
 
 CLANG="$AOSP/prebuilts/clang/host/linux-x86/clang-r450784d/bin/clang"
 INT="$AOSP/out/soong/.intermediates"
-BIONIC_LIBC="$INT/bionic/libc/libc/android_x86_64_shared/libc.so"
-BIONIC_LIBLOG="$INT/system/logging/liblog/liblog/android_x86_64_shared/liblog.so"
-BIONIC_LIBDL="$INT/bionic/libdl/libdl/android_x86_64_shared/libdl.so"
-CRTBEGIN="$INT/bionic/libc/crtbegin_so/android_x86_64/crtbegin_so.o"
-CRTEND="$INT/bionic/libc/crtend_so/android_x86_64/obj/bionic/libc/arch-common/bionic/crtend_so.o"
+# ACL_BIONIC_ARCH=arm64: the same library for arm64, against the tree's linux_bionic_arm64
+# outputs, as tools/stage-bionic-runtime.sh stages them.
+if [ "${ACL_BIONIC_ARCH:-x86_64}" = "arm64" ]; then
+  V=linux_bionic_arm64
+  # The machine's own C headers are for another architecture, so bionic's.
+  TRIPLE=(aarch64-linux-android31 -nostdlibinc -I"$AOSP/bionic/libc/include"
+          -I"$AOSP/bionic/libc/kernel/uapi" -I"$AOSP/bionic/libc/kernel/uapi/asm-arm64"
+          -I"$AOSP/bionic/libc/kernel/android/uapi")
+else
+  V=android_x86_64
+  TRIPLE=(x86_64-linux-android31)
+fi
+BIONIC_LIBC="$INT/bionic/libc/libc/${V}_shared/libc.so"
+BIONIC_LIBLOG="$INT/system/logging/liblog/liblog/${V}_shared/liblog.so"
+BIONIC_LIBDL="$INT/bionic/libdl/libdl/${V}_shared/libdl.so"
+CRTBEGIN="$INT/bionic/libc/crtbegin_so/$V/crtbegin_so.o"
+CRTEND="$INT/bionic/libc/crtend_so/$V/obj/bionic/libc/arch-common/bionic/crtend_so.o"
 # Headers: the prebuilt NDK sysroot is often absent in an AOSP checkout; use the in-tree sources.
 INC_JNI="$AOSP/libnativehelper/include_jni"           # jni.h
 INC_LOG="$AOSP/system/logging/liblog/include"          # android/log.h
@@ -525,14 +537,14 @@ EOF
 # libc.so.6) and no glibc crt/loader leaks in. -nostdlib + explicit crt = a clean bionic .so.
 # -fno-emulated-tls: use native ELF TLS (__tls_get_addr, provided by bionic) for __thread rather
 # than clang's android-default emulated-TLS (__emutls_get_address, a compiler-rt symbol not in bionic).
-"$CLANG" --target=x86_64-linux-android31 \
+"$CLANG" --target="${TRIPLE[@]}" \
   -fPIC -shared -nostdlib -fno-emulated-tls -Wl,-soname,libndktest.so \
   -I"$INC_JNI" -I"$INC_LOG" -I"$INC_SLES" \
   -o "$OUT/libndktest.so" \
   "$CRTBEGIN" "$OUT/ndktest.c" "$CRTEND" \
   "$BIONIC_LIBC" "$BIONIC_LIBLOG" "$BIONIC_LIBDL" $ACL_LIBANDROID \
   -fuse-ld=lld 2>/dev/null \
-|| "$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls \
+|| "$CLANG" --target="${TRIPLE[@]}" -fPIC -shared -nostdlib -fno-emulated-tls \
      -Wl,-soname,libndktest.so -I"$INC_JNI" -I"$INC_LOG" -I"$INC_SLES" -o "$OUT/libndktest.so" \
      "$CRTBEGIN" "$OUT/ndktest.c" "$CRTEND" \
      "$BIONIC_LIBC" "$BIONIC_LIBLOG" "$BIONIC_LIBDL" $ACL_LIBANDROID -fuse-ld=lld
@@ -608,7 +620,7 @@ int Java_com_acl_ndktest_Main_mediaFormatTest(void* e, void* c) {
   return 77;
 }
 EOF
-  "$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls \
+  "$CLANG" --target="${TRIPLE[@]}" -fPIC -shared -nostdlib -fno-emulated-tls \
     -Wl,-soname,libmediatest.so -o "$OUT/libmediatest.so" \
     "$CRTBEGIN" "$OUT/mediatest.c" "$CRTEND" "$BIONIC_LIBC" "$ACL_LIBMEDIANDK" -fuse-ld=lld
   echo "== built $OUT/libmediatest.so =="
@@ -618,6 +630,9 @@ echo "== built $OUT/libndktest.so =="
 readelf -d "$OUT/libndktest.so" | grep -E 'NEEDED|SONAME'
 echo "== exported symbol =="
 readelf -sW "$OUT/libndktest.so" | grep nativeAnswer | head -1
+
+# The rest runs the library on this machine.
+[ "${ACL_BIONIC_ARCH:-x86_64}" = "arm64" ] && [ "$(uname -m)" != "aarch64" ] && exit 0
 
 # --- A glibc probe that tries to dlopen it (the failure) ---
 cat >"$OUT/dltest.c" <<'EOF'
