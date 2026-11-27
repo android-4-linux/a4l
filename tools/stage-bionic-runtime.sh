@@ -42,8 +42,8 @@ INT="$AOSP/out/soong/.intermediates"
 
 # ACL_BIONIC_ARCH=arm64: the runtime for an arm64 host, from the tree's linux_bionic_arm64
 # outputs (bionic built for a Linux arm64 host; the tree has no Android arm64 target built).
-# What a4l's loader does on arm64 so far needs the linker, the C library and its neighbours,
-# and the stub: none of the shim libraries below are built for it yet.
+# a4l's shim libraries are built for it too, all but the GL and Vulkan forwarders, whose
+# entry points are x86_64 code. libdl_android, ICU and libstdc++ are not staged.
 if [ "${ACL_BIONIC_ARCH:-x86_64}" = "arm64" ]; then
   V=linux_bionic_arm64
   A_LINKER="$INT/bionic/linker/linker/$V/linker64"
@@ -67,13 +67,43 @@ if [ "${ACL_BIONIC_ARCH:-x86_64}" = "arm64" ]; then
   "$CLANG" --target=aarch64-linux-android31 -fPIC -pie -nostdlib \
     -o "$OUT/stub" "$A_CRTB" "$HERE/ndk-loader-spike/stub.c" "$A_CRTE" \
     "$SYS/libc.so" "$SYS/libdl.so" -fuse-ld=lld
+  # As for x86_64 below, where each is described: symbolic libz, then a4l's libraries, built
+  # against bionic's own headers. libandroid.so first, the others link it. A host build names
+  # the file, and its soname, libz-host.so; the linker finds it by the file name.
+  A_LIBZ="$INT/external/zlib/libz/${V}_shared/libz-host.so"
+  [ -e "$A_LIBZ" ] || { echo "MISSING: $A_LIBZ" >&2; exit 1; }
+  cp -f "$A_LIBZ" "$SYS/libz.so"
+  chmod u+w "$SYS/libz.so"
+  "$HERE/elf-set-symbolic.sh" "$SYS/libz.so" || echo "stage-bionic-runtime: libz.so left non-symbolic" >&2
+  A_INC=(-nostdlibinc -I"$AOSP/bionic/libc/include" -I"$AOSP/bionic/libc/kernel/uapi"
+         -I"$AOSP/bionic/libc/kernel/uapi/asm-arm64" -I"$AOSP/bionic/libc/kernel/android/uapi"
+         -I"$AOSP/system/logging/liblog/include" -I"$AOSP/frameworks/wilhelm/include"
+         -I"$AOSP/out/soong/ndk/sysroot/usr/include")
+  A_CRTB_SO="$INT/bionic/libc/crtbegin_so/$V/crtbegin_so.o"
+  A_CRTE_SO="$INT/bionic/libc/crtend_so/$V/obj/bionic/libc/arch-common/bionic/crtend_so.o"
+  # soname : source : extra flags and libraries. Hidden visibility where x86_64 has it.
+  for spec in \
+      "libandroid.so:acl_libandroid.c:-fvisibility=hidden $SYS/liblog.so $SYS/libdl.so" \
+      "libjnigraphics.so:acl_libjnigraphics.c:" \
+      "libmediandk.so:acl_libmediandk.c:" \
+      "libaaudio.so:acl_libaaudio.c:$SYS/libandroid.so" \
+      "libwebviewchromium_plat_support.so:acl_libwebviewchromium_plat_support.c:" \
+      "libOpenSLES.so:acl_libopensles.c:-fvisibility=hidden $SYS/libandroid.so -Wl,--version-script=$HERE/../src/ndk/bionic/acl_libopensles.map" \
+      "libacl_sysprops.so:acl_system_properties.c:-fvisibility=hidden -Wl,-z,global"; do
+    so="${spec%%:*}"; rest="${spec#*:}"; src="${rest%%:*}"; extra="${rest#*:}"
+    # -mno-outline-atomics: the atomics inline, not calls into compiler-rt, which is not linked.
+    # shellcheck disable=SC2086  # $extra is a list
+    "$CLANG" --target=aarch64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls \
+      -mno-outline-atomics -O2 -Wl,-soname,"$so" -Wl,-z,now "${A_INC[@]}" -o "$SYS/$so" \
+      "$A_CRTB_SO" "$HERE/../src/ndk/bionic/$src" "$A_CRTE_SO" "$SYS/libc.so" $extra -fuse-ld=lld
+  done
   if [ "$PRINT_ENV" = 1 ]; then
     echo "export ACL_BIONIC_LINKER=$OUT/linker64"
     echo "export ACL_BIONIC_SYSROOT=$SYS"
     echo "export ACL_BIONIC_STUB=$OUT/stub"
     exit 0
   fi
-  echo "== staged (arm64: linker, libc, libm, libdl, liblog, libc++, stub) =="
+  echo "== staged (arm64: linker, bionic libraries, a4l's shim libraries less GL, stub) =="
   exit 0
 fi
 LINKER="$AOSP/out/target/product/generic_x86_64/apex/com.android.runtime/bin/linker64"

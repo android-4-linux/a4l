@@ -22,6 +22,8 @@ import subprocess
 import sys
 import tempfile
 
+from ndk_probe_arch import probe_arch
+
 SKIP = 77
 
 
@@ -31,16 +33,15 @@ def main() -> int:
         return 2
     probe, src_root = sys.argv[1], sys.argv[2]
     aosp = os.environ.get("AOSP", "/mnt/dev/aosp")
-    linker = os.path.join(
-        aosp, "out/target/product/generic_x86_64/apex/com.android.runtime/bin/linker64")
-    if not os.path.exists(linker):
-        sys.stdout.write(f"SKIP: no built bionic linker under {aosp}\n")
+    arch, wrapper, why = probe_arch(probe, aosp)
+    if arch is None:
+        sys.stdout.write(f"SKIP: {why}\n")
         return SKIP
 
     work = tempfile.mkdtemp(prefix="a4l-ndk-mediandk-")
     try:
         tools = os.path.join(src_root, "tools")
-        env = dict(os.environ, AOSP=aosp)
+        env = dict(os.environ, AOSP=aosp, ACL_BIONIC_ARCH=arch)
         stage = os.path.join(work, "bionic-runtime")
         so_dir = os.path.join(work, "repro")
         try:
@@ -62,7 +63,7 @@ def main() -> int:
             "ACL_BIONIC_SYSROOT": os.path.join(stage, "bionic"),
             "ACL_BIONIC_STUB": os.path.join(stage, "stub"),
         })
-        p = subprocess.run([probe, target, "--mediaformat"],
+        p = subprocess.run(wrapper + [probe, target, "--mediaformat"],
                            env=env, capture_output=True, text=True, timeout=120)
         out = p.stdout + p.stderr
     finally:
