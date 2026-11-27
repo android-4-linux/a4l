@@ -51,5 +51,16 @@ Not checked: that the tone was heard (nobody was listening to the jack), capture
 microphone (the board has none), HDMI audio, and a Pi 5.
 
 With ALSA only, one process at a time can usually hold a hardware device unless the
-configuration mixes (`dmix`). The system volume an app sets through `AudioManager` is bound
-to PipeWire's default sink; on ALSA it is not connected to the mixer.
+configuration mixes (`dmix`).
+
+## Volume
+
+Where audio goes to ALSA, the volume an app reads and sets through `AudioManager` is one
+mixer control of the same device: the first of `Master`, `PCM`, `Speaker`, `Headphone` and
+`Digital` that has a playback volume, or the one `ACL_ALSA_MIXER` names (`amixer scontrols`
+lists them). The top of the control's range is full volume. A device with no such control
+(the Pi 4's HDMI outputs, for one) reports full volume and takes no change.
+
+On the Pi 4's headphone device the control is `PCM`: `acl-alsa-volume-probe 0.5` moved it
+from 0.00 dB to -2.02 dB, `0` to its bottom, and the first value put it back, as `amixer`
+showed. Mute, and the volume from an app, were not tried there.

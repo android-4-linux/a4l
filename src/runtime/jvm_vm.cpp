@@ -55,7 +55,7 @@
 #include "svc/permission/permission_jni.h"
 #include "svc/permission/permission_store.h"
 #include "svc/sensor/sensor_jni.h"
-#if ACL_HAVE_PIPEWIRE
+#if ACL_HAVE_PIPEWIRE || ACL_HAVE_ALSA
 #include "audio/audio_jni.h"
 #endif
 #include "audio/audio.h"
@@ -7662,9 +7662,10 @@ class ArtVm final : public JniVm {
     // Bind org.acl.internal.HostPermissions to svc/permission (the desktop's
     // permission store). Its D-Bus half is gated inside the module too.
     acl::permission::register_permission_natives(env);
-#if ACL_HAVE_PIPEWIRE
+#if ACL_HAVE_PIPEWIRE || ACL_HAVE_ALSA
     // Bind org.acl.internal.AudioBridge (AudioManager master volume) to the
-    // host PipeWire default sink.
+    // host PipeWire default sink, or to an ALSA mixer control where audio
+    // goes to ALSA.
     acl::audio::register_audio_natives(env);
 #endif
 #if ACL_HAVE_VULKAN && ACL_HAVE_WCS

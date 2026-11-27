@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <thread>
@@ -110,4 +111,38 @@ TEST_CASE("alsa source: with no device a recording is silence, in real time",
   REQUIRE(source->read(pcm, 160, /*blocking=*/true) == 160);
   CHECK(std::all_of(pcm, pcm + 160, [](std::int16_t v) { return v == 0; }));
   source->close();
+}
+
+TEST_CASE("alsa volume: decibels to a linear amplitude and back",
+          "[audio][alsa]") {
+  using acl::audio::alsa_db_from_linear;
+  using acl::audio::alsa_linear_from_db;
+  // A control from -102.39 dB to +4.00 dB, as a Raspberry Pi 4's "PCM" is.
+  const long lo = -10239, hi = 400;
+  CHECK(alsa_linear_from_db(hi, hi) == 1.0f);
+  CHECK(alsa_linear_from_db(hi + 100, hi) == 1.0f);
+  // 20 dB under the top is a tenth of the amplitude; 6.02 dB is about half.
+  CHECK(std::abs(alsa_linear_from_db(hi - 2000, hi) - 0.1f) < 1e-4f);
+  CHECK(std::abs(alsa_linear_from_db(hi - 602, hi) - 0.5f) < 1e-3f);
+  CHECK(alsa_db_from_linear(1.0f, lo, hi) == hi);
+  CHECK(alsa_db_from_linear(2.0f, lo, hi) == hi);
+  CHECK(alsa_db_from_linear(0.0f, lo, hi) == lo);
+  CHECK(alsa_db_from_linear(-1.0f, lo, hi) == lo);
+  CHECK(alsa_db_from_linear(0.1f, lo, hi) == hi - 2000);
+  CHECK(alsa_db_from_linear(0.5f, lo, hi) == hi - 602);
+  // Quieter than the control goes is its bottom.
+  CHECK(alsa_db_from_linear(1e-9f, lo, hi) == lo);
+}
+
+TEST_CASE("alsa volume: a device with no mixer reports full volume, fixed",
+          "[audio][alsa]") {
+  const DeviceEnv env("null");
+  auto v = acl::audio::make_alsa_volume();
+  REQUIRE(v != nullptr);
+  CHECK_FALSE(v->available());
+  CHECK(v->volume() == 1.0f);
+  CHECK_FALSE(v->muted());
+  CHECK_FALSE(v->set_volume(0.5f));
+  CHECK_FALSE(v->set_muted(true));
+  CHECK(v->volume() == 1.0f);
 }

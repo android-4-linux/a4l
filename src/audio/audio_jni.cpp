@@ -9,6 +9,11 @@
 #include <memory>
 #include <string_view>
 
+#include "acl_config.h"
+#if ACL_HAVE_ALSA
+#include "audio/alsa_device.h"
+#endif
+#include "audio/audio.h"
 #include "audio/pw_volume.h"
 #include "log/log.h"
 
@@ -82,8 +87,18 @@ void JNICALL n_set_muted(JNIEnv*, jclass, jint, jboolean mute) {
 }  // namespace
 
 void register_audio_natives(JNIEnv* env) {
-  if (!vol())
-    vol() = make_pw_volume();
+  // The volume belongs to the backend the samples go to: ALSA's mixer when
+  // that is ALSA, PipeWire's default sink otherwise.
+  if (!vol()) {
+#if ACL_HAVE_ALSA
+    if (device_backend() == DeviceBackend::kAlsa)
+      vol() = make_alsa_volume();
+#endif
+#if ACL_HAVE_PIPEWIRE
+    if (!vol())
+      vol() = make_pw_volume();
+#endif
+  }
 
   jclass cls = env->FindClass("org/acl/internal/AudioBridge");
   if (cls == nullptr) {
