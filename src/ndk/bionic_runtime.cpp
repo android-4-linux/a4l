@@ -51,12 +51,36 @@
 #if defined(__x86_64__)
 #include <asm/prctl.h>
 #endif
+#if defined(__aarch64__)
+#include <sys/prctl.h>
+#ifndef PR_SET_TAGGED_ADDR_CTRL
+#define PR_SET_TAGGED_ADDR_CTRL 55
+#endif
+#ifndef PR_TAGGED_ADDR_ENABLE
+#define PR_TAGGED_ADDR_ENABLE (1UL << 0)
+#endif
+#endif
 
 #include "log/log.h"
 
 namespace acl::ndk {
 namespace {
 constexpr std::string_view kTag = "acl.ndk";
+
+#if defined(__aarch64__)
+// bionic's allocator puts a tag in the top byte of every heap pointer once the
+// kernel has accepted PR_SET_TAGGED_ADDR_CTRL, and the kernel takes a tagged
+// pointer in a system call only from a thread that has the setting. It is
+// per thread and inherited by new threads. bionic asks for it on the thread
+// that bootstraps the linker, which in a4l is the first System.loadLibrary:
+// ART's threads exist by then, and a native running on one of them got EFAULT
+// from chmod() on a path it had allocated. So ask before main, while the
+// process has one thread. A kernel without the call refuses bionic too, and
+// bionic then leaves its pointers untagged.
+__attribute__((constructor)) void enable_tagged_addresses() {
+  ::prctl(PR_SET_TAGGED_ADDR_CTRL, PR_TAGGED_ADDR_ENABLE, 0, 0, 0);
+}
+#endif
 
 // Reached when bionic code is about to run on a thread that has no bionic TCB —
 // from the down-call trampoline (which checks the slot before swapping, so it
