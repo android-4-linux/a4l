@@ -28,18 +28,11 @@
 namespace acl::pkg {
 
 // The directory a4l owns for per-user state: $XDG_CACHE_HOME/a4l, else
-// $HOME/.cache/a4l, else /tmp/a4l-<uid>. Created 0700 if missing; a cache an
-// earlier a4l left under the name "acl" is renamed to it first. Returns ""
+// $HOME/.cache/a4l, else /tmp/a4l-<uid>. Created 0700 if missing. Returns ""
 // and fills `error` unless it is a real directory, owned by this user, that
 // neither group nor others can write: a cache someone else can write is not a
 // place to load code from.
 std::string private_cache_root(std::string& error);
-
-// An app's data is in $XDG_DATA_HOME/a4l/<package_dir> ($HOME/.local/share
-// without XDG_DATA_HOME). It used to be under "acl". If this user has the app's
-// data under the old name and none under the new, move it. Call before
-// anything makes the new directory. True if it moved.
-bool adopt_legacy_data_dir(std::string_view package_dir);
 
 // `package` if it is a well-formed Android package name, else "app". The name
 // comes from the APK's manifest and becomes a directory name, so anything that
