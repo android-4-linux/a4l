@@ -22,7 +22,7 @@ endif
 bionic_offsets_h = custom_target(
   'bionic-offsets-h',
   output : 'bionic_offsets.h',
-  command : [files('../../tools/gen-bionic-offsets.sh'), '@OUTPUT@'],
+  command : [files('../../tools/gen-bionic-offsets.sh'), '@OUTPUT@', host_machine.cpu_family()],
   depend_files : files('../../tools/bionic_offsets_probe.cpp'),
   build_by_default : true,
 )

@@ -5,6 +5,9 @@
 // library's first call touches: the allocator, stdio formatting, errno and a
 // thread-local of its own, all of which live behind the thread pointer the
 // loader has to have put in place. 42 if they all worked.
+//
+// Java_com_acl_ndktest_Main_nativeAnswer is the name `acl-ndk-probe --thread`
+// calls on a second thread it has attached; it is the same function.
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,4 +26,10 @@ int answer(void* a, void* b) {
   t_counter += atoi(p) + (int)strlen(p);
   free(p);
   return t_counter + errno;
+}
+
+int Java_com_acl_ndktest_Main_nativeAnswer(void* env, void* cls) {
+  // A thread that was just attached starts from the thread-local's initial
+  // value, 40, not from what another thread left in it.
+  return answer(env, cls);
 }

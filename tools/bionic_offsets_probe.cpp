@@ -85,14 +85,16 @@ void acl_bionic_offsets() {
   // numbers.
   DEF(SIZEOF_BIONIC_TCB, sizeof(bionic_tcb));
   DEF(TLS_SLOTS, BIONIC_TLS_SLOTS);
-  DEF(TLS_SLOT_SELF_, TLS_SLOT_SELF);
+#if defined(__x86_64__) || defined(__i386__)
+  DEF(TLS_SLOT_SELF_, TLS_SLOT_SELF);  // only x86 has one
+#endif
   DEF(TLS_SLOT_THREAD_ID_, TLS_SLOT_THREAD_ID);
   DEF(TLS_SLOT_STACK_GUARD_, TLS_SLOT_STACK_GUARD);
   DEF(TLS_SLOT_DTV_, TLS_SLOT_DTV);
   DEF(TLS_SLOT_BIONIC_TLS_, TLS_SLOT_BIONIC_TLS);
-  // %fs == static_tls + offset_bionic_tcb only while MIN_TLS_SLOT is 0
-  // (x86_64). arm64's is negative — StaticTlsLayout::offset_thread_pointer() is
-  // offset_bionic_tcb_ + -MIN_TLS_SLOT*8 — so the port must use this rather
-  // than assume the TCB offset.
+  // The thread pointer is static_tls + offset_bionic_tcb only while
+  // MIN_TLS_SLOT is 0 (x86_64). arm64's is negative:
+  // StaticTlsLayout::offset_thread_pointer() is offset_bionic_tcb_ +
+  // -MIN_TLS_SLOT*8, and attach indexes the slots from there.
   DEF(MIN_TLS_SLOT_, MIN_TLS_SLOT);
 }

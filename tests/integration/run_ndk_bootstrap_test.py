@@ -5,7 +5,8 @@
 # architecture a4l was built for: x86_64 or arm64. The test stages the runtime for the probe's
 # architecture, builds tests/fixtures/ndk_answer.c against it, and runs
 # `acl-ndk-probe <lib> answer`, which must print 42: the library's answer uses malloc, stdio,
-# errno and a thread-local, so a wrong thread pointer crashes or gives another number.
+# errno and a thread-local, so a wrong thread pointer crashes or gives another number. Then
+# `acl-ndk-probe <lib> --thread`: a second thread is attached and gets 42 on a TCB of its own.
 #
 # An arm64 probe on an x86_64 machine runs under qemu-aarch64-static with the sysroot named by
 # ACL_ARM64_SYSROOT (default /mnt/dev/sysroot-bullseye-arm64).
@@ -96,9 +97,18 @@ def main() -> int:
             if p.returncode != 0 or "answer() = 42 (PASS)" not in out:
                 sys.stderr.write(f"FAIL: run {attempt + 1}: exit {p.returncode}\n{out}\n")
                 return 1
+            # A second thread, attached: its own TCB, thread struct and tid, and the
+            # library's thread-local at its initial value there.
+            p = subprocess.run(wrapper + [probe, lib, "--thread"], env=env,
+                               capture_output=True, text=True, timeout=120)
+            out = p.stdout + p.stderr
+            if p.returncode != 0 or "(PASS)" not in out:
+                sys.stderr.write(f"FAIL: --thread run {attempt + 1}: exit {p.returncode}\n{out}\n")
+                return 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    sys.stdout.write(f"OK: the bionic linker bootstrapped on {arch} and a library answered 42\n")
+    sys.stdout.write(f"OK: the bionic linker bootstrapped on {arch}; a library answered 42 on the "
+                     "bootstrapping thread and on an attached one\n")
     return 0
 
 
