@@ -11,7 +11,12 @@
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+
+#include "acl_config.h"
+#if ACL_HAVE_SDBUS
 #include <sdbus-c++/sdbus-c++.h>
+#endif
 
 #include "log/log.h"
 
@@ -19,6 +24,34 @@ namespace acl::share {
 namespace {
 
 constexpr std::string_view kTag = "svc.share";
+
+#if !ACL_HAVE_SDBUS
+// Built without sdbus-c++ there is no portal to ask. The natives are bound all
+// the same and say the URI was not opened and the email not composed, which is
+// what HostShare's callers get from a desktop with no portal.
+jboolean JNICALL n_open_uri(JNIEnv*, jclass, jstring) {
+  return JNI_FALSE;
+}
+
+jboolean JNICALL n_compose_email(JNIEnv* env,
+                                 jclass,
+                                 jstring,
+                                 jstring,
+                                 jstring,
+                                 jintArray jfds) {
+  // The caller detached these descriptors for the portal call to own.
+  if (jfds != nullptr) {
+    const jsize n = env->GetArrayLength(jfds);
+    if (jint* els = env->GetIntArrayElements(jfds, nullptr); els != nullptr) {
+      for (jsize i = 0; i < n; ++i)
+        if (els[i] >= 0)
+          ::close(els[i]);
+      env->ReleaseIntArrayElements(jfds, els, JNI_ABORT);
+    }
+  }
+  return JNI_FALSE;
+}
+#else
 
 // Ask the host's desktop portal to open a URI. The portal shows the user's
 // default handler (a browser for http/https) — the sandbox-correct alternative
@@ -146,6 +179,8 @@ jboolean JNICALL n_compose_email(JNIEnv* env,
              ? JNI_TRUE
              : JNI_FALSE;
 }
+
+#endif  // ACL_HAVE_SDBUS
 
 }  // namespace
 
