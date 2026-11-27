@@ -317,6 +317,23 @@ public class Main extends Activity {
             telephony = e.toString();
         }
         log("telephony callback " + telephony);
+        // LocationManager looks its service up by name for isLocationEnabled() and for a
+        // GNSS status callback; both threw "No service published for: location".
+        String location;
+        try {
+            final android.location.LocationManager lm =
+                    getSystemService(android.location.LocationManager.class);
+            final boolean enabled = lm.isLocationEnabled();
+            final android.location.GnssStatus.Callback gnss =
+                    new android.location.GnssStatus.Callback() {};
+            lm.registerGnssStatusCallback(getMainExecutor(), gnss);
+            lm.unregisterGnssStatusCallback(gnss);
+            location = "answered=" + (enabled || !enabled) + " gnss=true";
+        } catch (RuntimeException e) {
+            location = e.toString();
+        }
+        log("location service " + location);
+        expect("answered=true gnss=true".equals(location), "location service " + location);
         expect("registered=true".equals(telephony), "telephony callback " + telephony);
         expect("locked=false enforced=true".equals(contextCalls), "context calls " + contextCalls);
         expect(noProperty, "getProperty for an absent property");

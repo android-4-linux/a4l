@@ -5940,6 +5940,10 @@ public final class HostBootstrap {
         // TelephonyRegistryManager (getSystemService("telephony_registry")) registers telephony
         // callbacks and listeners with ITelephonyRegistry; a no-op one takes them and never calls.
         svc.put("telephony.registry", "com.android.internal.telephony.ITelephonyRegistry");
+        // LocationManager finds its service by name for what it does not do through the
+        // manager object: isLocationEnabled() (its cache) and the GNSS callbacks. Unpublished,
+        // those throw "No service published for: location". It is the service the manager has.
+        svc.put("location", "android.location.ILocationManager");
         // WebView provider init reads IWebViewUpdateService.isMultiProcessEnabled() etc.; a no-op proxy
         // (multiprocess=false, no updates) is enough — acl installs the provider directly (see
         // installWebViewProvider), so the update-service is only queried for these secondary flags.
@@ -5986,6 +5990,7 @@ public final class HostBootstrap {
                                 : "activity_task".equals(name) ? makeActivityTaskHandler(iface)
                                 : "activity".equals(name) ? makeActivityManagerHandler(iface)
                                 : "window".equals(name) ? makeWindowManagerHandler(iface)
+                                : "location".equals(name) ? AclLocationManager.newService()
                                 : noop(iface);
                         final String descriptor = ifaceName;  // AIDL DESCRIPTOR == interface FQN
                         // Proxy IBinder (an interface) rather than new Binder() — the latter
