@@ -17,7 +17,7 @@ module_libs += battery_lib
 
 # Dev tool: print the selected backend + derived battery state. Handy on desktop to
 # see which daemon acl picks and verify the UPower → BatteryManager mapping.
-executable(
+battery_probe = executable(
   'acl-battery-probe',
   files('battery_probe_main.cpp'),
   include_directories : [config_inc, core_inc],
