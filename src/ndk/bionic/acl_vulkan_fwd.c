@@ -26,6 +26,7 @@ void* acl_vk_bridge = 0;
 // vkGetInstanceProcAddr(VkInstance, const char*) — 2 register args; the 8-slot
 // stack copy (same as the generated GL forwarders) is harmless here (no stack
 // args) and keeps the frame/alignment identical.
+#if defined(__x86_64__)
 asm(".text\n"
     ".globl vkGetInstanceProcAddr\n"
     "vkGetInstanceProcAddr:\n"
@@ -54,3 +55,16 @@ asm(".text\n"
     "  mov %rbp, %rsp\n"
     "  pop %rbp\n"
     "  ret\n");
+#elif defined(__aarch64__)
+// libEGL.so's acl_gl_call_x15 calls the function in x15 on the donor thread
+// pointer.
+asm(".text\n"
+    ".globl vkGetInstanceProcAddr\n"
+    ".type vkGetInstanceProcAddr,%function\n"
+    "vkGetInstanceProcAddr:\n"
+    "  adrp x15, :got:acl_vk_bridge\n"
+    "  ldr x15, [x15, :got_lo12:acl_vk_bridge]\n"
+    "  ldr x15, [x15]\n"
+    "  ldr x15, [x15, #8]\n"  // fns[0] = acl_vk_get_instance_proc_addr
+    "  b acl_gl_call_x15\n");
+#endif

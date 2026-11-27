@@ -90,6 +90,18 @@ def main() -> int:
         if cc.returncode != 0:
             sys.stderr.write(f"FAIL: could not build the fixture library\n{cc.stderr}\n")
             return 1
+        # A second library, which links a4l's libEGL.so and libGLESv2.so.
+        gl_lib = os.path.join(work, "libglforward.so")
+        cc = subprocess.run(
+            [clang, f"--target={triple}", "-fPIC", "-shared", "-nostdlib", "-fno-emulated-tls",
+             "-O1", "-Wl,-soname,libglforward.so", "-o", gl_lib, crtb,
+             os.path.join(src_root, "tests/fixtures/ndk_gl_forward.c"), crte,
+             os.path.join(stage, "bionic/libc.so"), os.path.join(stage, "bionic/libEGL.so"),
+             os.path.join(stage, "bionic/libGLESv2.so"), "-fuse-ld=lld"],
+            capture_output=True, text=True)
+        if cc.returncode != 0:
+            sys.stderr.write(f"FAIL: could not build the GL fixture library\n{cc.stderr}\n")
+            return 1
         env = dict(os.environ,
                    ACL_BIONIC_LINKER=os.path.join(stage, "linker64"),
                    ACL_BIONIC_SYSROOT=os.path.join(stage, "bionic"),
@@ -121,11 +133,21 @@ def main() -> int:
                     sys.stderr.write(
                         f"FAIL: {mode} run {attempt + 1}: exit {p.returncode}\n{out}\n")
                     return 1
+            # The GL forwarders: an EGL and a GLES entry point reach the probe, standing in
+            # for Mesa, on the donor's thread pointer with their stack arguments in place.
+            p = subprocess.run(wrapper + [probe, gl_lib, "--glforward"], env=env,
+                               capture_output=True, text=True, timeout=120)
+            out = p.stdout + p.stderr
+            if p.returncode != 0 or "2 calls, 2 on the donor (PASS)" not in out:
+                sys.stderr.write(
+                    f"FAIL: --glforward run {attempt + 1}: exit {p.returncode}\n{out}\n")
+                return 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
     sys.stdout.write(f"OK: the bionic linker bootstrapped on {arch}; a library answered 42 on the "
-                     "bootstrapping thread and on an attached one, and its JNI_OnLoad and "
-                     "natives ran across the boundary\n")
+                     "bootstrapping thread and on an attached one, its JNI_OnLoad and "
+                     "natives ran across the boundary, and the GL forwarders reached a "
+                     "donor thread\n")
     return 0
 
 

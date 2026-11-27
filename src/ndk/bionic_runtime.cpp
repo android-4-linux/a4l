@@ -821,6 +821,11 @@ std::atomic<std::uintptr_t> g_gl_donor_pool[kGlDonorPool];
 std::atomic<int> g_gl_donor_published{0};
 void* g_gl_pick_donor =
     nullptr;  // address of libEGL.so's acl_gl_pick_donor, for the JIT stubs
+#if defined(__aarch64__)
+// libEGL.so's acl_gl_call_x15: calls the function in x15 on the calling
+// thread's donor thread pointer. The arm64 JIT stubs end there.
+void* g_gl_call_x15 = nullptr;
+#endif
 // Registry of glibc %fs values whose GL is donor-routed (a producer/native-GL
 // context is current on that thread). Set by the Java eglMakeCurrent path; read
 // by GLUtils so its texImage2D routes to the same donor. Defined here (visible
@@ -1059,18 +1064,21 @@ size_t g_gl_jit_used = 0, g_gl_jit_cap = 0;
 void* gl_jit_wrap(void* mesa) {
   if (mesa == nullptr || g_gl_pick_donor == nullptr)
     return nullptr;
-#if !defined(__x86_64__)
-  // The stub below is x86_64 machine code. No GL forwarder is built for arm64
-  // yet, so nothing sets g_gl_pick_donor there and this is not reached.
-  return nullptr;
-#else
+#if defined(__aarch64__)
+  if (g_gl_call_x15 == nullptr)
+    return nullptr;
+#endif
   std::lock_guard<std::mutex> lk(g_gl_jit_mu);
   auto it = g_gl_jit_cache.find(mesa);
   if (it != g_gl_jit_cache.end())
     return it->second;
 
+#if defined(__x86_64__)
   static constexpr size_t kStub =
       176;  // frame + 8-slot arg copy + swap/call/restore
+#else
+  static constexpr size_t kStub = 32;  // three instructions, two addresses
+#endif
   if (g_gl_jit_page == nullptr || g_gl_jit_used + kStub > g_gl_jit_cap) {
     g_gl_jit_cap = 64 * 1024;
     g_gl_jit_page = static_cast<uint8_t*>(
@@ -1083,6 +1091,23 @@ void* gl_jit_wrap(void* mesa) {
     }
   }
   uint8_t* p = g_gl_jit_page + g_gl_jit_used;
+#if defined(__aarch64__)
+  // The function to call goes in x15 and libEGL.so's acl_gl_call_x15 does the
+  // rest, as it does for the static forwarders.
+  const std::uint32_t insns[4] = {
+      0x5800008F,  // ldr x15, .+16  (mesa)
+      0x580000B0,  // ldr x16, .+20  (acl_gl_call_x15)
+      0xD61F0200,  // br  x16
+      0xD503201F,  // nop
+  };
+  const std::uintptr_t words[2] = {
+      reinterpret_cast<std::uintptr_t>(mesa),
+      reinterpret_cast<std::uintptr_t>(g_gl_call_x15)};
+  std::memcpy(p, insns, sizeof(insns));
+  std::memcpy(p + sizeof(insns), words, sizeof(words));
+  __builtin___clear_cache(reinterpret_cast<char*>(p),
+                          reinterpret_cast<char*>(p + kStub));
+#else
   size_t n = 0;
   auto b = [&](std::initializer_list<uint8_t> bytes) {
     for (uint8_t x : bytes)
@@ -1124,10 +1149,10 @@ void* gl_jit_wrap(void* mesa) {
   b({0x48, 0x89, 0xEC});              // mov %rbp,%rsp
   b({0x5D});                          // pop %rbp
   b({0xC3});                          // ret
+#endif
   g_gl_jit_used += kStub;
   g_gl_jit_cache.emplace(mesa, p);
   return p;
-#endif
 }
 
 // Replacement for eglGetProcAddress installed into the EGL bridge slot: resolve
@@ -1475,6 +1500,9 @@ void install_gl_forwarders(BionicRuntime* rt, bool opens_gl_itself) {
     void* he = rt->load((std::string(sysroot) + "/libEGL.so").c_str(), &err);
     if (he != nullptr) {
       g_gl_pick_donor = rt->symbol(he, "acl_gl_pick_donor");
+#if defined(__aarch64__)
+      g_gl_call_x15 = rt->symbol(he, "acl_gl_call_x15");
+#endif
       if (auto* pool = static_cast<std::uintptr_t*>(
               rt->symbol(he, "acl_gl_donor_pool"))) {
         for (int i = 0; i < kGlDonorPool; ++i)
