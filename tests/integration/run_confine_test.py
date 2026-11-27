@@ -36,12 +36,12 @@ say home_entries "$(ls -A "$T_HOME" 2>/dev/null | tr '\n' ' ')"
 say runtime "$(can_list "$T_RUNTIME")"
 say wayland "$(test -e "$T_RUNTIME/wayland-test" && echo yes || echo no)"
 say bus "$(test -e "$T_RUNTIME/bus" && echo yes || echo no)"
-say other_app "$(can_list "$T_DATA/acl/org.other.app")"
-say other_verified "$(can_list "$T_CACHE/acl/verified")"
+say other_app "$(can_list "$T_DATA/a4l/org.other.app")"
+say other_verified "$(can_list "$T_CACHE/a4l/verified")"
 say apk "$(can_read "$T_APK")"
 say apk_write "$( ( : >> "$T_APK" ) 2>/dev/null && echo yes || echo no)"
-say data_write "$(can_write "$T_DATA/acl/$T_PKG")"
-say cache_write "$(can_write "$T_CACHE/acl/$T_PKG")"
+say data_write "$(can_write "$T_DATA/a4l/$T_PKG")"
+say cache_write "$(can_write "$T_CACHE/a4l/$T_PKG")"
 say tmp_write "$(can_write /tmp)"
 say root_write "$(can_write /)"
 say usr_write "$(can_write /usr)"
@@ -82,8 +82,8 @@ def main() -> int:
     runtime = os.path.join(scratch, "runtime")
     data = os.path.join(home, ".local", "share")
     cache = os.path.join(home, ".cache")
-    for d in (runtime, os.path.join(data, "acl", "org.other.app"),
-              os.path.join(cache, "acl", "verified", "0000")):
+    for d in (runtime, os.path.join(data, "a4l", "org.other.app"),
+              os.path.join(cache, "a4l", "verified", "0000")):
         os.makedirs(d)
     with open(os.path.join(home, "secret.txt"), "w") as f:
         f.write("not for the app\n")
@@ -175,7 +175,7 @@ def main() -> int:
             "caps": "0000000000000000",
             "cwd": "/",
             "xdg_data": data,
-            "android_data": os.path.join(cache, "acl", pkg, "android-data"),
+            "android_data": os.path.join(cache, "a4l", pkg, "android-data"),
         }
         for key, value in want.items():
             check(got.get(key) == value,

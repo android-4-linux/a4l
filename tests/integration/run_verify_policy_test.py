@@ -121,7 +121,7 @@ def main() -> int:
     shutil.copy(os.path.join(apk_dir, "ok-v2-eocd-comment.apk"), src)
     original = read(src)
     out = expect(OK, *run, "--verify=require", src)
-    copies = glob.glob(os.path.join(cache, "acl", "verified", "*", "base.apk"))
+    copies = glob.glob(os.path.join(cache, "a4l", "verified", "*", "base.apk"))
     check(len(copies) == 1, f"want one verified copy, found {copies}")
     if len(copies) == 1:
         copy = copies[0]
@@ -150,13 +150,13 @@ def main() -> int:
             f.seek(41)
             f.write(b"\xff")
         expect(REFUSED, *run, "--verify=require", src)
-        check(not glob.glob(os.path.join(cache, "acl", "verified", "*")),
+        check(not glob.glob(os.path.join(cache, "a4l", "verified", "*")),
               "a copy that does not verify was left in the cache")
     # The reporting modes leave the path alone and make no copy.
     shutil.rmtree(cache, ignore_errors=True)
     out = expect(OK, *run, signed)
     check("verified copy" not in out and
-          not os.path.exists(os.path.join(cache, "acl", "verified")),
+          not os.path.exists(os.path.join(cache, "a4l", "verified")),
           "--verify=warn made a copy:\n" + out)
 
     # --- a manifest's package name cannot steer extraction out of the cache ---
@@ -176,7 +176,7 @@ def main() -> int:
         landed = [os.path.relpath(p, scratch)
                   for p in glob.glob(os.path.join(scratch, "**", "libevil.so"),
                                      recursive=True)]
-        check(landed == [os.path.join("cache", "acl", "app", "lib",
+        check(landed == [os.path.join("cache", "a4l", "app", "lib",
                                       "libevil.so")],
               f"package {hostile!r} put a library at {landed}")
     shutil.rmtree(scratch, ignore_errors=True)

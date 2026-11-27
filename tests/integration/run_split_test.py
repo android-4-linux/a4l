@@ -69,7 +69,7 @@ def main() -> int:
             check(0 <= staged < child,
                   "the broker did not stage a verified copy first", out)
             after = out[child:] if child >= 0 else ""
-            check("opened " in after and "/acl/verified/" in after
+            check("opened " in after and "/a4l/verified/" in after
                   and "base.apk" in after,
                   "the app process did not open the verified copy", out)
             check("app process ended (exited)" in out,

@@ -755,8 +755,8 @@ bool plan_launch(const Inputs& in,
     error = "no home directory to keep the app's data in";
     return false;
   }
-  out.data_dir = data_home + "/acl/" + in.package_dir;
-  out.cache_dir = cache_home + "/acl/" + in.package_dir;
+  out.data_dir = data_home + "/a4l/" + in.package_dir;
+  out.cache_dir = cache_home + "/a4l/" + in.package_dir;
   for (const std::string& d :
        {out.data_dir, out.cache_dir, out.cache_dir + "/android-data",
         out.cache_dir + "/mesa"}) {

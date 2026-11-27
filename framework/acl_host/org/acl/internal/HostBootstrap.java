@@ -2033,7 +2033,7 @@ public final class HostBootstrap {
         // ── App storage, mapped onto the XDG Base Directory spec ─────────────────────────
         // Android's per-app sandbox (/data/data/<pkg>/{files,databases,cache,app_*}) has no
         // analogue on the host, so acl roots it under the freedesktop XDG dirs: persistent data
-        // at $XDG_DATA_HOME/acl/<pkg>, caches at $XDG_CACHE_HOME/acl/<pkg> (defaults per spec:
+        // at $XDG_DATA_HOME/a4l/<pkg>, caches at $XDG_CACHE_HOME/a4l/<pkg> (defaults per spec:
         // ~/.local/share and ~/.cache). getDataDir() is that data root; the Android subdirs hang
         // off it. This replaces the null base (super(null)) that made every Context.getDir/
         // getFilesDir NPE, and keeps app data out of the (absent) /data sandbox.
@@ -2048,10 +2048,10 @@ public final class HostBootstrap {
             return new java.io.File(base);
         }
         private java.io.File dataRoot() {
-            return new java.io.File(xdgHome("XDG_DATA_HOME", ".local/share"), "acl/" + pkg);
+            return new java.io.File(xdgHome("XDG_DATA_HOME", ".local/share"), "a4l/" + pkg);
         }
         private java.io.File cacheRoot() {
-            return new java.io.File(xdgHome("XDG_CACHE_HOME", ".cache"), "acl/" + pkg);
+            return new java.io.File(xdgHome("XDG_CACHE_HOME", ".cache"), "a4l/" + pkg);
         }
         private static java.io.File ensure(java.io.File d) { d.mkdirs(); return d; }
 

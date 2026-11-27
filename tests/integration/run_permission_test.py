@@ -99,7 +99,7 @@ def main():
         bus_env = {k: v for k, v in os.environ.items() if k != "ACL_ALLOW_DEVICES"}
         bus_env["DBUS_SESSION_BUS_ADDRESS"] = address
         data = os.path.join(work, "data")
-        grant = os.path.join(data, "acl", PACKAGE, "files", "grant")
+        grant = os.path.join(data, "a4l", PACKAGE, "files", "grant")
         stub_log = os.path.join(work, "stub.log")
         with open(stub_log, "wb") as log:
             stub = subprocess.Popen([stub_exe, grant], env=bus_env, stdout=log,

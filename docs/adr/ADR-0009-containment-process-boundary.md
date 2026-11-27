@@ -118,7 +118,7 @@ and no child is started.
   under `/etc` (loader, resolver, TLS roots, fontconfig, GPU loader configuration); the APK; the
   a4l binary; and the paths a4l itself was told to read through its own options and environment
   (the ART home, the boot classpath, the bionic runtime). Writable: the app's data and cache
-  directories (`$XDG_DATA_HOME/acl/<package>`, `$XDG_CACHE_HOME/acl/<package>`) and a private
+  directories (`$XDG_DATA_HOME/a4l/<package>`, `$XDG_CACHE_HOME/a4l/<package>`) and a private
   256 MiB `/tmp`. Not present: the home directory, `/run` and with it the compositor, PipeWire
   and D-Bus sockets, other apps' directories, other apps' verified copies. An input that would
   put the home or runtime directory in view is refused, not bound.
