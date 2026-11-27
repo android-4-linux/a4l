@@ -1711,6 +1711,10 @@ struct PresentSession {
   // The root's ViewTreeObserver, called as ViewRootImpl calls it (nTraverse).
   jmethodID m_layout_requested = nullptr;  // View.isLayoutRequested
   jmethodID m_tree_observer = nullptr;     // HostBootstrap.dispatchTreeObserver
+  // The windows of the Activities on screen under a translucent top one
+  // (HostBootstrap.layoutUnderlays, drawUnderlays).
+  jmethodID m_layout_underlays = nullptr;
+  jmethodID m_draw_underlays = nullptr;
   bool global_layout_due = true;  // a root no traversal has reported yet
   bool draw_cancelled = false;    // the last traversal's pre-draw said no
   jclass motionevent_cls = nullptr, keyevent_cls = nullptr;  // global refs
@@ -2609,6 +2613,12 @@ jlong JNICALL PresentDriver_nOpen(JNIEnv* env,
                                                 "(Landroid/view/View;Z)Z");
     if (env->ExceptionCheck() == JNI_TRUE)
       env->ExceptionClear();
+    s->m_layout_underlays =
+        env->GetStaticMethodID(hb, "layoutUnderlays", "(II)Z");
+    s->m_draw_underlays = env->GetStaticMethodID(
+        hb, "drawUnderlays", "(Landroid/graphics/Canvas;)V");
+    if (env->ExceptionCheck() == JNI_TRUE)
+      env->ExceptionClear();
     s->route_overlay_touch = env->GetStaticMethodID(
         hb, "routeOverlayTouch", "(Landroid/view/MotionEvent;)Z");
     env->DeleteLocalRef(hb);
@@ -2925,7 +2935,8 @@ static std::atomic<int> g_force_record_pulse{0};
 void JNICALL PresentDriver_nSetContentView(JNIEnv* env,
                                            jclass,
                                            jlong sp,
-                                           jobject view) {
+                                           jobject view,
+                                           jboolean keep_plane) {
   auto* s = reinterpret_cast<PresentSession*>(sp);
   if (s == nullptr || view == nullptr)
     return;
@@ -2936,8 +2947,10 @@ void JNICALL PresentDriver_nSetContentView(JNIEnv* env,
     env->DeleteGlobalRef(old);
   // The old screen's video SurfaceView (if any) is gone — hide the stale video
   // plane and restore a full opaque region so the new screen isn't left with a
-  // video hole. A new screen's video re-arms via maybeInjectVideoSurface.
-  if (s->presenter)
+  // video hole. A new screen's video re-arms via maybeInjectVideoSurface. The
+  // plane stays when its Activity is still on screen, under a translucent one
+  // or after it (HostBootstrap.dropHiddenPlanes).
+  if (s->presenter && keep_plane == JNI_FALSE)
     s->presenter->reset_video_overlay();
   log::i(kTag,
          "PresentDriver.nSetContentView: decor swapped (activity transition)");
@@ -3640,6 +3653,19 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
     return;
   }
   const bool diag = tdiag <= 4;
+  // The windows of the Activities on screen under a translucent top one: laid
+  // out here, each a traversal of its own, and drawn under the top one below.
+  bool underlays = false;
+  if (s->m_layout_underlays != nullptr && s->hostbootstrap_cls != nullptr) {
+    underlays = env->CallStaticBooleanMethod(s->hostbootstrap_cls,
+                                             s->m_layout_underlays, s->w,
+                                             s->h) == JNI_TRUE;
+    if (env->ExceptionCheck() == JNI_TRUE) {
+      env->ExceptionDescribe();
+      env->ExceptionClear();
+      underlays = false;
+    }
+  }
   // Whether this traversal lays the tree out anew: the first for this root, or
   // one a view asked for. Read before measure and layout clear the request.
   bool did_layout = s->global_layout_due;
@@ -3838,6 +3864,14 @@ void JNICALL PresentDriver_nTraverse(JNIEnv* env, jclass, jlong sp) {
       ::dlsym(RTLD_DEFAULT, "acl_graphics_frame_tick"));
   if (frame_tick != nullptr)
     frame_tick();
+  if (underlays && s->m_draw_underlays != nullptr && s->canvas != nullptr) {
+    env->CallStaticVoidMethod(s->hostbootstrap_cls, s->m_draw_underlays,
+                              s->canvas);
+    if (env->ExceptionCheck() == JNI_TRUE) {
+      env->ExceptionDescribe();
+      env->ExceptionClear();
+    }
+  }
   if (s->m_draw != nullptr && s->canvas != nullptr)
     env->CallVoidMethod(s->view, s->m_draw, s->canvas);
   if (env->ExceptionCheck() == JNI_TRUE) {
@@ -4387,7 +4421,7 @@ void register_present_driver_natives(JNIEnv* env) {
        const_cast<char*>("(JLjava/lang/String;)V"),
        reinterpret_cast<void*>(PresentDriver_nSetClipboard)},
       {const_cast<char*>("nSetContentView"),
-       const_cast<char*>("(JLandroid/view/View;)V"),
+       const_cast<char*>("(JLandroid/view/View;Z)V"),
        reinterpret_cast<void*>(PresentDriver_nSetContentView)},
       {const_cast<char*>("nRepeatFd"), const_cast<char*>("(J)I"),
        reinterpret_cast<void*>(PresentDriver_nRepeatFd)},

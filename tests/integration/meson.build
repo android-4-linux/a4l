@@ -362,6 +362,19 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 240,
       is_parallel : false,
     )
+    # An Activity with a translucent theme over another, a card over a map: the one
+    # underneath shows through, paused and not stopped, with its GL view's surface, and is
+    # resumed when the one over it finishes. Read off a headless Weston's screen and the
+    # fixture's lifecycle log. Needs what gl-surfaceview-under-views needs; SKIPs
+    # otherwise, which includes CI. is_parallel off: it reads the screen.
+    test(
+      'translucent-activity',
+      py3,
+      args : [files('run_translucent_activity_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+      is_parallel : false,
+    )
     # Offscreen GL through android.opengl.EGL14 on the default display, as a player's
     # placeholder surface sets it up, where Mesa's default platform has no server running and
     # where there is no display server at all. Needs host ART, Mesa and a render node; SKIPs
