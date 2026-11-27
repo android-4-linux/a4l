@@ -93,6 +93,7 @@
 #include "codec/SkCodec.h"
 #include "effects/SkImageFilters.h"
 #include "st_frame.h"
+#include "utils/SkCamera.h"
 #include "utils/SkParsePath.h"
 #include "utils/SkShadowUtils.h"
 
@@ -2395,6 +2396,108 @@ void Canvas_nConcat(jlong canvas, jlong matrix) {
   if (c != nullptr && m != nullptr)
     c->concat(*m);
 }
+// ---- android.graphics.Camera ------------------------------------------------
+// A 3D transform flattened to a Matrix: what a legacy Animation that rotates a
+// View about X or Y builds each frame (Rotate3dAnimation and its many copies).
+// Not the device camera. Skia's Sk3DView is the class AOSP's Camera wraps, and
+// it is in the libskia this library links. Without these natives the
+// constructor threw UnsatisfiedLinkError from inside View.draw: WhatsApp
+// animates a message it has just sent with one, and the conversation list
+// stopped drawing.
+jfieldID g_camera_instance = nullptr;  // Camera.native_instance (J)
+
+Sk3DView* camera_of(JNIEnv* env, jobject obj) {
+  if (g_camera_instance == nullptr)
+    return nullptr;
+  return reinterpret_cast<Sk3DView*>(env->GetLongField(obj, g_camera_instance));
+}
+void Camera_nativeConstructor(JNIEnv* env, jobject obj) {
+  if (g_camera_instance != nullptr)
+    env->SetLongField(obj, g_camera_instance,
+                      reinterpret_cast<jlong>(new Sk3DView));
+}
+// From finalize(), which zeroes the field after; cleared here too so a second
+// call frees nothing.
+void Camera_nativeDestructor(JNIEnv* env, jobject obj) {
+  delete camera_of(env, obj);
+  if (g_camera_instance != nullptr)
+    env->SetLongField(obj, g_camera_instance, 0);
+}
+void Camera_save(JNIEnv* env, jobject obj) {
+  if (auto* v = camera_of(env, obj))
+    v->save();
+}
+void Camera_restore(JNIEnv* env, jobject obj) {
+  if (auto* v = camera_of(env, obj))
+    v->restore();
+}
+void Camera_translate(JNIEnv* env, jobject obj, jfloat x, jfloat y, jfloat z) {
+  if (auto* v = camera_of(env, obj))
+    v->translate(x, y, z);
+}
+void Camera_rotateX(JNIEnv* env, jobject obj, jfloat deg) {
+  if (auto* v = camera_of(env, obj))
+    v->rotateX(deg);
+}
+void Camera_rotateY(JNIEnv* env, jobject obj, jfloat deg) {
+  if (auto* v = camera_of(env, obj))
+    v->rotateY(deg);
+}
+void Camera_rotateZ(JNIEnv* env, jobject obj, jfloat deg) {
+  if (auto* v = camera_of(env, obj))
+    v->rotateZ(deg);
+}
+void Camera_rotate(JNIEnv* env, jobject obj, jfloat x, jfloat y, jfloat z) {
+  if (auto* v = camera_of(env, obj)) {
+    v->rotateX(x);
+    v->rotateY(y);
+    v->rotateZ(z);
+  }
+}
+void Camera_setLocation(JNIEnv* env,
+                        jobject obj,
+                        jfloat x,
+                        jfloat y,
+                        jfloat z) {
+  if (auto* v = camera_of(env, obj))
+    v->setCameraLocation(x, y, z);
+}
+jfloat Camera_getLocationX(JNIEnv* env, jobject obj) {
+  auto* v = camera_of(env, obj);
+  return v != nullptr ? v->getCameraLocationX() : 0.0f;
+}
+jfloat Camera_getLocationY(JNIEnv* env, jobject obj) {
+  auto* v = camera_of(env, obj);
+  return v != nullptr ? v->getCameraLocationY() : 0.0f;
+}
+jfloat Camera_getLocationZ(JNIEnv* env, jobject obj) {
+  auto* v = camera_of(env, obj);
+  return v != nullptr ? v->getCameraLocationZ() : 0.0f;
+}
+void Camera_nativeGetMatrix(JNIEnv* env, jobject obj, jlong matrix) {
+  auto* v = camera_of(env, obj);
+  auto* m = reinterpret_cast<SkMatrix*>(matrix);
+  if (v != nullptr && m != nullptr)
+    v->getMatrix(m);
+}
+void Camera_nativeApplyToCanvas(JNIEnv* env, jobject obj, jlong canvas) {
+  auto* v = camera_of(env, obj);
+  auto* c = canvas_sk(canvas);
+  if (v == nullptr || c == nullptr)
+    return;
+  SkMatrix m;
+  v->getMatrix(&m);
+  c->concat(m);
+}
+jfloat Camera_dotWithNormal(JNIEnv* env,
+                            jobject obj,
+                            jfloat x,
+                            jfloat y,
+                            jfloat z) {
+  auto* v = camera_of(env, obj);
+  return v != nullptr ? v->dotWithNormal(x, y, z) : 0.0f;
+}
+
 // @CriticalNative — replace the CTM with the Matrix (matrix==0 → identity).
 void Canvas_nSetMatrix(jlong canvas, jlong matrix) {
   auto* c = canvas_sk(canvas);
@@ -9334,6 +9437,28 @@ const JNINativeMethod kCanvas[] = {
      reinterpret_cast<void*>(Canvas_nQuickRejectRect)},
     {"nQuickReject", "(JJ)Z", reinterpret_cast<void*>(Canvas_nQuickRejectPath)},
 };
+const JNINativeMethod kCamera[] = {
+    {"nativeConstructor", "()V",
+     reinterpret_cast<void*>(Camera_nativeConstructor)},
+    {"nativeDestructor", "()V",
+     reinterpret_cast<void*>(Camera_nativeDestructor)},
+    {"save", "()V", reinterpret_cast<void*>(Camera_save)},
+    {"restore", "()V", reinterpret_cast<void*>(Camera_restore)},
+    {"translate", "(FFF)V", reinterpret_cast<void*>(Camera_translate)},
+    {"rotateX", "(F)V", reinterpret_cast<void*>(Camera_rotateX)},
+    {"rotateY", "(F)V", reinterpret_cast<void*>(Camera_rotateY)},
+    {"rotateZ", "(F)V", reinterpret_cast<void*>(Camera_rotateZ)},
+    {"rotate", "(FFF)V", reinterpret_cast<void*>(Camera_rotate)},
+    {"setLocation", "(FFF)V", reinterpret_cast<void*>(Camera_setLocation)},
+    {"getLocationX", "()F", reinterpret_cast<void*>(Camera_getLocationX)},
+    {"getLocationY", "()F", reinterpret_cast<void*>(Camera_getLocationY)},
+    {"getLocationZ", "()F", reinterpret_cast<void*>(Camera_getLocationZ)},
+    {"nativeGetMatrix", "(J)V",
+     reinterpret_cast<void*>(Camera_nativeGetMatrix)},
+    {"nativeApplyToCanvas", "(J)V",
+     reinterpret_cast<void*>(Camera_nativeApplyToCanvas)},
+    {"dotWithNormal", "(FFF)F", reinterpret_cast<void*>(Camera_dotWithNormal)},
+};
 const JNINativeMethod kMatrix[] = {
     {"nCreate", "(J)J", reinterpret_cast<void*>(Matrix_nCreate)},
     {"nGetNativeFinalizer", "()J",
@@ -10590,6 +10715,16 @@ extern "C" jint register_acl_graphics(JNIEnv* env) {
            kAnimatedVectorDrawable, n(kAnimatedVectorDrawable)) &&
        ok;
   ok = reg(env, "android/graphics/Matrix", kMatrix, n(kMatrix)) && ok;
+  // The field first: the natives are no use without it.
+  if (jclass cam = env->FindClass("android/graphics/Camera")) {
+    g_camera_instance = env->GetFieldID(cam, "native_instance", "J");
+    if (g_camera_instance == nullptr)
+      env->ExceptionClear();
+    env->DeleteLocalRef(cam);
+  } else {
+    env->ExceptionClear();
+  }
+  ok = reg(env, "android/graphics/Camera", kCamera, n(kCamera)) && ok;
   ok = reg(env, "android/graphics/RenderNode", kRenderNode, n(kRenderNode)) &&
        ok;
   ok = reg(env, "android/graphics/Paint", kPaint, n(kPaint)) && ok;
