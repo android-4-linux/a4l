@@ -7793,7 +7793,9 @@ class ArtVm final : public JniVm {
     g_ndk_have_cfg = true;
     env->GetJavaVM(&g_ndk_vm);
     acl::ndk::set_looper_used_hook(&ndk_looper_used);
-    register_ndk_audio();  // what the staged libaaudio.so plays through
+    // What the staged libaaudio.so plays through and libOpenSLES.so records
+    // from.
+    register_ndk_audio();
     if (jclass c = env->FindClass("java/lang/Runtime")) {
       JNINativeMethod m[] = {
           {const_cast<char*>("nativeLoad"),

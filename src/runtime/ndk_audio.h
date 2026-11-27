@@ -5,7 +5,8 @@
 
 namespace acl::runtime {
 
-// Gives the bionic runtime the audio output a4l's libaaudio.so plays through.
+// Gives the bionic runtime the audio output a4l's libaaudio.so plays through
+// and the input its libOpenSLES.so records from.
 // Before the app's first native library is loaded.
 void register_ndk_audio();
 

@@ -59,6 +59,10 @@ public class Main extends Activity {
     // Java_com_acl_ndktest_Main_aaudioPlay in tools/build-ndk-repro.sh.
     public static native int aaudioPlay();
 
+    // Bound by name. An OpenSL ES recorder with a buffer queue, run for 300 ms; see
+    // Java_com_acl_ndktest_Main_openslesRecord in tools/build-ndk-repro.sh.
+    public static native int openslesRecord();
+
     // Up-called BY the native, from bionic %fs back into ART's glibc %fs.
     public static int helper(int a, int b) {
         return a + b;
@@ -82,6 +86,13 @@ public class Main extends Activity {
         if (System.getenv("ACL_NDK_TEST_AAUDIO") != null) {
             final int calls = aaudioPlay();
             Log.i("acl", "AAUDIO: result=" + calls + " fed=" + (calls >= 2));
+        }
+
+        // Opt-in (run_ndk_art_test.py --opensles): the library records through libOpenSLES.so.
+        // 300 ms in 20 ms buffers is 15 callbacks.
+        if (System.getenv("ACL_NDK_TEST_OPENSLES") != null) {
+            final int calls = openslesRecord();
+            Log.i("acl", "OPENSLES: result=" + calls + " paced=" + (calls >= 10 && calls <= 17));
         }
 
         // Opt-in (run_ndk_art_test.py --handler): the library installs a fault handler of its

@@ -110,19 +110,6 @@ ICUDIR="$AOSP/out/target/product/generic_x86_64/apex/com.android.i18n/lib64"
 for icu in libandroidicu.so libicuuc.so libicui18n.so; do
   [ -f "$ICUDIR/$icu" ] && cp -f "$ICUDIR/$icu" "$SYS/$icu"
 done
-# libOpenSLES.so: Android's OpenSL ES audio. App native libs DT_NEEDED it (Telegram's
-# libtmessages.49.so) and the whole lib fails to load if it's absent, taking the app down. acl has
-# no audio HAL to back the real one (it needs AudioFlinger/Binder); the NDK's stub .so carries the
-# full symbol set (slCreateEngine + the SL_IID_* interface IDs) with NO dependencies, so it
-# satisfies the loader. slCreateEngine is a bare return, i.e. OpenSL audio is a no-op — apps init it
-# lazily for playback/voice and reach their UI regardless. Best-effort.
-OPENSLES="$AOSP/out/soong/ndk/platforms/android-current/arch-x86_64/usr/lib64/libOpenSLES.so"
-if [ -e "$OPENSLES" ]; then
-  cp -f "$OPENSLES" "$SYS/libOpenSLES.so"
-  say "   libOpenSLES.so <- NDK stub (audio no-op)"
-else
-  say "   libOpenSLES.so: NDK stub not found under \$AOSP — apps NEEDing OpenSL ES stay blocked"
-fi
 if [ -n "$BLIBSTDCXX" ] && [ -e "$BLIBSTDCXX" ]; then
   cp -f "$BLIBSTDCXX" "$SYS/libstdc++.so"   # NDK gnustl-era C++ ABI stub; old libGDX games NEED it
   say "   libstdc++.so <- $BLIBSTDCXX"
@@ -198,6 +185,20 @@ for pair in "libEGL.so:acl_egl_fwd.c:" "libGLESv2.so:acl_gles_fwd.c:$SYS/libEGL.
     "$GLCRTB" "$HERE/../src/ndk/bionic/$gsrc" "$GLCRTE" "$BLIBC" ${gextra:+"$gextra"} -fuse-ld=lld
 done
 say "   libEGL.so / libGLESv2.so: host-Mesa forwarders (per-thread donors); libjnigraphics.so: shim"
+
+# 2c'. libOpenSLES.so (src/ndk/bionic/acl_libopensles.c): an OpenSL ES engine with an audio
+# recorder over a4l's audio input, reached through libandroid.so. App native libs DT_NEEDED it
+# (Telegram's libtmessages, WhatsApp's libwhatsapp) and fail to load without it. It used to be
+# the NDK's link stub, whose slCreateEngine makes no engine. The version script gives its symbols
+# the LIBOPENSLES version a library built against the NDK asks for. The SLES headers come from
+# the tree, for a checkout with no NDK sysroot built.
+"$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls \
+  -fvisibility=hidden -O2 -Wl,-soname,libOpenSLES.so -Wl,-z,now \
+  -Wl,--version-script="$HERE/../src/ndk/bionic/acl_libopensles.map" \
+  "${BIONIC_INC[@]}" -I"$AOSP/frameworks/wilhelm/include" -o "$SYS/libOpenSLES.so" \
+  "$GLCRTB" "$HERE/../src/ndk/bionic/acl_libopensles.c" "$GLCRTE" "$BLIBC" "$SYS/libandroid.so" \
+  -fuse-ld=lld
+say "   libOpenSLES.so: engine + audio recorder shim"
 
 # 2d. System properties for native code (src/ndk/bionic/acl_system_properties.c). -z global: the
 # bionic linker searches such a library ahead of a library's own dependencies, libc among them, so
