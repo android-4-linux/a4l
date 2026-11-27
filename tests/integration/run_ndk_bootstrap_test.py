@@ -118,7 +118,8 @@ def main() -> int:
             p = subprocess.run(wrapper + [probe, lib, "--thread"], env=env,
                                capture_output=True, text=True, timeout=120)
             out = p.stdout + p.stderr
-            if p.returncode != 0 or "(PASS)" not in out:
+            if (p.returncode != 0 or "(PASS)" not in out
+                    or "allocated path" not in out or "(FAIL)" in out):
                 sys.stderr.write(f"FAIL: --thread run {attempt + 1}: exit {p.returncode}\n{out}\n")
                 return 1
             # The boundary: a call up into the host and back, then a JNI_OnLoad and a

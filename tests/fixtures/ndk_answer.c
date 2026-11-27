@@ -6,12 +6,17 @@
 // thread-local of its own, all of which live behind the thread pointer the
 // loader has to have put in place. 42 if they all worked.
 //
+// acl_ndk_heap_path makes a system call with a path from the allocator. On
+// arm64 bionic tags that pointer's top byte, and the kernel refuses it with
+// EFAULT on a thread that does not have the tagged address ABI on.
+//
 // Java_com_acl_ndktest_Main_nativeAnswer is the name `acl-ndk-probe --thread`
 // calls on a second thread it has attached; it is the same function.
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static __thread int t_counter = 40;
 
@@ -26,6 +31,16 @@ int answer(void* a, void* b) {
   t_counter += atoi(p) + (int)strlen(p);
   free(p);
   return t_counter + errno;
+}
+
+int acl_ndk_heap_path(unsigned* top_byte) {
+  char* p = strdup("/");
+  if (!p)
+    return -1;
+  *top_byte = (unsigned)((unsigned long)p >> 56);
+  int r = access(p, F_OK) == 0 ? 0 : errno;
+  free(p);
+  return r;
 }
 
 int Java_com_acl_ndktest_Main_nativeAnswer(void* env, void* cls) {

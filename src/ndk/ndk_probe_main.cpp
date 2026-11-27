@@ -18,6 +18,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -457,6 +458,64 @@ static bool run_thread_selftest(acl::ndk::BionicRuntime& rt, void* h) {
   return churn_ok && no_leak;
 }
 
+// A thread made before the linker is bootstrapped, which is what ART's threads
+// are in a4l: the linker comes up on the first System.loadLibrary. Released, it
+// attaches and has the library make a system call with a path from bionic's
+// allocator (acl_ndk_heap_path in tests/fixtures/ndk_answer.c). On arm64 that
+// pointer carries a tag, and the kernel takes it only from a thread with the
+// tagged address ABI on, which this one has only if the process asked for it
+// before the thread was made.
+class EarlyThread {
+ public:
+  EarlyThread() : th_([this] { run(); }) {}
+  ~EarlyThread() { release(nullptr, nullptr); }
+  EarlyThread(const EarlyThread&) = delete;
+  EarlyThread& operator=(const EarlyThread&) = delete;
+
+  // The library's errno, 0 when the call worked; -1 if it did not run.
+  int release(acl::ndk::BionicRuntime* rt, void* fn) {
+    {
+      const std::lock_guard<std::mutex> lk(mu_);
+      if (!released_) {
+        rt_ = rt;
+        fn_ = fn;
+        released_ = true;
+      }
+    }
+    cv_.notify_one();
+    if (th_.joinable())
+      th_.join();
+    return result_;
+  }
+  unsigned top_byte() const { return top_byte_; }
+
+ private:
+  void run() {
+    {
+      std::unique_lock<std::mutex> lk(mu_);
+      cv_.wait(lk, [this] { return released_; });
+    }
+    if (rt_ == nullptr || fn_ == nullptr)
+      return;
+    std::string why;
+    if (rt_->attach_current_thread(&why) == 0) {
+      std::fprintf(stderr, "attach failed: %s\n", why.c_str());
+      return;
+    }
+    const acl::ndk::BionicRuntime::RunScope scope(*rt_);
+    result_ = reinterpret_cast<int (*)(unsigned*)>(fn_)(&top_byte_);
+  }
+
+  std::mutex mu_;
+  std::condition_variable cv_;
+  acl::ndk::BionicRuntime* rt_ = nullptr;
+  void* fn_ = nullptr;
+  bool released_ = false;
+  int result_ = -1;
+  unsigned top_byte_ = 0;
+  std::thread th_;  // last: it runs as soon as it is made
+};
+
 int main(int argc, char** argv) {
   if (argc != 3) {
     std::fprintf(
@@ -467,6 +526,9 @@ int main(int argc, char** argv) {
         argv[0]);
     return 2;
   }
+  std::unique_ptr<EarlyThread> early;
+  if (std::string(argv[2]) == "--thread")
+    early = std::make_unique<EarlyThread>();
   acl::ndk::BionicConfig cfg = acl::ndk::BionicConfig::from_env();
   std::string err;
   acl::ndk::BionicRuntime* rt = acl::ndk::BionicRuntime::instance(cfg, &err);
@@ -539,6 +601,16 @@ int main(int argc, char** argv) {
 
   // Thread mode: attach a second thread and run bionic code as that thread.
   if (std::string(argv[2]) == "--thread") {
+    // Not every library this mode is run on has the function.
+    if (void* heap_path = rt->symbol(h, "acl_ndk_heap_path")) {
+      const int e = early->release(rt, heap_path);
+      std::printf(
+          "acl-ndk-probe: thread older than the linker: access() of an "
+          "allocated path (top byte %#x) -> errno %d %s\n",
+          early->top_byte(), e, e == 0 ? "(PASS)" : "(FAIL)");
+      if (e != 0)
+        return 1;
+    }
     return run_thread_selftest(*rt, h) ? 0 : 1;
   }
 
