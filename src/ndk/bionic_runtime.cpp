@@ -526,36 +526,50 @@ static_assert(sizeof(FsPair) == 16, "trampoline scan assumes a 16-byte FsPair");
 static_assert(offsetof(FsPair, glibc_fs) == 8,
               "trampoline scan assumes glibc_fs at +8");
 std::atomic<int> g_fs_pair_count{0};
+// In bionic_fs while a thread that has claimed a free slot fills it in. No
+// thread pointer has this value, so no lookup matches it.
+constexpr std::uintptr_t kFsPairClaimed = 1;
 
 void register_fs_pair(std::uintptr_t bionic_fs, std::uintptr_t glibc_fs) {
-  // Reuse a slot a detached thread left behind before growing: threads come and
-  // go, and an append-only table would run out under any thread churn. Only the
-  // owning thread clears its own entry, so a reader that matched `bionic_fs`
-  // cannot have it freed underneath — it is that thread doing the reading.
-  const int n = g_fs_pair_count.load(std::memory_order_acquire);
-  for (int i = 0; i < n && i < kMaxAttached; ++i) {
+  // The lowest free slot, so one a detached thread left behind is used again:
+  // threads come and go, and an append-only table would run out under any
+  // thread churn. Only the owning thread clears its own entry, so a reader
+  // that matched `bionic_fs` cannot have it freed underneath — it is that
+  // thread doing the reading.
+  //
+  // A slot is claimed by compare-and-swap before anything is written to it,
+  // whether it is a reused one or the next past the count. It used to be
+  // written first, in two ways that let threads registering at once take each
+  // other's slot. A reused slot's glibc_fs was written before the swap that
+  // claimed it, so the winner could be published beside the loser's glibc_fs:
+  // two threads then called into the host on one glibc thread pointer, and
+  // glibc's per-thread malloc cache aborted with a double free. And a new
+  // slot was counted before it was filled, so another thread saw it as free,
+  // took it, and was then overwritten: its next call into the host found no
+  // pairing and aborted as unattached.
+  for (int i = 0; i < kMaxAttached; ++i) {
     std::uintptr_t expected = 0;
-    if (g_fs_pairs[i].bionic_fs.load(std::memory_order_relaxed) != 0)
-      continue;
-    g_fs_pairs[i].glibc_fs =
-        glibc_fs;  // must be visible before the entry is published
-    if (g_fs_pairs[i].bionic_fs.compare_exchange_strong(
-            expected, bionic_fs, std::memory_order_release,
+    if (!g_fs_pairs[i].bionic_fs.compare_exchange_strong(
+            expected, kFsPairClaimed, std::memory_order_acquire,
             std::memory_order_relaxed))
-      return;
+      continue;
+    g_fs_pairs[i].glibc_fs = glibc_fs;
+    g_fs_pairs[i].bionic_fs.store(
+        bionic_fs, std::memory_order_release);  // publishes the entry
+    // The lookups stop at the count, so it covers the slot before this
+    // thread, the entry's only reader by bionic_fs, can look itself up.
+    int n = g_fs_pair_count.load(std::memory_order_relaxed);
+    while (n < i + 1 && !g_fs_pair_count.compare_exchange_weak(
+                            n, i + 1, std::memory_order_release,
+                            std::memory_order_relaxed)) {
+    }
+    return;
   }
-  const int i = g_fs_pair_count.fetch_add(1, std::memory_order_relaxed);
-  if (i >= kMaxAttached) {
-    log::e(kTag,
-           "more than {} threads attached to bionic at once; cannot track this "
-           "one's glibc %fs",
-           kMaxAttached);
-    std::abort();  // an untracked thread would up-call onto another thread's
-                   // TLS
-  }
-  g_fs_pairs[i].glibc_fs = glibc_fs;
-  g_fs_pairs[i].bionic_fs.store(
-      bionic_fs, std::memory_order_release);  // publishes the entry
+  log::e(kTag,
+         "more than {} threads attached to bionic at once; cannot track this "
+         "one's glibc %fs",
+         kMaxAttached);
+  std::abort();  // an untracked thread would up-call onto another thread's TLS
 }
 
 // Called from the exiting thread's own destructor, before its TCB is unmapped —
@@ -590,7 +604,8 @@ std::uintptr_t bionic_fs_for(std::uintptr_t glibc_fs) {
   for (int i = 0; i < n && i < kMaxAttached; ++i) {
     const std::uintptr_t b =
         g_fs_pairs[i].bionic_fs.load(std::memory_order_acquire);
-    if (b != 0 && g_fs_pairs[i].glibc_fs == glibc_fs)
+    // A claimed slot still holds the glibc_fs of the thread that left it.
+    if (b != 0 && b != kFsPairClaimed && g_fs_pairs[i].glibc_fs == glibc_fs)
       return b;
   }
   return 0;
