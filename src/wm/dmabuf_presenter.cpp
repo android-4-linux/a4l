@@ -17,6 +17,7 @@
 #include "wm/present.h"
 #include "wm/shell_env.h"
 #include "wm/split_present.h"
+#include "wm/touch_pointer.h"
 #include "wm/video_geometry.h"
 
 #if ACL_HAVE_WCS && ACL_HAVE_VULKAN
@@ -68,6 +69,7 @@
 #include <wl/presentation.hpp>  // wl::PresentationManager<App>, wl::PresentFeedback
 #include <wl/proxy_impl.hpp>
 #include <wl/registry.hpp>
+#include <wl/touch.hpp>  // wl::TouchHandler
 #include <wl/wl_ptr.hpp>
 #include <wl/xdg_shell.hpp>  // must follow xdg_shell_client.hpp
 
@@ -640,6 +642,7 @@ class SeatH : public CWlSeat<SeatH> {
   Presenter* app_ = nullptr;
   wl::WlPtr<wl::PointerHandler<Presenter>>* pointer_slot_ = nullptr;
   wl::WlPtr<wl::KeyboardHandler<Presenter>>* keyboard_slot_ = nullptr;
+  wl::WlPtr<wl::TouchHandler<Presenter>>* touch_slot_ = nullptr;
   void OnCapabilities(std::uint32_t caps) override {
     if ((caps & WL_SEAT_CAPABILITY_POINTER) != 0u && pointer_slot_ != nullptr &&
         pointer_slot_->IsNull()) {
@@ -656,6 +659,14 @@ class SeatH : public CWlSeat<SeatH> {
               wl::construct<wl_keyboard_traits,
                             wl_seat_traits::Op::GetKeyboard>(*this)))
         keyboard_slot_->Get()->app_ = app_;
+    }
+    if ((caps & WL_SEAT_CAPABILITY_TOUCH) != 0u && touch_slot_ != nullptr &&
+        touch_slot_->IsNull()) {
+      if (wl::SetupHandler(
+              *touch_slot_,
+              wl::construct<wl_touch_traits, wl_seat_traits::Op::GetTouch>(
+                  *this)))
+        touch_slot_->Get()->app_ = app_;
     }
   }
 };
@@ -1573,6 +1584,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       seat_.Get()->app_ = this;
       seat_.Get()->pointer_slot_ = &pointer_;
       seat_.Get()->keyboard_slot_ = &keyboard_;
+      seat_.Get()->touch_slot_ = &touch_;
       // wl_shm (only for the cursor theme) + the cursor manager, so the pointer
       // gets a cursor on enter (this presenter owns no wl_shm otherwise).
       // Best-effort: no shm/theme -> no cursor.
@@ -1877,9 +1889,22 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     const bool pressed = e.state == WL_POINTER_BUTTON_STATE_PRESSED;
     if (pressed == pointer_down_)
       return;  // only edges
+    if (pressed && finger_.active())
+      return;  // a finger is the pointer until it lifts
     pointer_down_ = pressed;
     deliver(pressed ? PointerInput::Action::Down : PointerInput::Action::Up);
   }
+
+  // wl_touch -> the same app input: the first finger is the pointer (see
+  // TouchPointer). A touchscreen with no mouse has no wl_pointer at all.
+  void OnTouchDown(const wl::TouchPoint& p) {
+    deliver(finger_.down(p.id, p.x, p.y, pointer_down_));
+  }
+  void OnTouchMotion(const wl::TouchPoint& p) {
+    deliver(finger_.motion(p.id, p.x, p.y));
+  }
+  void OnTouchUp(std::int32_t id) { deliver(finger_.up(id)); }
+  void OnTouchCancel() { deliver(finger_.cancel()); }
 
   // wl_keyboard → app input (native side of a KeyEvent). Press/release/repeat →
   // Down/Up.
@@ -1962,6 +1987,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     if (input_ != nullptr && *input_)
       (*input_)(
           PointerInput{a, static_cast<float>(px_), static_cast<float>(py_)});
+  }
+  void deliver(const std::optional<PointerInput>& p) {
+    if (p && input_ != nullptr && *input_)
+      (*input_)(*p);
   }
 
   bool build_buffer(const gfx::DmabufFrame& frame) noexcept {
@@ -2352,6 +2381,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       false;  // await agl_shell bound_ok before set_background
   double px_ = 0.0, py_ = 0.0;
   bool pointer_down_ = false;
+  wl::WlPtr<wl::TouchHandler<Presenter>> touch_;  // on wl_seat capabilities
+  TouchPointer finger_;  // the finger that is the pointer, if one is
   bool want_ime_ = false, ime_bound_ = false, ime_visible_ = false,
        ime_entered_ = false;
   int w_ = 0, h_ = 0;
