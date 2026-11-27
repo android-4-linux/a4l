@@ -75,6 +75,7 @@ public final class AclLocationManager {
                     return sLast;
                 case "isProviderEnabled":
                 case "isProviderEnabledForUser":
+                case "isLocationEnabledForUser":
                 case "hasProvider":
                     return nAvailable();
                 case "getProviders":
