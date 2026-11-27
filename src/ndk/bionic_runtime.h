@@ -14,6 +14,7 @@
 #include <jni.h>
 #include <type_traits>
 
+#include "ndk/bionic/acl_audio_in.h"
 #include "ndk/bionic/acl_audio_out.h"
 #endif
 
@@ -129,6 +130,10 @@ void main_looper_bridge_pump();
 // PCM output for the staged libaaudio.so (see ndk/bionic/acl_audio_out.h). The
 // calls arrive on the app's threads with the host %fs restored.
 void set_audio_out_ops(const acl_audio_out_ops* ops);
+
+// PCM input for the staged libOpenSLES.so (see ndk/bionic/acl_audio_in.h), on
+// the same terms.
+void set_audio_in_ops(const acl_audio_in_ops* ops);
 
 // `used` is called on a thread whose NDK ALooper was just given its first fd,
 // with the looper's epoll fd. The runtime uses it to have that thread's Java

@@ -27,6 +27,7 @@ CRTEND="$INT/bionic/libc/crtend_so/android_x86_64/obj/bionic/libc/arch-common/bi
 # Headers: the prebuilt NDK sysroot is often absent in an AOSP checkout; use the in-tree sources.
 INC_JNI="$AOSP/libnativehelper/include_jni"           # jni.h
 INC_LOG="$AOSP/system/logging/liblog/include"          # android/log.h
+INC_SLES="$AOSP/frameworks/wilhelm/include"            # SLES/OpenSLES.h
 
 for f in "$CLANG" "$BIONIC_LIBC" "$BIONIC_LIBLOG" "$BIONIC_LIBDL" "$CRTBEGIN" "$CRTEND"; do
   [ -e "$f" ] || { echo "MISSING: $f  (build bionic in \$AOSP, or set AOSP=)" >&2; exit 1; }
@@ -55,6 +56,8 @@ cat >"$OUT/ndktest.c" <<'EOF'
 #include <jni.h>
 #include <unistd.h>
 #include <android/log.h>
+#include <SLES/OpenSLES.h>          // for openslesRecord
+#include <SLES/OpenSLES_Android.h>
 typedef struct ALooper ALooper;
 JNIEXPORT jint JNICALL
 Java_com_acl_ndktest_Main_nativeAnswer(JNIEnv* e, jclass c) {
@@ -207,6 +210,112 @@ Java_com_acl_ndktest_Main_aaudioPlay(JNIEnv* e, jclass c) {
   if (((int (*)(void*))Stream_close)(stream) != 0) return -11;
   return calls;
 }
+// Bound by name. Records through a4l's libOpenSLES.so the way a voice recorder does: makes an
+// engine, then a 16 kHz mono 16-bit recorder with two 20 ms buffers in an Android simple buffer
+// queue, records for 300 ms and stops. The callback checks its buffer was written over and
+// queues it again. Returns the number of callbacks, or a negative step code.
+static volatile int ndktest_sl_calls;
+static volatile int ndktest_sl_unwritten;
+static short ndktest_sl_buf[2][320];
+static void ndktest_sl_mark(short* b) { for (int i = 0; i < 320; i++) b[i] = 0x5555; }
+static void ndktest_sl_cb(SLAndroidSimpleBufferQueueItf q, void* ctx) {
+  (void)ctx;
+  short* b = ndktest_sl_buf[ndktest_sl_calls % 2];     // filled in the order queued
+  for (int i = 0; i < 320; i++) if (b[i] == 0x5555) { ndktest_sl_unwritten++; break; }
+  ndktest_sl_mark(b);
+  ndktest_sl_calls++;
+  (*q)->Enqueue(q, b, sizeof ndktest_sl_buf[0]);
+}
+JNIEXPORT jint JNICALL
+Java_com_acl_ndktest_Main_openslesRecord(JNIEnv* e, jclass c) {
+  void* lib = dlopen("libOpenSLES.so", 2);
+  if (!lib) return -1;
+  SLresult (*create)(SLObjectItf*, SLuint32, const SLEngineOption*, SLuint32,
+                     const SLInterfaceID*, const SLboolean*) = dlsym(lib, "slCreateEngine");
+#define NDKTEST_IID(name) \
+  SLInterfaceID* p##name = dlsym(lib, "SL_IID_" #name); if (!p##name || !*p##name) return -2; \
+  const SLInterfaceID name = *p##name
+  NDKTEST_IID(ENGINE); NDKTEST_IID(RECORD); NDKTEST_IID(ANDROIDSIMPLEBUFFERQUEUE);
+  NDKTEST_IID(ANDROIDCONFIGURATION); NDKTEST_IID(PLAY);
+#undef NDKTEST_IID
+  if (!create) return -2;
+  SLObjectItf eng = 0; SLEngineItf engine = 0;
+  if (create(&eng, 0, 0, 0, 0, 0) != SL_RESULT_SUCCESS || !eng) return -3;
+  if ((*eng)->GetInterface(eng, ENGINE, &engine) != SL_RESULT_PRECONDITIONS_VIOLATED) return -4;
+  if ((*eng)->Realize(eng, SL_BOOLEAN_FALSE) != SL_RESULT_SUCCESS) return -5;
+  if ((*eng)->GetInterface(eng, ENGINE, &engine) != SL_RESULT_SUCCESS || !engine) return -6;
+  if ((*eng)->GetInterface(eng, PLAY, &engine) != SL_RESULT_FEATURE_UNSUPPORTED) return -7;
+  (*eng)->GetInterface(eng, ENGINE, &engine);
+
+  SLObjectItf mix = 0, player = (SLObjectItf)1;
+  if ((*engine)->CreateOutputMix(engine, &mix, 0, 0, 0) != SL_RESULT_SUCCESS || !mix) return -8;
+  if ((*mix)->Realize(mix, SL_BOOLEAN_FALSE) != SL_RESULT_SUCCESS) return -9;
+  (*mix)->Destroy(mix);
+  // No player: the call fails and says so, and hands back no object.
+  if ((*engine)->CreateAudioPlayer(engine, &player, 0, 0, 0, 0, 0) != SL_RESULT_FEATURE_UNSUPPORTED
+      || player) return -10;
+
+  SLDataLocator_IODevice dev = {SL_DATALOCATOR_IODEVICE, SL_IODEVICE_AUDIOINPUT,
+                                SL_DEFAULTDEVICEID_AUDIOINPUT, 0};
+  SLDataSource src = {&dev, 0};
+  SLDataLocator_AndroidSimpleBufferQueue loc = {SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 2};
+  SLDataFormat_PCM fmt = {SL_DATAFORMAT_PCM, 1, SL_SAMPLINGRATE_16, SL_PCMSAMPLEFORMAT_FIXED_16,
+                          SL_PCMSAMPLEFORMAT_FIXED_16, SL_SPEAKER_FRONT_CENTER,
+                          SL_BYTEORDER_LITTLEENDIAN};
+  SLDataSink snk = {&loc, &fmt};
+  const SLInterfaceID ids[3] = {ANDROIDSIMPLEBUFFERQUEUE, ANDROIDCONFIGURATION, PLAY};
+  const SLboolean need_play[3] = {SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE};
+  const SLboolean want_play[3] = {SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE, SL_BOOLEAN_FALSE};
+  SLObjectItf rec = 0;
+  // An interface a recorder does not have: fatal when required, left out when not.
+  if ((*engine)->CreateAudioRecorder(engine, &rec, &src, &snk, 3, ids, need_play)
+      != SL_RESULT_FEATURE_UNSUPPORTED || rec) return -11;
+  fmt.bitsPerSample = fmt.containerSize = SL_PCMSAMPLEFORMAT_FIXED_8;
+  if ((*engine)->CreateAudioRecorder(engine, &rec, &src, &snk, 3, ids, want_play)
+      != SL_RESULT_CONTENT_UNSUPPORTED || rec) return -12;
+  fmt.bitsPerSample = fmt.containerSize = SL_PCMSAMPLEFORMAT_FIXED_16;
+  if ((*engine)->CreateAudioRecorder(engine, &rec, &src, &snk, 3, ids, want_play)
+      != SL_RESULT_SUCCESS || !rec) return -13;
+  if ((*rec)->Realize(rec, SL_BOOLEAN_FALSE) != SL_RESULT_SUCCESS) return -14;
+  SLRecordItf record = 0; SLAndroidSimpleBufferQueueItf q = 0; SLAndroidConfigurationItf cfg = 0;
+  if ((*rec)->GetInterface(rec, RECORD, &record) != SL_RESULT_SUCCESS ||
+      (*rec)->GetInterface(rec, ANDROIDSIMPLEBUFFERQUEUE, &q) != SL_RESULT_SUCCESS ||
+      (*rec)->GetInterface(rec, ANDROIDCONFIGURATION, &cfg) != SL_RESULT_SUCCESS) return -15;
+  const SLuint32 preset = SL_ANDROID_RECORDING_PRESET_VOICE_COMMUNICATION;
+  if ((*cfg)->SetConfiguration(cfg, SL_ANDROID_KEY_RECORDING_PRESET, &preset, sizeof preset)
+      != SL_RESULT_SUCCESS) return -16;
+  if ((*q)->RegisterCallback(q, ndktest_sl_cb, 0) != SL_RESULT_SUCCESS) return -17;
+  ndktest_sl_mark(ndktest_sl_buf[0]); ndktest_sl_mark(ndktest_sl_buf[1]);
+  if ((*q)->Enqueue(q, ndktest_sl_buf[0], sizeof ndktest_sl_buf[0]) != SL_RESULT_SUCCESS ||
+      (*q)->Enqueue(q, ndktest_sl_buf[1], sizeof ndktest_sl_buf[1]) != SL_RESULT_SUCCESS) return -18;
+  // The queue holds the two the recorder was made for.
+  if ((*q)->Enqueue(q, ndktest_sl_buf[0], sizeof ndktest_sl_buf[0])
+      != SL_RESULT_BUFFER_INSUFFICIENT) return -19;
+  // Nothing is filled before the recorder is started.
+  usleep(60000);
+  if (ndktest_sl_calls != 0) return -20;
+  if ((*record)->SetRecordState(record, SL_RECORDSTATE_RECORDING) != SL_RESULT_SUCCESS) return -21;
+  usleep(300000);
+  if ((*record)->SetRecordState(record, SL_RECORDSTATE_STOPPED) != SL_RESULT_SUCCESS) return -22;
+  usleep(50000);                               // a callback under way at the stop has ended
+  const int calls = ndktest_sl_calls;
+  SLuint32 state = 99; SLmillisecond ms = 0; SLAndroidSimpleBufferQueueState qs = {99, 99};
+  if ((*record)->GetRecordState(record, &state) != SL_RESULT_SUCCESS ||
+      state != SL_RECORDSTATE_STOPPED) return -23;
+  if ((*q)->GetState(q, &qs) != SL_RESULT_SUCCESS || qs.index != (SLuint32)calls ||
+      qs.count != 2) return -24;
+  // Every buffer handed back was 20 ms, and at most one more was part filled.
+  if ((*record)->GetPosition(record, &ms) != SL_RESULT_SUCCESS ||
+      ms < (SLmillisecond)calls * 20 || ms > (SLmillisecond)(calls + 1) * 20) return -25;
+  usleep(50000);
+  if (ndktest_sl_calls != calls) return -26;   // and nothing came after the stop
+  if (ndktest_sl_unwritten) return -27;
+  if ((*q)->Clear(q) != SL_RESULT_SUCCESS || (*q)->GetState(q, &qs) != SL_RESULT_SUCCESS ||
+      qs.count != 0) return -28;
+  (*rec)->Destroy(rec);
+  (*eng)->Destroy(eng);
+  return calls;
+}
 // Decoy for the bind-by-name path: an EXPORTED Java_<class>_answer, while JNI_OnLoad below ALSO
 // RegisterNatives-binds answer() to the_registered (4250). A RegisterNatives binding is the app's
 // explicit choice and must win, so acl's name binding has to skip methods JNI_OnLoad already
@@ -269,13 +378,13 @@ EOF
 # than clang's android-default emulated-TLS (__emutls_get_address, a compiler-rt symbol not in bionic).
 "$CLANG" --target=x86_64-linux-android31 \
   -fPIC -shared -nostdlib -fno-emulated-tls -Wl,-soname,libndktest.so \
-  -I"$INC_JNI" -I"$INC_LOG" \
+  -I"$INC_JNI" -I"$INC_LOG" -I"$INC_SLES" \
   -o "$OUT/libndktest.so" \
   "$CRTBEGIN" "$OUT/ndktest.c" "$CRTEND" \
   "$BIONIC_LIBC" "$BIONIC_LIBLOG" "$BIONIC_LIBDL" $ACL_LIBANDROID \
   -fuse-ld=lld 2>/dev/null \
 || "$CLANG" --target=x86_64-linux-android31 -fPIC -shared -nostdlib -fno-emulated-tls \
-     -Wl,-soname,libndktest.so -I"$INC_JNI" -I"$INC_LOG" -o "$OUT/libndktest.so" \
+     -Wl,-soname,libndktest.so -I"$INC_JNI" -I"$INC_LOG" -I"$INC_SLES" -o "$OUT/libndktest.so" \
      "$CRTBEGIN" "$OUT/ndktest.c" "$CRTEND" \
      "$BIONIC_LIBC" "$BIONIC_LIBLOG" "$BIONIC_LIBDL" $ACL_LIBANDROID -fuse-ld=lld
 

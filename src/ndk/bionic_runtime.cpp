@@ -3839,6 +3839,46 @@ void set_audio_out_ops(const acl_audio_out_ops* ops) {
   g_audio_out = ops;
 }
 
+// PCM input for libOpenSLES.so, the same way. The caller is the shim's
+// recording thread, or the app's thread that starts and stops a recorder.
+const acl_audio_in_ops* g_audio_in = nullptr;
+void* acl_audio_in_open_tramp(int rate, int channels) {
+  if (g_audio_in == nullptr)
+    return nullptr;
+  return with_host_fs<void*>(nullptr,
+                             [&] { return g_audio_in->open(rate, channels); });
+}
+void acl_audio_in_start_tramp(void* in) {
+  with_host_fs<int>(0, [&] {
+    g_audio_in->start(in);
+    return 0;
+  });
+}
+int acl_audio_in_read_tramp(void* in, std::int16_t* pcm, int frames) {
+  return with_host_fs<int>(0,
+                           [&] { return g_audio_in->read(in, pcm, frames); });
+}
+void acl_audio_in_stop_tramp(void* in) {
+  with_host_fs<int>(0, [&] {
+    g_audio_in->stop(in);
+    return 0;
+  });
+}
+void acl_audio_in_close_tramp(void* in) {
+  with_host_fs<int>(0, [&] {
+    g_audio_in->close(in);
+    return 0;
+  });
+}
+const acl_audio_in_ops kAudioInTramps = {
+    &acl_audio_in_open_tramp,  &acl_audio_in_start_tramp,
+    &acl_audio_in_read_tramp,  &acl_audio_in_stop_tramp,
+    &acl_audio_in_close_tramp,
+};
+void set_audio_in_ops(const acl_audio_in_ops* ops) {
+  g_audio_in = ops;
+}
+
 // A looper's first fd, from libandroid's ALooper_addFd on the looper's thread.
 // The host side calls into Java, so it runs under the thread's glibc %fs.
 void (*g_looper_used_fn)(int) = nullptr;
@@ -4048,6 +4088,13 @@ void* BionicRuntime::load_library(const char* abs_path,
             if (auto** ao = static_cast<const acl_audio_out_ops**>(
                     symbol(la, "acl_audio_out_ops")))
               *ao = &kAudioOutTramps;
+          }
+          // libOpenSLES.so's input, on the same terms: a recorder then fails
+          // to realize.
+          if (g_audio_in != nullptr) {
+            if (auto** ai = static_cast<const acl_audio_in_ops**>(
+                    symbol(la, "acl_audio_in_ops")))
+              *ai = &kAudioInTramps;
           }
           if (void** lu =
                   static_cast<void**>(symbol(la, "acl_looper_used_hook")))

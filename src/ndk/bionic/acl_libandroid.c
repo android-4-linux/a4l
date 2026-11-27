@@ -40,6 +40,7 @@
 #include <time.h>  // clock_gettime (ASurfaceTransactionStats_getLatchTime)
 #include <unistd.h>
 
+#include "acl_audio_in.h"   // acl_audio_in_ops, for libOpenSLES.so
 #include "acl_audio_out.h"  // acl_audio_out_ops, for libaaudio.so
 
 #include <android/hardware_buffer.h>  // AHardwareBuffer + AHardwareBuffer_Desc (NDK contract)
@@ -167,6 +168,9 @@ struct ALooper {
 // when this library is loaded, and libaaudio.so is opened later by whoever
 // wants it. NULL until then (see acl_audio_out.h).
 ACL_EXPORT const struct acl_audio_out_ops* acl_audio_out_ops = NULL;
+
+// PCM input for a4l's libOpenSLES.so, set the same way (see acl_audio_in.h).
+ACL_EXPORT const struct acl_audio_in_ops* acl_audio_in_ops = NULL;
 
 // Set by the runtime: called once per looper, on the looper's own thread, when
 // that thread first gives it an fd. Nothing polls an ALooper on a thread that

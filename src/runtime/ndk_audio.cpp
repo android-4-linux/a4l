@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Provenance: original a4l. No GPL-3.0 sources.
 //
-// The host side of native audio output (ndk/bionic/acl_audio_out.h): what
-// a4l's libaaudio.so plays through. Each output is an audio::Track over the
+// The host side of native audio. Output (ndk/bionic/acl_audio_out.h) is what
+// a4l's libaaudio.so plays through: each one is an audio::Track over the
 // configured sink, the same pair android.media.AudioTrack plays through, so
-// native and Java audio share the device, the volume and ACL_AUDIO.
+// native and Java audio share the device, the volume and ACL_AUDIO. Input
+// (ndk/bionic/acl_audio_in.h) is what a4l's libOpenSLES.so records from: an
+// audio::Recorder over the source android.media.AudioRecord reads.
 #include "runtime/ndk_audio.h"
 
 #include <algorithm>
@@ -12,6 +14,7 @@
 #include <memory>
 
 #include "audio/audio.h"
+#include "audio/audio_record.h"
 #include "audio/audio_track.h"
 #include "log/log.h"
 #include "ndk/bionic_runtime.h"
@@ -85,10 +88,59 @@ const acl_audio_out_ops kOps = {
     &out_open, &out_write, &out_start, &out_stop, &out_timestamp, &out_close,
 };
 
+audio::Recorder* recorder_of(void* in) {
+  return static_cast<audio::Recorder*>(in);
+}
+
+void* in_open(int rate, int channels) {
+  audio::Recorder::Config cfg;
+  cfg.sample_rate = rate;
+  cfg.channels = channels;
+  cfg.capacity_frames = audio::Recorder::min_capacity_frames(rate);
+  if (!audio::Recorder::valid(cfg)) {
+    log::w(kTag, "input refused: {} Hz, {} ch", rate, channels);
+    return nullptr;
+  }
+  auto recorder = std::make_unique<audio::Recorder>(cfg, audio::make_source());
+  if (!recorder->ok())
+    return nullptr;
+  log::i(kTag, "input: {} Hz, {} ch, {} frames", rate, channels,
+         cfg.capacity_frames);
+  return recorder.release();
+}
+
+void in_start(void* in) {
+  if (in != nullptr)
+    recorder_of(in)->start();
+}
+
+int in_read(void* in, std::int16_t* pcm, int frames) {
+  if (in == nullptr || pcm == nullptr || frames <= 0)
+    return 0;
+  return std::max(0, recorder_of(in)->read(pcm, frames, /*blocking=*/true));
+}
+
+void in_stop(void* in) {
+  if (in != nullptr)
+    recorder_of(in)->stop();
+}
+
+void in_close(void* in) {
+  if (in == nullptr)
+    return;
+  std::unique_ptr<audio::Recorder> recorder(recorder_of(in));
+  recorder->shutdown();
+}
+
+const acl_audio_in_ops kInOps = {
+    &in_open, &in_start, &in_read, &in_stop, &in_close,
+};
+
 }  // namespace
 
 void register_ndk_audio() {
   ndk::set_audio_out_ops(&kOps);
+  ndk::set_audio_in_ops(&kInOps);
 }
 
 }  // namespace acl::runtime

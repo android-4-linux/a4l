@@ -73,6 +73,12 @@ AAUDIO_CHECKS = [
     "fed=true",
 ]
 
+# --opensles: the library opens libOpenSLES.so and records through a buffer queue.
+OPENSLES_CHECKS = [
+    "acl.audio.ndk: input: 16000 Hz, 1 ch",
+    "paced=true",
+]
+
 CHECKS = [
     "NDK bionic loader armed",   # the gated nativeLoad hook installed (bootstraps lazily)
     "loaded bionic native lib",   # routed as bionic (not glibc dlopen)
@@ -108,10 +114,13 @@ def main() -> int:
     aaudio = "--aaudio" in argv           # libaaudio.so output; see AAUDIO_CHECKS
     if aaudio:
         argv.remove("--aaudio")
+    opensles = "--opensles" in argv       # libOpenSLES.so recorder; see OPENSLES_CHECKS
+    if opensles:
+        argv.remove("--opensles")
     if len(argv) != 4:
         sys.stderr.write(
             "usage: run_ndk_art_test.py <acl> <src_root> <android.jar> <ndk.apk> "
-            "[--worker|--donor|--handler|--aaudio]\n")
+            "[--worker|--donor|--handler|--aaudio|--opensles]\n")
         return 2
     acl, src_root, android_jar, ndk_apk = argv
 
@@ -212,6 +221,8 @@ def main() -> int:
         if aaudio:
             env["ACL_NDK_TEST_AAUDIO"] = "1"
             env["ACL_AUDIO"] = "null"  # no sound device needed, and none made to sound
+        if opensles:
+            env["ACL_NDK_TEST_OPENSLES"] = "1"
         if handler:
             env["ACL_NDK_TEST_HANDLER"] = "1"
             env.pop("ACL_NO_CRASHPAD_SHIM_KEEPER", None)
@@ -230,6 +241,14 @@ def main() -> int:
             sys.stderr.write(f"FAIL: AAudio output: acl exit {p.returncode}\n")
             ok = False
         for c in AAUDIO_CHECKS:
+            if c not in out:
+                sys.stderr.write(f"FAIL: missing '{c}'\n")
+                ok = False
+    elif opensles:
+        if p.returncode != 0:
+            sys.stderr.write(f"FAIL: OpenSL ES recorder: acl exit {p.returncode}\n")
+            ok = False
+        for c in OPENSLES_CHECKS:
             if c not in out:
                 sys.stderr.write(f"FAIL: missing '{c}'\n")
                 ok = False
