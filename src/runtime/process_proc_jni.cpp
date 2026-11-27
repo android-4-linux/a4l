@@ -5,15 +5,22 @@
 // android.os.Process.readProcFile and parseProcLine: a /proc file, or a line
 // of one, split into fields by a format array. An app reads its own
 // /proc/self/stat this way (start time, CPU time), and so does the framework.
+//
+// getElapsedCpuTime, and sendSignal with its quiet form: what killProcess
+// calls. An app ends itself with killProcess(myPid()).
 #include "runtime/process_proc_jni.h"
 
 #include <fcntl.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <csignal>
 #include <cstddef>
 #include <cstdlib>
+#include <ctime>
 #include <string>
+
+#include "log/log.h"
 
 namespace acl::runtime {
 namespace {
@@ -177,6 +184,49 @@ jboolean JNICALL parse_proc_line(JNIEnv* env,
              : JNI_FALSE;
 }
 
+// CPU time this process has used, in milliseconds.
+jlong JNICALL elapsed_cpu_time(JNIEnv*, jclass) {
+  struct timespec ts{};
+  if (::clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0)
+    return 0;
+  return static_cast<jlong>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+}
+
+// On Android an app can signal the processes of its own uid, which are its
+// own. Here the app has one process, this one, and its uid is the user's: a
+// signal for another pid is not sent. SIGKILL for this process ends it the
+// way System.exit does, less the Java shutdown hooks a kill does not run,
+// with the status a shell gives a process that died of the signal. Any other
+// signal is dropped: SIGQUIT and SIGUSR1 ask Android's runtime for a stack
+// dump and a collection, and neither is something an app waits on.
+void JNICALL send_signal(JNIEnv* env, jclass, jint pid, jint sig) {
+  if (pid != static_cast<jint>(::getpid())) {
+    log::i("acl.runtime.process",
+           "sendSignal({}, {}): not this process; not sent", pid, sig);
+    return;
+  }
+  if (sig != SIGKILL) {
+    log::i("acl.runtime.process", "sendSignal: signal {} to itself dropped",
+           sig);
+    return;
+  }
+  log::i("acl.runtime.process", "the app killed its own process");
+  constexpr jint kStatus = 128 + SIGKILL;
+  jclass runtime = env->FindClass("java/lang/Runtime");
+  jmethodID get = runtime != nullptr
+                      ? env->GetStaticMethodID(runtime, "getRuntime",
+                                               "()Ljava/lang/Runtime;")
+                      : nullptr;
+  jmethodID halt =
+      runtime != nullptr ? env->GetMethodID(runtime, "halt", "(I)V") : nullptr;
+  jobject rt =
+      get != nullptr ? env->CallStaticObjectMethod(runtime, get) : nullptr;
+  if (rt != nullptr && halt != nullptr)
+    env->CallVoidMethod(rt, halt, kStatus);  // does not return
+  env->ExceptionClear();
+  ::_exit(kStatus);
+}
+
 }  // namespace
 
 void register_process_proc_natives(JNIEnv* env) {
@@ -192,6 +242,12 @@ void register_process_proc_natives(JNIEnv* env) {
       {const_cast<char*>("parseProcLine"),
        const_cast<char*>("([BII[I[Ljava/lang/String;[J[F)Z"),
        reinterpret_cast<void*>(&parse_proc_line)},
+      {const_cast<char*>("getElapsedCpuTime"), const_cast<char*>("()J"),
+       reinterpret_cast<void*>(&elapsed_cpu_time)},
+      {const_cast<char*>("sendSignal"), const_cast<char*>("(II)V"),
+       reinterpret_cast<void*>(&send_signal)},
+      {const_cast<char*>("sendSignalQuiet"), const_cast<char*>("(II)V"),
+       reinterpret_cast<void*>(&send_signal)},
   };
   if (env->RegisterNatives(c, m, sizeof(m) / sizeof(m[0])) != JNI_OK)
     env->ExceptionClear();
