@@ -356,6 +356,19 @@ public class Main extends Activity {
                 && self.nativeLibraryDir != null;
         log("native libs extracted=" + extracted);
         expect(extracted, "ApplicationInfo.flags is 0x" + Integer.toHexString(self.flags));
+        // There is no Android input method, so the lists of them are empty. They are never
+        // null: an app that lists keyboard languages iterates them unguarded.
+        final android.view.inputmethod.InputMethodManager imm =
+                getSystemService(android.view.inputmethod.InputMethodManager.class);
+        String imes;
+        try {
+            imes = imm.getInputMethodList().size() + "/" + imm.getEnabledInputMethodList().size()
+                    + "/" + imm.getEnabledInputMethodSubtypeList(null, true).size();
+        } catch (RuntimeException e) {
+            imes = e.toString();
+        }
+        log("input methods " + imes);
+        expect("0/0/0".equals(imes), "input method lists are " + imes);
         // Process.readProcFile and parseProcLine split a line by a format, as the framework
         // and apps read /proc/self/stat: a number, a name in parentheses that has a space in
         // it, a state letter, and a number after a run of spaces.

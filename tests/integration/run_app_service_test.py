@@ -62,6 +62,7 @@ CHECKS = [
     "SERVICE: color matrix filtered=true",
     f"SERVICE: process name {PACKAGE} application {PACKAGE}",
     "SERVICE: native libs extracted=true",
+    "SERVICE: input methods 0/0/0",
     "SERVICE: proc file parsed=true",
     f"SERVICE: pending intent {PACKAGE} uid true broadcast true/false immutable true"
     " activity true/false immutable false",
