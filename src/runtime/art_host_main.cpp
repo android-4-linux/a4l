@@ -18,6 +18,7 @@
 
 #include <dlfcn.h>
 #include <jni.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -72,8 +73,14 @@ std::vector<std::string> setup_art(const std::string& home,
   set("ANDROID_ART_ROOT", home + "/apex/com.android.art");
   set("ANDROID_I18N_ROOT", home + "/com.android.i18n");
   set("ANDROID_TZDATA_ROOT", home + "/com.android.tzdata");
-  if (!std::getenv("ANDROID_DATA"))
-    set("ANDROID_DATA", home + "/acl-android-data");
+  // a4l gives this process an ANDROID_DATA that exists. Run by hand it has
+  // none: name one beside the runtime and make it if that is allowed, since an
+  // app measures the directory.
+  if (!std::getenv("ANDROID_DATA")) {
+    const std::string data = home + "/acl-android-data";
+    ::mkdir(data.c_str(), 0700);
+    set("ANDROID_DATA", data);
+  }
 
   struct BcpJar {
     const char* module;

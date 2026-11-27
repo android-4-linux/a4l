@@ -215,6 +215,13 @@ def main():
             if c not in out:
                 sys.stderr.write(f"FAIL: missing '{c}'\n{out[-8000:]}\n")
                 return 1
+        # The data directory is in the data directory this run was given.
+        where = ("SERVICE: data directory measured=true at "
+                 + os.path.join(work, "data", "a4l", "android-data"))
+        if where not in out:
+            line = [ln for ln in out.splitlines() if "data directory" in ln]
+            sys.stderr.write(f"FAIL: missing '{where}'; got {line}\n")
+            return 1
     except subprocess.CalledProcessError as e:
         sys.stderr.write(f"FAIL: build step: {e.cmd}\n{e.stderr}\n")
         return 1
