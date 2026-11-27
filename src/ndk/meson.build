@@ -9,7 +9,8 @@
 # between glibc and bionic, and the stack canary lives at %fs:0x28 — a mid-function %fs change
 # would false-fail the check. The swap is confined to this TU.
 # jni_dep (when a JDK is present) provides jni.h for the JNIEnv/JavaVM boundary trampolines.
-ndk_deps = [fmt_dep]
+# dl: dlsym and dlvsym, in libdl before glibc 2.34.
+ndk_deps = [fmt_dep, cxx.find_library('dl', required : false)]
 if have_jni
   ndk_deps += jni_dep
 endif

@@ -7,6 +7,8 @@
 # `acl-ndk-probe <lib> answer`, which must print 42: the library's answer uses malloc, stdio,
 # errno and a thread-local, so a wrong thread pointer crashes or gives another number. Then
 # `acl-ndk-probe <lib> --thread`: a second thread is attached and gets 42 on a TCB of its own.
+# Then `--boundary` and `--jni` with tests/fixtures/ndk_jni.c: a call up into the host and back,
+# a JNI_OnLoad through a4l's wrapped JNIEnv, and registered natives through the down-call stub.
 #
 # An arm64 probe on an x86_64 machine runs under qemu-aarch64-static with the sysroot named by
 # ACL_ARM64_SYSROOT (default /mnt/dev/sysroot-bullseye-arm64).
@@ -80,7 +82,9 @@ def main() -> int:
              "-I" + os.path.join(aosp, "bionic/libc/kernel/uapi", asm),
              "-I" + os.path.join(aosp, "bionic/libc/kernel/android/uapi"),
              "-Wl,-soname,libanswer.so", "-o", lib, crtb,
-             os.path.join(src_root, "tests/fixtures/ndk_answer.c"), crte,
+             "-I" + os.path.join(aosp, "libnativehelper/include_jni"),
+             os.path.join(src_root, "tests/fixtures/ndk_answer.c"),
+             os.path.join(src_root, "tests/fixtures/ndk_jni.c"), crte,
              os.path.join(stage, "bionic/libc.so"), "-fuse-ld=lld"],
             capture_output=True, text=True)
         if cc.returncode != 0:
@@ -105,10 +109,23 @@ def main() -> int:
             if p.returncode != 0 or "(PASS)" not in out:
                 sys.stderr.write(f"FAIL: --thread run {attempt + 1}: exit {p.returncode}\n{out}\n")
                 return 1
+            # The boundary: a call up into the host and back, then a JNI_OnLoad and a
+            # registered native through a4l's wrapped JNIEnv and its down-call stub, one of
+            # them with arguments on the stack.
+            for mode, want in (("--boundary", "boundary selftest = 1010 (PASS)"),
+                               ("--jni", "native=4250 (varargs up-call) stack-args=ok -> (PASS)")):
+                p = subprocess.run(wrapper + [probe, lib, mode], env=env,
+                                   capture_output=True, text=True, timeout=120)
+                out = p.stdout + p.stderr
+                if p.returncode != 0 or want not in out:
+                    sys.stderr.write(
+                        f"FAIL: {mode} run {attempt + 1}: exit {p.returncode}\n{out}\n")
+                    return 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
     sys.stdout.write(f"OK: the bionic linker bootstrapped on {arch}; a library answered 42 on the "
-                     "bootstrapping thread and on an attached one\n")
+                     "bootstrapping thread and on an attached one, and its JNI_OnLoad and "
+                     "natives ran across the boundary\n")
     return 0
 
 

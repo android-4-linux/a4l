@@ -16,6 +16,7 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <thread>
 
@@ -36,6 +37,10 @@ static int glibc_cb(int x) {
 // RegisterNatives captures the bound function pointer.
 namespace {
 const void* g_captured_native = nullptr;
+// A second native, registered as "many" by a library that has one: twelve
+// integer and nine floating-point arguments, so some of each are passed on the
+// stack whatever the architecture.
+const void* g_captured_many = nullptr;
 int g_glibc_calls = 0;
 __thread int probe_tls;  // glibc TLS, exercised during the up-calls
 
@@ -57,6 +62,9 @@ jint JNICALL fake_RegisterNatives(JNIEnv*,
   ++g_glibc_calls;
   if (n >= 1)
     g_captured_native = m[0].fnPtr;
+  for (jint i = 1; i < n; ++i)
+    if (m[i].name != nullptr && std::strcmp(m[i].name, "many") == 0)
+      g_captured_many = m[i].fnPtr;
   return JNI_OK;
 }
 // The wrapped RegisterNatives records each binding (so name resolution won't
@@ -118,6 +126,7 @@ static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, const char* so_path) {
   probe_tls = 0;
   g_glibc_calls = 0;
   g_captured_native = nullptr;
+  g_captured_many = nullptr;
 
   // The exact operation Runtime.nativeLoad will call: load + drive JNI_OnLoad
   // across the boundary.
@@ -143,12 +152,33 @@ static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, const char* so_path) {
 
   // 6 up-calls: GetEnv, GetVersion, FindClass, RegisterNatives (JNI_OnLoad) +
   // GetStaticMethodID, CallStaticIntMethod (native).
+  // Every argument weighted by its place, so one out of order or read from
+  // the wrong slot changes the sum: 1*1 + 2*2 + ... + 10*10 = 385, and
+  // (0.5*1 + 1.5*2 + ... + 8.5*9) = 262.5, truncated and times 1000.
+  bool many_ok = true;
+  if (g_captured_many) {
+    using Many =
+        jlong (*)(JNIEnv*, jclass, jint, jint, jint, jint, jint, jint, jint,
+                  jint, jint, jint, jdouble, jdouble, jdouble, jdouble, jdouble,
+                  jdouble, jdouble, jdouble, jdouble);
+    const jlong got =
+        reinterpret_cast<Many>(const_cast<void*>(g_captured_many))(
+            real_env, nullptr, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0.5, 1.5, 2.5,
+            3.5, 4.5, 5.5, 6.5, 7.5, 8.5);
+    many_ok = got == 385 + 262 * 1000;
+    if (!many_ok)
+      std::fprintf(stderr, "many-argument native returned %lld\n",
+                   static_cast<long long>(got));
+  }
   const bool ok = ver == JNI_VERSION_1_6 && g_captured_native != nullptr &&
-                  g_glibc_calls == 6 && probe_tls == 444 && native_ret == 4250;
+                  g_glibc_calls == 6 && probe_tls == 444 &&
+                  native_ret == 4250 && many_ok;
   std::printf(
       "acl-ndk-probe: JNI_OnLoad ver=%#x up-calls=%d probe_tls=%d native=%d "
-      "(varargs up-call) -> %s\n",
-      ver, g_glibc_calls, probe_tls, native_ret, ok ? "(PASS)" : "(FAIL)");
+      "(varargs up-call) stack-args=%s -> %s\n",
+      ver, g_glibc_calls, probe_tls, native_ret,
+      g_captured_many ? (many_ok ? "ok" : "wrong") : "none",
+      ok ? "(PASS)" : "(FAIL)");
   return ok;
 }
 
