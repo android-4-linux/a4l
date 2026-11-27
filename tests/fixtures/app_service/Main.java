@@ -581,6 +581,30 @@ public class Main extends Activity {
                 && android.graphics.Color.red(end) < 16;
         log("sweep gradient drawn=" + swept);
         expect(swept, String.format("sweep gradient %08x %08x %08x", start, half, end));
+        // android.graphics.Camera, the 3D transform a legacy Animation rotates a View with.
+        // A turn of 60 degrees about Y halves the width (cos 60) and adds perspective in x;
+        // restore() undoes it; the canvas takes the same matrix.
+        final android.graphics.Camera camera = new android.graphics.Camera();
+        final float cameraZ = camera.getLocationZ();
+        camera.save();
+        camera.rotateY(60f);
+        final float[] turned = new float[9];
+        final android.graphics.Matrix cameraMatrix = new android.graphics.Matrix();
+        camera.getMatrix(cameraMatrix);
+        cameraMatrix.getValues(turned);
+        final android.graphics.Canvas cameraCanvas = new android.graphics.Canvas(
+                android.graphics.Bitmap.createBitmap(4, 4, android.graphics.Bitmap.Config.ARGB_8888));
+        camera.applyToCanvas(cameraCanvas);
+        final float[] onCanvas = new float[9];
+        cameraCanvas.getMatrix().getValues(onCanvas);
+        final float facing = camera.dotWithNormal(0f, 0f, 1f);
+        camera.restore();
+        camera.getMatrix(cameraMatrix);
+        final String cameraSeen = String.format(java.util.Locale.ROOT,
+                "z %.1f turned %.3f/%.3f/%.5f canvas %b facing %.3f restored %b",
+                cameraZ, turned[0], turned[4], turned[6],
+                java.util.Arrays.equals(turned, onCanvas), facing, cameraMatrix.isIdentity());
+        log("camera " + cameraSeen);
         // A ComposeShader of a red shader (the destination) and a green one (the source):
         // SRC is the green, DST the red, and MULTIPLY their product, black.
         final android.graphics.Shader redShader = new android.graphics.LinearGradient(
