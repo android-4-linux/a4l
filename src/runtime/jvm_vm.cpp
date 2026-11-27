@@ -342,6 +342,136 @@ bool st_readback_and_swap(void* egl_surface) {
   }
   return true;
 }
+// ── A GL SurfaceView under the view tree ────────────────────────────────────
+// An app on the View-tree present whose engine draws GL into a SurfaceView
+// that sits under its other views: a map (Waze), a game board. The window is
+// not the GL surface, as it is for an app whose first Activity is one, and
+// the view is not a video. HostBootstrap.maybeInjectGlPlane gives the view
+// its surface and says where it is (nSetGlPlane); the app's
+// eglCreateWindowSurface then gets an offscreen gbm window of that size, and
+// each eglSwapBuffers puts the swapped buffer on the plane under the
+// toplevel, the one a video is shown on, through the hole the view punches.
+struct GlPlane {
+  std::mutex mtx;
+  // The view's place in the window. No size: there is no such view now.
+  // Atomic: the present thread sets them every frame and must not wait for a
+  // swap, and ANativeWindow_getWidth and _getHeight read the size with no
+  // lock (their caller may be on a bionic thread pointer).
+  std::atomic<int> x{0}, y{0}, w{0}, h{0};
+  // What the compositor takes on a plane, for a window with and without
+  // alpha. Filled on the present thread, where the presenter can be asked.
+  std::vector<std::uint64_t> mods_xrgb, mods_argb;
+  // The window the app's EGLSurface is. Replaced when the app makes another;
+  // not destroyed when the view goes, since the app's render thread may be
+  // drawing into it then.
+  std::unique_ptr<gfx::GlWindow> window;
+  std::chrono::steady_clock::time_point last_swap{};
+  bool told_live = false;
+};
+GlPlane g_gl_plane;
+
+// eglCreateWindowSurface for the view. EGL_NO_SURFACE when there is no such
+// view, or the window cannot be made.
+EGLSurface make_gl_plane_surface(EGLConfig config) {
+  std::lock_guard<std::mutex> lk(g_gl_plane.mtx);
+  const int w = g_gl_plane.w.load(), h = g_gl_plane.h.load();
+  if (w <= 0 || h <= 0)
+    return EGL_NO_SURFACE;
+  gfx::GlDevice* dev = acl_fallback_gbm_device();
+  if (dev == nullptr)
+    return EGL_NO_SURFACE;
+  EGLint alpha = 0;
+  eglGetConfigAttrib(static_cast<EGLDisplay>(dev->egl_display()), config,
+                     EGL_ALPHA_SIZE, &alpha);
+  std::string err;
+  auto win = dev->make_window(
+      w, h, nullptr, alpha > 0 ? g_gl_plane.mods_argb : g_gl_plane.mods_xrgb,
+      &err, config);
+  if (!win) {
+    log::w(kTag, "egl10: a {}x{} window for the SurfaceView failed: {}", w, h,
+           err);
+    return EGL_NO_SURFACE;
+  }
+  auto* egl = static_cast<EGLSurface>(win->egl_surface());
+  g_gl_plane.window = std::move(win);  // the one before goes, with its buffers
+  g_gl_plane.told_live = false;
+  log::i(kTag,
+         "egl10: eglCreateWindowSurface -> a {}x{} offscreen window, shown on "
+         "the plane under the view tree",
+         w, h);
+  return egl;
+}
+
+bool is_gl_plane_surface(void* egl_surface) {
+  std::lock_guard<std::mutex> lk(g_gl_plane.mtx);
+  return g_gl_plane.window != nullptr &&
+         g_gl_plane.window->egl_surface() == egl_surface;
+}
+
+// eglSwapBuffers for the view's window. False if `egl_surface` is not it.
+// Runs on the app's render thread. The swap is made where the context is
+// bound, the GL donor thread pointer: a swap from the app's native code is
+// already there (`on_donor`), and one from Java EGL10 is taken there (see
+// _eglMakeCurrent). A window's swap on Android waits for the display once
+// the queue is full; an offscreen one returns at once, so the thread is held
+// to one swap a refresh here.
+bool gl_plane_swap(void* egl_surface, bool on_donor) {
+  using Clock = std::chrono::steady_clock;
+  constexpr std::chrono::microseconds kRefresh{16667};
+  Clock::time_point due;
+  {
+    std::lock_guard<std::mutex> lk(g_gl_plane.mtx);
+    gfx::GlWindow* win = g_gl_plane.window.get();
+    if (win == nullptr || win->egl_surface() != egl_surface)
+      return false;
+    gfx::DmabufFrame frame{};
+    std::string err;
+    struct SwapArg {
+      gfx::GlWindow* win;
+      gfx::DmabufFrame* frame;
+      std::string* err;
+      bool ok;
+    } sa{win, &frame, &err, false};
+    if (on_donor) {
+      sa.ok = win->swap(&frame, &err);
+    } else {
+      acl_gl_run_on_donor(
+          +[](void* p) {
+            auto* a = static_cast<SwapArg*>(p);
+            a->ok = a->win->swap(a->frame, a->err);
+          },
+          &sa);
+    }
+    if (!sa.ok) {
+      static std::atomic<bool> told{false};
+      if (!told.exchange(true))
+        log::w(kTag, "egl10: the SurfaceView's swap failed: {}", err);
+    } else if (const int w = g_gl_plane.w.load(), h = g_gl_plane.h.load();
+               w > 0 && h > 0) {
+      // The presenter keeps its own reference to the buffer and shows it from
+      // its own thread; the window owns `frame` until its next swap.
+      if (wm::IPresenter* p = wm::active_video_presenter()) {
+        p->present_video(frame, g_gl_plane.x.load(), g_gl_plane.y.load(), w, h);
+        if (!g_gl_plane.told_live) {
+          g_gl_plane.told_live = true;
+          log::i(kTag,
+                 "egl10: the SurfaceView's frames are on the plane ({}x{} "
+                 "format 0x{:x} modifier 0x{:x})",
+                 frame.width, frame.height, frame.drm_format, frame.modifier);
+        }
+      }
+    }
+    due = g_gl_plane.last_swap + kRefresh;
+  }
+  if (due > Clock::now())
+    std::this_thread::sleep_until(due);
+  {
+    std::lock_guard<std::mutex> lk(g_gl_plane.mtx);
+    g_gl_plane.last_swap = Clock::now();
+  }
+  return true;
+}
+
 // The VM boot thread == the app main/UI thread. eglGetDisplay from HERE is the
 // throwaway AndroidGraphics.checkGL20 probe (during onCreate, before present);
 // it must NOT block for the wayland device (that only comes after onCreate) —
@@ -3043,6 +3173,53 @@ void JNICALL PresentDriver_nSetVideoBounds(JNIEnv*,
   s->presenter->set_video_bounds(static_cast<int>(x), static_cast<int>(y),
                                  static_cast<int>(w), static_cast<int>(h));
 }
+// Where a SurfaceView that an engine draws GL into is, and its size (see
+// GlPlane). No size: the view is gone, and its plane is hidden. Present
+// thread.
+void JNICALL PresentDriver_nSetGlPlane(JNIEnv*,
+                                       jclass,
+                                       jlong sp,
+                                       jint x,
+                                       jint y,
+                                       jint w,
+                                       jint h) {
+#if ACL_HAVE_GL
+  auto* s = reinterpret_cast<PresentSession*>(sp);
+  if (s == nullptr || !s->presenter)
+    return;
+  constexpr std::uint32_t kDrmXrgb8888 = 0x34325258;  // 'XR24'
+  constexpr std::uint32_t kDrmArgb8888 = 0x34325241;  // 'AR24'
+  if (w <= 0 || h <= 0) {
+    if (g_gl_plane.w.exchange(0) > 0)
+      s->presenter->hide_video();
+    g_gl_plane.h.store(0);
+    return;
+  }
+  // Called every frame, and nearly always with what it was told before.
+  if (g_gl_plane.x.load() == x && g_gl_plane.y.load() == y &&
+      g_gl_plane.w.load() == w && g_gl_plane.h.load() == h)
+    return;
+  {
+    std::lock_guard<std::mutex> lk(g_gl_plane.mtx);
+    if (g_gl_plane.mods_xrgb.empty())
+      g_gl_plane.mods_xrgb = s->presenter->modifiers_for(kDrmXrgb8888);
+    if (g_gl_plane.mods_argb.empty())
+      g_gl_plane.mods_argb = s->presenter->modifiers_for(kDrmArgb8888);
+  }
+  g_gl_plane.x.store(static_cast<int>(x));
+  g_gl_plane.y.store(static_cast<int>(y));
+  g_gl_plane.w.store(static_cast<int>(w));
+  g_gl_plane.h.store(static_cast<int>(h));
+  s->presenter->set_video_bounds(static_cast<int>(x), static_cast<int>(y),
+                                 static_cast<int>(w), static_cast<int>(h));
+#else
+  (void)sp;
+  (void)x;
+  (void)y;
+  (void)w;
+  (void)h;
+#endif
+}
 // The eventfd the decode thread signals after a video frame is ready; the
 // present loop epolls it so video advances without waiting for a UI frame /
 // input event. -1 if the presenter has no wake fd.
@@ -4230,6 +4407,8 @@ void register_present_driver_natives(JNIEnv* env) {
        reinterpret_cast<void*>(PresentDriver_nMakeVideoSurface)},
       {const_cast<char*>("nSetVideoBounds"), const_cast<char*>("(JIIII)V"),
        reinterpret_cast<void*>(PresentDriver_nSetVideoBounds)},
+      {const_cast<char*>("nSetGlPlane"), const_cast<char*>("(JIIII)V"),
+       reinterpret_cast<void*>(PresentDriver_nSetGlPlane)},
       {const_cast<char*>("nVideoWakeFd"), const_cast<char*>("(J)I"),
        reinterpret_cast<void*>(PresentDriver_nVideoWakeFd)},
       {const_cast<char*>("nPumpVideo"), const_cast<char*>("(J)V"),
@@ -8220,6 +8399,11 @@ class ArtVm final : public JniVm {
       // `config` so the surface matches its context (eglMakeCurrent).
       if (g_gl_session.device == nullptr ||
           (g_gl_session.wl_surface == nullptr && !g_gl_session.split)) {
+        // No GL present session: the app is on the View-tree present, and
+        // the surface is a SurfaceView's that sits under its other views.
+        if (EGLSurface plane = make_gl_plane_surface(config);
+            plane != EGL_NO_SURFACE)
+          return plane;
         log::w(
             kTag,
             "egl10: eglCreateWindowSurface with no active GL present session");
@@ -8291,10 +8475,17 @@ class ArtVm final : public JniVm {
       return egl;
     };
     hooks.swap_surfacetexture = [](void* egl_surface, void*) -> bool {
-      // Java EGL10 swap path: the split child's window, or a producer.
-      return split_gl_swap(egl_surface) || st_readback_and_swap(egl_surface);
+      // Java EGL10 swap path: the split child's window, a SurfaceView's
+      // window under the view tree, or a producer.
+      return split_gl_swap(egl_surface) ||
+             gl_plane_swap(egl_surface, /*on_donor=*/false) ||
+             st_readback_and_swap(egl_surface);
     };
+    // Surfaces whose context is bound where the app's native GL looks for
+    // it: a producer's, and a SurfaceView's window under the view tree.
     hooks.is_surfacetexture_surface = [](void* egl_surface, void*) -> bool {
+      if (is_gl_plane_surface(egl_surface))
+        return true;
       std::lock_guard<std::mutex> lk(g_st_gl_mtx);
       return g_st_gl_producers.find(egl_surface) != g_st_gl_producers.end();
     };
@@ -8408,6 +8599,12 @@ class ArtVm final : public JniVm {
       std::lock_guard<std::mutex> lk(g_gl_session.mtx);
       if (g_gl_session.device == nullptr ||
           (g_gl_session.wl_surface == nullptr && !g_gl_session.split)) {
+        // No GL session: the app is on the View-tree present, and the window
+        // is a SurfaceView's that sits under its other views (see GlPlane).
+        if (EGLSurface plane =
+                make_gl_plane_surface(static_cast<EGLConfig>(cfg));
+            plane != EGL_NO_SURFACE)
+          return static_cast<void*>(plane);
         log::w(kTag,
                "native egl: eglCreateWindowSurface with no active GL session");
         return nullptr;
@@ -8441,10 +8638,15 @@ class ArtVm final : public JniVm {
     nhooks.window_size =
         [](void*, int* w,
            int* h) {  // captureless + lock-free: safe under bionic %fs
+          // With no GL session the window is a SurfaceView's under the view
+          // tree, and its size the view's.
+          const bool session = g_gl_session.w > 0 && g_gl_session.h > 0;
           if (w)
-            *w = g_gl_session.w;
+            *w = session ? g_gl_session.w
+                         : g_gl_plane.w.load(std::memory_order_relaxed);
           if (h)
-            *h = g_gl_session.h;
+            *h = session ? g_gl_session.h
+                         : g_gl_plane.h.load(std::memory_order_relaxed);
         };
     // Native EGL swap of a SurfaceTexture producer (Telegram's IntroActivity
     // renders + swaps in native code via the bionic libEGL forwarders, not Java
@@ -8453,7 +8655,9 @@ class ArtVm final : public JniVm {
     // GlWindow already swapped with the gbm lock/release Mesa's raw swap would
     // omit).
     nhooks.swap_surface = [](void* egl_surface, void*) -> bool {
-      return split_gl_swap(egl_surface) || st_readback_and_swap(egl_surface);
+      return split_gl_swap(egl_surface) ||
+             gl_plane_swap(egl_surface, /*on_donor=*/true) ||
+             st_readback_and_swap(egl_surface);
     };
     // A --split child renders on Mesa's gbm platform, which has window
     // configs only. An engine's offscreen (pbuffer) surface is backed by a
