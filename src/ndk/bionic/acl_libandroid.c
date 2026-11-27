@@ -40,7 +40,7 @@
 #include <time.h>  // clock_gettime (ASurfaceTransactionStats_getLatchTime)
 #include <unistd.h>
 
-#include "acl_audio_in.h"  // acl_audio_in_ops, for libOpenSLES.so
+#include "acl_audio_in.h"   // acl_audio_in_ops, for libOpenSLES.so
 #include "acl_audio_out.h"  // acl_audio_out_ops, for libaaudio.so
 
 #include <android/hardware_buffer.h>  // AHardwareBuffer + AHardwareBuffer_Desc (NDK contract)
