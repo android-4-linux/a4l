@@ -4270,8 +4270,34 @@ public final class HostBootstrap {
     // Activity. Add order == Z order (last = topmost). removeView drops it (stops drawing).
     // WindowManagerImpl is final and WindowManagerGlobal's ctor private, so acl can't intercept
     // addView — it reads WindowManagerGlobal.mViews (where addView lands the decor) live each frame.
+    //
+    // A window belongs to the Activity it was opened from, and is shown only while that Activity
+    // is the top one: on Android a Dialog left open by an Activity that starts another is under
+    // the new Activity, with it. Drawn regardless, it sat over the new screen and took its
+    // touches. WhatsApp opens its transcript language screen from a bottom sheet and dismisses
+    // the sheet when the Activity under it restarts: the sheet stayed over the language list,
+    // and each tap on it opened the list again.
     private static final java.util.WeakHashMap<android.view.View, Boolean> sOverlayAttached =
             new java.util.WeakHashMap<>();
+
+    // The Activity a window was opened from, or null for one opened from no Activity (a Toast,
+    // a Service's window). A Dialog's window carries its Activity's token; a PopupWindow's
+    // view has its anchor's context, which leads to the Activity.
+    private static android.app.Activity overlayOwner(android.view.View v,
+            android.view.WindowManager.LayoutParams lp) {
+        if (lp.token != null) {
+            for (ActivityRecord r : sTask) {
+                if (r.token == lp.token) return r.activity;
+            }
+        }
+        android.content.Context c = v.getContext();
+        for (int depth = 0; c != null && depth < 16; depth++) {
+            if (c instanceof android.app.Activity) return (android.app.Activity) c;
+            if (!(c instanceof android.content.ContextWrapper)) break;
+            c = ((android.content.ContextWrapper) c).getBaseContext();
+        }
+        return null;
+    }
 
     public static void presentOverlays(android.graphics.Canvas canvas, int w, int h) {
         if (canvas == null) return;
@@ -4303,11 +4329,16 @@ public final class HostBootstrap {
                 }
             }
             android.view.View top = null; android.graphics.Rect topRect = null; boolean topModal = false;
+            final ActivityRecord topRecord = sTask.peek();
+            final android.app.Activity topActivity = topRecord != null ? topRecord.activity : null;
             for (int i = 0; i < views.size() && i < params.size(); i++) {
                 android.view.View v = (android.view.View) views.get(i);
                 android.view.WindowManager.LayoutParams lp =
                         (android.view.WindowManager.LayoutParams) params.get(i);
                 if (v == null || lp == null) continue;
+                // Another Activity's window: under the top Activity, so not drawn and not touched.
+                final android.app.Activity owner = overlayOwner(v, lp);
+                if (owner != null && owner != topActivity) continue;
                 if (i < roots.size()) neuterViewRoot(roots.get(i));
                 if (!Boolean.TRUE.equals(sOverlayAttached.get(v))) {
                     if (!v.isAttachedToWindow()) attachDecorToWindow(v);
