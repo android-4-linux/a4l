@@ -182,6 +182,18 @@ def main() -> int:
             counts = [int(n) for n in re.findall(rf"sink={sink} close: (\d+) frames", out)]
             if "AT: tone started true, unknown false, session true, after release false" not in out:
                 return "ToneGenerator did not start, refuse and release as it should", None
+            if "android.media.AudioRecord natives registered (27 of 27)" not in out:
+                return "AudioRecord's natives were not all registered", None
+            # 16 kHz mono 16-bit: a 40 ms buffer is 1280 bytes, and 100 ms is 1600 samples.
+            rec = re.search(r"AT: record min 1280 bad -2 state 1 read 1600 in (\d+) ms"
+                            r" silent true recording true stopped true", out)
+            if not rec:
+                return "AudioRecord did not size, start, read and stop as it should", None
+            if "AT: record formats buffer 640 timed true float 640 bytes 320 after release" \
+                    not in out:
+                return "AudioRecord's direct, float or 8-bit read, or its timestamp, is wrong", None
+            if not 60 <= int(rec.group(1)) <= 2000:
+                return f"AudioRecord's 100 ms blocking read took {rec.group(1)} ms", None
             if counts != [A_FRAMES, B_FRAMES, TONE_FRAMES]:
                 return f"the {sink} sink closed with {counts}", None
             return None, f"{tag}: writes took {a_ms} ms and {b_ms} ms"
