@@ -144,8 +144,8 @@ class FracScaleH : public fs::CWpFractionalScaleV1<FracScaleH> {
   }
 };
 // wl_output: integer scale (the fallback when there's no fractional scale) +
-// the display mode (for the Android Display metrics, read separately by
-// query_display).
+// the display mode and transform (for the Android Display metrics, read
+// separately by query_display).
 class OutputH : public CWlOutput<OutputH> {
  public:
   std::int32_t* scale =
@@ -154,6 +154,18 @@ class OutputH : public CWlOutput<OutputH> {
   int* mode_w = nullptr;  // query_display: current mode dimensions + scale
   int* mode_h = nullptr;
   int* out_scale = nullptr;
+  std::uint32_t* transform = nullptr;  // query_display: WL_OUTPUT_TRANSFORM_*
+  void OnGeometry(int32_t,
+                  int32_t,
+                  int32_t,
+                  int32_t,
+                  uint32_t,
+                  const char*,
+                  const char*,
+                  uint32_t t) override {
+    if (transform != nullptr)
+      *transform = t;
+  }
   void OnScale(int32_t factor) override {
     if (factor <= 0)
       return;
@@ -1056,14 +1068,20 @@ bool query_display(int& width, int& height, int& scale) noexcept {
           reg, out, out_name, std::min(out_ver, wl_output_traits::version)))
     return false;
   int mw = 0, mh = 0, sc = 1;
+  std::uint32_t transform = WL_OUTPUT_TRANSFORM_NORMAL;
   out.Get()->mode_w = &mw;
   out.Get()->mode_h = &mh;
   out.Get()->out_scale = &sc;
+  out.Get()->transform = &transform;
   // geometry/mode/scale/done arrive together after bind.
   if (!wl::RoundtripWithTimeout(d.Get()) || mw <= 0 || mh <= 0)
     return false;
-  width = mw;
-  height = mh;
+  // The mode is the panel's own, before the output's transform. An output
+  // turned a quarter (90, 270 and their flipped forms: the odd values) shows
+  // a display as wide as the mode is high.
+  const bool quarter_turn = (transform & 1u) != 0u;
+  width = quarter_turn ? mh : mw;
+  height = quarter_turn ? mw : mh;
   scale = sc;
   return true;
 }

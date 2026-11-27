@@ -1198,6 +1198,15 @@ if py3.found() and have_jni
         depends : [acl_exe, touch_apk, framework_shim, close_compositor],
         timeout : 120,
       )
+      # The same output turned 90 degrees: the display is 720x1280.
+      test(
+        'run-apk-display-rotated',
+        py3,
+        args : [files('run_display_test.py'), acl_exe, touch_apk, framework_shim,
+                close_compositor, 'rotated'],
+        depends : [acl_exe, touch_apk, framework_shim, close_compositor],
+        timeout : 120,
+      )
     endif
   else
     message('javac not found; skipping run-apk-framework integration test.')
