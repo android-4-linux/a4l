@@ -4918,7 +4918,23 @@ public final class HostBootstrap {
     private static Object noop(Class<?> iface) {
         return java.lang.reflect.Proxy.newProxyInstance(
                 iface.getClassLoader(), new Class<?>[]{iface},
-                (p, method, a) -> defaultValue(method.getReturnType()));
+                (p, method, a) -> "getWindowId".equals(method.getName())
+                        ? newWindowId(method.getReturnType())
+                        : defaultValue(method.getReturnType()));
+    }
+
+    // IWindowSession.getWindowId: an IWindowId with a binder of its own. View.getWindowId asks
+    // once per window and keeps the answer, so one made per call is one per window, and two
+    // WindowIds are equal exactly when they are the same window's. The default stand-in's
+    // asBinder() is null, and WindowId.equals calls equals on it: a PopupWindow that ended its
+    // exit transition while another window's was running died in Transition.forceToEnd with a
+    // NullPointerException, half removed, and stayed on the screen.
+    private static Object newWindowId(Class<?> iface) {
+        final android.os.IBinder binder = new android.os.Binder();
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface},
+                (p, method, a) -> "asBinder".equals(method.getName())
+                        ? binder : defaultValue(method.getReturnType()));
     }
 
     // IBinders an app has written to a Parcel, by the handle written in their place (jvm_vm's
@@ -5386,6 +5402,7 @@ public final class HostBootstrap {
                         }
                         return method.getReturnType() == void.class ? null : Integer.valueOf(0);
                     }
+                    if ("getWindowId".equals(n)) return newWindowId(method.getReturnType());
                     return defaultValue(method.getReturnType());
                 });
     }
