@@ -752,6 +752,7 @@ public class Main extends Activity {
             case 13: permissions(); break;
             case 14: coveredDialog(); break;
             case 15: windowIds(); break;
+            case 16: overlayTouches(); break;
             default:
                 log("PASS");
                 System.exit(0);
@@ -760,6 +761,83 @@ public class Main extends Activity {
 
     void later(Runnable r) {
         main.postDelayed(r, 100);
+    }
+
+    // A touch goes to the window it lands in, not only to the topmost; a window above that
+    // watches for outside touches is told and dismisses; and a touch nowhere reaches the modal
+    // window, which dismisses too. No pointer can be injected from here, so the events are
+    // handed to a4l's own router, where the compositor's would arrive.
+    private static boolean routeTouch(int action, float x, float y) throws Exception {
+        final long now = android.os.SystemClock.uptimeMillis();
+        final android.view.MotionEvent e = android.view.MotionEvent.obtain(now, now, action, x, y, 0);
+        try {
+            return (Boolean) Class.forName("org.acl.internal.HostBootstrap")
+                    .getMethod("routeOverlayTouch", android.view.MotionEvent.class).invoke(null, e);
+        } finally {
+            e.recycle();
+        }
+    }
+
+    void overlayTouches() {
+        final StringBuilder seen = new StringBuilder();
+        final android.view.View under = new android.view.View(this) {
+            @Override public boolean onTouchEvent(android.view.MotionEvent e) {
+                seen.append(e.getActionMasked()).append('@').append((int) e.getX()).append(',')
+                        .append((int) e.getY()).append(' ');
+                return true;
+            }
+        };
+        // Modal, as a PopupWindow is unless told otherwise, and dismissed by an outside touch.
+        final android.widget.PopupWindow menu = new android.widget.PopupWindow(under, 100, 50);
+        menu.setOutsideTouchable(true);
+        menu.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0));
+        // Above it and beside it: not modal, and watching for touches outside itself.
+        final android.widget.PopupWindow submenu =
+                new android.widget.PopupWindow(new android.view.View(this), 80, 40);
+        submenu.setTouchModal(false);
+        submenu.setOutsideTouchable(true);
+        submenu.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0));
+        final android.view.View decor = getWindow().getDecorView();
+        menu.showAtLocation(decor, android.view.Gravity.NO_GRAVITY, 300, 200);
+        submenu.showAtLocation(decor, android.view.Gravity.NO_GRAVITY, 600, 400);
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                String first;
+                try {
+                    // In the lower window, with the other one above it.
+                    final boolean down = routeTouch(android.view.MotionEvent.ACTION_DOWN, 310, 212);
+                    final boolean up = routeTouch(android.view.MotionEvent.ACTION_UP, 310, 212);
+                    first = "taken " + down + "/" + up + " at " + seen.toString().trim();
+                } catch (Throwable t) {
+                    first = t.toString();
+                }
+                final String lower = first;
+                main.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        final boolean aboveGone = !submenu.isShowing();
+                        String rest;
+                        try {
+                            // In no window: the modal one takes it, and goes.
+                            final boolean down = routeTouch(android.view.MotionEvent.ACTION_DOWN, 900, 900);
+                            routeTouch(android.view.MotionEvent.ACTION_UP, 900, 900);
+                            rest = "outside taken " + down;
+                        } catch (Throwable t) {
+                            rest = t.toString();
+                        }
+                        final String outside = rest;
+                        main.postDelayed(new Runnable() {
+                            @Override public void run() {
+                                log("overlay touch " + lower + " above dismissed " + aboveGone
+                                        + " " + outside + " dismissed " + !menu.isShowing());
+                                if (submenu.isShowing()) submenu.dismiss();
+                                if (menu.isShowing()) menu.dismiss();
+                                next();
+                            }
+                        }, 300);
+                    }
+                }, 300);
+            }
+        }, 300);
     }
 
     // A Dialog left open by an Activity that starts another is under the new Activity: it is

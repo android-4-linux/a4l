@@ -4328,7 +4328,7 @@ public final class HostBootstrap {
                             + (md == null ? 0 : System.identityHashCode(md)) + "): " + s);
                 }
             }
-            android.view.View top = null; android.graphics.Rect topRect = null; boolean topModal = false;
+            final java.util.ArrayList<ShownOverlay> shown = new java.util.ArrayList<>();
             final ActivityRecord topRecord = sTask.peek();
             final android.app.Activity topActivity = topRecord != null ? topRecord.activity : null;
             for (int i = 0; i < views.size() && i < params.size(); i++) {
@@ -4349,23 +4349,37 @@ public final class HostBootstrap {
                     canvas.drawColor(a << 24);  // black scrim behind the dialog
                 }
                 android.graphics.Rect r = drawOverlayView(canvas, v, lp, w, h);
-                if (r != null) {  // the last drawn overlay is topmost — it receives input
-                    top = v; topRect = r; topModal = (lp.flags & 0x20 /*FLAG_NOT_TOUCH_MODAL*/) == 0;
-                }
+                if (r != null) shown.add(new ShownOverlay(v, r, lp.flags));
             }
-            sTopOverlay = top; sTopOverlayRect = topRect; sTopOverlayModal = topModal;
+            sShownOverlays = shown;
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: presentOverlays: " + t);
             if (sOverlayFailures++ < 3) t.printStackTrace();
         }
     }
 
-    // The topmost drawn overlay + where acl placed it on screen, for input routing. Written by
-    // presentOverlays and read by routeOverlayTouch — both run on the present/main thread.
+    // The windows drawn in the last frame, bottom to top, with where each was placed, for input
+    // routing. Written by presentOverlays and read by routeOverlayTouch, both on the main thread.
+    private static final class ShownOverlay {
+        final android.view.View view;
+        final android.graphics.Rect rect;
+        final boolean touchable;     // not FLAG_NOT_TOUCHABLE
+        final boolean modal;         // not FLAG_NOT_TOUCH_MODAL: takes touches outside itself too
+        final boolean watchOutside;  // FLAG_WATCH_OUTSIDE_TOUCH: told of a touch that lands elsewhere
+        ShownOverlay(android.view.View v, android.graphics.Rect r, int flags) {
+            view = v; rect = r;
+            touchable = (flags & 0x10) == 0;
+            modal = (flags & 0x20) == 0;
+            watchOutside = (flags & 0x40000) != 0;
+        }
+    }
     private static int sOverlayFailures;
-    private static volatile android.view.View sTopOverlay;
-    private static volatile android.graphics.Rect sTopOverlayRect;
-    private static volatile boolean sTopOverlayModal;
+    private static volatile java.util.List<ShownOverlay> sShownOverlays =
+            java.util.Collections.emptyList();
+    // The window the gesture under way went down in, and whether it is an overlay's gesture at
+    // all: its moves and its up follow the down.
+    private static android.view.View sTouchTarget;
+    private static boolean sTouchInOverlay;
 
     // Overlay drop diagnostic (ACL_OVERLAY_DIAG=1): log only on a per-view DRAWN<->DROPPED transition
     // (the flicker signature) so it stays cheap even at the present loop's frame rate.
@@ -4375,23 +4389,65 @@ public final class HostBootstrap {
             new java.util.WeakHashMap<>();
     private static volatile String sOverlayRosterSig = "";
 
-    // Route a pointer event to the topmost Dialog/PopupWindow overlay. acl gravity-places the decor
-    // at sTopOverlayRect, so translate the event into the decor's local space before dispatch.
-    // Returns true if the overlay consumed it (so the caller must NOT also deliver it to the Activity):
-    // inside the overlay -> dispatched to the overlay; outside a modal overlay -> swallowed (the
-    // dialog blocks the window behind, as on device); outside a non-modal one -> falls through.
+    // Route a pointer event to the Dialog/PopupWindow windows over the Activity, as the window
+    // manager does. A touch goes to the topmost window it lands in; failing that, to the topmost
+    // modal window, which takes touches outside itself (that is how a touch beside a PopupWindow
+    // dismisses it). Every window above the one that takes it, and every one when none does, is
+    // sent ACTION_OUTSIDE if it asked to watch for that. The event is translated into the
+    // window's own space, where acl placed it. Returns true if a window took the gesture, so
+    // the caller must NOT also deliver it to the Activity.
+    //
+    // Only the topmost window used to be asked. With a submenu open, a touch on the menu under
+    // it went to the Activity, nothing told either popup of it, and both stayed up.
     public static boolean routeOverlayTouch(android.view.MotionEvent me) {
-        android.view.View top = sTopOverlay;
-        android.graphics.Rect r = sTopOverlayRect;
-        if (top == null || r == null) return false;
-        if (r.contains((int) me.getX(), (int) me.getY())) {
-            me.offsetLocation(-r.left, -r.top);
-            try { top.dispatchTouchEvent(me); } catch (Throwable t) {
-                System.err.println("acl HostBootstrap: routeOverlayTouch: " + t);
+        final java.util.List<ShownOverlay> shown = sShownOverlays;
+        final int action = me.getActionMasked();
+        if (action != android.view.MotionEvent.ACTION_DOWN) {
+            if (!sTouchInOverlay) return false;
+            final android.view.View target = sTouchTarget;
+            if (action == android.view.MotionEvent.ACTION_UP
+                    || action == android.view.MotionEvent.ACTION_CANCEL) {
+                sTouchInOverlay = false;
+                sTouchTarget = null;
+            }
+            // A window that went away mid-gesture: the rest of the gesture is dropped.
+            for (ShownOverlay s : shown) {
+                if (s.view == target) { sendOverlayTouch(s, me, action); break; }
             }
             return true;
         }
-        return sTopOverlayModal;
+        sTouchInOverlay = false;
+        sTouchTarget = null;
+        final int x = (int) me.getX(), y = (int) me.getY();
+        int taker = -1;
+        for (int i = shown.size() - 1; i >= 0 && taker < 0; i--) {
+            final ShownOverlay s = shown.get(i);
+            if (s.touchable && (s.rect.contains(x, y) || s.modal)) taker = i;
+        }
+        for (int i = shown.size() - 1; i > taker; i--) {
+            final ShownOverlay s = shown.get(i);
+            if (s.touchable && s.watchOutside)
+                sendOverlayTouch(s, me, android.view.MotionEvent.ACTION_OUTSIDE);
+        }
+        if (taker < 0) return false;
+        final ShownOverlay s = shown.get(taker);
+        sTouchInOverlay = true;
+        sTouchTarget = s.view;
+        sendOverlayTouch(s, me, action);
+        return true;
+    }
+
+    private static void sendOverlayTouch(ShownOverlay s, android.view.MotionEvent me, int action) {
+        final android.view.MotionEvent local = android.view.MotionEvent.obtain(me);
+        try {
+            local.setAction(action);
+            local.offsetLocation(-s.rect.left, -s.rect.top);
+            s.view.dispatchTouchEvent(local);
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: routeOverlayTouch: " + t);
+        } finally {
+            local.recycle();
+        }
     }
 
     // Stop a Dialog/Popup's real ViewRootImpl from running its own traversal (acl drives render via

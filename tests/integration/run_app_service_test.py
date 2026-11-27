@@ -100,6 +100,8 @@ CHECKS = [
     "SERVICE: permissions asked twice 5/1/0 6/2/0",
     "SERVICE: dialog drawn=true while covered=0 back=true",
     "SERVICE: window ids dialog true same true activity true other false",
+    "SERVICE: overlay touch taken true/true at 0@10,12 1@10,12 above dismissed true"
+    " outside taken true dismissed true",
     "SERVICE: PASS",
     "SERVICE: keystore generators made keys=true",
 ]
