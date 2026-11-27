@@ -10,7 +10,8 @@ audio_deps = [fmt_dep]   # via log/log.h
 if have_pipewire
   # PipeWire AudioTrack sink + the master-volume controller (default-sink tracking) and its
   # JNI seam backing org.acl.internal.AudioBridge → android.media.AudioManager.
-  audio_sources += files('pipewire_sink.cpp', 'pw_volume.cpp', 'audio_jni.cpp')
+  audio_sources += files('pipewire_sink.cpp', 'pipewire_source.cpp', 'pw_volume.cpp',
+                         'audio_jni.cpp')
   audio_deps += [pw_dep, jni_dep]  # jni_dep = jni.h only (calls go through the passed JNIEnv*)
 endif
 
@@ -41,6 +42,19 @@ if have_ffmpeg
     link_with : [audio_lib, acl_log],
     dependencies : sp_deps,
     name_prefix : 'lib',
+    install : false,
+  )
+endif
+
+# Dev tool: record from the PipeWire input a4l would use and print the level, to check which
+# microphone that is. Not gated by the permission store: it is not an app.
+if have_pipewire
+  executable(
+    'acl-capture-probe',
+    files('capture_probe_main.cpp'),
+    include_directories : [config_inc, core_inc],
+    link_with : [audio_lib, acl_log],
+    dependencies : [fmt_dep, pw_dep],
     install : false,
   )
 endif

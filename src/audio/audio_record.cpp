@@ -4,10 +4,12 @@
 #include "audio/audio_record.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <string_view>
 #include <utility>
 
+#include "acl_config.h"
 #include "log/log.h"
 
 namespace acl::audio {
@@ -131,7 +133,99 @@ std::unique_ptr<Source> make_silent_source() {
   return std::make_unique<SilentSource>();
 }
 
+namespace {
+
+// Both sources are opened; start() picks the one the recording reads until
+// the next start().
+class GatedSource final : public Source {
+ public:
+  GatedSource(std::unique_ptr<Source> device, std::function<bool()> allowed)
+      : device_(std::move(device)),
+        silent_(make_silent_source()),
+        allowed_(std::move(allowed)),
+        active_(silent_.get()) {}
+
+  bool open(const Format& fmt, int capacity_frames) override {
+    if (!silent_->open(fmt, capacity_frames))
+      return false;
+    // A device that cannot be opened is a recording of silence, not a
+    // recorder that fails.
+    if (device_ != nullptr && !device_->open(fmt, capacity_frames))
+      device_.reset();
+    return true;
+  }
+
+  void start() override {
+    const std::lock_guard<std::mutex> lock(mu_);
+    if (started_)
+      return;
+    started_ = true;
+    Source* pick = silent_.get();
+    if (device_ != nullptr && allowed_ && allowed_())
+      pick = device_.get();
+    active_.store(pick, std::memory_order_release);
+    pick->start();
+  }
+
+  void stop() override {
+    const std::lock_guard<std::mutex> lock(mu_);
+    if (!started_)
+      return;
+    started_ = false;
+    active_.load(std::memory_order_acquire)->stop();
+  }
+
+  // Not under mu_: a blocked read must not hold up the stop that ends it.
+  int read(std::int16_t* pcm, int frames, bool blocking) override {
+    return active_.load(std::memory_order_acquire)->read(pcm, frames, blocking);
+  }
+
+  void close() override {
+    stop();
+    silent_->close();
+    if (device_ != nullptr)
+      device_->close();
+  }
+
+ private:
+  std::unique_ptr<Source> device_;
+  const std::unique_ptr<Source> silent_;
+  const std::function<bool()> allowed_;
+  std::mutex mu_;  // start and stop
+  bool started_ = false;
+  std::atomic<Source*> active_;
+};
+
+std::mutex g_capture_mu;
+Capture g_capture;  // guarded by g_capture_mu
+
+}  // namespace
+
+std::unique_ptr<Source> make_gated_source(std::unique_ptr<Source> device,
+                                          std::function<bool()> allowed) {
+  return std::make_unique<GatedSource>(std::move(device), std::move(allowed));
+}
+
+void set_capture(Capture capture) {
+  const std::lock_guard<std::mutex> lock(g_capture_mu);
+  g_capture = std::move(capture);
+}
+
 std::unique_ptr<Source> make_source() {
+#if ACL_HAVE_PIPEWIRE
+  const char* backend = std::getenv("ACL_AUDIO");
+  if (backend != nullptr && std::strcmp(backend, "pipewire") == 0) {
+    Capture capture;
+    {
+      const std::lock_guard<std::mutex> lock(g_capture_mu);
+      capture = g_capture;
+    }
+    // No gate, no device: nothing is made that could hear one.
+    if (capture.allowed)
+      return make_gated_source(make_pipewire_source(capture.app_name),
+                               std::move(capture.allowed));
+  }
+#endif
   return make_silent_source();
 }
 
