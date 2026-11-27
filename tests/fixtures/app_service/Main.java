@@ -753,6 +753,7 @@ public class Main extends Activity {
             case 14: coveredDialog(); break;
             case 15: windowIds(); break;
             case 16: overlayTouches(); break;
+            case 17: popupPlaces(); break;
             default:
                 log("PASS");
                 System.exit(0);
@@ -761,6 +762,33 @@ public class Main extends Activity {
 
     void later(Runnable r) {
         main.postDelayed(r, 100);
+    }
+
+    // A view in a PopupWindow knows where it is on the screen, and a second PopupWindow
+    // anchored to it opens under it, as a submenu does under its item.
+    void popupPlaces() {
+        final android.view.View first = new android.view.View(this);
+        final android.view.View second = new android.view.View(this);
+        final android.widget.PopupWindow popup = new android.widget.PopupWindow(first, 100, 50);
+        final android.widget.PopupWindow dropdown = new android.widget.PopupWindow(second, 80, 40);
+        popup.showAtLocation(getWindow().getDecorView(), android.view.Gravity.NO_GRAVITY, 300, 200);
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                final int[] at = new int[2];
+                first.getLocationOnScreen(at);
+                final String popupAt = at[0] + "," + at[1];
+                dropdown.showAsDropDown(first);
+                main.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        second.getLocationOnScreen(at);
+                        log("popup at " + popupAt + " dropdown at " + at[0] + "," + at[1]);
+                        dropdown.dismiss();
+                        popup.dismiss();
+                        next();
+                    }
+                }, 300);
+            }
+        }, 300);
     }
 
     // A touch goes to the window it lands in, not only to the topmost; a window above that

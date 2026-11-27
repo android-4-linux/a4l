@@ -102,6 +102,7 @@ CHECKS = [
     "SERVICE: window ids dialog true same true activity true other false",
     "SERVICE: overlay touch taken true/true at 0@10,12 1@10,12 above dismissed true"
     " outside taken true dismissed true",
+    "SERVICE: popup at 300,200 dropdown at 300,250",
     "SERVICE: PASS",
     "SERVICE: keystore generators made keys=true",
 ]

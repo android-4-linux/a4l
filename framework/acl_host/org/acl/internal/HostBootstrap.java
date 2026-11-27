@@ -4538,7 +4538,12 @@ public final class HostBootstrap {
         v.layout(0, 0, mw, mh);
         int gravity = lp.gravity == 0 ? android.view.Gravity.CENTER : lp.gravity;
         android.graphics.Rect out = new android.graphics.Rect();
-        android.view.Gravity.apply(gravity, mw, mh, new android.graphics.Rect(0, 0, w, h), lp.x, lp.y, out);
+        // A PopupWindow's x and y are in the window it was opened from. For one opened from
+        // the Activity that is the screen; for one opened from another popup it is that popup.
+        android.graphics.Rect frame = popupParentFrame(v);
+        if (frame == null) frame = new android.graphics.Rect(0, 0, w, h);
+        android.view.Gravity.apply(gravity, mw, mh, frame, lp.x, lp.y, out);
+        noteWindowPosition(v, out.left, out.top);
         // The window's tree observer, as for the Activity's decor: a window that starts its
         // opening animation from a pre-draw listener never starts it otherwise. A listener that
         // cancels the draw leaves the window out of this frame.
@@ -4549,6 +4554,55 @@ public final class HostBootstrap {
         v.draw(canvas);
         canvas.restoreToCount(save);
         return out;
+    }
+
+    // Where the window is on the screen, for View.getLocationOnScreen: ViewRootImpl writes it
+    // to the AttachInfo from the frame the window manager gives it, and here there is neither.
+    // Left at 0,0 a view in a popup reported its place in the popup as its place on the
+    // screen, and a PopupWindow anchored to it (a submenu, a dropdown in a dialog) opened
+    // there: as far up and left of its anchor as the first popup is from the corner.
+    private static void noteWindowPosition(android.view.View decor, int left, int top) {
+        try {
+            final Object info = getField(android.view.View.class, decor, "mAttachInfo");
+            if (info == null) return;
+            final Class<?> aiCls = info.getClass();
+            if (!Integer.valueOf(left).equals(getField(aiCls, info, "mWindowLeft")))
+                setField(aiCls, info, "mWindowLeft", left);
+            if (!Integer.valueOf(top).equals(getField(aiCls, info, "mWindowTop")))
+                setField(aiCls, info, "mWindowTop", top);
+        } catch (Throwable t) {
+            if (sOverlayFailures++ < 3) System.err.println("acl HostBootstrap: window position: " + t);
+        }
+    }
+
+    // The frame of the window a PopupWindow was opened from, when that is another overlay
+    // window: the root of its anchor (showAsDropDown) or of its parent view (showAtLocation),
+    // where noteWindowPosition last put it. Null for anything else, the Activity's own window
+    // among them, which is the screen. PopupWindow works its position out against that root
+    // because WindowManagerGlobal knows no window for the token it asks about.
+    private static android.graphics.Rect popupParentFrame(android.view.View decor) {
+        try {
+            if (!"android.widget.PopupWindow$PopupDecorView".equals(decor.getClass().getName()))
+                return null;
+            final Object popup = getField(decor.getClass(), decor, "this$0");
+            android.view.View root = null;
+            for (String name : new String[] {"mAnchorRoot", "mParentRootView"}) {
+                final Object ref = getField(android.widget.PopupWindow.class, popup, name);
+                if (ref instanceof java.lang.ref.WeakReference)
+                    root = (android.view.View) ((java.lang.ref.WeakReference<?>) ref).get();
+                if (root != null) break;
+            }
+            if (root == null || root == decor || !Boolean.TRUE.equals(sOverlayAttached.get(root)))
+                return null;
+            final Object info = getField(android.view.View.class, root, "mAttachInfo");
+            if (info == null) return null;
+            final int left = (Integer) getField(info.getClass(), info, "mWindowLeft");
+            final int top = (Integer) getField(info.getClass(), info, "mWindowTop");
+            return new android.graphics.Rect(left, top, left + root.getWidth(), top + root.getHeight());
+        } catch (Throwable t) {
+            if (sOverlayFailures++ < 3) System.err.println("acl HostBootstrap: popup parent: " + t);
+            return null;
+        }
     }
 
     private static int measureSpec(int lpDim, int avail, int match, int wrap) {
