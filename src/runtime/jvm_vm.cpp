@@ -8298,6 +8298,46 @@ class ArtVm final : public JniVm {
       std::lock_guard<std::mutex> lk(g_st_gl_mtx);
       return g_st_gl_producers.find(egl_surface) != g_st_gl_producers.end();
     };
+    // A pbuffer on the gbm platform, which has none: a gbm window of that
+    // size that is never presented, on the device the config is from. That
+    // is the fallback device for an app with no GLSurfaceView session (an
+    // engine that sets up offscreen first), or a --split child's device.
+    hooks.create_offscreen_surface = [](EGLDisplay display, EGLConfig config,
+                                        int w, int h, void*) -> EGLSurface {
+      if (w <= 0 || h <= 0 || w > 16384 || h > 16384)
+        return EGL_NO_SURFACE;
+      std::lock_guard<std::mutex> lk(g_gl_session.mtx);
+      gfx::GlDevice* dev = nullptr;
+      if (g_gl_session.device != nullptr &&
+          g_gl_session.device->egl_display() == display) {
+        dev = g_gl_session.device.get();
+      } else if (gfx::GlDevice* gbm = acl_fallback_gbm_device();
+                 gbm != nullptr && gbm->egl_display() == display) {
+        dev = gbm;
+      }
+      if (dev == nullptr) {
+        log::w(kTag,
+               "egl10: eglCreatePbufferSurface on a display that is "
+               "not a4l's");
+        return EGL_NO_SURFACE;
+      }
+      std::string err;
+      auto win = dev->make_window(w, h, nullptr, {}, &err, config);
+      if (!win) {
+        log::w(kTag, "egl10: offscreen {}x{} surface failed: {}", w, h, err);
+        return EGL_NO_SURFACE;
+      }
+      auto* egl = static_cast<EGLSurface>(win->egl_surface());
+      // Kept for the life of the process: the app destroys the EGLSurface
+      // through Mesa, and an engine has one or two of these.
+      static std::vector<std::unique_ptr<gfx::GlWindow>> keep;
+      keep.push_back(std::move(win));
+      log::i(kTag,
+             "egl10: eglCreatePbufferSurface {}x{} -> offscreen gbm window "
+             "(the gbm platform has no pbuffers)",
+             w, h);
+      return egl;
+    };
     if (gfx::register_egl10(env, hooks) == JNI_OK)
       log::i(kTag,
              "egl10: EGLImpl registered (GLThread context + window-surface "
