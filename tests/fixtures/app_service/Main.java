@@ -345,6 +345,50 @@ public class Main extends Activity {
             process = t.toString();
         }
         log("process natives " + process);
+        // android.net.DnsResolver: a name resolved on a thread of the resolver's, answered
+        // on the caller's executor. An app's own HTTP stack uses it; the class was missing.
+        String dns;
+        try {
+            final java.util.concurrent.CountDownLatch answered =
+                    new java.util.concurrent.CountDownLatch(2);
+            final boolean[] loopback = new boolean[1];
+            final int[] codes = {-1, -1};
+            final java.util.concurrent.Executor direct = new java.util.concurrent.Executor() {
+                @Override public void execute(Runnable r) { r.run(); }
+            };
+            final android.net.DnsResolver resolver = android.net.DnsResolver.getInstance();
+            resolver.query(null, "localhost", android.net.DnsResolver.FLAG_EMPTY, direct, null,
+                    new android.net.DnsResolver.Callback<java.util.List<java.net.InetAddress>>() {
+                        @Override public void onAnswer(java.util.List<java.net.InetAddress> a,
+                                int rcode) {
+                            for (java.net.InetAddress x : a) loopback[0] |= x.isLoopbackAddress();
+                            codes[0] = rcode;
+                            answered.countDown();
+                        }
+                        @Override public void onError(android.net.DnsResolver.DnsException e) {
+                            answered.countDown();
+                        }
+                    });
+            // The DNS packet itself is not something a4l answers with.
+            resolver.rawQuery(null, "localhost", android.net.DnsResolver.CLASS_IN,
+                    android.net.DnsResolver.TYPE_A, android.net.DnsResolver.FLAG_EMPTY, direct,
+                    null, new android.net.DnsResolver.Callback<byte[]>() {
+                        @Override public void onAnswer(byte[] a, int rcode) {
+                            answered.countDown();
+                        }
+                        @Override public void onError(android.net.DnsResolver.DnsException e) {
+                            codes[1] = e.code;
+                            answered.countDown();
+                        }
+                    });
+            final boolean done = answered.await(10, java.util.concurrent.TimeUnit.SECONDS);
+            dns = "answered=" + done + " loopback=" + loopback[0] + " rcode=" + codes[0]
+                    + " raw=" + codes[1];
+        } catch (Throwable t) {
+            dns = t.toString();
+        }
+        log("dns resolver " + dns);
+        expect("answered=true loopback=true rcode=0 raw=1".equals(dns), "dns resolver " + dns);
         expect("cpu=true signal=true".equals(process), "process natives " + process);
         expect("registered=true".equals(telephony), "telephony callback " + telephony);
         expect("locked=false enforced=true".equals(contextCalls), "context calls " + contextCalls);
