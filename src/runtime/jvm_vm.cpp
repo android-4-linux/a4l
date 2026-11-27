@@ -36,7 +36,9 @@
 #include <unistd.h>
 
 #include "acl_config.h"
-#if ACL_HAVE_SDBUS
+// These register with or without sdbus-c++: the D-Bus half of each is gated
+// inside the module, and a class whose natives were left unbound throws
+// UnsatisfiedLinkError at the app.
 #include "svc/appearance/appearance.h"
 #include "svc/battery/battery_jni.h"
 #include "svc/bluetooth/bt_jni.h"
@@ -48,11 +50,7 @@
 #include "svc/power/power_jni.h"
 #include "svc/share/share_jni.h"
 #include "svc/storage/storage_jni.h"
-#endif
 
-// The sensor and location hubs register unconditionally -- their D-Bus sources
-// are gated inside the modules -- so their headers must not sit behind
-// ACL_HAVE_SDBUS.
 #include "svc/location/location_jni.h"
 #include "svc/permission/permission_jni.h"
 #include "svc/permission/permission_store.h"
@@ -4521,12 +4519,10 @@ class JniVm : public Vm {
       env_->CallStaticVoidMethod(boot, m, dw, dh, ddpi);
     }
     clear_exception();
-#if ACL_HAVE_SDBUS
     if (jmethodID m = env_->GetStaticMethodID(boot, "setColorScheme", "(I)V"))
       env_->CallStaticVoidMethod(
           boot, m, static_cast<jint>(acl::appearance::query_color_scheme()));
     clear_exception();
-#endif
     if (app_application_ == nullptr) {
       const std::string apk =
           config_.classpath.empty() ? std::string() : config_.classpath.front();
@@ -4607,7 +4603,6 @@ class JniVm : public Vm {
     }
     clear_exception();
 
-#if ACL_HAVE_SDBUS
     // Day/night: the desktop's color-scheme preference (XDG Settings portal) →
     // Configuration.uiMode, so AppCompat FOLLOW_SYSTEM and apps pick the right
     // theme instead of always light. Best-effort; -1 (no portal) leaves the
@@ -4619,7 +4614,6 @@ class JniVm : public Vm {
           static_cast<jint>(acl::appearance::query_color_scheme()));
     }
     clear_exception();
-#endif
 
     // The app's Application, created once (its onCreate sets the app's
     // singleton).
@@ -7628,10 +7622,11 @@ class ArtVm final : public JniVm {
         env->ExceptionClear();
       env->DeleteLocalRef(boot);
     }
-#if ACL_HAVE_SDBUS
     // Bind android.net.ConnectivityManager (acl clean-room shim on the boot
     // classpath) to the svc/net host connectivity backend
-    // (systemd-networkd/NetworkManager/ConnMan).
+    // (systemd-networkd/NetworkManager/ConnMan). This and the bindings below
+    // are made without sdbus-c++ too; the backends are then their offline
+    // ones.
     acl::net::register_connectivity_natives(env);
     acl::net::register_wifi_natives(env);
     // Bind org.acl.internal.NotifyBridge (INotificationManager translation) to
@@ -7656,7 +7651,6 @@ class ArtVm final : public JniVm {
     // (StorageManager/IStorageManager.getVolumeList) to the svc/storage host
     // UDisks2 backend (removable media).
     acl::storage::register_storage_natives(env);
-#endif
     // Bind org.acl.internal.AclSensorManager to the svc/sensor hub (Linux IIO /
     // synthetic). No D-Bus dependency, so this is outside the sdbus block.
     acl::svc::sensor::register_sensor_natives(env);

@@ -5,26 +5,25 @@
 # PackageManager, Clipboard, SharedPreferences, ContentResolver, notifications.
 svc_sources = files('svc.cpp')
 
-# svc/net + svc/notify host D-Bus backends (ConnectivityManager / NotificationManager)
-# build when sdbus-c++ is present; each its own static lib + dev probe tool.
-if have_sdbus
-  subdir('net')
-  subdir('notify')
-  # svc/mpris: the app's media session as an MPRIS player. Needs D-Bus and JNI.
-  if have_jni
-    subdir('mpris')
-  endif
-  subdir('battery')
-  subdir('bluetooth')
-  subdir('storage')
-  subdir('appearance')
+# The host D-Bus backends (ConnectivityManager, NotificationManager, the media session, battery,
+# Bluetooth, storage, day/night, NSD, Share). The D-Bus half of each is gated on ACL_HAVE_SDBUS
+# inside the module, so they build without sdbus-c++ too and their natives are bound either
+# way: a framework class that calls one then gets the offline answer, not an
+# UnsatisfiedLinkError. Each is its own static lib; some have a dev probe tool.
+subdir('net')
+subdir('notify')
+subdir('battery')
+subdir('bluetooth')
+subdir('storage')
+subdir('appearance')
+if have_jni
+  # svc/mpris: the app's media session as an MPRIS player.
+  subdir('mpris')
   # svc/nsd: android.net.nsd.NsdManager over the host mDNS/DNS-SD daemon (Avahi) —
-  # browse / resolve / advertise. Needs both D-Bus and JNI.
-  if have_jni
-    subdir('nsd')
-    # svc/share: hand a shared URI (Intent.ACTION_SEND of a URL) to xdg-desktop-portal's OpenURI.
-    subdir('share')
-  endif
+  # browse / resolve / advertise.
+  subdir('nsd')
+  # svc/share: hand a shared URI (Intent.ACTION_SEND of a URL) to xdg-desktop-portal's OpenURI.
+  subdir('share')
 endif
 
 # svc/sensor: android.hardware.SensorManager over Linux IIO (sysfs) / synthetic. No D-Bus
