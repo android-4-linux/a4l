@@ -3992,6 +3992,54 @@ void Paint_nSetColor(jlong paintPtr, jint color) {
   if (ap != nullptr)
     ap->paint.setColor(static_cast<SkColor>(color));
 }
+// An IEEE 754 half as a float: what android.util.Half.toFloat returns.
+float half_to_float(std::uint16_t h) {
+  const std::uint32_t sign = static_cast<std::uint32_t>(h & 0x8000u) << 16;
+  std::uint32_t exponent = (h >> 10) & 0x1fu;
+  std::uint32_t mantissa = h & 0x3ffu;
+  std::uint32_t bits = 0;
+  if (exponent == 0) {
+    if (mantissa != 0) {  // subnormal: shift the leading one into place
+      exponent = 1;
+      while ((mantissa & 0x400u) == 0) {
+        mantissa <<= 1;
+        --exponent;
+      }
+      mantissa &= 0x3ffu;
+      bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+    } else {
+      bits = sign;
+    }
+  } else if (exponent == 0x1f) {
+    bits = sign | 0x7f800000u | (mantissa << 13);  // infinity or NaN
+  } else {
+    bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+  }
+  float f = 0;
+  std::memcpy(&f, &bits, sizeof(f));
+  return f;
+}
+// Paint.setColor(@ColorLong long): Color.pack's two layouts. With the low six
+// bits (the color space id) zero the high 32 bits are an sRGB ARGB int;
+// otherwise red, green and blue are halfs in bits 48, 32 and 16, alpha is ten
+// bits from bit 6, and the color is in the space the handle names.
+// @CriticalNative
+void Paint_nSetColorLong(jlong paintPtr, jlong colorSpacePtr, jlong color) {
+  auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  if (ap == nullptr)
+    return;
+  const auto c = static_cast<std::uint64_t>(color);
+  if ((c & 0x3fu) == 0) {
+    ap->paint.setColor(
+        static_cast<SkColor>(static_cast<std::uint32_t>(c >> 32)));
+    return;
+  }
+  const SkColor4f wide{half_to_float(static_cast<std::uint16_t>(c >> 48)),
+                       half_to_float(static_cast<std::uint16_t>(c >> 32)),
+                       half_to_float(static_cast<std::uint16_t>(c >> 16)),
+                       static_cast<float>((c >> 6) & 0x3ffu) / 1023.0F};
+  ap->paint.setColor4f(wide, reinterpret_cast<SkColorSpace*>(colorSpacePtr));
+}
 // @CriticalNative — reset draw state; keep the resolved default typeface, reset
 // size.
 void Paint_nReset(jlong paintPtr) {
@@ -9802,6 +9850,7 @@ const JNINativeMethod kPaint[] = {
     {"nGetNativeFinalizer", "()J",
      reinterpret_cast<void*>(Paint_nGetNativeFinalizer)},
     {"nSetColor", "(JI)V", reinterpret_cast<void*>(Paint_nSetColor)},
+    {"nSetColor", "(JJJ)V", reinterpret_cast<void*>(Paint_nSetColorLong)},
     {"nReset", "(J)V", reinterpret_cast<void*>(Paint_nReset)},
     {"nSetFlags", "(JI)V", reinterpret_cast<void*>(Paint_nSetFlags)},
     {"nGetFlags", "(J)I", reinterpret_cast<void*>(Paint_nGetFlags)},

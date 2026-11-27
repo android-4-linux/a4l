@@ -601,6 +601,26 @@ public class Main extends Activity {
                 && android.graphics.Color.red(end) < 16;
         log("sweep gradient drawn=" + swept);
         expect(swept, String.format("sweep gradient %08x %08x %08x", start, half, end));
+        // Paint.setColor(long), the form Compose sets every color with: Color.pack's sRGB
+        // layout, and its wide one, here Display P3's red, which an sRGB bitmap shows as red.
+        final android.graphics.Paint longPaint = new android.graphics.Paint();
+        final android.graphics.Bitmap longBitmap = android.graphics.Bitmap.createBitmap(
+                2, 1, android.graphics.Bitmap.Config.ARGB_8888);
+        final android.graphics.Canvas longCanvas = new android.graphics.Canvas(longBitmap);
+        longPaint.setColor(android.graphics.Color.pack(0xff336699));
+        longCanvas.drawRect(0f, 0f, 1f, 1f, longPaint);
+        longPaint.setColor(android.graphics.Color.pack(1f, 0f, 0f, 1f,
+                android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.DISPLAY_P3)));
+        longCanvas.drawRect(1f, 0f, 2f, 1f, longPaint);
+        final int packed = longBitmap.getPixel(0, 0);
+        final int wide = longBitmap.getPixel(1, 0);
+        final boolean wideRed = android.graphics.Color.alpha(wide) == 255
+                && android.graphics.Color.red(wide) > 250
+                && android.graphics.Color.green(wide) < 16
+                && android.graphics.Color.blue(wide) < 16;
+        log(String.format("paint long color srgb=%08x wide red=%b", packed, wideRed));
+        expect(packed == 0xff336699 && wideRed,
+                String.format("paint long color %08x %08x", packed, wide));
         // android.graphics.Camera, the 3D transform a legacy Animation rotates a View with.
         // A turn of 60 degrees about Y halves the width (cos 60) and adds perspective in x;
         // restore() undoes it; the canvas takes the same matrix.
