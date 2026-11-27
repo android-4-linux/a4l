@@ -106,6 +106,18 @@ def main() -> int:
                    ACL_BIONIC_LINKER=os.path.join(stage, "linker64"),
                    ACL_BIONIC_SYSROOT=os.path.join(stage, "bionic"),
                    ACL_BIONIC_STUB=os.path.join(stage, "stub"))
+        # bionic's environment has what its time zone code reads: ANDROID_DATA from this
+        # process's, and the two that are not set here set to something, so gmtime_r in a
+        # bionic built for a host does not abort.
+        tz_env = {k: v for k, v in env.items()
+                  if k not in ("ANDROID_TZDATA_ROOT", "ANDROID_ROOT")}
+        tz_env["ANDROID_DATA"] = "/acl-ndk-test/data"
+        p = subprocess.run(wrapper + [probe, lib, "acl_ndk_time_env"], env=tz_env,
+                           capture_output=True, text=True, timeout=120)
+        out = p.stdout + p.stderr
+        if p.returncode != 0 or "acl_ndk_time_env() = 42 (PASS)" not in out:
+            sys.stderr.write(f"FAIL: time and environment: exit {p.returncode}\n{out}\n")
+            return 1
         for attempt in range(3):  # a thread pointer left wrong shows up as an odd run out
             p = subprocess.run(wrapper + [probe, lib, "answer"], env=env,
                                capture_output=True, text=True, timeout=120)

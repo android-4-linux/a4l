@@ -364,11 +364,18 @@ std::uintptr_t find_sym(const char* path,
   return result;
 }
 
-// Synthetic KernelArgumentBlock + LD_LIBRARY_PATH storage (single-bootstrap →
+// Synthetic KernelArgumentBlock + environment storage (single-bootstrap →
 // static is fine).
 std::uintptr_t g_block[256];
 char g_argv0[] = "acl-linker64";
 char g_ldpath[4096];
+// What bionic's own code reads from its environment, taken from this
+// process's. Its time zone loader looks for tzdata under these three, and a
+// libc built for a host (the arm64 one a4l stages) aborts in gmtime_r and
+// localtime_r when one of them is not set.
+constexpr const char* kBionicEnv[] = {"ANDROID_DATA", "ANDROID_TZDATA_ROOT",
+                                      "ANDROID_ROOT"};
+char g_env[std::size(kBionicEnv)][4096 + 32];
 
 void* build_kab(const Mapped& lk,
                 const char* stub_path,
@@ -380,6 +387,16 @@ void* build_kab(const Mapped& lk,
   g_block[k++] = reinterpret_cast<std::uintptr_t>(const_cast<char*>(stub_path));
   g_block[k++] = 0;
   g_block[k++] = reinterpret_cast<std::uintptr_t>(g_ldpath);
+  for (std::size_t i = 0; i < std::size(kBionicEnv); ++i) {
+    // Not set here (a probe with no runtime around it): a directory that is
+    // not there, so the lookup fails and not the process.
+    const char* value = std::getenv(kBionicEnv[i]);
+    if (value == nullptr || value[0] == '\0' ||
+        std::strlen(value) >= sizeof(g_env[i]) - 32)
+      value = "/nonexistent";
+    std::snprintf(g_env[i], sizeof(g_env[i]), "%s=%s", kBionicEnv[i], value);
+    g_block[k++] = reinterpret_cast<std::uintptr_t>(g_env[i]);
+  }
   g_block[k++] = 0;
   auto aux = [&](std::uint64_t t, std::uint64_t v) {
     g_block[k++] = t;
