@@ -62,6 +62,7 @@ CHECKS = [
     "SERVICE: media and obb dirs, display context=true",
     "SERVICE: wifi link true -1/-1/-1 standard 0 security -1 scan 0/0/0",
     "SERVICE: color matrix filtered=true",
+    "SERVICE: memory info sane=true",
     "SERVICE: link properties consistent=true",
     f"SERVICE: process name {PACKAGE} application {PACKAGE}",
     "SERVICE: native libs extracted=true",
