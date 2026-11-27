@@ -1550,11 +1550,18 @@ public final class HostBootstrap {
                                     if (mn.startsWith("showSoftInput")) PresentDriver.setImeVisible(true);
                                     else if (mn.startsWith("hideSoftInput")) PresentDriver.setImeVisible(false);
                                     // Delegate to the original stub for the return value / its state.
+                                    final Object r;
                                     try {
-                                        return method.invoke(orig, a);
+                                        r = method.invoke(orig, a);
                                     } catch (java.lang.reflect.InvocationTargetException e) {
                                         throw e.getCause();
                                     }
+                                    // No Android input method is installed: the lists of them
+                                    // are empty, not null. InputMethodManager hands them to the
+                                    // app as they come, and apps iterate them unguarded.
+                                    if (r == null && method.getReturnType() == java.util.List.class)
+                                        return new java.util.ArrayList<Object>();
+                                    return r;
                                 });
                         svcF.set(imm, wrapped);  // final field; setAccessible bypasses (as elsewhere)
                     } catch (Throwable ignored) {}
