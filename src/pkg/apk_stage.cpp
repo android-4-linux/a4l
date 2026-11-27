@@ -112,14 +112,11 @@ bool write_file_atomic(const std::string& dir,
 std::string private_cache_root(std::string& error) {
   std::string root;
   // An XDG path must be absolute; a relative one is ignored, as the spec says.
-  std::string legacy;  // the name this directory had before it was "a4l"
   if (const char* x = std::getenv("XDG_CACHE_HOME");
       x != nullptr && x[0] == '/') {
     root = std::string(x) + "/a4l";
-    legacy = std::string(x) + "/acl";
   } else if (const char* h = std::getenv("HOME"); h != nullptr && h[0] == '/') {
     root = std::string(h) + "/.cache/a4l";
-    legacy = std::string(h) + "/.cache/acl";
   } else {
     // No home. /tmp is shared, so the name carries the uid and the ownership
     // check below is what makes it safe to use.
@@ -127,49 +124,9 @@ std::string private_cache_root(std::string& error) {
   }
   std::error_code ec;
   fs::create_directories(fs::path(root).parent_path(), ec);
-  // An earlier a4l's cache is taken over whole, so its verified copies and
-  // extracted libraries are not made again. Only a directory that passes the
-  // same checks, and only when there is no new one: rename(2) fails otherwise.
-  if (std::string ignored; !legacy.empty() && !fs::exists(root, ec) &&
-                           is_private_dir(legacy, ignored))
-    ::rename(legacy.c_str(), root.c_str());
   if (!make_private_dir(root, error))
     return {};
   return root;
-}
-
-bool adopt_legacy_data_dir(std::string_view package_dir) {
-  std::string home;
-  // An XDG path must be absolute; a relative one is ignored, as the spec says.
-  if (const char* x = std::getenv("XDG_DATA_HOME");
-      x != nullptr && x[0] == '/') {
-    home = x;
-  } else if (const char* h = std::getenv("HOME"); h != nullptr && h[0] == '/') {
-    home = std::string(h) + "/.local/share";
-  }
-  if (home.empty() || package_dir.empty() || package_dir == "." ||
-      package_dir == ".." || package_dir.find('/') != std::string_view::npos)
-    return false;
-  const std::string old_dir = home + "/acl/" + std::string(package_dir);
-  const std::string new_root = home + "/a4l";
-  const std::string new_dir = new_root + "/" + std::string(package_dir);
-  struct stat st{};
-  // The old directory itself, not what a link there points at.
-  if (::lstat(old_dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) ||
-      st.st_uid != ::geteuid())
-    return false;
-  if (::lstat(new_dir.c_str(), &st) == 0)
-    return false;  // the app already has data under the new name
-  if (::mkdir(new_root.c_str(), 0700) != 0 && errno != EEXIST)
-    return false;
-  // One rename: the data is under one name or the other, never both or
-  // neither, whatever interrupts this.
-  if (::rename(old_dir.c_str(), new_dir.c_str()) != 0)
-    return false;
-  // The old parent goes once the last app has left it; rmdir(2) refuses
-  // while another app's data is still there.
-  ::rmdir((home + "/acl").c_str());
-  return true;
 }
 
 std::string safe_package_dir(std::string_view package) {

@@ -320,105 +320,12 @@ struct EnvVar {
   }
 };
 
-void touch(const std::string& path) {
-  std::ofstream(path) << "x";
-}
-
 }  // namespace
 
-TEST_CASE("the cache is named a4l, and an earlier acl cache is taken over",
-          "[pkg][stage]") {
-  using acl::pkg::private_cache_root;
+TEST_CASE("the cache is named a4l", "[pkg][stage]") {
+  const TempDir tmp;
+  const EnvVar env("XDG_CACHE_HOME", tmp.path);
   std::string error;
-  {
-    const TempDir tmp;
-    const EnvVar env("XDG_CACHE_HOME", tmp.path);
-    CHECK(private_cache_root(error) == tmp.path + "/a4l");
-    CHECK(fs::is_directory(tmp.path + "/a4l"));
-  }
-  {
-    // What an earlier a4l left comes along whole.
-    const TempDir tmp;
-    const EnvVar env("XDG_CACHE_HOME", tmp.path);
-    REQUIRE(::mkdir((tmp.path + "/acl").c_str(), 0700) == 0);
-    touch(tmp.path + "/acl/kept");
-    CHECK(private_cache_root(error) == tmp.path + "/a4l");
-    CHECK(fs::exists(tmp.path + "/a4l/kept"));
-    CHECK_FALSE(fs::exists(tmp.path + "/acl"));
-  }
-  {
-    // With a cache under the new name already, the old one is left alone.
-    const TempDir tmp;
-    const EnvVar env("XDG_CACHE_HOME", tmp.path);
-    REQUIRE(::mkdir((tmp.path + "/acl").c_str(), 0700) == 0);
-    REQUIRE(::mkdir((tmp.path + "/a4l").c_str(), 0700) == 0);
-    touch(tmp.path + "/acl/old");
-    CHECK(private_cache_root(error) == tmp.path + "/a4l");
-    CHECK(fs::exists(tmp.path + "/acl/old"));
-    CHECK_FALSE(fs::exists(tmp.path + "/a4l/old"));
-  }
-  {
-    // An old cache others could write is not one to load code from.
-    const TempDir tmp;
-    const EnvVar env("XDG_CACHE_HOME", tmp.path);
-    REQUIRE(::mkdir((tmp.path + "/acl").c_str(), 0777) == 0);
-    REQUIRE(::chmod((tmp.path + "/acl").c_str(), 0777) == 0);
-    touch(tmp.path + "/acl/planted");
-    CHECK(private_cache_root(error) == tmp.path + "/a4l");
-    CHECK_FALSE(fs::exists(tmp.path + "/a4l/planted"));
-    CHECK(fs::exists(tmp.path + "/acl/planted"));
-  }
-}
-
-TEST_CASE("an app's data under the old name moves to the new one, once",
-          "[pkg][stage]") {
-  using acl::pkg::adopt_legacy_data_dir;
-  {
-    const TempDir tmp;
-    const EnvVar env("XDG_DATA_HOME", tmp.path);
-    CHECK_FALSE(adopt_legacy_data_dir("org.example"));  // nothing to move
-    fs::create_directories(tmp.path + "/acl/org.example/files");
-    touch(tmp.path + "/acl/org.example/files/key");
-    fs::create_directories(tmp.path + "/acl/org.other");
-    CHECK(adopt_legacy_data_dir("org.example"));
-    CHECK(fs::exists(tmp.path + "/a4l/org.example/files/key"));
-    CHECK_FALSE(fs::exists(tmp.path + "/acl/org.example"));
-    CHECK(fs::exists(tmp.path + "/acl/org.other"));  // another app's stays
-    CHECK_FALSE(adopt_legacy_data_dir("org.example"));
-    // The old parent is removed with the last app that leaves it.
-    CHECK(adopt_legacy_data_dir("org.other"));
-    CHECK_FALSE(fs::exists(tmp.path + "/acl"));
-  }
-  {
-    // Data under the new name wins; the old is not merged in or removed.
-    const TempDir tmp;
-    const EnvVar env("XDG_DATA_HOME", tmp.path);
-    fs::create_directories(tmp.path + "/acl/org.example");
-    fs::create_directories(tmp.path + "/a4l/org.example");
-    touch(tmp.path + "/acl/org.example/old");
-    CHECK_FALSE(adopt_legacy_data_dir("org.example"));
-    CHECK(fs::exists(tmp.path + "/acl/org.example/old"));
-    CHECK_FALSE(fs::exists(tmp.path + "/a4l/org.example/old"));
-  }
-  {
-    // A link where the old directory would be is not followed or moved.
-    const TempDir tmp;
-    const TempDir elsewhere;
-    const EnvVar env("XDG_DATA_HOME", tmp.path);
-    fs::create_directories(tmp.path + "/acl");
-    fs::create_directory_symlink(elsewhere.path, tmp.path + "/acl/org.example");
-    CHECK_FALSE(adopt_legacy_data_dir("org.example"));
-    CHECK_FALSE(fs::exists(tmp.path + "/a4l/org.example"));
-  }
-  {
-    // A name that could leave the directory is refused.
-    const TempDir tmp;
-    const EnvVar env("XDG_DATA_HOME", tmp.path);
-    fs::create_directories(tmp.path + "/acl/a/b");
-    CHECK_FALSE(adopt_legacy_data_dir("a/b"));
-    CHECK_FALSE(adopt_legacy_data_dir(""));
-    CHECK_FALSE(adopt_legacy_data_dir(".."));
-    CHECK_FALSE(adopt_legacy_data_dir("."));
-    CHECK(fs::exists(tmp.path + "/acl/a/b"));
-  }
+  CHECK(acl::pkg::private_cache_root(error) == tmp.path + "/a4l");
+  CHECK(fs::is_directory(tmp.path + "/a4l"));
 }
