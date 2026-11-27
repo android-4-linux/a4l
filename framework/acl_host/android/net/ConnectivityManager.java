@@ -78,6 +78,31 @@ public class ConnectivityManager {
     public void registerDefaultNetworkCallback(NetworkCallback cb, android.os.Handler h) { register(cb); }
     public void registerNetworkCallback(NetworkRequest req, NetworkCallback cb) { register(cb); }
     public void registerNetworkCallback(NetworkRequest req, NetworkCallback cb, android.os.Handler h) { register(cb); }
+    // requestNetwork: the app asks for a network of a kind instead of watching the default
+    // one. acl has the host's one network and brings up no other, so the request is met at
+    // once when that network is of a transport the request names (or it names none), and
+    // otherwise never: with a timeout the callback gets onUnavailable when it runs out.
+    public void requestNetwork(NetworkRequest req, NetworkCallback cb) {
+        request(req, cb, null, 0);
+    }
+    public void requestNetwork(NetworkRequest req, NetworkCallback cb, android.os.Handler h) {
+        request(req, cb, h, 0);
+    }
+    public void requestNetwork(NetworkRequest req, NetworkCallback cb, int timeoutMs) {
+        request(req, cb, null, timeoutMs);
+    }
+    public void requestNetwork(NetworkRequest req, NetworkCallback cb, android.os.Handler h,
+            int timeoutMs) {
+        request(req, cb, h, timeoutMs);
+    }
+    // The best network for a request: of acl's one network, that one when it matches.
+    public void registerBestMatchingNetworkCallback(NetworkRequest req, NetworkCallback cb,
+            android.os.Handler h) {
+        request(req, cb, h, 0);
+    }
+    // The app's own finding on whether a network reaches the internet. Android re-checks the
+    // network on it; the host daemon does its own checking, so there is nothing to pass on.
+    public void reportNetworkConnectivity(Network network, boolean hasConnectivity) {}
     public void unregisterNetworkCallback(NetworkCallback cb) { callbacks.remove(cb); }
 
     // Default-network activity listener (chromium's NetworkActiveNotifier). acl has one always-on
@@ -98,6 +123,39 @@ public class ConnectivityManager {
         } else {
             cb.onLost(Network.DEFAULT);
         }
+    }
+
+    private void request(NetworkRequest req, final NetworkCallback cb, android.os.Handler h,
+            int timeoutMs) {
+        if (req == null || cb == null) {
+            throw new IllegalArgumentException("null request or callback");
+        }
+        final int st = nGetState();
+        if ((st & 0x1) != 0 && matches(req, NetworkCapabilities.fromPacked(st))) {
+            register(cb);
+            return;
+        }
+        callbacks.addIfAbsent(cb);
+        if (timeoutMs <= 0) return;
+        final android.os.Handler on = h != null ? h
+                : new android.os.Handler(android.os.Looper.getMainLooper());
+        on.postDelayed(new Runnable() {
+            @Override public void run() {
+                // Still registered: the app has not given the request up.
+                if (callbacks.remove(cb)) cb.onUnavailable();
+            }
+        }, timeoutMs);
+    }
+
+    // A request that names transports is met by a network on any one of them.
+    private static boolean matches(NetworkRequest req, NetworkCapabilities have) {
+        boolean named = false;
+        for (int t = 0; t < 32; t++) {
+            if (!req.hasTransport(t)) continue;
+            if (have.hasTransport(t)) return true;
+            named = true;
+        }
+        return !named;
     }
 
     private static int legacyType(int transport) {  // packed transport → TYPE_*

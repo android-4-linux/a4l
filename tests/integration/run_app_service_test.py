@@ -66,6 +66,7 @@ CHECKS = [
     f"SERVICE: pending intent {PACKAGE} uid true broadcast true/false immutable true"
     " activity true/false immutable false",
     "SERVICE: native heap sane=true",
+    "SERVICE: network requested=true",
     "SERVICE: sweep gradient drawn=true",
     "SERVICE: compose shader blended=true",
     "SERVICE: points and lines drawn=true",

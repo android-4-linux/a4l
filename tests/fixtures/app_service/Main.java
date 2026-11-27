@@ -437,6 +437,48 @@ public class Main extends Activity {
         log("native heap sane=" + heapOk);
         expect(heapOk, "native heap " + heap + " used " + used + " free " + free + " after "
                 + usedAfter);
+        // requestNetwork: a request that names no transport is met by the host's network when
+        // there is one. One for a transport the host does not have (Bluetooth) is not, and with
+        // a timeout its callback hears so.
+        final android.net.ConnectivityManager cm = (android.net.ConnectivityManager)
+                getSystemService(CONNECTIVITY_SERVICE);
+        final boolean online = cm.getActiveNetwork() != null;
+        final boolean[] got = new boolean[2];
+        final java.util.concurrent.CountDownLatch gone = new java.util.concurrent.CountDownLatch(1);
+        final android.os.HandlerThread netThread = new android.os.HandlerThread("net-request");
+        netThread.start();
+        final android.net.ConnectivityManager.NetworkCallback any =
+                new android.net.ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(android.net.Network n) { got[0] = true; }
+        };
+        final android.net.ConnectivityManager.NetworkCallback bluetooth =
+                new android.net.ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(android.net.Network n) { got[1] = true; }
+            @Override public void onUnavailable() { gone.countDown(); }
+        };
+        boolean timedOut = false;
+        try {
+            cm.requestNetwork(new android.net.NetworkRequest.Builder().build(), any);
+            cm.requestNetwork(new android.net.NetworkRequest.Builder()
+                    .addTransportType(android.net.NetworkCapabilities.TRANSPORT_BLUETOOTH)
+                    .build(), bluetooth, new Handler(netThread.getLooper()), 20);
+            timedOut = gone.await(5, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        final boolean met = got[0] == online;
+        cm.unregisterNetworkCallback(any);
+        got[0] = false;
+        cm.registerBestMatchingNetworkCallback(new android.net.NetworkRequest.Builder().build(),
+                any, main);
+        final boolean best = got[0] == online;
+        cm.unregisterNetworkCallback(any);
+        cm.reportNetworkConnectivity(cm.getActiveNetwork(), true);
+        netThread.quitSafely();
+        final boolean requested = met && best && !got[1] && timedOut;
+        log("network requested=" + requested);
+        expect(requested, "requestNetwork: online " + online + " met " + met + " best " + best
+                + " bluetooth " + got[1] + " timed out " + timedOut);
         // A SweepGradient from red to blue around the center: red just past the positive x
         // axis, an even mix opposite it, blue just before the axis again.
         final android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
