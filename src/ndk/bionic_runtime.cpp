@@ -38,8 +38,7 @@
 #include <unordered_map>
 #include <vector>
 
-#if defined(__x86_64__)
-#include <asm/prctl.h>
+#if defined(__x86_64__) || defined(__aarch64__)
 #include <sys/auxv.h>
 #include <sys/syscall.h>
 
@@ -48,6 +47,9 @@
 #include <unistd.h>
 #include <algorithm>
 #include <cstdio>
+#endif
+#if defined(__x86_64__)
+#include <asm/prctl.h>
 #endif
 
 #include "log/log.h"
@@ -156,6 +158,324 @@ bool BionicConfig::valid(std::string* why) const {
   return true;
 }
 
+#if defined(__x86_64__) || defined(__aarch64__)
+
+// ── The linker bootstrap, common to the hosts it runs on ──────────────────
+// Map Android's linker, hand it a synthetic kernel argument block, and call
+// its __linker_init as a function. What differs between hosts is the thread
+// pointer register and the instruction that returns: the rest is ELF and
+// auxv, which read the same on both.
+namespace {
+
+#if defined(__x86_64__)
+std::uintptr_t tp_get() {
+  std::uintptr_t v = 0;
+  syscall(SYS_arch_prctl, ARCH_GET_FS, &v);
+  return v;
+}
+void tp_set(std::uintptr_t v) {
+  syscall(SYS_arch_prctl, ARCH_SET_FS, v);
+}
+constexpr std::uint8_t kRetInsn[] = {0xC3};  // ret
+#else
+// TPIDR_EL0 is the thread pointer, and EL0 may write it. The compiler takes it
+// for constant across a function, so nothing between a tp_set and the tp_set
+// that undoes it may touch a thread-local of either libc.
+std::uintptr_t tp_get() {
+  std::uintptr_t v = 0;
+  asm volatile("mrs %0, tpidr_el0" : "=r"(v));
+  return v;
+}
+void tp_set(std::uintptr_t v) {
+  asm volatile("msr tpidr_el0, %0" : : "r"(v));
+}
+constexpr std::uint8_t kRetInsn[] = {0xC0, 0x03, 0x5F, 0xD6};  // ret
+#endif
+
+// The page size is the host's: 4 KiB on x86_64, and 4, 16 or 64 KiB on arm64.
+std::uintptr_t boot_page() {
+  static const auto size = static_cast<std::uintptr_t>(::sysconf(_SC_PAGESIZE));
+  return size;
+}
+std::uintptr_t boot_page_down(std::uintptr_t v) {
+  return v & ~(boot_page() - 1);
+}
+std::uintptr_t boot_page_up(std::uintptr_t v) {
+  return boot_page_down(v + boot_page() - 1);
+}
+
+struct Mapped {
+  std::uintptr_t base = 0, entry = 0, phdr = 0;
+  std::uint16_t phnum = 0;
+};
+
+bool map_pie(const char* path, Mapped& out) {
+  int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return false;
+  Elf64_Ehdr eh{};
+  if (::pread(fd, &eh, sizeof(eh), 0) != (ssize_t)sizeof(eh)) {
+    ::close(fd);
+    return false;
+  }
+  Elf64_Phdr ph[64];
+  if (eh.e_phnum > 64) {
+    ::close(fd);
+    return false;
+  }
+  ::pread(fd, ph, eh.e_phnum * sizeof(Elf64_Phdr), eh.e_phoff);
+  std::uintptr_t maxv = 0;
+  for (int i = 0; i < eh.e_phnum; ++i)
+    if (ph[i].p_type == PT_LOAD)
+      maxv = std::max<std::uintptr_t>(maxv, ph[i].p_vaddr + ph[i].p_memsz);
+  if (maxv == 0) {  // nothing to load
+    ::close(fd);
+    return false;
+  }
+  void* base = ::mmap(nullptr, boot_page_up(maxv), PROT_NONE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (base == MAP_FAILED) {
+    ::close(fd);
+    return false;
+  }
+  const auto b = reinterpret_cast<std::uintptr_t>(base);
+  for (int i = 0; i < eh.e_phnum; ++i) {
+    const Elf64_Phdr& p = ph[i];
+    if (p.p_type != PT_LOAD)
+      continue;
+    const std::uintptr_t start = b + p.p_vaddr, astart = boot_page_down(start);
+    const off_t aoff = static_cast<off_t>(boot_page_down(p.p_offset));
+    const std::size_t fmap = (start - astart) + p.p_filesz;
+    const int prot = (p.p_flags & PF_R ? PROT_READ : 0) |
+                     (p.p_flags & PF_W ? PROT_WRITE : 0) |
+                     (p.p_flags & PF_X ? PROT_EXEC : 0);
+    if (fmap > 0 &&
+        ::mmap(reinterpret_cast<void*>(astart), fmap, prot | PROT_WRITE,
+               MAP_PRIVATE | MAP_FIXED, fd, aoff) == MAP_FAILED) {
+      ::close(fd);
+      return false;
+    }
+    const std::uintptr_t file_end = start + p.p_filesz,
+                         mem_end = start + p.p_memsz;
+    if (mem_end > file_end) {
+      const std::uintptr_t tail = std::min(boot_page_up(file_end), mem_end);
+      if (tail > file_end)
+        std::memset(reinterpret_cast<void*>(file_end), 0, tail - file_end);
+      if (boot_page_up(file_end) < boot_page_up(mem_end) &&
+          ::mmap(reinterpret_cast<void*>(boot_page_up(file_end)),
+                 boot_page_up(mem_end) - boot_page_up(file_end),
+                 prot | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1,
+                 0) == MAP_FAILED) {
+        ::close(fd);
+        return false;
+      }
+    }
+    if (!(prot & PROT_WRITE) && fmap > 0)
+      ::mprotect(reinterpret_cast<void*>(astart), boot_page_up(fmap), prot);
+  }
+  ::close(fd);
+  out.base = b;
+  out.entry = b + eh.e_entry;
+  out.phdr = b + eh.e_phoff;
+  out.phnum = eh.e_phnum;
+  return true;
+}
+
+std::uintptr_t find_sym(const char* path,
+                        std::uintptr_t base,
+                        const char* name) {
+  int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return 0;
+  const off_t sz = ::lseek(fd, 0, SEEK_END);
+  void* m = ::mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+  ::close(fd);
+  if (m == MAP_FAILED)
+    return 0;
+  const auto* f = reinterpret_cast<const std::uint8_t*>(m);
+  const auto& eh = *reinterpret_cast<const Elf64_Ehdr*>(f);
+  const auto* sh = reinterpret_cast<const Elf64_Shdr*>(f + eh.e_shoff);
+  std::uintptr_t result = 0;
+  for (int i = 0; i < eh.e_shnum && result == 0; ++i) {
+    if (sh[i].sh_type != SHT_SYMTAB && sh[i].sh_type != SHT_DYNSYM)
+      continue;
+    const auto* sym = reinterpret_cast<const Elf64_Sym*>(f + sh[i].sh_offset);
+    const char* str =
+        reinterpret_cast<const char*>(f + sh[sh[i].sh_link].sh_offset);
+    for (std::size_t s = 0, n = sh[i].sh_size / sizeof(Elf64_Sym); s < n; ++s)
+      if (sym[s].st_value && std::strcmp(str + sym[s].st_name, name) == 0) {
+        result = base + sym[s].st_value;
+        break;
+      }
+  }
+  ::munmap(m, sz);
+  return result;
+}
+
+// Synthetic KernelArgumentBlock + LD_LIBRARY_PATH storage (single-bootstrap →
+// static is fine).
+std::uintptr_t g_block[256];
+char g_argv0[] = "acl-linker64";
+char g_ldpath[4096];
+
+void* build_kab(const Mapped& lk,
+                const char* stub_path,
+                const std::string& ld) {
+  std::snprintf(g_ldpath, sizeof(g_ldpath), "LD_LIBRARY_PATH=%s", ld.c_str());
+  std::size_t k = 0;
+  g_block[k++] = 2;
+  g_block[k++] = reinterpret_cast<std::uintptr_t>(g_argv0);
+  g_block[k++] = reinterpret_cast<std::uintptr_t>(const_cast<char*>(stub_path));
+  g_block[k++] = 0;
+  g_block[k++] = reinterpret_cast<std::uintptr_t>(g_ldpath);
+  g_block[k++] = 0;
+  auto aux = [&](std::uint64_t t, std::uint64_t v) {
+    g_block[k++] = t;
+    g_block[k++] = v;
+  };
+  aux(AT_PAGESZ, boot_page());
+  aux(AT_CLKTCK, getauxval(AT_CLKTCK));
+  aux(AT_HWCAP, getauxval(AT_HWCAP));
+  aux(AT_HWCAP2, getauxval(AT_HWCAP2));
+  aux(AT_SYSINFO_EHDR, getauxval(AT_SYSINFO_EHDR));
+  aux(AT_RANDOM, getauxval(AT_RANDOM));
+  aux(AT_PLATFORM, getauxval(AT_PLATFORM));
+  aux(AT_SECURE, 0);
+  aux(AT_UID, getuid());
+  aux(AT_EUID, geteuid());
+  aux(AT_GID, getgid());
+  aux(AT_EGID, getegid());
+  aux(AT_FLAGS, 0);
+  aux(AT_EXECFN, reinterpret_cast<std::uintptr_t>(g_argv0));
+  aux(AT_BASE, lk.base);
+  aux(AT_PHDR, lk.phdr);
+  aux(AT_PHNUM, lk.phnum);
+  aux(AT_ENTRY, lk.entry);
+  aux(AT_NULL, 0);
+  return g_block;
+}
+
+// The signals bionic's crash handler takes over during the bootstrap.
+// linker_main calls linker_debuggerd_init(), whose
+// debuggerd_register_handlers() (system/core/debuggerd/include/
+// debuggerd/handler.h) sigaction()s exactly this set. BIONIC_SIGNAL_DEBUGGER is
+// bionic's
+// __SIGRTMIN + 3; __SIGRTMIN is the kernel's 32, so the raw number is 35 —
+// glibc's SIGRTMIN macro is 34 (it reserves 32/33 for NPTL) and would restore
+// the wrong signal, hence the literal.
+constexpr int kBionicSignals[] = {SIGABRT,   SIGBUS, SIGFPE,  SIGILL, SIGSEGV,
+                                  SIGSTKFLT, SIGSYS, SIGTRAP, 32 + 3};
+
+// Bootstrap the linker; on success fill the loader fn ptrs and the bionic
+// thread pointer. Returns true/false. The thread pointer (%fs on x86_64,
+// TPIDR_EL0 on arm64) and the host's signal state, see below, are restored to
+// glibc/host before returning.
+bool bootstrap_linker(const BionicConfig& cfg,
+                      std::uintptr_t* out_bionic_fs,
+                      void** out_dlopen,
+                      void** out_dlsym,
+                      void** out_dlerror,
+                      void** out_shared_globals) {
+  Mapped lk;
+  if (!map_pie(cfg.linker.c_str(), lk))
+    return false;
+  const std::uintptr_t init_addr =
+      find_sym(cfg.linker.c_str(), lk.base, "__dl___linker_init");
+  void* dlopen_a = reinterpret_cast<void*>(
+      find_sym(cfg.linker.c_str(), lk.base, "__dl___loader_dlopen"));
+  void* dlsym_a = reinterpret_cast<void*>(
+      find_sym(cfg.linker.c_str(), lk.base, "__dl___loader_dlsym"));
+  void* dlerror_a = reinterpret_cast<void*>(
+      find_sym(cfg.linker.c_str(), lk.base, "__dl___loader_dlerror"));
+  if (!init_addr || !dlopen_a || !dlsym_a)
+    return false;
+
+  std::string ld = cfg.sysroot;
+  for (const std::string& p : cfg.extra_lib_paths) {
+    ld += ':';
+    ld += p;
+  }
+  void* kab = build_kab(lk, cfg.stub.c_str(), ld);
+
+  // Signal state is HOST state, and the linker's init claims two pieces of it
+  // for bionic:
+  //   1. the crash handlers (linker_debuggerd_init -> kBionicSignals above),
+  //   and
+  //   2. THIS thread's sigaltstack — __libc_init_main_thread_late ->
+  //   __init_additional_stacks ->
+  //      __init_alternate_signal_stack (bionic/libc/bionic/pthread_create.cpp)
+  //      mmaps a guarded SIGNAL_STACK_SIZE region and sigaltstack()s it in.
+  // acl must keep both. ART installs its own SIGSEGV handler (implicit null
+  // checks are SEGVs it fixes up), and on host
+  // art::Thread::TearDownAlternateSignalStack (art/runtime/thread_linux.cc)
+  // reads back whatever sigaltstack is installed and `delete[]`s it — with
+  // bionic's mmap there, ART shutdown free()s a bionic guard-page address and
+  // SIGSEGVs. So snapshot the host's signal state, let the linker do as it
+  // likes, then put it back: acl stays the crash handler and the owner of its
+  // own alt stack. Bionic's handlers/stack stay mapped, just unreferenced — a
+  // bionic crash is then reported by the host, which is what we want from a
+  // translation layer anyway.
+  stack_t saved_ss{};
+  const bool have_ss = ::sigaltstack(nullptr, &saved_ss) == 0;
+  struct sigaction saved_sa[std::size(kBionicSignals)];
+  bool have_sa[std::size(kBionicSignals)];
+  for (std::size_t i = 0; i < std::size(kBionicSignals); ++i)
+    have_sa[i] = ::sigaction(kBionicSignals[i], nullptr, &saved_sa[i]) == 0;
+
+  // Restoring the handlers afterwards is not enough: between the linker's
+  // sigaction calls and the restore below, bionic's crash handler is the
+  // process's SIGSEGV handler. The bootstrap often runs on a worker (the app's
+  // first System.loadLibrary), and an implicit null check on any other thread
+  // in that window goes to bionic's handler and kills the process instead of
+  // becoming a NullPointerException. So keep the linker from installing them
+  // at all: make linker_debuggerd_init() return at once. It is a void function
+  // that only registers the handlers. Without the symbol (a stripped linker)
+  // the restore below is all there is.
+  if (const std::uintptr_t dbg = find_sym(cfg.linker.c_str(), lk.base,
+                                          "__dl__Z21linker_debuggerd_initv");
+      dbg != 0) {
+    const std::uintptr_t page = boot_page_down(dbg);
+    // The instruction can end on the next page.
+    const std::size_t span = boot_page_up(dbg + sizeof(kRetInsn)) - page;
+    if (::mprotect(reinterpret_cast<void*>(page), span,
+                   PROT_READ | PROT_WRITE) == 0) {
+      std::memcpy(reinterpret_cast<void*>(dbg), kRetInsn, sizeof(kRetInsn));
+      ::mprotect(reinterpret_cast<void*>(page), span, PROT_READ | PROT_EXEC);
+      __builtin___clear_cache(reinterpret_cast<char*>(dbg),
+                              reinterpret_cast<char*>(dbg) + sizeof(kRetInsn));
+      log::i(kTag, "linker crash handlers not installed (host keeps SIGSEGV)");
+    }
+  }
+
+  const std::uintptr_t glibc_fs = tp_get();
+  reinterpret_cast<std::uintptr_t (*)(void*)>(init_addr)(
+      kab);  // sets the thread pointer -> permanent bionic TCB
+  *out_bionic_fs = tp_get();
+  tp_set(glibc_fs);
+
+  // Back on the glibc thread pointer, so these libc calls are safe again.
+  for (std::size_t i = 0; i < std::size(kBionicSignals); ++i)
+    if (have_sa[i])
+      ::sigaction(kBionicSignals[i], &saved_sa[i], nullptr);
+  if (have_ss)
+    ::sigaltstack(&saved_ss,
+                  nullptr);  // SS_DISABLE when the host had none: still correct
+
+  *out_dlopen = dlopen_a;
+  *out_dlsym = dlsym_a;
+  *out_dlerror = dlerror_a;
+  // The linker's view of libc's shared globals — the static TLS layout + module
+  // table that attach_current_thread needs. libc itself imports this symbol
+  // from the linker.
+  *out_shared_globals = reinterpret_cast<void*>(
+      find_sym(cfg.linker.c_str(), lk.base, "__loader_shared_globals"));
+  return true;
+}
+
+}  // namespace
+
+#endif  // x86_64 || aarch64
+
 #if defined(__x86_64__)
 
 // The x86_64 bootstrap. Kept in an anonymous namespace so nothing here is
@@ -163,10 +483,12 @@ bool BionicConfig::valid(std::string* why) const {
 namespace {
 
 constexpr std::size_t kPage = 4096;
-std::uintptr_t page_down(std::uintptr_t v) {
+// maybe_unused: attach is their one user, and it is compiled out in a build
+// without the bionic offsets.
+[[maybe_unused]] std::uintptr_t page_down(std::uintptr_t v) {
   return v & ~(std::uintptr_t{kPage} - 1);
 }
-std::uintptr_t page_up(std::uintptr_t v) {
+[[maybe_unused]] std::uintptr_t page_up(std::uintptr_t v) {
   return page_down(v + kPage - 1);
 }
 
@@ -336,12 +658,10 @@ alignas(16) char g_zero_dtv[ACL_BIONIC_SIZEOF_TLSDTV] = {};
 #endif
 
 std::uintptr_t get_fs() {
-  std::uintptr_t v = 0;
-  syscall(SYS_arch_prctl, ARCH_GET_FS, &v);
-  return v;
+  return tp_get();
 }
 void set_fs(std::uintptr_t v) {
-  syscall(SYS_arch_prctl, ARCH_SET_FS, v);
+  tp_set(v);
 }
 
 // ── Signal %fs shim
@@ -1694,270 +2014,6 @@ void maybe_install_wv_fault_catch() {
   }
 }
 
-struct Mapped {
-  std::uintptr_t base = 0, entry = 0, phdr = 0;
-  std::uint16_t phnum = 0;
-};
-
-bool map_pie(const char* path, Mapped& out) {
-  int fd = ::open(path, O_RDONLY | O_CLOEXEC);
-  if (fd < 0)
-    return false;
-  Elf64_Ehdr eh{};
-  if (::pread(fd, &eh, sizeof(eh), 0) != (ssize_t)sizeof(eh)) {
-    ::close(fd);
-    return false;
-  }
-  Elf64_Phdr ph[64];
-  if (eh.e_phnum > 64) {
-    ::close(fd);
-    return false;
-  }
-  ::pread(fd, ph, eh.e_phnum * sizeof(Elf64_Phdr), eh.e_phoff);
-  std::uintptr_t maxv = 0;
-  for (int i = 0; i < eh.e_phnum; ++i)
-    if (ph[i].p_type == PT_LOAD)
-      maxv = std::max<std::uintptr_t>(maxv, ph[i].p_vaddr + ph[i].p_memsz);
-  if (maxv == 0) {  // nothing to load
-    ::close(fd);
-    return false;
-  }
-  void* base = ::mmap(nullptr, page_up(maxv), PROT_NONE,
-                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (base == MAP_FAILED) {
-    ::close(fd);
-    return false;
-  }
-  const auto b = reinterpret_cast<std::uintptr_t>(base);
-  for (int i = 0; i < eh.e_phnum; ++i) {
-    const Elf64_Phdr& p = ph[i];
-    if (p.p_type != PT_LOAD)
-      continue;
-    const std::uintptr_t start = b + p.p_vaddr, astart = page_down(start);
-    const off_t aoff = static_cast<off_t>(page_down(p.p_offset));
-    const std::size_t fmap = (start - astart) + p.p_filesz;
-    const int prot = (p.p_flags & PF_R ? PROT_READ : 0) |
-                     (p.p_flags & PF_W ? PROT_WRITE : 0) |
-                     (p.p_flags & PF_X ? PROT_EXEC : 0);
-    if (fmap > 0 &&
-        ::mmap(reinterpret_cast<void*>(astart), fmap, prot | PROT_WRITE,
-               MAP_PRIVATE | MAP_FIXED, fd, aoff) == MAP_FAILED) {
-      ::close(fd);
-      return false;
-    }
-    const std::uintptr_t file_end = start + p.p_filesz,
-                         mem_end = start + p.p_memsz;
-    if (mem_end > file_end) {
-      const std::uintptr_t tail = std::min(page_up(file_end), mem_end);
-      if (tail > file_end)
-        std::memset(reinterpret_cast<void*>(file_end), 0, tail - file_end);
-      if (page_up(file_end) < page_up(mem_end) &&
-          ::mmap(reinterpret_cast<void*>(page_up(file_end)),
-                 page_up(mem_end) - page_up(file_end), prot | PROT_WRITE,
-                 MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1,
-                 0) == MAP_FAILED) {
-        ::close(fd);
-        return false;
-      }
-    }
-    if (!(prot & PROT_WRITE) && fmap > 0)
-      ::mprotect(reinterpret_cast<void*>(astart), page_up(fmap), prot);
-  }
-  ::close(fd);
-  out.base = b;
-  out.entry = b + eh.e_entry;
-  out.phdr = b + eh.e_phoff;
-  out.phnum = eh.e_phnum;
-  return true;
-}
-
-std::uintptr_t find_sym(const char* path,
-                        std::uintptr_t base,
-                        const char* name) {
-  int fd = ::open(path, O_RDONLY | O_CLOEXEC);
-  if (fd < 0)
-    return 0;
-  const off_t sz = ::lseek(fd, 0, SEEK_END);
-  void* m = ::mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, 0);
-  ::close(fd);
-  if (m == MAP_FAILED)
-    return 0;
-  const auto* f = reinterpret_cast<const std::uint8_t*>(m);
-  const auto& eh = *reinterpret_cast<const Elf64_Ehdr*>(f);
-  const auto* sh = reinterpret_cast<const Elf64_Shdr*>(f + eh.e_shoff);
-  std::uintptr_t result = 0;
-  for (int i = 0; i < eh.e_shnum && result == 0; ++i) {
-    if (sh[i].sh_type != SHT_SYMTAB && sh[i].sh_type != SHT_DYNSYM)
-      continue;
-    const auto* sym = reinterpret_cast<const Elf64_Sym*>(f + sh[i].sh_offset);
-    const char* str =
-        reinterpret_cast<const char*>(f + sh[sh[i].sh_link].sh_offset);
-    for (std::size_t s = 0, n = sh[i].sh_size / sizeof(Elf64_Sym); s < n; ++s)
-      if (sym[s].st_value && std::strcmp(str + sym[s].st_name, name) == 0) {
-        result = base + sym[s].st_value;
-        break;
-      }
-  }
-  ::munmap(m, sz);
-  return result;
-}
-
-// Synthetic KernelArgumentBlock + LD_LIBRARY_PATH storage (single-bootstrap →
-// static is fine).
-std::uintptr_t g_block[256];
-char g_argv0[] = "acl-linker64";
-char g_ldpath[4096];
-
-void* build_kab(const Mapped& lk,
-                const char* stub_path,
-                const std::string& ld) {
-  std::snprintf(g_ldpath, sizeof(g_ldpath), "LD_LIBRARY_PATH=%s", ld.c_str());
-  std::size_t k = 0;
-  g_block[k++] = 2;
-  g_block[k++] = reinterpret_cast<std::uintptr_t>(g_argv0);
-  g_block[k++] = reinterpret_cast<std::uintptr_t>(const_cast<char*>(stub_path));
-  g_block[k++] = 0;
-  g_block[k++] = reinterpret_cast<std::uintptr_t>(g_ldpath);
-  g_block[k++] = 0;
-  auto aux = [&](std::uint64_t t, std::uint64_t v) {
-    g_block[k++] = t;
-    g_block[k++] = v;
-  };
-  aux(AT_PAGESZ, kPage);
-  aux(AT_CLKTCK, getauxval(AT_CLKTCK));
-  aux(AT_HWCAP, getauxval(AT_HWCAP));
-  aux(AT_HWCAP2, getauxval(AT_HWCAP2));
-  aux(AT_SYSINFO_EHDR, getauxval(AT_SYSINFO_EHDR));
-  aux(AT_RANDOM, getauxval(AT_RANDOM));
-  aux(AT_PLATFORM, getauxval(AT_PLATFORM));
-  aux(AT_SECURE, 0);
-  aux(AT_UID, getuid());
-  aux(AT_EUID, geteuid());
-  aux(AT_GID, getgid());
-  aux(AT_EGID, getegid());
-  aux(AT_FLAGS, 0);
-  aux(AT_EXECFN, reinterpret_cast<std::uintptr_t>(g_argv0));
-  aux(AT_BASE, lk.base);
-  aux(AT_PHDR, lk.phdr);
-  aux(AT_PHNUM, lk.phnum);
-  aux(AT_ENTRY, lk.entry);
-  aux(AT_NULL, 0);
-  return g_block;
-}
-
-// The signals bionic's crash handler takes over during the bootstrap.
-// linker_main calls linker_debuggerd_init(), whose
-// debuggerd_register_handlers() (system/core/debuggerd/include/
-// debuggerd/handler.h) sigaction()s exactly this set. BIONIC_SIGNAL_DEBUGGER is
-// bionic's
-// __SIGRTMIN + 3; __SIGRTMIN is the kernel's 32, so the raw number is 35 —
-// glibc's SIGRTMIN macro is 34 (it reserves 32/33 for NPTL) and would restore
-// the wrong signal, hence the literal.
-constexpr int kBionicSignals[] = {SIGABRT,   SIGBUS, SIGFPE,  SIGILL, SIGSEGV,
-                                  SIGSTKFLT, SIGSYS, SIGTRAP, 32 + 3};
-
-// Bootstrap the linker; on success fill the loader fn ptrs and bionic %fs.
-// Returns true/false.
-// (%fs — and the host's signal state, see below — are restored to glibc/host
-// before returning.)
-bool bootstrap_x86_64(const BionicConfig& cfg,
-                      std::uintptr_t* out_bionic_fs,
-                      void** out_dlopen,
-                      void** out_dlsym,
-                      void** out_dlerror,
-                      void** out_shared_globals) {
-  Mapped lk;
-  if (!map_pie(cfg.linker.c_str(), lk))
-    return false;
-  const std::uintptr_t init_addr =
-      find_sym(cfg.linker.c_str(), lk.base, "__dl___linker_init");
-  void* dlopen_a = reinterpret_cast<void*>(
-      find_sym(cfg.linker.c_str(), lk.base, "__dl___loader_dlopen"));
-  void* dlsym_a = reinterpret_cast<void*>(
-      find_sym(cfg.linker.c_str(), lk.base, "__dl___loader_dlsym"));
-  void* dlerror_a = reinterpret_cast<void*>(
-      find_sym(cfg.linker.c_str(), lk.base, "__dl___loader_dlerror"));
-  if (!init_addr || !dlopen_a || !dlsym_a)
-    return false;
-
-  std::string ld = cfg.sysroot;
-  for (const std::string& p : cfg.extra_lib_paths) {
-    ld += ':';
-    ld += p;
-  }
-  void* kab = build_kab(lk, cfg.stub.c_str(), ld);
-
-  // Signal state is HOST state, and the linker's init claims two pieces of it
-  // for bionic:
-  //   1. the crash handlers (linker_debuggerd_init -> kBionicSignals above),
-  //   and
-  //   2. THIS thread's sigaltstack — __libc_init_main_thread_late ->
-  //   __init_additional_stacks ->
-  //      __init_alternate_signal_stack (bionic/libc/bionic/pthread_create.cpp)
-  //      mmaps a guarded SIGNAL_STACK_SIZE region and sigaltstack()s it in.
-  // acl must keep both. ART installs its own SIGSEGV handler (implicit null
-  // checks are SEGVs it fixes up), and on host
-  // art::Thread::TearDownAlternateSignalStack (art/runtime/thread_linux.cc)
-  // reads back whatever sigaltstack is installed and `delete[]`s it — with
-  // bionic's mmap there, ART shutdown free()s a bionic guard-page address and
-  // SIGSEGVs. So snapshot the host's signal state, let the linker do as it
-  // likes, then put it back: acl stays the crash handler and the owner of its
-  // own alt stack. Bionic's handlers/stack stay mapped, just unreferenced — a
-  // bionic crash is then reported by the host, which is what we want from a
-  // translation layer anyway.
-  stack_t saved_ss{};
-  const bool have_ss = ::sigaltstack(nullptr, &saved_ss) == 0;
-  struct sigaction saved_sa[std::size(kBionicSignals)];
-  bool have_sa[std::size(kBionicSignals)];
-  for (std::size_t i = 0; i < std::size(kBionicSignals); ++i)
-    have_sa[i] = ::sigaction(kBionicSignals[i], nullptr, &saved_sa[i]) == 0;
-
-  // Restoring the handlers afterwards is not enough: between the linker's
-  // sigaction calls and the restore below, bionic's crash handler is the
-  // process's SIGSEGV handler. The bootstrap often runs on a worker (the app's
-  // first System.loadLibrary), and an implicit null check on any other thread
-  // in that window goes to bionic's handler and kills the process instead of
-  // becoming a NullPointerException. So keep the linker from installing them
-  // at all: make linker_debuggerd_init() return at once. It is a void function
-  // that only registers the handlers. Without the symbol (a stripped linker)
-  // the restore below is all there is.
-  if (const std::uintptr_t dbg = find_sym(cfg.linker.c_str(), lk.base,
-                                          "__dl__Z21linker_debuggerd_initv");
-      dbg != 0) {
-    const std::uintptr_t page = dbg & ~static_cast<std::uintptr_t>(0xfff);
-    if (::mprotect(reinterpret_cast<void*>(page), 0x1000,
-                   PROT_READ | PROT_WRITE) == 0) {
-      *reinterpret_cast<std::uint8_t*>(dbg) = 0xC3;  // ret
-      ::mprotect(reinterpret_cast<void*>(page), 0x1000, PROT_READ | PROT_EXEC);
-      log::i(kTag, "linker crash handlers not installed (host keeps SIGSEGV)");
-    }
-  }
-
-  const std::uintptr_t glibc_fs = get_fs();
-  reinterpret_cast<std::uintptr_t (*)(void*)>(init_addr)(
-      kab);  // sets %fs -> permanent bionic TCB
-  *out_bionic_fs = get_fs();
-  set_fs(glibc_fs);
-
-  // Back on glibc %fs, so these libc calls are safe again.
-  for (std::size_t i = 0; i < std::size(kBionicSignals); ++i)
-    if (have_sa[i])
-      ::sigaction(kBionicSignals[i], &saved_sa[i], nullptr);
-  if (have_ss)
-    ::sigaltstack(&saved_ss,
-                  nullptr);  // SS_DISABLE when the host had none: still correct
-
-  *out_dlopen = dlopen_a;
-  *out_dlsym = dlsym_a;
-  *out_dlerror = dlerror_a;
-  // The linker's view of libc's shared globals — the static TLS layout + module
-  // table that attach_current_thread needs. libc itself imports this symbol
-  // from the linker.
-  *out_shared_globals = reinterpret_cast<void*>(
-      find_sym(cfg.linker.c_str(), lk.base, "__loader_shared_globals"));
-  return true;
-}
-
 }  // namespace
 
 // ── Java-GL donor bridging (mixed Java-EGL + native-GL apps)
@@ -2080,12 +2136,37 @@ bool BionicRuntime_bootstrap(const BionicConfig& cfg,
                              void** dls,
                              void** dle,
                              void** sg) {
-  return bootstrap_x86_64(cfg, fs, dlo, dls, dle, sg);
+  return bootstrap_linker(cfg, fs, dlo, dls, dle, sg);
 }
 
-#else  // non-x86_64: bootstrap not yet ported (arm64 swaps TPIDR_EL0 / auxv /
-       // relocs)
+#else  // not x86_64
 
+#if defined(__aarch64__)
+// arm64, so far: the linker bootstraps, and the thread that bootstrapped it
+// loads libraries and calls into them. Attaching other threads, the JNI
+// boundary, the down-call trampolines, the signal shim and the GL forwarders
+// are x86_64 only; each says so where it is asked for.
+namespace {
+// The calling thread's bionic thread pointer, 0 when it has none. Only the
+// bootstrapping thread has one here.
+__thread __attribute__((tls_model("initial-exec"))) std::uintptr_t t_bionic_fs =
+    0;
+}  // namespace
+void ndk_set_fs(std::uintptr_t v) {
+  tp_set(v);
+}
+std::uintptr_t ndk_get_fs() {
+  return tp_get();
+}
+bool BionicRuntime_bootstrap(const BionicConfig& cfg,
+                             std::uintptr_t* fs,
+                             void** dlo,
+                             void** dls,
+                             void** dle,
+                             void** sg) {
+  return bootstrap_linker(cfg, fs, dlo, dls, dle, sg);
+}
+#else
 void ndk_set_fs(std::uintptr_t) {}
 std::uintptr_t ndk_get_fs() {
   return 0;
@@ -2098,6 +2179,7 @@ bool BionicRuntime_bootstrap(const BionicConfig&,
                              void**) {
   return false;
 }
+#endif
 // No app native GL runs here, so there is no donor thread pointer to route
 // to: Java GL calls go straight to the host library on the calling thread.
 extern "C" void acl_gl_run_on_donor(void (*fn)(void*), void* arg) {
@@ -2137,11 +2219,9 @@ BionicRuntime* BionicRuntime::instance(const BionicConfig& cfg,
       *error = why;
     return nullptr;
   }
-#if !defined(__x86_64__)
+#if !defined(__x86_64__) && !defined(__aarch64__)
   if (error)
-    *error =
-        "bionic loader: only x86_64 host is supported so far (arm64 TLS port "
-        "pending)";
+    *error = "bionic loader: only x86_64 and arm64 hosts are supported";
   return nullptr;
 #endif
   static BionicRuntime rt;
@@ -2181,6 +2261,11 @@ BionicRuntime* BionicRuntime::instance(const BionicConfig& cfg,
                      // than emit a wrong one
   }
 #endif
+#if defined(__aarch64__)
+  // The bootstrapping thread has the TCB __linker_init built. No other thread
+  // can be given one yet (attach_current_thread).
+  t_bionic_fs = fs;
+#endif
   log::i(kTag, "bionic linker bootstrapped in-process (fs={:#x})", fs);
   return g_rt;
 }
@@ -2196,7 +2281,7 @@ void* BionicRuntime::bootstrap_thread_struct() const noexcept {
 }
 
 std::uintptr_t BionicRuntime::current_thread_fs() noexcept {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
   return t_bionic_fs;
 #else
   return 0;
