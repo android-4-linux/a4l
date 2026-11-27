@@ -816,8 +816,9 @@ if py3.found() and have_jni
         depends : [acl_exe, ndk_apk],
         timeout : 300,
       )
-      # An app library records through libOpenSLES.so: an engine, and a recorder whose buffer
-      # queue is filled at the pace of the clock. Same fixture, ACL_NDK_TEST_OPENSLES=1.
+      # An app library records and plays through libOpenSLES.so: an engine, a recorder whose
+      # buffer queue is filled at the pace of the clock, and a player whose queue is emptied at
+      # it, into the null sink. Same fixture, ACL_NDK_TEST_OPENSLES=1.
       test(
         'run-apk-ndk-art-opensles',
         py3,
