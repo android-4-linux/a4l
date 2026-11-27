@@ -382,6 +382,15 @@ public class Main extends Activity {
                 && android.graphics.Color.alpha(through) == 255;
         log("color matrix filtered=" + filtered);
         expect(filtered, String.format("ColorMatrixColorFilter gave %08x", through));
+        // ActivityManager.getMemoryInfo is the host's memory, not zeros.
+        final android.app.ActivityManager.MemoryInfo mem = new android.app.ActivityManager.MemoryInfo();
+        ((android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryInfo(mem);
+        final boolean memSane = mem.availMem > (16L << 20) && mem.totalMem >= mem.availMem
+                && mem.threshold > 0 && mem.threshold < mem.totalMem
+                && mem.lowMemory == (mem.availMem < mem.threshold);
+        log("memory info sane=" + memSane);
+        expect(memSane, "MemoryInfo avail " + mem.availMem + " total " + mem.totalMem
+                + " threshold " + mem.threshold + " low " + mem.lowMemory);
         // LinkProperties names the interface of the host's default route, with its addresses
         // and MTU, or says there is none. Checked against the interface itself.
         String linkProps;
