@@ -77,6 +77,7 @@ CHECKS = [
     "SERVICE: telephony callback registered=true",
     "SERVICE: location service answered=true gnss=true",
     "SERVICE: process natives cpu=true signal=true",
+    "SERVICE: dns resolver answered=true loopback=true rcode=0 raw=1",
     "SERVICE: paint long color srgb=ff336699 wide red=true",
     "SERVICE: camera z -8.0 turned 0.500/1.000/0.00150 canvas true facing -0.500 restored true",
     "SERVICE: compose shader blended=true",
