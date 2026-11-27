@@ -19,6 +19,11 @@ public class WifiInfo implements android.net.TransportInfo {
     /** Android's sentinel for an unavailable SSID (matches the platform constant). */
     public static final String SSID_NONE = "<unknown ssid>";
 
+    /** A link speed the host does not report. */
+    public static final int LINK_SPEED_UNKNOWN = -1;
+    /** A security type the host does not report. */
+    public static final int SECURITY_TYPE_UNKNOWN = -1;
+
     private final boolean connected;
     private final String ssid;      // unquoted, "" when unknown
     private final String bssid;     // "" when unknown
@@ -52,6 +57,22 @@ public class WifiInfo implements android.net.TransportInfo {
 
     /** Channel frequency in MHz (0 when unknown). */
     public int getFrequency() { return frequency; }
+
+    /** The transmit rate in Mbps: the negotiated rate, which is the one the host reports. */
+    public int getTxLinkSpeedMbps() { return linkSpeed > 0 ? linkSpeed : LINK_SPEED_UNKNOWN; }
+
+    /** The host reports one rate for the link and none for receive alone. */
+    public int getRxLinkSpeedMbps() { return LINK_SPEED_UNKNOWN; }
+
+    /** The most the link could carry; the host does not say. */
+    public int getMaxSupportedTxLinkSpeedMbps() { return LINK_SPEED_UNKNOWN; }
+    public int getMaxSupportedRxLinkSpeedMbps() { return LINK_SPEED_UNKNOWN; }
+
+    /** The 802.11 generation of the link; the host does not say which. */
+    public int getWifiStandard() { return ScanResult.WIFI_STANDARD_UNKNOWN; }
+
+    /** How the association is secured; the host's snapshot does not carry it. */
+    public int getCurrentSecurityType() { return SECURITY_TYPE_UNKNOWN; }
 
     /** acl exposes a single association; 0 when connected, -1 (NONE) otherwise. */
     public int getNetworkId() { return connected ? 0 : -1; }
