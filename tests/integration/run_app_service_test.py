@@ -60,6 +60,7 @@ CHECKS = [
     "SERVICE: base context chain ends=true",
     "SERVICE: media and obb dirs, display context=true",
     "SERVICE: color matrix filtered=true",
+    "SERVICE: link properties consistent=true",
     f"SERVICE: process name {PACKAGE} application {PACKAGE}",
     "SERVICE: native libs extracted=true",
     "SERVICE: proc file parsed=true",
