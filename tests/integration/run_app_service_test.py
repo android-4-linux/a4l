@@ -75,6 +75,7 @@ CHECKS = [
     "SERVICE: sweep gradient drawn=true",
     "SERVICE: camera z -8.0 turned 0.500/1.000/0.00150 canvas true facing -0.500 restored true",
     "SERVICE: compose shader blended=true",
+    "SERVICE: animators enabled=true scale=1.0",
     "SERVICE: points and lines drawn=true",
     "SERVICE: canvas paint layer skew ring=true",
     "SERVICE: refused other=false implicit=false/null undeclared=false",

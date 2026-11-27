@@ -635,6 +635,12 @@ public class Main extends Activity {
         final boolean compose = composed[0] == 0xFF00FF00 && composed[1] == 0xFFFF0000
                 && composed[2] == 0xFF000000;
         log("compose shader blended=" + compose);
+        // Animators take the time they are given: the duration scale is 1, not the 0 that ends
+        // each one on its first frame. ViewConfiguration asks the window manager about the
+        // menu key, which is the first use of it here, and the scale is set from it then.
+        android.view.ViewConfiguration.get(this).hasPermanentMenuKey();
+        log("animators enabled=" + android.animation.ValueAnimator.areAnimatorsEnabled()
+                + " scale=" + android.animation.ValueAnimator.getDurationScale());
         expect(compose, String.format("ComposeShader %08x %08x %08x", composed[0], composed[1],
                 composed[2]));
         // drawPoint, drawPoints and drawLines, with a 3-pixel square stroke: each mark is
