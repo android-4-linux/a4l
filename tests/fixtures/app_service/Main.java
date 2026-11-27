@@ -155,6 +155,33 @@ public class Main extends Activity {
                 && ints.get(0) == 0 && ints.get(3) == 0;
         log("bitmap copied through buffers=" + copied);
         expect(copied, "copyPixelsFromBuffer or copyPixelsToBuffer");
+        // Bitmap.extractAlpha: the alpha alone, as ALPHA_8. Through a blur it spreads past
+        // the source, and the offset says by how much. Apps build shadows and glows this way.
+        String alphaOf;
+        try {
+            final android.graphics.Bitmap spot = android.graphics.Bitmap.createBitmap(8, 8,
+                    android.graphics.Bitmap.Config.ARGB_8888);
+            spot.setPixel(3, 4, 0x80FF0000);
+            final android.graphics.Bitmap mask = spot.extractAlpha();
+            final android.graphics.Paint blur = new android.graphics.Paint();
+            blur.setMaskFilter(new android.graphics.BlurMaskFilter(4f,
+                    android.graphics.BlurMaskFilter.Blur.NORMAL));
+            final int[] at = new int[2];
+            final android.graphics.Bitmap glow = spot.extractAlpha(blur, at);
+            alphaOf = mask.getConfig() + " " + mask.getWidth() + "x" + mask.getHeight()
+                    + " alpha " + android.graphics.Color.alpha(mask.getPixel(3, 4)) + "/"
+                    + android.graphics.Color.alpha(mask.getPixel(0, 0))
+                    + " blurred larger " + (glow.getWidth() > 8 && glow.getHeight() > 8)
+                    + " offset negative " + (at[0] < 0 && at[1] < 0)
+                    + " spread " + (android.graphics.Color.alpha(
+                            glow.getPixel(3 - at[0] + 1, 4 - at[1])) > 0);
+        } catch (Throwable t) {
+            Log.w(TAG, "Bitmap.extractAlpha", t);
+            alphaOf = t.toString();
+        }
+        log("extract alpha " + alphaOf);
+        expect(alphaOf.equals("ALPHA_8 8x8 alpha 128/0 blurred larger true offset negative true"
+                + " spread true"), "Bitmap.extractAlpha: " + alphaOf);
         // A BlurMaskFilter on the paint: a square's edge spreads past where it was drawn, the
         // middle stays opaque, and a corner well away is untouched.
         final android.graphics.Bitmap soft = android.graphics.Bitmap.createBitmap(

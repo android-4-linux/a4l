@@ -942,6 +942,38 @@ jobject Bitmap_nativeCopy(JNIEnv* env,
   return copy_bitmap(env, reinterpret_cast<AclBitmap*>(srcPtr),
                      config_to_ct(dstConfig), isMutable != JNI_FALSE);
 }
+// Bitmap.extractAlpha: a new ALPHA_8 bitmap of the source's alpha. A paint
+// with a mask filter (a blur, for a shadow or glow) gives the filtered alpha,
+// which may be larger than the source; offsetXY then says where its origin
+// sits relative to the source's. Null if the pixels cannot be had, which
+// Bitmap.extractAlpha turns into a RuntimeException.
+jobject Bitmap_nativeExtractAlpha(JNIEnv* env,
+                                  jclass,
+                                  jlong srcPtr,
+                                  jlong paintPtr,
+                                  jintArray offsetXY) {
+  const auto* src = reinterpret_cast<AclBitmap*>(srcPtr);
+  if (src == nullptr)
+    return nullptr;
+  const auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
+  auto w = std::make_unique<AclBitmap>();
+  SkIPoint offset = SkIPoint::Make(0, 0);
+  if (!src->bitmap.extractAlpha(
+          &w->bitmap, ap != nullptr ? &ap->paint : nullptr, &offset) ||
+      w->bitmap.getPixels() == nullptr)
+    return nullptr;
+  if (offsetXY != nullptr && env->GetArrayLength(offsetXY) >= 2) {
+    const jint xy[2] = {offset.fX, offset.fY};
+    env->SetIntArrayRegion(offsetXY, 0, 2, xy);
+  }
+  const int width = w->bitmap.width();
+  const int height = w->bitmap.height();
+  return env->NewObject(g_bitmap_class, g_bitmap_ctor,
+                        reinterpret_cast<jlong>(w.release()), width, height,
+                        /*density=*/0, /*requestPremultiplied=*/JNI_TRUE,
+                        /*ninePatchChunk=*/static_cast<jbyteArray>(nullptr),
+                        /*ninePatchInsets=*/static_cast<jobject>(nullptr));
+}
 // Bitmap.asShared() / createAshmemBitmap(): on Android an immutable copy in
 // shared memory, made so the pixels cross Binder without another copy (a
 // notification's large icon). acl sends no bitmap to another process, so an
@@ -6469,6 +6501,8 @@ const JNINativeMethod kBitmap[] = {
     {"nativeErase", "(JI)V", reinterpret_cast<void*>(Bitmap_nativeErase)},
     {"nativeCopy", "(JIZ)Landroid/graphics/Bitmap;",
      reinterpret_cast<void*>(Bitmap_nativeCopy)},
+    {"nativeExtractAlpha", "(JJ[I)Landroid/graphics/Bitmap;",
+     reinterpret_cast<void*>(Bitmap_nativeExtractAlpha)},
     {"nativeWriteToParcel", "(JILandroid/os/Parcel;)Z",
      reinterpret_cast<void*>(Bitmap_nativeWriteToParcel)},
     {"nativeCreateFromParcel", "(Landroid/os/Parcel;)Landroid/graphics/Bitmap;",
