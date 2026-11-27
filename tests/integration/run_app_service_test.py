@@ -99,6 +99,7 @@ CHECKS = [
     " notification=true sdk=24/33",
     "SERVICE: permissions asked twice 5/1/0 6/2/0",
     "SERVICE: dialog drawn=true while covered=0 back=true",
+    "SERVICE: window ids dialog true same true activity true other false",
     "SERVICE: PASS",
     "SERVICE: keystore generators made keys=true",
 ]

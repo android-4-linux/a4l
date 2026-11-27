@@ -751,6 +751,7 @@ public class Main extends Activity {
             case 12: keyGenerators(); break;
             case 13: permissions(); break;
             case 14: coveredDialog(); break;
+            case 15: windowIds(); break;
             default:
                 log("PASS");
                 System.exit(0);
@@ -827,6 +828,38 @@ public class Main extends Activity {
                 next();
             }
         }, 400);
+    }
+
+    // A view's WindowId is its window's: equal for two views of one window, not for a
+    // Dialog's and the Activity's. Transition.forceToEnd compares them when a window with a
+    // running transition goes away.
+    void windowIds() {
+        final android.view.View inDialog = new android.view.View(this);
+        final android.view.View alsoInDialog = new android.view.View(this);
+        final android.widget.LinearLayout box = new android.widget.LinearLayout(this);
+        box.addView(inDialog, 40, 40);
+        box.addView(alsoInDialog, 40, 40);
+        final android.app.Dialog dialog = new android.app.Dialog(this);
+        dialog.setContentView(box);
+        dialog.show();
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                String seen;
+                try {
+                    final android.view.WindowId a = inDialog.getWindowId();
+                    final android.view.WindowId b = alsoInDialog.getWindowId();
+                    final android.view.WindowId mine = getWindow().getDecorView().getWindowId();
+                    seen = "dialog " + (a != null) + " same " + (a != null && a.equals(b))
+                            + " activity " + (mine != null)
+                            + " other " + (a != null && mine != null && a.equals(mine));
+                } catch (Throwable t) {
+                    seen = t.toString();
+                }
+                log("window ids " + seen);
+                dialog.dismiss();
+                next();
+            }
+        }, 300);
     }
 
     // A second requestPermissions is answered like the first. Activity refuses a request
