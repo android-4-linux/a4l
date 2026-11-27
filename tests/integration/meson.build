@@ -1194,3 +1194,16 @@ if py3.found() and have_jni
 else
   message('python3/JDK not both available; skipping run-apk integration test.')
 endif
+
+# The keystore backend against a real gnome-keyring on a private session bus: in memory when
+# the daemon has no default keyring, the Secret Service once it has a login keyring. Needs
+# libsecret in the build and gnome-keyring-daemon at run time; SKIPs without the daemon.
+if have_secret and have_jni
+  test(
+    'keystore-keyring',
+    py3,
+    args : [files('run_keystore_keyring_test.py'), keystore_probe],
+    depends : [keystore_probe],
+    timeout : 120,
+  )
+endif

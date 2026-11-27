@@ -24,7 +24,7 @@ module_libs += keystore_lib
 # Dev tool: round-trip a blob through the selected backend (store/contains/load/list/
 # erase). Verifies the Secret Service (or memory fallback) works before the JCE provider
 # is wired on top.
-executable(
+keystore_probe = executable(
   'acl-keystore-probe',
   files('keystore_probe_main.cpp'),
   include_directories : [config_inc, core_inc],
