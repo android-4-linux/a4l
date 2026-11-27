@@ -478,6 +478,24 @@ if py3.found() and have_gl and have_ffmpeg
         timeout : 300,
       )
     endif
+    # A portal that owns its bus name and never answers costs an app's start two seconds,
+    # not two default D-Bus timeouts. Runs a private session bus with a stand-in on it.
+    # Needs sdbus-c++ and dbus-daemon; SKIPs without the latter.
+    if have_sdbus
+      silent_name_stub = executable(
+        'acl-silent-name-stub',
+        files('silent_name_stub_main.cpp'),
+        dependencies : [sdbus_dep],
+        install : false,
+      )
+      test(
+        'portal-timeout',
+        py3,
+        args : [files('run_portal_timeout_test.py'), appearance_probe, silent_name_stub],
+        depends : [appearance_probe, silent_name_stub],
+        timeout : 120,
+      )
+    endif
     # An exception no thread catches is logged as "FATAL EXCEPTION", thrown or handed to the
     # handler directly, and the app goes on; and ACL_EXIT_STACKS names a
     # thread that calls System.exit. Starts a headless Weston for itself. Needs host ART;
