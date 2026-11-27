@@ -1011,6 +1011,17 @@ if py3.found() and have_jni
         timeout : 120,
       )
     endif
+    # The same app with its samples going to an ALSA PCM (alsa-lib's null one): asked for
+    # with ACL_AUDIO=alsa, and as the fallback when ACL_AUDIO=pipewire finds no daemon.
+    if have_alsa
+      test(
+        'run-apk-audio-alsa',
+        py3,
+        args : [files('run_audio_alsa_test.py'), acl_exe, audio_apk, framework_shim],
+        depends : [acl_exe, audio_apk, framework_shim],
+        timeout : 120,
+      )
+    endif
 
     # Phase 2 (gfx/Canvas): gfx.apk's main() builds a custom MyView extends
     # android.view.View; v.draw(c) -> onDraw(c) fills a Bitmap-backed Canvas blue and

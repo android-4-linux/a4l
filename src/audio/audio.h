@@ -45,8 +45,18 @@ class Sink {
   virtual std::int64_t latency_ns() const { return 0; }
 };
 
-// Create the configured sink. ACL_AUDIO=pipewire selects the PipeWire backend
-// (only if built with it); anything else (default) is the counting/null sink.
+// Which device backend ACL_AUDIO selects in this process:
+//   unset, "null" or anything else   none: the counting sink, a silent source
+//   "pipewire"   PipeWire when it is built in and its daemon's socket is
+//                there; ALSA when it is not and ALSA is built in
+//   "alsa"       ALSA (the "default" PCM, or the one ACL_ALSA_DEVICE names)
+// So ACL_AUDIO=pipewire means "the device", and a system with no PipeWire
+// still sounds. Worked out once per process.
+enum class DeviceBackend { kNone, kPipeWire, kAlsa };
+DeviceBackend device_backend();
+
+// Create the configured sink: the one device_backend() names, or the
+// counting/null sink.
 // In a --split app process it is neither: the samples go to the broker, which
 // has the audio device and makes this choice itself (see make_device_sink).
 std::unique_ptr<Sink> make_sink();

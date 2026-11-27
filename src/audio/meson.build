@@ -16,6 +16,12 @@ if have_pipewire
 endif
 
 
+if have_alsa
+  # The ALSA sink and source: audio on a system with no PipeWire daemon.
+  audio_sources += files('alsa_sink.cpp', 'alsa_source.cpp')
+  audio_deps += [alsa_dep]
+endif
+
 audio_lib = static_library(
   'acl_audio',
   audio_sources,
