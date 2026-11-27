@@ -151,7 +151,12 @@ struct ndktest_ksigaction { void* handler; unsigned long flags; void* restorer; 
 static void ndktest_own_handler(int sig) { (void)sig; }
 JNIEXPORT jint JNICALL
 Java_com_acl_ndktest_Main_handlerKept(JNIEnv* e, jclass c) {
+  // rt_sigaction's number is the architecture's; the structure is the same on both.
+#if defined(__aarch64__)
+  enum { kRtSigaction = 134, kSigsegv = 11 };
+#else
   enum { kRtSigaction = 13, kSigsegv = 11 };
+#endif
   struct ndktest_ksigaction before = {0}, mine, now = {0};
   if (syscall(kRtSigaction, kSigsegv, (void*)0, &before, 8L) != 0) return -1;
   mine = before;                       // keeps the restorer and flags the kernel needs
@@ -181,12 +186,14 @@ extern void* dlopen(const char* name, int flags);
 extern void* dlsym(void* handle, const char* name);
 static volatile int ndktest_aaudio_calls;
 static volatile int ndktest_aaudio_frames;
+static volatile int ndktest_aaudio_last;
 static int ndktest_aaudio_cb(void* stream, void* user, void* data, int frames) {
   (void)stream; (void)user;
   short* pcm = (short*)data;
   for (int i = 0; i < frames * 2; i++) pcm[i] = 0;
   ndktest_aaudio_calls++;
   ndktest_aaudio_frames += frames;
+  ndktest_aaudio_last = frames;
   return 0;                                   // AAUDIO_CALLBACK_RESULT_CONTINUE
 }
 JNIEXPORT jint JNICALL
@@ -215,8 +222,13 @@ Java_com_acl_ndktest_Main_aaudioPlay(JNIEnv* e, jclass c) {
   if (((int (*)(void*))Stream_requestStop)(stream) != 0) return -7;
   if (((int (*)(void*))Stream_getState)(stream) != 10) return -8;       // STOPPED
   const int calls = ndktest_aaudio_calls;
-  // Everything the callback supplied was queued, and nothing came after the stop.
-  if (((long long (*)(void*))Stream_getFramesWritten)(stream) != ndktest_aaudio_frames) return -9;
+  // Everything the callback supplied was queued, and nothing came after the stop. The stop
+  // may find the last buffer waiting for room, and a write let go by a stop may be short:
+  // it takes the rest if it wakes after the stop has emptied the queue, and nothing more if
+  // it wakes before. The counts were equal on x86_64 and differed under qemu-aarch64.
+  const long long written = ((long long (*)(void*))Stream_getFramesWritten)(stream);
+  if (written > ndktest_aaudio_frames ||
+      written < ndktest_aaudio_frames - ndktest_aaudio_last) return -9;
   usleep(50000);
   if (ndktest_aaudio_calls != calls) return -10;
   if (((int (*)(void*))Stream_close)(stream) != 0) return -11;

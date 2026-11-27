@@ -33,6 +33,8 @@ import subprocess
 import sys
 import tempfile
 
+from ndk_probe_arch import probe_arch
+
 SKIP = 77  # meson interprets exit 77 as "skipped"
 
 # --worker mode: the fixture also calls the native from a NON-main thread — an ART thread bionic
@@ -156,13 +158,28 @@ def main() -> int:
             sys.stdout.write(f"SKIP: {name} not found under {root}\n")
             return SKIP
 
+    # The a4l binary picks the architecture. An arm64 one runs under qemu-user here, on the
+    # glibc arm64 ART tree named by ACL_ART_HOME_ARM64 (tools/assemble-arm64-art.sh); the dex
+    # tools above are still the build machine's.
+    arch, wrapper, why = probe_arch(acl, root)
+    if arch is None:
+        sys.stdout.write(f"SKIP: {why}\n")
+        return SKIP
+    abi = {"x86_64": "x86_64", "arm64": "arm64-v8a"}[arch]
+    target_home = home
+    if arch == "arm64":
+        target_home = os.environ.get("ACL_ART_HOME_ARM64", "")
+        if not os.path.isdir(target_home):
+            sys.stdout.write("SKIP: ACL_ART_HOME_ARM64 not set (arm64 ART tree required)\n")
+            return SKIP
+
     def run(cmd, env=None, cwd=None):
         subprocess.run(cmd, check=True, capture_output=True, text=True, env=env, cwd=cwd)
 
     work = tempfile.mkdtemp(prefix="acl-art-ndk-")
     try:
         tools = os.path.join(src_root, "tools")
-        tool_env = dict(os.environ, AOSP=root)
+        tool_env = dict(os.environ, AOSP=root, ACL_BIONIC_ARCH=arch)
         # 1. the bionic runtime acl bootstraps (linker64 + sysroot + stub), and the app's
         #    bionic-ABI .so. Both need a built bionic in $AOSP -> SKIP, not FAIL, if missing.
         stage = os.path.join(work, "bionic-runtime")
@@ -204,15 +221,15 @@ def main() -> int:
         run([d8, "--min-api", "24", "--lib", android_jar, "--output", app]
             + glob.glob(os.path.join(app_cls, "**/*.class"), recursive=True))
         run(["unzip", "-o", ndk_apk, "AndroidManifest.xml", "-d", app])
-        os.makedirs(os.path.join(app, "lib/x86_64"))
-        run(["cp", os.path.join(so_dir, "libndktest.so"), os.path.join(app, "lib/x86_64/")])
+        os.makedirs(os.path.join(app, "lib", abi))
+        run(["cp", os.path.join(so_dir, "libndktest.so"), os.path.join(app, "lib", abi)])
         unaligned = os.path.join(work, "unaligned.apk")
         apk = os.path.join(work, "ndk_art.apk")
         # -j flattens the top-level entries; the second pass runs in `app` (no -j) so the .so
         # keeps its lib/x86_64/ path, which is what pkg's ABI selection matches on.
         run(["zip", "-X", "-0", "-j", "-q", unaligned,
              os.path.join(app, "AndroidManifest.xml"), os.path.join(app, "classes.dex")])
-        run(["zip", "-X", "-0", "-q", unaligned, "lib/x86_64/libndktest.so"], cwd=app)
+        run(["zip", "-X", "-0", "-q", unaligned, f"lib/{abi}/libndktest.so"], cwd=app)
         run([zipalign, "-f", "4", unaligned, apk])
 
         # 4. run it on host ART with the bionic loader armed. ACL_BIONIC_APP_LIBS is NOT set
@@ -225,6 +242,11 @@ def main() -> int:
         env["ACL_BIONIC_STUB"] = os.path.join(stage, "stub")
         env["XDG_CACHE_HOME"] = os.path.join(work, "cache")  # keep lib extraction in the sandbox
         env.pop("ACL_BIONIC_APP_LIBS", None)
+        if target_home != home:
+            env["ACL_ART_HOME"] = target_home
+            # ACL_ARM64_LIBRARY_PATH: more directories for the arm64 binary's own libraries.
+            more = os.environ.get("ACL_ARM64_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = os.path.join(target_home, "lib64") + (":" + more if more else "")
         if worker:
             env["ACL_NDK_TEST_WORKER"] = "1"  # the fixture also calls the native off-main-thread
         if donor:
@@ -240,7 +262,7 @@ def main() -> int:
         if handler:
             env["ACL_NDK_TEST_HANDLER"] = "1"
             env.pop("ACL_NO_CRASHPAD_SHIM_KEEPER", None)
-        p = subprocess.run([acl, "run", apk, "--vm=art"],
+        p = subprocess.run(wrapper + [acl, "run", apk, "--vm=art"],
                            env=env, capture_output=True, text=True, timeout=300)
         out = p.stdout + p.stderr
     except subprocess.CalledProcessError as e:
@@ -327,7 +349,7 @@ def main() -> int:
         sys.stdout.write("OK: an ART thread attached itself to bionic on first native call; "
                          "nativeAnswer()=42 off the main thread, no TLS corruption\n")
     else:
-        sys.stdout.write("OK: app's bionic lib/x86_64/*.so loaded in-process on host ART; "
+        sys.stdout.write(f"OK: app's bionic lib/{abi}/*.so loaded in-process on host ART; "
                          "JNI round-trip answer()=4250 (RegisterNatives, and NOT the exported 9999 "
                          "decoy) + nativeAnswer()=42 (bound by name)\n")
     return 0
