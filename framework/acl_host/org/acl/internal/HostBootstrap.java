@@ -3859,9 +3859,18 @@ public final class HostBootstrap {
         }
     }
 
+    // Set while finishRecord takes an Activity off the task and brings back the one under it.
+    // An Activity that one starts meanwhile, from onActivityResult, onRestart, onStart or
+    // onResume, is started when finishRecord is done. On Android startActivity only asks:
+    // the Activity that asked is resumed first, then paused under the new one. Started at
+    // once, the new one was on top before the one under it had been brought back, and that
+    // one was then resumed over it and given the screen. Main thread.
+    private static boolean sFinishing;
+
     private static void finishRecord(ActivityRecord rec) {
+        if (rec == null || !sByToken.containsKey(rec.token)) return;  // already gone
+        sFinishing = true;
         try {
-            if (rec == null || !sByToken.containsKey(rec.token)) return;  // already gone
             final boolean wasTop = (sTask.peek() == rec);
             safeLifecycle(rec.activity, "onPause");
             safeLifecycle(rec.activity, "onStop");
@@ -3885,11 +3894,13 @@ public final class HostBootstrap {
                 System.exit(0);
                 return;
             }
-            if (rec.requestCode >= 0 && rec.callerToken == next.token)
-                deliverActivityResult(next.activity, rec.requestCode, rec.resultCode, rec.resultData);
             // Started again if it was stopped, which one under a translucent Activity was
             // not; and with it the ones on screen under it, if it is translucent itself.
             syncShown();
+            // The result comes after onStart and before onResume, where
+            // ActivityThread.performResumeActivity delivers it.
+            if (rec.requestCode >= 0 && rec.callerToken == next.token)
+                deliverActivityResult(next.activity, rec.requestCode, rec.resultCode, rec.resultData);
             // Paused when the finished one was started over it, so resumed now, which
             // brings onPostResume with it: a FragmentActivity resumes its fragments there.
             safeLifecycle(next.activity, "onResume");
@@ -3901,6 +3912,8 @@ public final class HostBootstrap {
                     + " (depth=" + sTask.size() + ")");
         } catch (Throwable t) {
             System.err.println("acl activity-stack: finishRecord failed: " + t);
+        } finally {
+            sFinishing = false;
         }
     }
 
@@ -4354,6 +4367,12 @@ public final class HostBootstrap {
             // startActivity may be called from any thread, and the Activity is made on the main
             // one: an Activity cannot be constructed on a thread that has no Looper.
             if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(
+                        () -> suppress(intent, callerToken, requestCode));
+                return null;
+            }
+            // Asked for by an Activity that is being brought back: started once it has been.
+            if (sFinishing) {
                 new android.os.Handler(android.os.Looper.getMainLooper()).post(
                         () -> suppress(intent, callerToken, requestCode));
                 return null;
