@@ -73,6 +73,7 @@ CHECKS = [
     "SERVICE: native heap sane=true",
     "SERVICE: network requested=true",
     "SERVICE: sweep gradient drawn=true",
+    "SERVICE: context calls locked=false enforced=true",
     "SERVICE: paint long color srgb=ff336699 wide red=true",
     "SERVICE: camera z -8.0 turned 0.500/1.000/0.00150 canvas true facing -0.500 restored true",
     "SERVICE: compose shader blended=true",

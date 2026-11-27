@@ -932,6 +932,9 @@ public final class HostBootstrap {
             return root;
         }
         public int getDisplayId() { return 0; }
+        // ContextWrapper does not forward this one, and Context's own throws "Not implemented.
+        // Must override in a subclass." KeyguardManager.isDeviceLocked() asks for it.
+        public int getAssociatedDisplayId() { return 0; }
         // A null-base ContextWrapper NPEs on getDisplay()/getDisplayNoVerify() (mBase == null);
         // WindowManagerImpl.addView calls mContext.getDisplayNoVerify(), so a Dialog/PopupWindow on
         // this context needs a real Display (Wayland output metrics).
@@ -1176,6 +1179,24 @@ public final class HostBootstrap {
         @Override public int checkCallingPermission(String perm) { return HostPermissions.check(perm, pkg); }
         @Override public int checkCallingOrSelfPermission(String perm) {
             return HostPermissions.check(perm, pkg);
+        }
+        // The enforce forms of the same checks. ContextWrapper's forward to a base this context
+        // does not have (a NullPointerException); LocationManager.getProvider() calls one.
+        private void enforce(String perm, String message) {
+            if (HostPermissions.check(perm, pkg)
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                throw new SecurityException(
+                        (message != null ? message + ": " : "") + pkg + " does not have " + perm);
+            }
+        }
+        @Override public void enforcePermission(String perm, int pid, int uid, String message) {
+            enforce(perm, message);
+        }
+        @Override public void enforceCallingPermission(String perm, String message) {
+            enforce(perm, message);
+        }
+        @Override public void enforceCallingOrSelfPermission(String perm, String message) {
+            enforce(perm, message);
         }
         private android.content.ContentResolver resolver;  // one per context (PhoneWindow, apps)
         @Override public android.content.ContentResolver getContentResolver() {
@@ -4997,6 +5018,7 @@ public final class HostBootstrap {
         @Override public Resources getResources() { return Resources.getSystem(); }
         // getDisplayId() is @hide; overrides at runtime by signature. DEFAULT_DISPLAY = 0.
         public int getDisplayId() { return 0; }
+        public int getAssociatedDisplayId() { return 0; }
         @Override public Object getSystemService(String name) {
             // PhoneWindow/setContentView needs a LayoutInflater (LayoutInflater.from →
             // getSystemService(LAYOUT_INFLATER_SERVICE)). Concrete impl is internal.

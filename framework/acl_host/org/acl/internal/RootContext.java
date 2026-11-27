@@ -734,6 +734,12 @@ final class RootContext extends Context {
         return d.getDisplayId();
     }
 
+    // Context's own throws "Not implemented. Must override in a subclass." KeyguardManager asks
+    // for it in isDeviceLocked(). There is one display, so it is the display the context is on.
+    @Override public int getAssociatedDisplayId() {
+        return d.getDisplayId();
+    }
+
     @Override public void updateDisplay(int a0) {
         d.updateDisplay(a0);
     }
