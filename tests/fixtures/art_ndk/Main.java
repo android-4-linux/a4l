@@ -59,6 +59,12 @@ public class Main extends Activity {
     // Java_com_acl_ndktest_Main_aaudioPlay in tools/build-ndk-repro.sh.
     public static native int aaudioPlay();
 
+    // Bound by name. Eight threads calling RegisterNatives at once; see
+    // Java_com_acl_ndktest_Main_registerStorm in tools/build-ndk-repro.sh. stormTarget is
+    // what they register.
+    public static native int registerStorm();
+    public static native int stormTarget();
+
     // Bound by name. An OpenSL ES recorder with a buffer queue, run for 300 ms; see
     // Java_com_acl_ndktest_Main_openslesRecord in tools/build-ndk-repro.sh.
     public static native int openslesRecord();
@@ -84,6 +90,12 @@ public class Main extends Activity {
         // has detached, and takes a native call from Java.
         if (System.getenv("ACL_NDK_TEST_DONOR") != null) {
             Log.i("acl", "DONOR: second attached thread got " + donorReuse());
+        }
+
+        // Opt-in (run_ndk_art_test.py --storm): threads register natives all at once.
+        if (System.getenv("ACL_NDK_TEST_STORM") != null) {
+            final int made = registerStorm();
+            Log.i("acl", "STORM: registered=" + made + " target=" + stormTarget());
         }
 
         // Opt-in (run_ndk_art_test.py --aaudio): the library plays through libaaudio.so.

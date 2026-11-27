@@ -431,6 +431,40 @@ Java_com_acl_ndktest_Main_openslesPlay(JNIEnv* e, jclass c) {
   (*eng)->Destroy(eng);
   return calls;
 }
+// Bound by name. Eight threads attach and each calls RegisterNatives 500 times, as an app's
+// libraries do when several are loaded at once. a4l keeps a record of every registration; the
+// record was unguarded. Returns the registrations made, 4000, or a negative step code.
+static JavaVM* ndktest_storm_vm;
+static jclass ndktest_storm_class;
+static jint ndktest_storm_target(JNIEnv* e, jclass c) { (void)e; (void)c; return 7; }
+static void* ndktest_storm_thread(void* arg) {
+  (void)arg;
+  JNIEnv* env = 0;
+  if ((*ndktest_storm_vm)->AttachCurrentThread(ndktest_storm_vm, (void**)&env, 0) != JNI_OK)
+    return (void*)-1;
+  const JNINativeMethod m = {"stormTarget", "()I", (void*)ndktest_storm_target};
+  long made = 0;
+  for (int i = 0; i < 500; i++)
+    if ((*env)->RegisterNatives(env, ndktest_storm_class, &m, 1) == JNI_OK) made++;
+  (*ndktest_storm_vm)->DetachCurrentThread(ndktest_storm_vm);
+  return (void*)made;
+}
+JNIEXPORT jint JNICALL
+Java_com_acl_ndktest_Main_registerStorm(JNIEnv* e, jclass c) {
+  if ((*e)->GetJavaVM(e, &ndktest_storm_vm) != JNI_OK) return -1;
+  ndktest_storm_class = (*e)->NewGlobalRef(e, c);
+  if (!ndktest_storm_class) return -2;
+  long threads[8];
+  for (int i = 0; i < 8; i++)
+    if (pthread_create(&threads[i], 0, ndktest_storm_thread, 0) != 0) return -3;
+  long total = 0;
+  for (int i = 0; i < 8; i++) {
+    void* ret = 0;
+    if (pthread_join(threads[i], &ret) != 0 || (long)ret < 0) return -4;
+    total += (long)ret;
+  }
+  return (jint)total;
+}
 // Decoy for the bind-by-name path: an EXPORTED Java_<class>_answer, while JNI_OnLoad below ALSO
 // RegisterNatives-binds answer() to the_registered (4250). A RegisterNatives binding is the app's
 // explicit choice and must win, so acl's name binding has to skip methods JNI_OnLoad already

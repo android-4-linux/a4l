@@ -32,6 +32,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <iterator>
 #include <mutex>
 #include <string_view>
 #include <unordered_map>
@@ -3056,7 +3057,12 @@ struct Registered {
   jobject cls;  // global ref
   std::string name, sig;
 };
-std::vector<Registered> g_registered;
+// An app loads libraries on several threads at once, and each JNI_OnLoad
+// registers here. Unguarded, two push_backs grew the vector together and freed
+// its old storage twice: glibc aborted with "double free or corruption (out)"
+// in WhatsApp's start, once in the launches watched.
+std::mutex g_registered_mu;
+std::vector<Registered> g_registered;  // guarded by g_registered_mu
 
 jint JNICALL w_RegisterNatives(JNIEnv* e,
                                jclass c,
@@ -3089,11 +3095,18 @@ jint JNICALL w_RegisterNatives(JNIEnv* e,
   // (was_registered). NewGlobalRef is always present on a real VM; tolerate a
   // partial env (the probe's fake ART) rather than crashing on a null slot —
   // nothing name-binds against that env anyway.
-  if (rc == JNI_OK && RF->NewGlobalRef != nullptr)
+  if (rc == JNI_OK && RF->NewGlobalRef != nullptr) {
+    // The refs are made outside the lock: only the list needs it.
+    std::vector<Registered> added;
+    added.reserve(static_cast<std::size_t>(n > 0 ? n : 0));
     for (jint i = 0; i < n; ++i)
-      g_registered.push_back({RF->NewGlobalRef(r, c),
-                              m[i].name ? m[i].name : "",
-                              m[i].signature ? m[i].signature : ""});
+      added.push_back({RF->NewGlobalRef(r, c), m[i].name ? m[i].name : "",
+                       m[i].signature ? m[i].signature : ""});
+    const std::lock_guard<std::mutex> lock(g_registered_mu);
+    g_registered.insert(g_registered.end(),
+                        std::make_move_iterator(added.begin()),
+                        std::make_move_iterator(added.end()));
+  }
   return rc;
 }
 
@@ -4182,6 +4195,7 @@ bool BionicRuntime::was_registered(JNIEnv* env,
                                    const char* name,
                                    const char* sig) const {
 #if defined(__x86_64__)
+  const std::lock_guard<std::mutex> lock(g_registered_mu);
   for (const Registered& r : g_registered)
     if (r.name == name && r.sig == sig && env->IsSameObject(r.cls, klass))
       return true;

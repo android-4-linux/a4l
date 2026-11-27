@@ -82,6 +82,11 @@ OPENSLES_CHECKS = [
     "in time=true",
 ]
 
+# --storm: eight threads call RegisterNatives 500 times each, and the last binding works.
+STORM_CHECKS = [
+    "STORM: registered=4000 target=7",
+]
+
 CHECKS = [
     "NDK bionic loader armed",   # the gated nativeLoad hook installed (bootstraps lazily)
     "loaded bionic native lib",   # routed as bionic (not glibc dlopen)
@@ -111,6 +116,9 @@ def main() -> int:
     donor = "--donor" in argv             # attach-after-detach mode; see DONOR_CHECKS
     if donor:
         argv.remove("--donor")
+    storm = "--storm" in argv             # concurrent RegisterNatives; see STORM_CHECKS
+    if storm:
+        argv.remove("--storm")
     handler = "--handler" in argv         # fault-handler keeper mode; see HANDLER_CHECKS
     if handler:
         argv.remove("--handler")
@@ -123,7 +131,7 @@ def main() -> int:
     if len(argv) != 4:
         sys.stderr.write(
             "usage: run_ndk_art_test.py <acl> <src_root> <android.jar> <ndk.apk> "
-            "[--worker|--donor|--handler|--aaudio|--opensles]\n")
+            "[--worker|--donor|--storm|--handler|--aaudio|--opensles]\n")
         return 2
     acl, src_root, android_jar, ndk_apk = argv
 
@@ -227,6 +235,8 @@ def main() -> int:
         if opensles:
             env["ACL_NDK_TEST_OPENSLES"] = "1"
             env["ACL_AUDIO"] = "null"  # no sound device needed, and none made to sound
+        if storm:
+            env["ACL_NDK_TEST_STORM"] = "1"
         if handler:
             env["ACL_NDK_TEST_HANDLER"] = "1"
             env.pop("ACL_NO_CRASHPAD_SHIM_KEEPER", None)
@@ -253,6 +263,14 @@ def main() -> int:
             sys.stderr.write(f"FAIL: OpenSL ES: acl exit {p.returncode}\n")
             ok = False
         for c in OPENSLES_CHECKS:
+            if c not in out:
+                sys.stderr.write(f"FAIL: missing '{c}'\n")
+                ok = False
+    elif storm:
+        if p.returncode != 0:
+            sys.stderr.write(f"FAIL: RegisterNatives storm: acl exit {p.returncode}\n")
+            ok = False
+        for c in STORM_CHECKS:
             if c not in out:
                 sys.stderr.write(f"FAIL: missing '{c}'\n")
                 ok = False
