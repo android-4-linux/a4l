@@ -161,6 +161,7 @@ DONOR_SUPPORT = r'''
 uintptr_t acl_gl_donor_map[16] = {0};   // 8 pairs of {bionic_fs, donor_fs}; MUST match the 128 below
 uintptr_t acl_gl_donor_pool[16] = {0};  // filled by acl (src/ndk/bionic_runtime.cpp)
 
+#if defined(__x86_64__)
 // uintptr_t acl_gl_pick_donor(void): rax = the calling bionic thread's own glibc donor %fs. Clobbers
 // only rax/r10/r11 (+ rbx, saved/restored) so a forwarder can call it with the GL args still live.
 asm(
@@ -204,6 +205,94 @@ asm(
     "  pop %rbx\n"
     "  ret\n"
 );
+#elif defined(__aarch64__)
+// The same table on arm64, in three entry points.
+//
+// acl_gl_pick_donor_x9: x9 = the calling bionic thread's donor thread pointer. Uses x9 to x13 and
+// nothing else, so a forwarder can call it with the GL arguments live.
+// acl_gl_pick_donor: the same for a C caller, in x0.
+// acl_gl_call_x15: call the function in x15 on the donor thread pointer and come back on the
+// caller's. Every forwarder ends here. Arguments in registers are untouched. The first eight
+// stack slots are copied below the frame, which holds what must outlive the call: the return
+// address and the caller's thread pointer.
+asm(
+    ".text\n"
+    ".globl acl_gl_pick_donor_x9\n"
+    ".type acl_gl_pick_donor_x9,%function\n"
+    "acl_gl_pick_donor_x9:\n"
+    "  mrs x10, tpidr_el0\n"                              // the key
+    "  adrp x11, :got:acl_gl_donor_map\n"
+    "  ldr x11, [x11, :got_lo12:acl_gl_donor_map]\n"      // x11 = &map[0]
+    "  mov x13, x11\n"
+    "1:\n"
+    "  add x12, x11, #128\n"                              // end (8 pairs * 16 bytes)
+    "  cmp x13, x12\n"
+    "  b.hs 4f\n"                                         // table full (>8 GL threads)
+    "  ldr x9, [x13]\n"                                   // slot.bionic_tp
+    "  cmp x9, x10\n"
+    "  b.eq 2f\n"                                         // our thread -> its donor
+    "  cbz x9, 3f\n"                                      // empty slot -> claim it
+    "  add x13, x13, #16\n"
+    "  b 1b\n"
+    "2:\n"
+    "  ldr x9, [x13, #8]\n"
+    "  ret\n"
+    "3:\n"
+    "  ldxr x9, [x13]\n"
+    "  cbnz x9, 5f\n"                                     // lost the race -> look at it again
+    "  stxr w9, x10, [x13]\n"
+    "  cbnz w9, 3b\n"
+    "  sub x9, x13, x11\n"                                // slot index * 16
+    "  lsr x9, x9, #1\n"                                  // slot index * 8
+    "  adrp x12, :got:acl_gl_donor_pool\n"
+    "  ldr x12, [x12, :got_lo12:acl_gl_donor_pool]\n"
+    "  ldr x9, [x12, x9]\n"                               // pool[index]
+    "  str x9, [x13, #8]\n"                               // publish slot.donor
+    "  ret\n"
+    "5:\n"
+    "  clrex\n"
+    "  b 1b\n"
+    "4:\n"
+    "  adrp x12, :got:acl_gl_donor_pool\n"
+    "  ldr x12, [x12, :got_lo12:acl_gl_donor_pool]\n"
+    "  ldr x9, [x12]\n"                                   // pool[0]
+    "  ret\n"
+    ".size acl_gl_pick_donor_x9,.-acl_gl_pick_donor_x9\n"
+    ".globl acl_gl_pick_donor\n"
+    ".type acl_gl_pick_donor,%function\n"
+    "acl_gl_pick_donor:\n"
+    "  mov x14, x30\n"
+    "  bl acl_gl_pick_donor_x9\n"
+    "  mov x0, x9\n"
+    "  ret x14\n"
+    ".size acl_gl_pick_donor,.-acl_gl_pick_donor\n"
+    ".globl acl_gl_call_x15\n"
+    ".type acl_gl_call_x15,%function\n"
+    "acl_gl_call_x15:\n"
+    "  sub sp, sp, #96\n"                                 // [sp..sp+64) the callee's stack args
+    "  stp x29, x30, [sp, #64]\n"
+    "  add x29, sp, #64\n"
+    "  bl acl_gl_pick_donor_x9\n"                         // x9 = donor
+    "  mrs x10, tpidr_el0\n"
+    "  str x10, [sp, #80]\n"                              // the caller's thread pointer
+    "  ldp x11, x12, [sp, #96]\n"
+    "  stp x11, x12, [sp, #0]\n"
+    "  ldp x11, x12, [sp, #112]\n"
+    "  stp x11, x12, [sp, #16]\n"
+    "  ldp x11, x12, [sp, #128]\n"
+    "  stp x11, x12, [sp, #32]\n"
+    "  ldp x11, x12, [sp, #144]\n"
+    "  stp x11, x12, [sp, #48]\n"
+    "  msr tpidr_el0, x9\n"
+    "  blr x15\n"
+    "  ldr x10, [sp, #80]\n"
+    "  msr tpidr_el0, x10\n"
+    "  ldp x29, x30, [sp, #64]\n"
+    "  add sp, sp, #96\n"
+    "  ret\n"
+    ".size acl_gl_call_x15,.-acl_gl_call_x15\n"
+);
+#endif
 
 // eglGetNativeClientBufferANDROID: the engine's impeller ProcTable dlsyms this from libEGL.so to turn
 // an AHardwareBuffer* into an EGLClientBuffer for eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID). On acl
@@ -258,7 +347,7 @@ def forwarders(syms, bridge, soname, with_support):
     copy = []
     for k in range(7, -1, -1):  # push slot7..slot0 so slot0 lands just above Mesa's return address
         copy.append(f'    "  mov {16 + 8 * k}(%rbp), %rax\\n  push %rax\\n"')  # app arg at [rbp+16+8k]
-    out += ["", 'asm(', '    ".text\\n"']
+    out += ["", "#if defined(__x86_64__)", 'asm(', '    ".text\\n"']
     for i, s in enumerate(syms):
         off = 8 + 8 * i  # bridge->fns[i]; donor_fs occupies offset 0 (unused now)
         out += [
@@ -284,6 +373,23 @@ def forwarders(syms, bridge, soname, with_support):
             '    "  ret\\n"',
         ]
     out.append(");")
+    # arm64: load bridge->fns[i] and go to acl_gl_call_x15 in libEGL.so, which does the rest.
+    # x16 and x17 are the linker's between the branch and its target; x15 is not.
+    out += ["#elif defined(__aarch64__)", 'asm(', '    ".text\\n"']
+    for i, s in enumerate(syms):
+        off = 8 + 8 * i
+        out += [
+            f'    ".globl {s}\\n"',
+            f'    ".type {s},%function\\n"',
+            f'    "{s}:\\n"',
+            f'    "  adrp x15, :got:{bridge}\\n"',
+            f'    "  ldr x15, [x15, :got_lo12:{bridge}]\\n"',
+            '    "  ldr x15, [x15]\\n"',                 # bridge*
+            f'    "  ldr x15, [x15, #{off}]\\n"',        # bridge->fns[i]
+            '    "  b acl_gl_call_x15\\n"',
+        ]
+    out.append(");")
+    out.append("#endif")
     return "\n".join(out) + "\n"
 
 

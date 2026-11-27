@@ -15,8 +15,10 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -104,6 +106,112 @@ acl::ndk::JniVmTable g_fake_vm_tbl;
 struct FakeVM {
   const acl::ndk::JniVmTable* functions;
 } g_fake_vm;
+// --glforward: a4l's libEGL.so and libGLESv2.so forward each entry point to
+// host Mesa on a donor thread's thread pointer. Here the probe is Mesa: every
+// slot of both bridges is gl_check, and the donor is a parked thread of the
+// probe's. The target library calls one EGL and one GLES entry point with
+// twelve integer and nine floating-point arguments, so some of each cross on
+// the stack.
+thread_local int t_gl_where = 0;  // its address tells the threads apart
+int* g_gl_donor_where = nullptr;
+int g_gl_calls = 0;
+int g_gl_on_donor = 0;
+
+long gl_check(long a1,
+              long a2,
+              long a3,
+              long a4,
+              long a5,
+              long a6,
+              long a7,
+              long a8,
+              long a9,
+              long a10,
+              long a11,
+              long a12,
+              double d1,
+              double d2,
+              double d3,
+              double d4,
+              double d5,
+              double d6,
+              double d7,
+              double d8,
+              double d9) {
+  ++g_gl_calls;
+  if (&t_gl_where == g_gl_donor_where)
+    ++g_gl_on_donor;
+  const double doubles = d1 * 1 + d2 * 2 + d3 * 3 + d4 * 4 + d5 * 5 + d6 * 6 +
+                         d7 * 7 + d8 * 8 + d9 * 9;
+  return a1 * 1 + a2 * 2 + a3 * 3 + a4 * 4 + a5 * 5 + a6 * 6 + a7 * 7 + a8 * 8 +
+         a9 * 9 + a10 * 10 + a11 * 11 + a12 * 12 +
+         static_cast<long>(doubles) * 1000;
+}
+
+struct GlBridge {
+  std::uintptr_t donor;
+  void* fns[512];
+};
+
+bool run_gl_forward_selftest(acl::ndk::BionicRuntime& rt, void* h) {
+  auto* pool = static_cast<std::uintptr_t*>(rt.symbol(h, "acl_gl_donor_pool"));
+  auto** egl = static_cast<void**>(rt.symbol(h, "acl_gl_egl_bridge"));
+  auto** gles = static_cast<void**>(rt.symbol(h, "acl_gl_gles_bridge"));
+  void* fn = rt.symbol(h, "acl_gl_forward_test");
+  if (!pool || !egl || !gles || !fn) {
+    std::fprintf(stderr,
+                 "the target does not link a4l's libEGL.so and libGLESv2.so, "
+                 "or has no acl_gl_forward_test\n");
+    return false;
+  }
+  // The donor: a thread that reports its thread pointer and waits.
+  std::mutex mu;
+  std::condition_variable cv;
+  std::uintptr_t donor_tp = 0;
+  bool done = false;
+  std::thread donor([&] {
+    std::unique_lock<std::mutex> lk(mu);
+    g_gl_donor_where = &t_gl_where;
+    donor_tp = reinterpret_cast<std::uintptr_t>(__builtin_thread_pointer());
+    cv.notify_all();
+    cv.wait(lk, [&] { return done; });
+  });
+  {
+    std::unique_lock<std::mutex> lk(mu);
+    cv.wait(lk, [&] { return donor_tp != 0; });
+  }
+  static GlBridge bridge;
+  for (void*& slot : bridge.fns)
+    slot = reinterpret_cast<void*>(&gl_check);
+  for (int i = 0; i < 8; ++i)
+    pool[i] = donor_tp;
+  *egl = &bridge;
+  *gles = &bridge;
+
+  long r;
+  {
+    acl::ndk::BionicRuntime::RunScope scope(rt);
+    r = reinterpret_cast<long (*)()>(fn)();
+  }
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    done = true;
+  }
+  cv.notify_all();
+  donor.join();
+
+  // 1*1 + ... + 12*12 = 650; 0.5*1 + ... + 8.5*9 = 262.5, truncated, times
+  // 1000. Twice.
+  const long want = 2 * (650 + 262 * 1000);
+  const bool ok = r == want && g_gl_calls == 2 && g_gl_on_donor == 2 &&
+                  &t_gl_where != g_gl_donor_where;
+  std::printf(
+      "acl-ndk-probe: GL forwarders = %ld (want %ld), %d calls, %d on the "
+      "donor %s\n",
+      r, want, g_gl_calls, g_gl_on_donor, ok ? "(PASS)" : "(FAIL)");
+  return ok;
+}
+
 }  // namespace
 
 static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, const char* so_path) {
@@ -422,6 +530,11 @@ int main(int argc, char** argv) {
   if (std::string(argv[2]) == "--load") {
     std::printf("acl-ndk-probe: loaded %s (PASS)\n", argv[1]);
     return 0;
+  }
+
+  // GL forwarder mode: see run_gl_forward_selftest.
+  if (std::string(argv[2]) == "--glforward") {
+    return run_gl_forward_selftest(*rt, h) ? 0 : 1;
   }
 
   // Thread mode: attach a second thread and run bionic code as that thread.

@@ -42,8 +42,7 @@ INT="$AOSP/out/soong/.intermediates"
 
 # ACL_BIONIC_ARCH=arm64: the runtime for an arm64 host, from the tree's linux_bionic_arm64
 # outputs (bionic built for a Linux arm64 host; the tree has no Android arm64 target built).
-# a4l's shim libraries are built for it too, all but the GL and Vulkan forwarders, whose
-# entry points are x86_64 code. libdl_android, ICU and libstdc++ are not staged.
+# a4l's shim libraries are built for it too. libdl_android, ICU and libstdc++ are not staged.
 if [ "${ACL_BIONIC_ARCH:-x86_64}" = "arm64" ]; then
   V=linux_bionic_arm64
   A_LINKER="$INT/bionic/linker/linker/$V/linker64"
@@ -84,6 +83,11 @@ if [ "${ACL_BIONIC_ARCH:-x86_64}" = "arm64" ]; then
   # soname : source : extra flags and libraries. Hidden visibility where x86_64 has it.
   for spec in \
       "libandroid.so:acl_libandroid.c:-fvisibility=hidden $SYS/liblog.so $SYS/libdl.so" \
+      "libEGL.so:acl_egl_fwd.c:" \
+      "libGLESv2.so:acl_gles_fwd.c:$SYS/libEGL.so" \
+      "libGLESv3.so:acl_gles_fwd.c:$SYS/libEGL.so" \
+      "libGLESv1_CM.so:acl_gles_fwd.c:$SYS/libEGL.so" \
+      ${ACL_WEBVIEW_VULKAN:+"libvulkan.so:acl_vulkan_fwd.c:$SYS/libEGL.so"} \
       "libjnigraphics.so:acl_libjnigraphics.c:" \
       "libmediandk.so:acl_libmediandk.c:" \
       "libaaudio.so:acl_libaaudio.c:$SYS/libandroid.so" \
@@ -103,7 +107,7 @@ if [ "${ACL_BIONIC_ARCH:-x86_64}" = "arm64" ]; then
     echo "export ACL_BIONIC_STUB=$OUT/stub"
     exit 0
   fi
-  echo "== staged (arm64: linker, bionic libraries, a4l's shim libraries less GL, stub) =="
+  echo "== staged (arm64: linker, bionic libraries, a4l's shim libraries, stub) =="
   exit 0
 fi
 LINKER="$AOSP/out/target/product/generic_x86_64/apex/com.android.runtime/bin/linker64"
