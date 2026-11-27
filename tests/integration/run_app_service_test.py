@@ -59,6 +59,7 @@ CHECKS = [
     "SERVICE: media and obb dirs, display context=true",
     "SERVICE: color matrix filtered=true",
     f"SERVICE: process name {PACKAGE} application {PACKAGE}",
+    "SERVICE: native libs extracted=true",
     "SERVICE: proc file parsed=true",
     f"SERVICE: pending intent {PACKAGE} uid true broadcast true/false immutable true"
     " activity true/false immutable false",

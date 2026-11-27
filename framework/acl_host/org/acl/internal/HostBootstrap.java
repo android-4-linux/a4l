@@ -991,7 +991,11 @@ public final class HostBootstrap {
             ai.publicSourceDir = apkPath;
             ai.dataDir = ensure(dataRoot()).getAbsolutePath();
             ai.nativeLibraryDir = new java.io.File(cacheRoot(), "lib").getAbsolutePath();
-            ai.flags = android.content.pm.ApplicationInfo.FLAG_HAS_CODE;
+            // FLAG_EXTRACT_NATIVE_LIBS: the app's libraries are files in nativeLibraryDir, not
+            // pages of the APK. A loader that finds the flag clear takes them to be loadable
+            // from the APK by the system and skips nativeLibraryDir (Meta's SoLoader does).
+            ai.flags = android.content.pm.ApplicationInfo.FLAG_HAS_CODE
+                    | android.content.pm.ApplicationInfo.FLAG_EXTRACT_NATIVE_LIBS;
             // With ACL_WEBVIEW_ARGS, mark the app debuggable so WebView's CommandLineUtil reads
             // /data/local/tmp/webview-command-line (run-apk binds it) — the only way to pass Chromium
             // flags (--disable-gpu / --enable-logging) on the obfuscated release APK.
