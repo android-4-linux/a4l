@@ -104,7 +104,7 @@ CHECKS = [
     "SERVICE: artwork shared=3x2/ff336699/false parcel=3x2/ff336699 next=77 views=true"
     " notification=true sdk=24/33",
     "SERVICE: permissions asked twice 5/1/0 6/2/0",
-    "SERVICE: dialog drawn=true while covered=0 back=true",
+    "SERVICE: dialog drawn=true while covered=0 back=true returned=srR",
     "SERVICE: window ids dialog true same true activity true other false",
     "SERVICE: overlay touch taken true/true at 0@10,12 1@10,12 above dismissed true"
     " outside taken true dismissed true",

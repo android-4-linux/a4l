@@ -3706,6 +3706,9 @@ public final class HostBootstrap {
                 deliverActivityResult(next.activity, rec.requestCode, rec.resultCode, rec.resultData);
             safeLifecycle(next.activity, "onRestart");
             safeLifecycle(next.activity, "onStart");
+            // Paused when the finished one was started over it, so resumed now, which
+            // brings onPostResume with it: a FragmentActivity resumes its fragments there.
+            safeLifecycle(next.activity, "onResume");
             ensureResumed(next.activity);
             android.view.Window w = next.activity.getWindow();
             android.view.View decor = w != null ? w.getDecorView() : null;
