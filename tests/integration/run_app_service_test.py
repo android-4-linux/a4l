@@ -76,6 +76,7 @@ CHECKS = [
     "SERVICE: context calls locked=false enforced=true",
     "SERVICE: telephony callback registered=true",
     "SERVICE: location service answered=true gnss=true",
+    "SERVICE: process natives cpu=true signal=true",
     "SERVICE: paint long color srgb=ff336699 wide red=true",
     "SERVICE: camera z -8.0 turned 0.500/1.000/0.00150 canvas true facing -0.500 restored true",
     "SERVICE: compose shader blended=true",
@@ -219,6 +220,11 @@ def main():
             if c not in out:
                 sys.stderr.write(f"FAIL: missing '{c}'\n{out[-8000:]}\n")
                 return 1
+        # The fixture ends with Process.killProcess(myPid()): the status is the one a
+        # process killed by SIGKILL has, and nothing ran after the call.
+        if p.returncode != 137 or "killProcess returned" in out:
+            sys.stderr.write(f"FAIL: killProcess: exit {p.returncode}\n{out[-3000:]}\n")
+            return 1
         # The data directory is in the data directory this run was given.
         where = ("SERVICE: data directory measured=true at "
                  + os.path.join(work, "data", "a4l", "android-data"))

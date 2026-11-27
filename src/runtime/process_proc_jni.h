@@ -7,7 +7,8 @@
 
 namespace acl::runtime {
 
-// Binds android.os.Process.readProcFile and parseProcLine.
+// Binds android.os.Process.readProcFile, parseProcLine, getElapsedCpuTime,
+// sendSignal and sendSignalQuiet.
 void register_process_proc_natives(JNIEnv* env);
 
 }  // namespace acl::runtime

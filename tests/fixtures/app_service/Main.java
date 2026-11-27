@@ -334,6 +334,18 @@ public class Main extends Activity {
         }
         log("location service " + location);
         expect("answered=true gnss=true".equals(location), "location service " + location);
+        // Process.getElapsedCpuTime(), and a signal for a process that is not the app's,
+        // which is not sent.
+        String process;
+        try {
+            final long cpu = android.os.Process.getElapsedCpuTime();
+            android.os.Process.sendSignal(1, android.os.Process.SIGNAL_USR1);
+            process = "cpu=" + (cpu > 0) + " signal=true";
+        } catch (Throwable t) {
+            process = t.toString();
+        }
+        log("process natives " + process);
+        expect("cpu=true signal=true".equals(process), "process natives " + process);
         expect("registered=true".equals(telephony), "telephony callback " + telephony);
         expect("locked=false enforced=true".equals(contextCalls), "context calls " + contextCalls);
         expect(noProperty, "getProperty for an absent property");
@@ -844,7 +856,10 @@ public class Main extends Activity {
             case 17: popupPlaces(); break;
             default:
                 log("PASS");
-                System.exit(0);
+                // An app ends itself this way; it does not return.
+                android.os.Process.killProcess(android.os.Process.myPid());
+                log("FAIL killProcess returned");
+                System.exit(4);
         }
     }
 
