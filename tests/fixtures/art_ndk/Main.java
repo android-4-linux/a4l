@@ -63,6 +63,10 @@ public class Main extends Activity {
     // Java_com_acl_ndktest_Main_openslesRecord in tools/build-ndk-repro.sh.
     public static native int openslesRecord();
 
+    // Bound by name. An OpenSL ES player with a buffer queue, run for 400 ms with a pause; see
+    // Java_com_acl_ndktest_Main_openslesPlay in tools/build-ndk-repro.sh.
+    public static native int openslesPlay();
+
     // Up-called BY the native, from bionic %fs back into ART's glibc %fs.
     public static int helper(int a, int b) {
         return a + b;
@@ -88,11 +92,16 @@ public class Main extends Activity {
             Log.i("acl", "AAUDIO: result=" + calls + " fed=" + (calls >= 2));
         }
 
-        // Opt-in (run_ndk_art_test.py --opensles): the library records through libOpenSLES.so.
+        // Opt-in (run_ndk_art_test.py --opensles): the library records and plays through
+        // libOpenSLES.so.
         // 300 ms in 20 ms buffers is 15 callbacks.
         if (System.getenv("ACL_NDK_TEST_OPENSLES") != null) {
             final int calls = openslesRecord();
             Log.i("acl", "OPENSLES: result=" + calls + " paced=" + (calls >= 10 && calls <= 17));
+            // 400 ms in 10 ms buffers is 40 callbacks. The output also takes its own
+            // buffer's worth ahead at each of the two starts, 80 ms or so each.
+            final int played = openslesPlay();
+            Log.i("acl", "OPENSLES: played=" + played + " in time=" + (played >= 30 && played <= 70));
         }
 
         // Opt-in (run_ndk_art_test.py --handler): the library installs a fault handler of its

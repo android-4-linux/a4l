@@ -73,10 +73,13 @@ AAUDIO_CHECKS = [
     "fed=true",
 ]
 
-# --opensles: the library opens libOpenSLES.so and records through a buffer queue.
+# --opensles: the library opens libOpenSLES.so, records through a buffer queue and plays
+# through one.
 OPENSLES_CHECKS = [
     "acl.audio.ndk: input: 16000 Hz, 1 ch",
     "paced=true",
+    "acl.audio.ndk: output: 48000 Hz, 2 ch",
+    "in time=true",
 ]
 
 CHECKS = [
@@ -114,7 +117,7 @@ def main() -> int:
     aaudio = "--aaudio" in argv           # libaaudio.so output; see AAUDIO_CHECKS
     if aaudio:
         argv.remove("--aaudio")
-    opensles = "--opensles" in argv       # libOpenSLES.so recorder; see OPENSLES_CHECKS
+    opensles = "--opensles" in argv       # libOpenSLES.so; see OPENSLES_CHECKS
     if opensles:
         argv.remove("--opensles")
     if len(argv) != 4:
@@ -223,6 +226,7 @@ def main() -> int:
             env["ACL_AUDIO"] = "null"  # no sound device needed, and none made to sound
         if opensles:
             env["ACL_NDK_TEST_OPENSLES"] = "1"
+            env["ACL_AUDIO"] = "null"  # no sound device needed, and none made to sound
         if handler:
             env["ACL_NDK_TEST_HANDLER"] = "1"
             env.pop("ACL_NO_CRASHPAD_SHIM_KEEPER", None)
@@ -246,7 +250,7 @@ def main() -> int:
                 ok = False
     elif opensles:
         if p.returncode != 0:
-            sys.stderr.write(f"FAIL: OpenSL ES recorder: acl exit {p.returncode}\n")
+            sys.stderr.write(f"FAIL: OpenSL ES: acl exit {p.returncode}\n")
             ok = False
         for c in OPENSLES_CHECKS:
             if c not in out:

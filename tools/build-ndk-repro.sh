@@ -251,8 +251,8 @@ Java_com_acl_ndktest_Main_openslesRecord(JNIEnv* e, jclass c) {
   if ((*engine)->CreateOutputMix(engine, &mix, 0, 0, 0) != SL_RESULT_SUCCESS || !mix) return -8;
   if ((*mix)->Realize(mix, SL_BOOLEAN_FALSE) != SL_RESULT_SUCCESS) return -9;
   (*mix)->Destroy(mix);
-  // No player: the call fails and says so, and hands back no object.
-  if ((*engine)->CreateAudioPlayer(engine, &player, 0, 0, 0, 0, 0) != SL_RESULT_FEATURE_UNSUPPORTED
+  // A player needs a source and a sink.
+  if ((*engine)->CreateAudioPlayer(engine, &player, 0, 0, 0, 0, 0) != SL_RESULT_PARAMETER_INVALID
       || player) return -10;
 
   SLDataLocator_IODevice dev = {SL_DATALOCATOR_IODEVICE, SL_IODEVICE_AUDIOINPUT,
@@ -313,6 +313,121 @@ Java_com_acl_ndktest_Main_openslesRecord(JNIEnv* e, jclass c) {
   if ((*q)->Clear(q) != SL_RESULT_SUCCESS || (*q)->GetState(q, &qs) != SL_RESULT_SUCCESS ||
       qs.count != 0) return -28;
   (*rec)->Destroy(rec);
+  (*eng)->Destroy(eng);
+  return calls;
+}
+// Bound by name. Plays through a4l's libOpenSLES.so the way a game or a voice player does: a
+// 48 kHz stereo 16-bit player with two 10 ms buffers in a buffer queue, to an output mix. Plays
+// 300 ms, pauses, plays 100 ms more and stops. The callback queues its buffer again. Returns
+// the number of callbacks, or a negative step code.
+static volatile int ndktest_slp_calls;
+static short ndktest_slp_buf[2][960];
+static void ndktest_slp_cb(SLAndroidSimpleBufferQueueItf q, void* ctx) {
+  (void)ctx;
+  short* b = ndktest_slp_buf[ndktest_slp_calls % 2];
+  ndktest_slp_calls++;
+  (*q)->Enqueue(q, b, sizeof ndktest_slp_buf[0]);
+}
+JNIEXPORT jint JNICALL
+Java_com_acl_ndktest_Main_openslesPlay(JNIEnv* e, jclass c) {
+  void* lib = dlopen("libOpenSLES.so", 2);
+  if (!lib) return -1;
+  SLresult (*create)(SLObjectItf*, SLuint32, const SLEngineOption*, SLuint32,
+                     const SLInterfaceID*, const SLboolean*) = dlsym(lib, "slCreateEngine");
+#define NDKTEST_IID(name) \
+  SLInterfaceID* p##name = dlsym(lib, "SL_IID_" #name); if (!p##name || !*p##name) return -2; \
+  const SLInterfaceID name = *p##name
+  NDKTEST_IID(ENGINE); NDKTEST_IID(PLAY); NDKTEST_IID(BUFFERQUEUE); NDKTEST_IID(VOLUME);
+  NDKTEST_IID(EFFECTSEND); NDKTEST_IID(RECORD);
+#undef NDKTEST_IID
+  if (!create) return -2;
+  SLObjectItf eng = 0, mix = 0, pl = 0; SLEngineItf engine = 0;
+  if (create(&eng, 0, 0, 0, 0, 0) != SL_RESULT_SUCCESS || !eng) return -3;
+  if ((*eng)->Realize(eng, SL_BOOLEAN_FALSE) != SL_RESULT_SUCCESS ||
+      (*eng)->GetInterface(eng, ENGINE, &engine) != SL_RESULT_SUCCESS) return -4;
+  if ((*engine)->CreateOutputMix(engine, &mix, 0, 0, 0) != SL_RESULT_SUCCESS ||
+      (*mix)->Realize(mix, SL_BOOLEAN_FALSE) != SL_RESULT_SUCCESS) return -5;
+
+  SLDataLocator_AndroidSimpleBufferQueue loc = {SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 2};
+  SLDataFormat_PCM fmt = {SL_DATAFORMAT_PCM, 2, SL_SAMPLINGRATE_48, SL_PCMSAMPLEFORMAT_FIXED_16,
+                          SL_PCMSAMPLEFORMAT_FIXED_16,
+                          SL_SPEAKER_FRONT_LEFT | SL_SPEAKER_FRONT_RIGHT,
+                          SL_BYTEORDER_LITTLEENDIAN};
+  SLDataSource src = {&loc, &fmt};
+  SLDataLocator_OutputMix out = {SL_DATALOCATOR_OUTPUTMIX, mix};
+  SLDataSink snk = {&out, 0};
+  const SLInterfaceID ids[3] = {BUFFERQUEUE, VOLUME, EFFECTSEND};
+  const SLboolean need_fx[3] = {SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE};
+  const SLboolean want_fx[3] = {SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE, SL_BOOLEAN_FALSE};
+  // An interface a player does not have: fatal when required, left out when not.
+  if ((*engine)->CreateAudioPlayer(engine, &pl, &src, &snk, 3, ids, need_fx)
+      != SL_RESULT_FEATURE_UNSUPPORTED || pl) return -6;
+  // A file to decode is not something this player plays.
+  SLDataLocator_URI uri = {SL_DATALOCATOR_URI, (SLchar*)"file:///nothing.ogg"};
+  SLDataSource from_uri = {&uri, &fmt};
+  if ((*engine)->CreateAudioPlayer(engine, &pl, &from_uri, &snk, 3, ids, want_fx)
+      != SL_RESULT_CONTENT_UNSUPPORTED || pl) return -7;
+  // Nor 8-bit PCM, and the sink has to be an output mix this library made.
+  fmt.bitsPerSample = fmt.containerSize = SL_PCMSAMPLEFORMAT_FIXED_8;
+  if ((*engine)->CreateAudioPlayer(engine, &pl, &src, &snk, 3, ids, want_fx)
+      != SL_RESULT_CONTENT_UNSUPPORTED || pl) return -8;
+  fmt.bitsPerSample = fmt.containerSize = SL_PCMSAMPLEFORMAT_FIXED_16;
+  out.outputMix = eng;
+  if ((*engine)->CreateAudioPlayer(engine, &pl, &src, &snk, 3, ids, want_fx)
+      != SL_RESULT_PARAMETER_INVALID || pl) return -9;
+  out.outputMix = mix;
+  if ((*engine)->CreateAudioPlayer(engine, &pl, &src, &snk, 3, ids, want_fx)
+      != SL_RESULT_SUCCESS || !pl) return -10;
+  if ((*pl)->Realize(pl, SL_BOOLEAN_FALSE) != SL_RESULT_SUCCESS) return -11;
+  SLPlayItf play = 0; SLAndroidSimpleBufferQueueItf q = 0; SLVolumeItf vol = 0; void* none = 0;
+  if ((*pl)->GetInterface(pl, PLAY, &play) != SL_RESULT_SUCCESS ||
+      (*pl)->GetInterface(pl, BUFFERQUEUE, &q) != SL_RESULT_SUCCESS ||
+      (*pl)->GetInterface(pl, VOLUME, &vol) != SL_RESULT_SUCCESS) return -12;
+  if ((*pl)->GetInterface(pl, RECORD, &none) != SL_RESULT_FEATURE_UNSUPPORTED ||
+      (*pl)->GetInterface(pl, EFFECTSEND, &none) != SL_RESULT_FEATURE_UNSUPPORTED) return -13;
+
+  SLmillibel mb = 1; SLboolean muted = SL_BOOLEAN_TRUE;
+  if ((*vol)->GetMaxVolumeLevel(vol, &mb) != SL_RESULT_SUCCESS || mb != 0) return -14;
+  if ((*vol)->SetVolumeLevel(vol, 100) != SL_RESULT_PARAMETER_INVALID) return -15;
+  if ((*vol)->SetVolumeLevel(vol, -600) != SL_RESULT_SUCCESS ||
+      (*vol)->GetVolumeLevel(vol, &mb) != SL_RESULT_SUCCESS || mb != -600) return -16;
+  if ((*vol)->SetMute(vol, SL_BOOLEAN_TRUE) != SL_RESULT_SUCCESS ||
+      (*vol)->SetMute(vol, SL_BOOLEAN_FALSE) != SL_RESULT_SUCCESS ||
+      (*vol)->GetMute(vol, &muted) != SL_RESULT_SUCCESS || muted) return -17;
+
+  if ((*q)->RegisterCallback(q, ndktest_slp_cb, 0) != SL_RESULT_SUCCESS) return -18;
+  if ((*q)->Enqueue(q, ndktest_slp_buf[0], sizeof ndktest_slp_buf[0]) != SL_RESULT_SUCCESS ||
+      (*q)->Enqueue(q, ndktest_slp_buf[1], sizeof ndktest_slp_buf[1]) != SL_RESULT_SUCCESS)
+    return -19;
+  if ((*q)->Enqueue(q, ndktest_slp_buf[0], sizeof ndktest_slp_buf[0])
+      != SL_RESULT_BUFFER_INSUFFICIENT) return -20;
+  usleep(60000);
+  if (ndktest_slp_calls != 0) return -21;      // nothing is played before the start
+  if ((*play)->SetPlayState(play, SL_PLAYSTATE_PLAYING) != SL_RESULT_SUCCESS) return -22;
+  usleep(300000);
+  if ((*play)->SetPlayState(play, SL_PLAYSTATE_PAUSED) != SL_RESULT_SUCCESS) return -23;
+  usleep(50000);                               // a callback under way at the pause has ended
+  const int paused_at = ndktest_slp_calls;
+  SLuint32 state = 99; SLmillisecond ms = 0; SLAndroidSimpleBufferQueueState qs = {99, 99};
+  if ((*play)->GetPlayState(play, &state) != SL_RESULT_SUCCESS ||
+      state != SL_PLAYSTATE_PAUSED) return -24;
+  if ((*q)->GetState(q, &qs) != SL_RESULT_SUCCESS || qs.index != (SLuint32)paused_at ||
+      qs.count != 2) return -25;
+  // Every buffer handed back was 10 ms, and at most one more was part played.
+  if ((*play)->GetPosition(play, &ms) != SL_RESULT_SUCCESS ||
+      ms < (SLmillisecond)paused_at * 10 || ms > (SLmillisecond)(paused_at + 1) * 10) return -26;
+  usleep(50000);
+  if (ndktest_slp_calls != paused_at) return -27;   // and nothing while paused
+  if ((*play)->SetPlayState(play, SL_PLAYSTATE_PLAYING) != SL_RESULT_SUCCESS) return -28;
+  usleep(100000);
+  if ((*play)->SetPlayState(play, SL_PLAYSTATE_STOPPED) != SL_RESULT_SUCCESS) return -29;
+  usleep(50000);
+  const int calls = ndktest_slp_calls;
+  if (calls <= paused_at) return -30;          // it went on after the pause
+  if ((*q)->Clear(q) != SL_RESULT_SUCCESS || (*q)->GetState(q, &qs) != SL_RESULT_SUCCESS ||
+      qs.count != 0) return -31;
+  (*pl)->Destroy(pl);
+  (*mix)->Destroy(mix);
   (*eng)->Destroy(eng);
   return calls;
 }

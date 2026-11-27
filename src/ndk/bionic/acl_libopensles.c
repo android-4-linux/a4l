@@ -4,12 +4,12 @@
 // follows the OpenSL ES 1.0.1 specification and those headers. No AOSP
 // implementation was read or copied. No GPL-3.0 sources.
 //
-// a4l's libOpenSLES.so: an OpenSL ES engine with an audio recorder over a4l's
-// audio recorder. TARGET code, compiled for bionic. Android's libOpenSLES
-// talks to AudioFlinger over Binder; there is neither here. The library used
-// to be the NDK's link stub, whose slCreateEngine returns without making an
-// engine: WhatsApp's voice note recorder took the 0 it happened to return for
-// success and called through the engine it did not get.
+// a4l's libOpenSLES.so: an OpenSL ES engine with an audio recorder and an
+// audio player over a4l's own. TARGET code, compiled for bionic. Android's
+// libOpenSLES talks to AudioFlinger over Binder; there is neither here. The
+// library used to be the NDK's link stub, whose slCreateEngine returns without
+// making an engine: WhatsApp's voice note recorder took the 0 it happened to
+// return for success and called through the engine it did not get.
 //
 // What there is:
 // - An engine object, with SL_IID_ENGINE.
@@ -19,18 +19,29 @@
 //   own fills the app's buffers in the order they were queued and calls the
 //   queue's callback after each. The PCM comes from the host through
 //   acl_audio_in_ops (libandroid.so).
-// - An output mix object, which apps make with the engine before anything
-//   else. Nothing plays through it.
+// - An audio player: 16-bit or float PCM from a buffer queue to an output
+//   mix, with SL_IID_PLAY, the buffer queue under either name, SL_IID_VOLUME
+//   and SL_IID_ANDROIDCONFIGURATION. A thread of the player's own takes the
+//   app's buffers in the order queued, hands them to the host through
+//   acl_audio_out_ops (libandroid.so) as 16-bit at the player's volume, and
+//   calls the queue's callback after each. The host's output blocks while it
+//   is full, which is what paces the callbacks.
+// - An output mix object, which a player names as its sink. Every player
+//   goes to the one host output device whichever mix it names.
 //
 // What there is not:
-// - An audio player. CreateAudioPlayer fails with
-//   SL_RESULT_FEATURE_UNSUPPORTED, as do the other Create calls.
-// - Recording in anything but 16-bit PCM; markers, position updates and the
-//   duration limit (stored and reported back, no event is sent); asynchronous
-//   Realize; effects; every other interface.
-// - The interface IDs' values. An ID is compared by address, here and in apps;
-//   the 16 bytes behind each are distinct and are not the ones Khronos
-//   assigned.
+// - A player of anything but PCM from a buffer queue: a URI, a file
+//   descriptor or an encoded format fails with SL_RESULT_CONTENT_UNSUPPORTED.
+//   The other Create calls fail with SL_RESULT_FEATURE_UNSUPPORTED.
+// - Recording in anything but 16-bit PCM; 8-bit, 24-bit and 32-bit integer
+//   PCM either way.
+// - Markers, position updates and the duration limit (stored and reported
+//   back, no event is sent); stereo position; asynchronous Realize; effects;
+//   every other interface.
+// - A pause that keeps what the host had queued: pausing or stopping a player
+//   drops it, a few tens of milliseconds the player counts as played.
+// - The interface IDs' values. This library compares an ID by address; the 16
+//   bytes behind each are distinct and are not the ones Khronos assigned.
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -42,12 +53,14 @@
 #include <SLES/OpenSLES_Android.h>
 
 #include "acl_audio_in.h"
+#include "acl_audio_out.h"
 
 #define ACL_EXPORT __attribute__((visibility("default")))
 
 // In libandroid.so: the host's input calls, or NULL where there is no host
 // audio (a build without it).
 extern const struct acl_audio_in_ops* acl_audio_in_ops;
+extern const struct acl_audio_out_ops* acl_audio_out_ops;
 
 // ---- interface IDs ----------------------------------------------------------
 
@@ -114,16 +127,18 @@ ACL_IID(VOLUME, 0x47b16bfe, 0x298f, 0x88fd, 0xa5ab, 0xe4, 0x9d, 0x04, 0x64, 0xcf
 
 // ---- objects ----------------------------------------------------------------
 
-enum AclKind { kEngine, kOutputMix, kRecorder };
+enum AclKind { kEngine, kOutputMix, kRecorder, kPlayer };
 
 enum {
   kMinRate = 4000,
   kMaxRate = 192000,
   kMaxChannels = 8,
   kMaxQueued = 256,
-  // Frames asked of the host at a time: a read ends within this much of a
-  // stop, and a buffer larger than it is filled in steps.
+  // Frames asked of or handed to the host at a time: a read or a write ends
+  // within this much of a stop, and a larger buffer is done in steps.
   kMaxReadMs = 20,
+  // Below this many millibels nothing is left of a 16-bit sample.
+  kSilentMillibel = -9600,
 };
 
 struct AclObject;
@@ -150,34 +165,46 @@ struct AclObject {
   struct AclItf engine;
   struct AclItf output_mix;
   struct AclItf record;
+  struct AclItf play;
+  struct AclItf volume;
   struct AclItf queue;
   struct AclItf config;
   bool has_queue;
   bool has_config;
+  bool has_volume;
 
-  // A recorder.
+  // A recorder or a player.
   int rate;
   int channels;
+  bool is_float;         // a player's samples are 32-bit float, not 16-bit
+  uint32_t frame_bytes;  // one frame as the app has it
   uint32_t max_buffers;
-  void* in;  // the host's input, from Realize
+  void* in;          // a recorder: the host's input, from Realize
+  void* out;         // a player: the host's output, from Realize
+  int16_t* scratch;  // a player: one write's worth, as the host takes it
 
   pthread_mutex_t lock;  // everything below
   pthread_cond_t changed;
   SLuint32 record_state;  // SL_RECORDSTATE_*
+  SLuint32 play_state;    // SL_PLAYSTATE_*
+  SLmillibel level;       // a player's volume, 0 or less
+  bool mute;
   bool thread_running;
   bool thread_stop;
   pthread_t thread;
   struct AclBuffer buffers[kMaxQueued];  // a ring
   uint32_t head;
   uint32_t count;
-  uint32_t filled;      // bytes of the head buffer filled
-  uint32_t generation;  // bumped by Clear
+  uint32_t filled;      // bytes of the head buffer filled or played
+  uint32_t generation;  // bumped by Clear, and by a player's stop
   uint32_t completed;   // buffers handed back
-  uint64_t frames;      // frames recorded
+  uint64_t frames;      // frames recorded or played
   slAndroidSimpleBufferQueueCallback queue_cb;
   void* queue_ctx;
   slRecordCallback record_cb;
   void* record_ctx;
+  slPlayCallback play_cb;
+  void* play_ctx;
   SLuint32 event_mask;
   SLmillisecond marker;
   SLmillisecond period;
@@ -193,13 +220,24 @@ static struct AclObject* acl_of_kind(const void* itf, enum AclKind kind) {
   return o != NULL && o->kind == kind ? o : NULL;
 }
 
+// A buffer queue's owner: a recorder or a player.
+static struct AclObject* acl_queue_owner(const void* itf) {
+  struct AclObject* o = acl_owner(itf);
+  return o != NULL && (o->kind == kRecorder || o->kind == kPlayer) ? o : NULL;
+}
+
+// Frames per read or write: kMaxReadMs of them.
+static int acl_step_frames(const struct AclObject* o) {
+  const int n = o->rate * kMaxReadMs / 1000;
+  return n > 0 ? n : 1;
+}
+
 // ---- the recorder's thread --------------------------------------------------
 
 static void* acl_record_thread(void* arg) {
   struct AclObject* o = (struct AclObject*)arg;
-  const uint32_t frame_bytes = (uint32_t)o->channels * 2U;
-  const int max_frames =
-      o->rate * kMaxReadMs / 1000 > 0 ? o->rate * kMaxReadMs / 1000 : 1;
+  const uint32_t frame_bytes = o->frame_bytes;
+  const int max_frames = acl_step_frames(o);
   pthread_mutex_lock(&o->lock);
   for (;;) {
     while (!o->thread_stop &&
@@ -395,16 +433,352 @@ static const struct SLRecordItf_ kRecordVt = {
     .GetPositionUpdatePeriod = acl_get_period,
 };
 
+// ---- the player's thread ----------------------------------------------------
+
+// A volume in millibels as a factor in Q15: a decibel at a time, then the
+// rest of one in a straight line. No libm here.
+static int32_t acl_gain_q15(SLmillibel level) {
+  if (level >= 0)
+    return 1 << 15;
+  if (level <= kSilentMillibel)
+    return 0;
+  int32_t gain = 1 << 15;
+  const int db = -level / 100;
+  for (int i = 0; i < db; i++)
+    gain = (int32_t)(((int64_t)gain * 58409) >> 16);  // 10^(-1/20) in Q16
+  const int rest = -level % 100;
+  const int32_t next = (int32_t)(((int64_t)gain * 58409) >> 16);
+  return gain - (gain - next) * rest / 100;
+}
+
+// `frames` frames of the app's samples into the scratch buffer, as 16-bit at
+// `gain`.
+static void acl_to_host(const struct AclObject* o,
+                        const uint8_t* data,
+                        int frames,
+                        int32_t gain) {
+  const size_t n = (size_t)frames * (size_t)o->channels;
+  for (size_t i = 0; i < n; i++) {
+    int32_t v;
+    if (o->is_float) {
+      float f;
+      memcpy(&f, data + i * 4, 4);
+      f *= 32768.0f;
+      if (!(f > -32768.0f))  // also NaN
+        f = -32768.0f;
+      else if (f > 32767.0f)
+        f = 32767.0f;
+      v = (int32_t)f;
+    } else {
+      int16_t x;
+      memcpy(&x, data + i * 2, 2);
+      v = x;
+    }
+    o->scratch[i] = (int16_t)((v * gain) >> 15);
+  }
+}
+
+static void* acl_play_thread(void* arg) {
+  struct AclObject* o = (struct AclObject*)arg;
+  const uint32_t frame_bytes = o->frame_bytes;
+  const int max_frames = acl_step_frames(o);
+  pthread_mutex_lock(&o->lock);
+  for (;;) {
+    while (!o->thread_stop &&
+           (o->play_state != SL_PLAYSTATE_PLAYING || o->count == 0))
+      pthread_cond_wait(&o->changed, &o->lock);
+    if (o->thread_stop)
+      break;
+    const struct AclBuffer buf = o->buffers[o->head];
+    const uint32_t generation = o->generation;
+    const uint32_t at = o->filled;
+    int want = (int)((buf.bytes - at) / frame_bytes);
+    if (want > max_frames)
+      want = max_frames;
+    const int32_t gain = o->mute ? 0 : acl_gain_q15(o->level);
+    pthread_mutex_unlock(&o->lock);
+
+    // The buffer is the app's until its callback, and Clear does not wait for
+    // this: an app that clears a queue and frees its buffers while playing
+    // must stop the player first.
+    acl_to_host(o, buf.data + at, want, gain);
+    const int got = acl_audio_out_ops->write(o->out, o->scratch, want);
+    if (got <= 0) {
+      // Paused or stopped under us, or the output is gone. Not a spin on a
+      // dead output.
+      const struct timespec nap = {0, 2 * 1000 * 1000};
+      nanosleep(&nap, NULL);
+    }
+
+    pthread_mutex_lock(&o->lock);
+    if (got <= 0 || generation != o->generation)
+      continue;
+    o->frames += (uint64_t)got;
+    o->filled += (uint32_t)got * frame_bytes;
+    if (o->filled < buf.bytes)
+      continue;
+    o->head = (o->head + 1) % kMaxQueued;
+    o->count--;
+    o->filled = 0;
+    o->completed++;
+    const slAndroidSimpleBufferQueueCallback cb = o->queue_cb;
+    void* ctx = o->queue_ctx;
+    pthread_mutex_unlock(&o->lock);
+    if (cb != NULL)
+      cb((SLAndroidSimpleBufferQueueItf)&o->queue.vt, ctx);
+    pthread_mutex_lock(&o->lock);
+  }
+  pthread_mutex_unlock(&o->lock);
+  return NULL;
+}
+
+// ---- SLPlayItf --------------------------------------------------------------
+
+static SLresult acl_set_play_state(SLPlayItf self, SLuint32 state) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL || o->out == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  if (state != SL_PLAYSTATE_STOPPED && state != SL_PLAYSTATE_PAUSED &&
+      state != SL_PLAYSTATE_PLAYING)
+    return SL_RESULT_PARAMETER_INVALID;
+  if (state == SL_PLAYSTATE_PLAYING) {
+    acl_audio_out_ops->start(o->out);
+    pthread_mutex_lock(&o->lock);
+    o->play_state = state;
+    pthread_cond_broadcast(&o->changed);
+    pthread_mutex_unlock(&o->lock);
+    return SL_RESULT_SUCCESS;
+  }
+  pthread_mutex_lock(&o->lock);
+  const bool was_playing = o->play_state == SL_PLAYSTATE_PLAYING;
+  o->play_state = state;
+  if (state == SL_PLAYSTATE_STOPPED) {
+    // Back to the start of the buffer being played.
+    o->filled = 0;
+    o->generation++;
+  }
+  pthread_mutex_unlock(&o->lock);
+  if (was_playing)
+    acl_audio_out_ops->stop(o->out);  // lets go the thread's write
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_get_play_state(SLPlayItf self, SLuint32* state) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL || state == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  pthread_mutex_lock(&o->lock);
+  *state = o->play_state;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+
+// A buffer queue has no end to measure to.
+static SLresult acl_get_duration(SLPlayItf self, SLmillisecond* ms) {
+  if (acl_of_kind(self, kPlayer) == NULL || ms == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  *ms = SL_TIME_UNKNOWN;
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_get_play_position(SLPlayItf self, SLmillisecond* ms) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL || ms == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  pthread_mutex_lock(&o->lock);
+  *ms = (SLmillisecond)(o->frames * 1000U / (uint64_t)o->rate);
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_play_register_callback(SLPlayItf self,
+                                           slPlayCallback cb,
+                                           void* ctx) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  pthread_mutex_lock(&o->lock);
+  o->play_cb = cb;
+  o->play_ctx = ctx;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_play_set_event_mask(SLPlayItf self, SLuint32 flags) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  pthread_mutex_lock(&o->lock);
+  o->event_mask = flags;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_play_get_event_mask(SLPlayItf self, SLuint32* flags) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL || flags == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  pthread_mutex_lock(&o->lock);
+  *flags = o->event_mask;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_play_set_marker(SLPlayItf self, SLmillisecond ms) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  pthread_mutex_lock(&o->lock);
+  o->marker = ms;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_play_clear_marker(SLPlayItf self) {
+  return acl_play_set_marker(self, SL_TIME_UNKNOWN);
+}
+
+static SLresult acl_play_get_marker(SLPlayItf self, SLmillisecond* ms) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL || ms == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  pthread_mutex_lock(&o->lock);
+  *ms = o->marker;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_play_set_period(SLPlayItf self, SLmillisecond ms) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL || ms == 0)
+    return SL_RESULT_PARAMETER_INVALID;
+  pthread_mutex_lock(&o->lock);
+  o->period = ms;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_play_get_period(SLPlayItf self, SLmillisecond* ms) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL || ms == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  pthread_mutex_lock(&o->lock);
+  *ms = o->period;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+
+static const struct SLPlayItf_ kPlayVt = {
+    .SetPlayState = acl_set_play_state,
+    .GetPlayState = acl_get_play_state,
+    .GetDuration = acl_get_duration,
+    .GetPosition = acl_get_play_position,
+    .RegisterCallback = acl_play_register_callback,
+    .SetCallbackEventsMask = acl_play_set_event_mask,
+    .GetCallbackEventsMask = acl_play_get_event_mask,
+    .SetMarkerPosition = acl_play_set_marker,
+    .ClearMarkerPosition = acl_play_clear_marker,
+    .GetMarkerPosition = acl_play_get_marker,
+    .SetPositionUpdatePeriod = acl_play_set_period,
+    .GetPositionUpdatePeriod = acl_play_get_period,
+};
+
+// ---- SLVolumeItf ------------------------------------------------------------
+
+static SLresult acl_set_volume(SLVolumeItf self, SLmillibel level) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL || level > 0)
+    return SL_RESULT_PARAMETER_INVALID;
+  pthread_mutex_lock(&o->lock);
+  o->level = level;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_get_volume(SLVolumeItf self, SLmillibel* level) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL || level == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  pthread_mutex_lock(&o->lock);
+  *level = o->level;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_get_max_volume(SLVolumeItf self, SLmillibel* level) {
+  if (acl_of_kind(self, kPlayer) == NULL || level == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  *level = 0;
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_set_mute(SLVolumeItf self, SLboolean mute) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  pthread_mutex_lock(&o->lock);
+  o->mute = mute != SL_BOOLEAN_FALSE;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_get_mute(SLVolumeItf self, SLboolean* mute) {
+  struct AclObject* o = acl_of_kind(self, kPlayer);
+  if (o == NULL || mute == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  pthread_mutex_lock(&o->lock);
+  *mute = o->mute ? SL_BOOLEAN_TRUE : SL_BOOLEAN_FALSE;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_enable_stereo_position(SLVolumeItf self, SLboolean on) {
+  if (acl_of_kind(self, kPlayer) == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  return on ? SL_RESULT_FEATURE_UNSUPPORTED : SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_is_stereo_position(SLVolumeItf self, SLboolean* on) {
+  if (acl_of_kind(self, kPlayer) == NULL || on == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  *on = SL_BOOLEAN_FALSE;
+  return SL_RESULT_SUCCESS;
+}
+
+static SLresult acl_set_stereo_position(SLVolumeItf self, SLpermille at) {
+  (void)at;
+  return acl_of_kind(self, kPlayer) != NULL ? SL_RESULT_FEATURE_UNSUPPORTED
+                                            : SL_RESULT_PARAMETER_INVALID;
+}
+
+static SLresult acl_get_stereo_position(SLVolumeItf self, SLpermille* at) {
+  if (acl_of_kind(self, kPlayer) == NULL || at == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  *at = 0;
+  return SL_RESULT_SUCCESS;
+}
+
+static const struct SLVolumeItf_ kVolumeVt = {
+    .SetVolumeLevel = acl_set_volume,
+    .GetVolumeLevel = acl_get_volume,
+    .GetMaxVolumeLevel = acl_get_max_volume,
+    .SetMute = acl_set_mute,
+    .GetMute = acl_get_mute,
+    .EnableStereoPosition = acl_enable_stereo_position,
+    .IsEnabledStereoPosition = acl_is_stereo_position,
+    .SetStereoPosition = acl_set_stereo_position,
+    .GetStereoPosition = acl_get_stereo_position,
+};
+
 // ---- SLAndroidSimpleBufferQueueItf ------------------------------------------
 
 static SLresult acl_enqueue(SLAndroidSimpleBufferQueueItf self,
                             const void* buffer,
                             SLuint32 size) {
-  struct AclObject* o = acl_of_kind(self, kRecorder);
+  struct AclObject* o = acl_queue_owner(self);
   if (o == NULL || buffer == NULL)
     return SL_RESULT_PARAMETER_INVALID;
-  const uint32_t frame_bytes = (uint32_t)o->channels * 2U;
-  const uint32_t bytes = size - size % frame_bytes;
+  const uint32_t bytes = size - size % o->frame_bytes;
   if (bytes == 0)
     return SL_RESULT_PARAMETER_INVALID;
   SLresult r = SL_RESULT_SUCCESS;
@@ -413,7 +787,8 @@ static SLresult acl_enqueue(SLAndroidSimpleBufferQueueItf self,
     r = SL_RESULT_BUFFER_INSUFFICIENT;
   } else {
     struct AclBuffer* b = &o->buffers[(o->head + o->count) % kMaxQueued];
-    // A recorder writes what the header calls a const buffer.
+    // A recorder writes what the header calls a const buffer; a player only
+    // reads it.
     b->data = (uint8_t*)(uintptr_t)buffer;
     b->bytes = bytes;
     o->count++;
@@ -424,7 +799,7 @@ static SLresult acl_enqueue(SLAndroidSimpleBufferQueueItf self,
 }
 
 static SLresult acl_queue_clear(SLAndroidSimpleBufferQueueItf self) {
-  struct AclObject* o = acl_of_kind(self, kRecorder);
+  struct AclObject* o = acl_queue_owner(self);
   if (o == NULL)
     return SL_RESULT_PARAMETER_INVALID;
   pthread_mutex_lock(&o->lock);
@@ -437,7 +812,7 @@ static SLresult acl_queue_clear(SLAndroidSimpleBufferQueueItf self) {
 
 static SLresult acl_queue_state(SLAndroidSimpleBufferQueueItf self,
                                 SLAndroidSimpleBufferQueueState* state) {
-  struct AclObject* o = acl_of_kind(self, kRecorder);
+  struct AclObject* o = acl_queue_owner(self);
   if (o == NULL || state == NULL)
     return SL_RESULT_PARAMETER_INVALID;
   pthread_mutex_lock(&o->lock);
@@ -451,7 +826,7 @@ static SLresult acl_queue_register_callback(
     SLAndroidSimpleBufferQueueItf self,
     slAndroidSimpleBufferQueueCallback cb,
     void* ctx) {
-  struct AclObject* o = acl_of_kind(self, kRecorder);
+  struct AclObject* o = acl_queue_owner(self);
   if (o == NULL)
     return SL_RESULT_PARAMETER_INVALID;
   pthread_mutex_lock(&o->lock);
@@ -578,6 +953,23 @@ static SLresult acl_realize(SLObjectItf self, SLboolean async) {
     }
     o->thread_running = true;
   }
+  if (o->kind == kPlayer) {
+    if (acl_audio_out_ops == NULL)
+      return SL_RESULT_RESOURCE_ERROR;
+    o->scratch = (int16_t*)malloc((size_t)acl_step_frames(o) *
+                                  (size_t)o->channels * sizeof(int16_t));
+    if (o->scratch == NULL)
+      return SL_RESULT_MEMORY_FAILURE;
+    o->out = acl_audio_out_ops->open(o->rate, o->channels);
+    if (o->out == NULL)
+      return SL_RESULT_RESOURCE_ERROR;
+    if (pthread_create(&o->thread, NULL, acl_play_thread, o) != 0) {
+      acl_audio_out_ops->close(o->out);
+      o->out = NULL;
+      return SL_RESULT_RESOURCE_ERROR;
+    }
+    o->thread_running = true;
+  }
   o->state = SL_OBJECT_STATE_REALIZED;
   return SL_RESULT_SUCCESS;
 }
@@ -619,10 +1011,13 @@ static SLresult acl_get_interface(SLObjectItf self,
     itf = &o->output_mix;
   else if (o->kind == kRecorder && iid == SL_IID_RECORD)
     itf = &o->record;
-  else if (o->kind == kRecorder && o->has_queue && acl_is_queue_iid(iid))
+  else if (o->kind == kPlayer && iid == SL_IID_PLAY)
+    itf = &o->play;
+  else if (o->kind == kPlayer && o->has_volume && iid == SL_IID_VOLUME)
+    itf = &o->volume;
+  else if (o->has_queue && acl_is_queue_iid(iid))
     itf = &o->queue;
-  else if (o->kind == kRecorder && o->has_config &&
-           iid == SL_IID_ANDROIDCONFIGURATION)
+  else if (o->has_config && iid == SL_IID_ANDROIDCONFIGURATION)
     itf = &o->config;
   if (itf == NULL)
     return SL_RESULT_FEATURE_UNSUPPORTED;
@@ -645,8 +1040,8 @@ static void acl_abort_async(SLObjectItf self) {
   (void)self;
 }
 
-// Not from the recorder's own callback: this waits for the thread that is
-// making it.
+// Not from the object's own buffer queue callback: this waits for the thread
+// that is making it.
 static void acl_destroy(SLObjectItf self) {
   struct AclObject* o = acl_owner(self);
   if (o == NULL)
@@ -663,6 +1058,19 @@ static void acl_destroy(SLObjectItf self) {
       pthread_join(o->thread, NULL);
     acl_audio_in_ops->close(o->in);
   }
+  if (o->kind == kPlayer && o->out != NULL) {
+    pthread_mutex_lock(&o->lock);
+    o->play_state = SL_PLAYSTATE_STOPPED;
+    o->thread_stop = true;
+    pthread_cond_broadcast(&o->changed);
+    const bool running = o->thread_running;
+    pthread_mutex_unlock(&o->lock);
+    acl_audio_out_ops->stop(o->out);
+    if (running && !pthread_equal(pthread_self(), o->thread))
+      pthread_join(o->thread, NULL);
+    acl_audio_out_ops->close(o->out);
+  }
+  free(o->scratch);
   pthread_cond_destroy(&o->changed);
   pthread_mutex_destroy(&o->lock);
   free(o);
@@ -723,11 +1131,15 @@ static struct AclObject* acl_new_object(enum AclKind kind) {
   o->engine.vt = &kEngineVt;
   o->output_mix.vt = &kOutputMixVt;
   o->record.vt = &kRecordVt;
+  o->play.vt = &kPlayVt;
+  o->volume.vt = &kVolumeVt;
   o->queue.vt = &kQueueVt;
   o->config.vt = &kConfigVt;
   o->object.owner = o->engine.owner = o->output_mix.owner = o;
   o->record.owner = o->queue.owner = o->config.owner = o;
+  o->play.owner = o->volume.owner = o;
   o->record_state = SL_RECORDSTATE_STOPPED;
+  o->play_state = SL_PLAYSTATE_STOPPED;
   o->marker = SL_TIME_UNKNOWN;
   o->period = 1000;
   o->limit = SL_TIME_UNKNOWN;
@@ -756,6 +1168,17 @@ static SLresult acl_take_interfaces(struct AclObject* o,
         known = true;
       } else if (acl_is_queue_iid(iid)) {
         known = o->has_queue = true;
+      } else if (iid == SL_IID_ANDROIDCONFIGURATION) {
+        known = o->has_config = true;
+      }
+    }
+    if (o->kind == kPlayer) {
+      if (iid == SL_IID_PLAY) {
+        known = true;
+      } else if (acl_is_queue_iid(iid)) {
+        known = o->has_queue = true;
+      } else if (iid == SL_IID_VOLUME) {
+        known = o->has_volume = true;
       } else if (iid == SL_IID_ANDROIDCONFIGURATION) {
         known = o->has_config = true;
       }
@@ -818,6 +1241,7 @@ static SLresult acl_create_audio_recorder(SLEngineItf self,
     return SL_RESULT_MEMORY_FAILURE;
   o->rate = (int)(pcm->samplesPerSec / 1000U);
   o->channels = (int)pcm->numChannels;
+  o->frame_bytes = (uint32_t)o->channels * 2U;
   o->max_buffers = queue->numBuffers;
   // The sink is a buffer queue, so the recorder has one whether or not the
   // app also lists the interface.
@@ -869,22 +1293,74 @@ static SLresult acl_no_device(SLEngineItf self,
   return SL_RESULT_FEATURE_UNSUPPORTED;
 }
 
-static SLresult acl_no_audio_player(SLEngineItf self,
-                                    SLObjectItf* player,
-                                    SLDataSource* source,
-                                    SLDataSink* sink,
-                                    SLuint32 count,
-                                    const SLInterfaceID* ids,
-                                    const SLboolean* required) {
-  (void)self;
-  (void)source;
-  (void)sink;
-  (void)count;
-  (void)ids;
-  (void)required;
-  if (player != NULL)
-    *player = NULL;
-  return SL_RESULT_FEATURE_UNSUPPORTED;
+// PCM from a buffer queue to an output mix.
+static SLresult acl_create_audio_player(SLEngineItf self,
+                                        SLObjectItf* player,
+                                        SLDataSource* source,
+                                        SLDataSink* sink,
+                                        SLuint32 count,
+                                        const SLInterfaceID* ids,
+                                        const SLboolean* required) {
+  if (player == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+  *player = NULL;
+  if (acl_of_kind(self, kEngine) == NULL || source == NULL || sink == NULL ||
+      source->pLocator == NULL || sink->pLocator == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+
+  // Every locator starts with its type.
+  const SLDataLocator_AndroidSimpleBufferQueue* queue =
+      (const SLDataLocator_AndroidSimpleBufferQueue*)source->pLocator;
+  if (queue->locatorType != SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE &&
+      queue->locatorType != SL_DATALOCATOR_BUFFERQUEUE)
+    return SL_RESULT_CONTENT_UNSUPPORTED;
+  if (source->pFormat == NULL || queue->numBuffers == 0 ||
+      queue->numBuffers > kMaxQueued)
+    return SL_RESULT_PARAMETER_INVALID;
+  const SLDataLocator_OutputMix* mix =
+      (const SLDataLocator_OutputMix*)sink->pLocator;
+  if (mix->locatorType != SL_DATALOCATOR_OUTPUTMIX)
+    return SL_RESULT_CONTENT_UNSUPPORTED;
+  if (acl_of_kind(mix->outputMix, kOutputMix) == NULL)
+    return SL_RESULT_PARAMETER_INVALID;
+
+  const SLDataFormat_PCM* pcm = (const SLDataFormat_PCM*)source->pFormat;
+  bool is_float = false;
+  if (pcm->formatType == SL_ANDROID_DATAFORMAT_PCM_EX) {
+    const SLAndroidDataFormat_PCM_EX* ex =
+        (const SLAndroidDataFormat_PCM_EX*)source->pFormat;
+    if (ex->representation == SL_ANDROID_PCM_REPRESENTATION_FLOAT)
+      is_float = true;
+    else if (ex->representation != SL_ANDROID_PCM_REPRESENTATION_SIGNED_INT)
+      return SL_RESULT_CONTENT_UNSUPPORTED;
+  } else if (pcm->formatType != SL_DATAFORMAT_PCM) {
+    return SL_RESULT_CONTENT_UNSUPPORTED;
+  }
+  const SLuint32 bits = is_float ? 32U : 16U;
+  if (pcm->bitsPerSample != bits || pcm->containerSize != bits ||
+      pcm->endianness != SL_BYTEORDER_LITTLEENDIAN)
+    return SL_RESULT_CONTENT_UNSUPPORTED;
+  if (pcm->numChannels < 1 || pcm->numChannels > kMaxChannels ||
+      pcm->samplesPerSec < (SLuint32)kMinRate * 1000U ||
+      pcm->samplesPerSec > (SLuint32)kMaxRate * 1000U)
+    return SL_RESULT_CONTENT_UNSUPPORTED;
+
+  struct AclObject* o = acl_new_object(kPlayer);
+  if (o == NULL)
+    return SL_RESULT_MEMORY_FAILURE;
+  o->rate = (int)(pcm->samplesPerSec / 1000U);
+  o->channels = (int)pcm->numChannels;
+  o->is_float = is_float;
+  o->frame_bytes = (uint32_t)o->channels * (bits / 8U);
+  o->max_buffers = queue->numBuffers;
+  o->has_queue = true;  // the source is one
+  const SLresult r = acl_take_interfaces(o, count, ids, required);
+  if (r != SL_RESULT_SUCCESS) {
+    acl_destroy((SLObjectItf)&o->object.vt);
+    return r;
+  }
+  *player = (SLObjectItf)&o->object.vt;
+  return SL_RESULT_SUCCESS;
 }
 
 static SLresult acl_no_midi_player(SLEngineItf self,
@@ -960,7 +1436,7 @@ static SLresult acl_no_extension_object(SLEngineItf self,
 }
 
 // The interfaces of each kind of object, for the two Query calls.
-static SLuint32 acl_supported(SLuint32 object_id, SLInterfaceID out[4]) {
+static SLuint32 acl_supported(SLuint32 object_id, SLInterfaceID out[5]) {
   switch (object_id) {
     case SL_OBJECTID_ENGINE:
       out[0] = SL_IID_OBJECT;
@@ -976,6 +1452,13 @@ static SLuint32 acl_supported(SLuint32 object_id, SLInterfaceID out[4]) {
       out[2] = SL_IID_ANDROIDSIMPLEBUFFERQUEUE;
       out[3] = SL_IID_ANDROIDCONFIGURATION;
       return 4;
+    case SL_OBJECTID_AUDIOPLAYER:
+      out[0] = SL_IID_OBJECT;
+      out[1] = SL_IID_PLAY;
+      out[2] = SL_IID_ANDROIDSIMPLEBUFFERQUEUE;
+      out[3] = SL_IID_VOLUME;
+      out[4] = SL_IID_ANDROIDCONFIGURATION;
+      return 5;
     default:
       return 0;
   }
@@ -984,7 +1467,7 @@ static SLuint32 acl_supported(SLuint32 object_id, SLInterfaceID out[4]) {
 static SLresult acl_query_num_interfaces(SLEngineItf self,
                                          SLuint32 object_id,
                                          SLuint32* count) {
-  SLInterfaceID ids[4];
+  SLInterfaceID ids[5];
   if (acl_of_kind(self, kEngine) == NULL || count == NULL)
     return SL_RESULT_PARAMETER_INVALID;
   *count = acl_supported(object_id, ids);
@@ -995,7 +1478,7 @@ static SLresult acl_query_interface(SLEngineItf self,
                                     SLuint32 object_id,
                                     SLuint32 index,
                                     SLInterfaceID* iid) {
-  SLInterfaceID ids[4];
+  SLInterfaceID ids[5];
   if (acl_of_kind(self, kEngine) == NULL || iid == NULL)
     return SL_RESULT_PARAMETER_INVALID;
   const SLuint32 n = acl_supported(object_id, ids);
@@ -1037,7 +1520,7 @@ static SLresult acl_is_extension_supported(SLEngineItf self,
 static const struct SLEngineItf_ kEngineVt = {
     .CreateLEDDevice = acl_no_device,
     .CreateVibraDevice = acl_no_device,
-    .CreateAudioPlayer = acl_no_audio_player,
+    .CreateAudioPlayer = acl_create_audio_player,
     .CreateAudioRecorder = acl_create_audio_recorder,
     .CreateMidiPlayer = acl_no_midi_player,
     .CreateListener = acl_no_listener,
