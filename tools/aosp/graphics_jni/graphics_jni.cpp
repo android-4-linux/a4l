@@ -6065,7 +6065,7 @@ jobject decode_encoded_to_bitmap(JNIEnv* env,
     return nullptr;
   const SkImageInfo srcInfo = acodec->getInfo();
   int sampleSize = 1;
-  bool justBounds = false, wantMutable = false;
+  bool justBounds = false, wantMutable = false, wantAlpha8 = false;
   if (options != nullptr) {
     jclass oc = env->GetObjectClass(options);
     if (jfieldID f = env->GetFieldID(oc, "inJustDecodeBounds", "Z"))
@@ -6077,6 +6077,16 @@ jobject decode_encoded_to_bitmap(JNIEnv* env,
     }
     if (jfieldID f = env->GetFieldID(oc, "inMutable", "Z"))
       wantMutable = env->GetBooleanField(options, f) == JNI_TRUE;
+    if (jfieldID f = env->GetFieldID(oc, "inPreferredConfig",
+                                     "Landroid/graphics/Bitmap$Config;")) {
+      if (jobject cfg = env->GetObjectField(options, f)) {
+        jclass cc = env->GetObjectClass(cfg);
+        if (jfieldID nf = env->GetFieldID(cc, "nativeInt", "I"))
+          wantAlpha8 = env->GetIntField(cfg, nf) == 1;  // Config.ALPHA_8
+        env->DeleteLocalRef(cc);
+        env->DeleteLocalRef(cfg);
+      }
+    }
     if (jfieldID f = env->GetFieldID(oc, "outWidth", "I"))
       env->SetIntField(options, f, srcInfo.width());
     if (jfieldID f = env->GetFieldID(oc, "outHeight", "I"))
@@ -6087,11 +6097,21 @@ jobject decode_encoded_to_bitmap(JNIEnv* env,
   if (justBounds)
     return nullptr;  // caller only wanted out{Width,Height}
   const SkISize dim = acodec->getSampledDimensions(sampleSize);
-  const SkImageInfo info = srcInfo.makeWH(dim.width(), dim.height())
-                               .makeColorType(kN32_SkColorType)
-                               .makeAlphaType(kPremul_SkAlphaType);
+  // A grayscale image asked for as ALPHA_8 decodes to one, its gray levels
+  // the alpha, as Android does: apps ship tint masks this way. Any other
+  // image ignores the preference and decodes to 32 bits.
+  const bool gray =
+      wantAlpha8 && acodec->computeOutputColorType(kAlpha_8_SkColorType) ==
+                        kGray_8_SkColorType;
+  const SkImageInfo sized = srcInfo.makeWH(dim.width(), dim.height());
+  const SkImageInfo info = gray ? sized.makeColorType(kGray_8_SkColorType)
+                                      .makeAlphaType(kOpaque_SkAlphaType)
+                                : sized.makeColorType(kN32_SkColorType)
+                                      .makeAlphaType(kPremul_SkAlphaType);
   auto* w = new AclBitmap();
-  if (!w->bitmap.tryAllocPixels(info)) {
+  if (!w->bitmap.tryAllocPixels(gray ? info.makeColorType(kAlpha_8_SkColorType)
+                                           .makeAlphaType(kPremul_SkAlphaType)
+                                     : info)) {
     delete w;
     return nullptr;
   }

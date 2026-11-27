@@ -52,6 +52,7 @@ CHECKS = [
     "SERVICE: bitmap copied through buffers=true",
     "SERVICE: extract alpha ALPHA_8 8x8 alpha 128/0 blurred larger true offset negative true"
     " spread true",
+    "SERVICE: gray png as mask ALPHA_8 2x1 alpha 64/192 plain ARGB_8888 ff404040",
     "SERVICE: mask filter blurred=true",
     "SERVICE: accounts stored=true token dropped=true removed=true",
     "SERVICE: absent property not found=true legacy storage=",

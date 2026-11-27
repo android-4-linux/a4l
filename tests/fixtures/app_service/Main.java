@@ -182,6 +182,32 @@ public class Main extends Activity {
         log("extract alpha " + alphaOf);
         expect(alphaOf.equals("ALPHA_8 8x8 alpha 128/0 blurred larger true offset negative true"
                 + " spread true"), "Bitmap.extractAlpha: " + alphaOf);
+        // A grayscale PNG asked for as ALPHA_8 decodes to one, its gray levels the alpha: a
+        // tint mask. Without the preference it is an opaque gray ARGB_8888.
+        final byte[] grayPng = {-119, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+                0, 0, 0, 2, 0, 0, 0, 1, 8, 0, 0, 0, 0, -47, 73, 32, 86, 0, 0, 0, 11, 73, 68, 65,
+                84, 120, -100, 99, 112, 56, 0, 0, 1, 67, 1, 1, 5, 17, 119, 124, 0, 0, 0, 0, 73,
+                69, 78, 68, -82, 66, 96, -126};
+        String mask;
+        try {
+            final android.graphics.BitmapFactory.Options asAlpha =
+                    new android.graphics.BitmapFactory.Options();
+            asAlpha.inPreferredConfig = android.graphics.Bitmap.Config.ALPHA_8;
+            final android.graphics.Bitmap m = android.graphics.BitmapFactory.decodeByteArray(
+                    grayPng, 0, grayPng.length, asAlpha);
+            final android.graphics.Bitmap plain = android.graphics.BitmapFactory.decodeByteArray(
+                    grayPng, 0, grayPng.length);
+            mask = m.getConfig() + " " + m.getWidth() + "x" + m.getHeight() + " alpha "
+                    + android.graphics.Color.alpha(m.getPixel(0, 0)) + "/"
+                    + android.graphics.Color.alpha(m.getPixel(1, 0)) + " plain "
+                    + plain.getConfig() + " " + Integer.toHexString(plain.getPixel(0, 0));
+        } catch (Throwable t) {
+            Log.w(TAG, "decode as ALPHA_8", t);
+            mask = t.toString();
+        }
+        log("gray png as mask " + mask);
+        expect(mask.equals("ALPHA_8 2x1 alpha 64/192 plain ARGB_8888 ff404040"),
+                "grayscale PNG decoded as ALPHA_8: " + mask);
         // A BlurMaskFilter on the paint: a square's edge spreads past where it was drawn, the
         // middle stays opaque, and a corner well away is untouched.
         final android.graphics.Bitmap soft = android.graphics.Bitmap.createBitmap(
