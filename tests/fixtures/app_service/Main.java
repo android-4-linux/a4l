@@ -100,6 +100,7 @@ public class Main extends Activity {
     protected void onPostResume() {
         super.onPostResume();
         launch.append('R');
+        if (launch.length() > 6) return;  // back from Cover, which afterCover reports
         // Activity.performCreate/Start/Resume and ActivityThread give this order.
         log("launch order " + launch);
         expect("acsCrR".contentEquals(launch), "launch order " + launch);
@@ -1075,8 +1076,9 @@ public class Main extends Activity {
         final int before = sDialogDraws;
         main.postDelayed(new Runnable() {
             @Override public void run() {
+                // Coming back, Main is started and resumed again: s, r and R after the launch.
                 log("dialog drawn=" + (shownDraws > 0) + " while covered=" + sCoveredDraws
-                        + " back=" + (sDialogDraws > before));
+                        + " back=" + (sDialogDraws > before) + " returned=" + launch.substring(6));
                 coverDialog.dismiss();
                 next();
             }
