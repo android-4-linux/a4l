@@ -77,6 +77,7 @@
 #include "ndk/native_bind.h"
 #include "ndk/webview_functor_vk.h"  // WebView AwDrawFn Vulkan functor %fs-bridge wrappers
 #include "pkg/apk.h"  // AAssetManager provider: read+inflate app assets from the APK
+#include "runtime/audio_record_jni.h"
 #include "runtime/audio_track_jni.h"  // the framework AudioTrack over audio::Track
 #include "runtime/debug_heap_jni.h"
 #include "runtime/framework_natives.h"
@@ -7385,6 +7386,7 @@ class ArtVm final : public JniVm {
     // android.media.ToneGenerator, likewise: an app that makes one (a dialer,
     // for its key tones) gets an UnsatisfiedLinkError from the constructor.
     register_tone_generator_natives(env);
+    register_audio_record_natives(env);
     // androidx.media3 / MediaSessionCompat build AudioAttributes from a legacy
     // stream type (setPlaybackToLocal ->
     // AudioAttributes.Builder.setLegacyStreamType), which consults

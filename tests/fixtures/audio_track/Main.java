@@ -50,6 +50,7 @@ public class Main extends Activity {
                     trackA();
                     trackB();
                     tone();
+                    record();
                     Log.i(TAG, "AT: done");
                     rc = 0;
                 } catch (Throwable e) {
@@ -160,6 +161,69 @@ public class Main extends Activity {
         tg.stopTone(); // after release: ignored
         Log.i(TAG, "AT: tone started " + started + ", unknown " + bad + ", session "
                 + (session != 0) + ", after release " + tg.startTone(0));
+    }
+
+    /**
+     * An AudioRecord starts, paces a blocking read by the clock, and stops. a4l opens no
+     * microphone, so what it reads is silence: 100 ms of it takes about 100 ms.
+     */
+    static void record() throws Exception {
+        final int rate = 16000;
+        int min = android.media.AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT);
+        int bad = android.media.AudioRecord.getMinBufferSize(100, AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT);
+        android.media.AudioRecord r = new android.media.AudioRecord(
+                android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION, rate,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, min * 2);
+        int state = r.getState();
+        r.startRecording();
+        boolean recording =
+                r.getRecordingState() == android.media.AudioRecord.RECORDSTATE_RECORDING;
+        short[] pcm = new short[rate / 10];
+        java.util.Arrays.fill(pcm, (short) 0x1234);
+        long t0 = System.nanoTime();
+        int n = r.read(pcm, 0, pcm.length);
+        long readMs = (System.nanoTime() - t0) / 1000000;
+        boolean silent = true;
+        for (short v : pcm) silent &= v == 0;
+        // The same stream into a direct buffer, and the time of the last frame read.
+        ByteBuffer direct = ByteBuffer.allocateDirect(640).order(ByteOrder.nativeOrder());
+        for (int i = 0; i < 640; i++) direct.put(i, (byte) 0x55);
+        int inBuffer = r.read(direct, 640);
+        for (int i = 0; i < 640; i++) silent &= direct.get(i) == 0;
+        android.media.AudioTimestamp ts = new android.media.AudioTimestamp();
+        int stamped = r.getTimestamp(ts, android.media.AudioTimestamp.TIMEBASE_MONOTONIC);
+        boolean timed = stamped == android.media.AudioRecord.SUCCESS
+                && ts.framePosition == n + inBuffer / 2 && ts.nanoTime > 0;
+        r.stop();
+        boolean stopped =
+                r.getRecordingState() == android.media.AudioRecord.RECORDSTATE_STOPPED;
+        r.release();
+
+        // Float and 8-bit: silence is 0.0 and, unsigned, 128.
+        android.media.AudioRecord f = new android.media.AudioRecord(
+                android.media.MediaRecorder.AudioSource.MIC, rate, AudioFormat.CHANNEL_IN_STEREO,
+                AudioFormat.ENCODING_PCM_FLOAT, 8 * rate / 10);
+        f.startRecording();
+        float[] floats = new float[640];
+        java.util.Arrays.fill(floats, 0.5f);
+        int nf = f.read(floats, 0, floats.length, android.media.AudioRecord.READ_BLOCKING);
+        for (float v : floats) silent &= v == 0f;
+        f.release();
+        android.media.AudioRecord e = new android.media.AudioRecord(
+                android.media.MediaRecorder.AudioSource.MIC, rate, AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_8BIT, rate / 10);
+        e.startRecording();
+        byte[] bytes = new byte[320];
+        int nb = e.read(bytes, 0, bytes.length);
+        for (byte v : bytes) silent &= v == (byte) 128;
+        e.release();
+        Log.i(TAG, "AT: record formats buffer " + inBuffer + " timed " + timed + " float " + nf
+                + " bytes " + nb + " after release " + e.read(bytes, 0, bytes.length));
+        Log.i(TAG, "AT: record min " + min + " bad " + bad + " state " + state + " read " + n
+                + " in " + readMs + " ms silent " + silent + " recording " + recording
+                + " stopped " + stopped);
     }
 
     static void trackB() throws Exception {
