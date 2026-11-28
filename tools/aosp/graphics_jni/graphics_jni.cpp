@@ -147,7 +147,8 @@ struct DisplayItem {
     Picture,
     Child,
     Layer,
-    Functor
+    Functor,
+    Hole
   } kind = Kind::Picture;
   sk_sp<SkPicture>
       picture;  // Picture: a segment of the node's own recorded ops
@@ -167,6 +168,10 @@ struct DisplayItem {
   // child is drawn; the walk applies this ahead of `matrix`.
   bool has_clip = false;
   SkRect clip = SkRect::MakeEmpty();
+  // Hole: where a segment's picture punches a hole (Canvas.punchHole), in the
+  // node's own space. The clear itself is in the picture; this is for the walk,
+  // which has to know of the holes under a compositing layer.
+  SkPath hole;
 };
 
 // What a node last recorded. A recording replaces it whole, and the
@@ -195,7 +200,26 @@ struct AclRenderNode : public SkRefCnt {
   float scaleX = 1.0f, scaleY = 1.0f;
   float pivotX = 0, pivotY = 0;
   bool pivotExplicit = false;
+  // hwui's LayerType: 0 none, 1 software (kept by the View, in Java), 2 a
+  // compositing layer (RenderNode.setUseCompositingLayer, and
+  // View.setLayerType(LAYER_TYPE_HARDWARE)). The walk draws a node of type 2
+  // into an offscreen of its own and composites that with the layer's paint:
+  // its alpha, blend mode and color filter, which is what hwui's
+  // LayerProperties::setFromPaint takes of it.
   int layerType = 0;
+  int layerAlpha = 255;
+  SkBlendMode layerBlend = SkBlendMode::kSrcOver;
+  // Set on the UI thread and read by the walk, which may be on another: a
+  // reference is taken and replaced under the lock that guards the content.
+  sk_sp<SkColorFilter> layer_color_filter() const {
+    std::lock_guard<std::mutex> lk(node_content_mutex());
+    return layer_color_filter_;
+  }
+  void set_layer_color_filter(sk_sp<SkColorFilter> filter) {
+    std::lock_guard<std::mutex> lk(node_content_mutex());
+    layer_color_filter_.swap(filter);
+  }
+  sk_sp<SkColorFilter> layer_color_filter_;
   // Shadow colors default to opaque BLACK (Android RenderNode default); the
   // walk multiplies them by the ambient/spot shadow alphas (0.039 / 0.19) when
   // casting an elevation shadow.
@@ -293,6 +317,9 @@ static sk_sp<AclRenderNode> freeze_subtree(AclRenderNode* n) {
   c->pivotY = n->pivotY;
   c->pivotExplicit = n->pivotExplicit;
   c->layerType = n->layerType;
+  c->layerAlpha = n->layerAlpha;
+  c->layerBlend = n->layerBlend;
+  c->layer_color_filter_ = n->layer_color_filter();
   c->spotShadowColor = n->spotShadowColor;
   c->ambientShadowColor = n->ambientShadowColor;
   c->clipToBounds = n->clipToBounds;
@@ -319,6 +346,7 @@ static sk_sp<AclRenderNode> freeze_subtree(AclRenderNode* n) {
     d.z_ordered = it.z_ordered;
     d.has_clip = it.has_clip;
     d.clip = it.clip;
+    d.hole = it.hole;
     if (it.kind == DisplayItem::Kind::Child && it.child)
       d.child = freeze_subtree(
           it.child.get());  // recurse: no live child refs survive in the copy
@@ -3112,9 +3140,15 @@ extern "C" void acl_graphics_set_force_record(int on) {
 // its rect to transparent so the video wl_subsurface below the ARGB toplevel
 // shows through. `node` is an AclRenderNode* (the SurfaceView's
 // View.mRenderNode native handle). No-op on a null/zero handle.
+// Whether a hole has been punched at all, by a node's flag or by
+// Canvas.punchHole. Until one has, a compositing layer has none to look for.
+std::atomic<bool> g_holes_punched{false};
 extern "C" void acl_graphics_set_punch_hole(jlong node, int on) {
-  if (auto* n = rnode(node))
+  if (auto* n = rnode(node)) {
     n->punch_hole = (on != 0);
+    if (on != 0)
+      g_holes_punched.store(true, std::memory_order_relaxed);
+  }
 }
 // Present frame epoch — bumped once per frame (acl_graphics_frame_tick, before
 // View.draw). Under force_record, a node is reported invalid (re-record) only
@@ -3271,7 +3305,26 @@ jboolean RenderNode_nIsPivotExplicitlySet(jlong h) {
 }
 RN_SETI(RenderNode_nSetLayerType, layerType)
 RN_GETI(RenderNode_nGetLayerType, layerType)
-jboolean RenderNode_nSetLayerPaint(jlong, jlong) {
+// The paint a compositing layer is drawn with. No paint: opaque, source-over,
+// no filter.
+jboolean RenderNode_nSetLayerPaint(jlong h, jlong paint) {
+  auto* n = rnode(h);
+  if (n == nullptr)
+    return JNI_TRUE;
+  const auto* ap = reinterpret_cast<const AclPaint*>(paint);
+  const int alpha = ap != nullptr ? ap->paint.getAlpha() : 255;
+  const SkBlendMode blend =
+      ap != nullptr ? ap->paint.getBlendMode_or(SkBlendMode::kSrcOver)
+                    : SkBlendMode::kSrcOver;
+  sk_sp<SkColorFilter> filter =
+      ap != nullptr ? ap->paint.refColorFilter() : nullptr;
+  if (n->layerAlpha != alpha || n->layerBlend != blend ||
+      n->layer_color_filter() != filter) {
+    n->layerAlpha = alpha;
+    n->layerBlend = blend;
+    n->set_layer_color_filter(std::move(filter));
+    bump_scene();
+  }
   return JNI_TRUE;
 }
 RN_SETB(RenderNode_nSetClipToBounds, clipToBounds)
@@ -6892,6 +6945,14 @@ struct NodeRecorder {
     it.functor = functor;
     split(std::move(it));
   }
+  // A hole the current segment punches, in the node's space. Not a boundary:
+  // the clear is in the segment's picture, and this only says where it is.
+  void note_hole(SkPath hole) {
+    DisplayItem it;
+    it.kind = DisplayItem::Kind::Hole;
+    it.hole = std::move(hole);
+    items.push_back(std::move(it));
+  }
   void reset(int W, int H) {
     if (seg != nullptr) {
       rec.finishRecordingAsPicture();
@@ -7212,20 +7273,25 @@ void draw_texture_layer_immediate(
 // Apply a node's view-property transform (position + translation + scale/rotate
 // about the pivot) — the placement shared by the node's content draw and its
 // cast shadow. Does NOT apply clip/alpha.
-void apply_view_transform(SkCanvas* c, const AclRenderNode* n) {
+SkMatrix view_matrix(const AclRenderNode* n) {
   const float w = static_cast<float>(n->right - n->left);
   const float h = static_cast<float>(n->bottom - n->top);
-  c->translate(static_cast<float>(n->left), static_cast<float>(n->top));
-  c->translate(n->translationX, n->translationY);
+  SkMatrix m =
+      SkMatrix::Translate(static_cast<float>(n->left) + n->translationX,
+                          static_cast<float>(n->top) + n->translationY);
   if (n->scaleX != 1.0f || n->scaleY != 1.0f || n->rotation != 0.0f) {
     const float px = n->pivotExplicit ? n->pivotX : w * 0.5f;
     const float py = n->pivotExplicit ? n->pivotY : h * 0.5f;
-    c->translate(px, py);
+    m.preTranslate(px, py);
     if (n->rotation != 0.0f)
-      c->rotate(n->rotation);
-    c->scale(n->scaleX, n->scaleY);
-    c->translate(-px, -py);
+      m.preRotate(n->rotation);
+    m.preScale(n->scaleX, n->scaleY);
+    m.preTranslate(-px, -py);
   }
+  return m;
+}
+void apply_view_transform(SkCanvas* c, const AclRenderNode* n) {
+  c->concat(view_matrix(n));
 }
 
 // A node's shadow-casting outline (its ViewOutlineProvider shape) in local
@@ -7287,6 +7353,31 @@ void draw_child_shadow(SkCanvas* c, const AclRenderNode* n) {
                             flags);
 }
 
+// The holes `n` and the nodes under it punch, as paths in the space `to_device`
+// maps the node's parent into: a node's own flag (its whole rect) and the
+// Canvas.punchHole calls its recordings noted. The clips in between are not
+// applied, so a hole that a clip trims is reported whole.
+void collect_holes(const AclRenderNode* n,
+                   const SkMatrix& to_device,
+                   std::vector<SkPath>* out,
+                   int depth = 0) {
+  if (n == nullptr || depth > 64)
+    return;
+  const SkMatrix m = SkMatrix::Concat(to_device, view_matrix(n));
+  const float w = static_cast<float>(n->right - n->left);
+  const float h = static_cast<float>(n->bottom - n->top);
+  if (n->punch_hole && w > 0 && h > 0)
+    out->push_back(SkPath::Rect(SkRect::MakeWH(w, h)).makeTransform(m));
+  const std::shared_ptr<const NodeContent> content = n->content();
+  for (const DisplayItem& it : content->items) {
+    if (it.kind == DisplayItem::Kind::Hole)
+      out->push_back(it.hole.makeTransform(m));
+    else if (it.kind == DisplayItem::Kind::Child)
+      collect_holes(it.child.get(), SkMatrix::Concat(m, it.matrix), out,
+                    depth + 1);
+  }
+}
+
 // Walk a RenderNode's display list onto `c` NOW, applying the node's position +
 // transform + clip + alpha (the properties the View/Compose set via the
 // RenderNode setters). This is hwui's tree walk: own-op segments are replayed
@@ -7312,6 +7403,7 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
   const float w = static_cast<float>(n->right - n->left);
   const float h = static_cast<float>(n->bottom - n->top);
   SkAutoCanvasRestore acr(c, true);
+  const SkMatrix parent_ctm = c->getTotalMatrix();
   apply_view_transform(c, n);
   if (n->clipToBounds && w > 0 && h > 0)
     c->clipRect(SkRect::MakeWH(w, h));
@@ -7337,7 +7429,45 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
   // the node's content into an offscreen and composite it through the effect +
   // alpha. The filter applies in the node's transformed local space (so a
   // scaled node scales its blur too).
-  if (n->alpha < 1.0f || n->render_effect != nullptr) {
+  //
+  // A compositing layer the app asked for (layerType 2) is the node's own
+  // size, holds only what the node draws, and is composited with the layer's
+  // paint. What the node draws with a blend mode that reads the destination (a
+  // fade made with DST_IN or DST_OUT) then works on the node's own pixels:
+  // drawn straight onto the parent it cut into what was already there. Not for
+  // a node that holds a WebView functor, which draws onto the frame itself.
+  bool own_layer = n->layerType == 2 && w > 0 && h > 0;
+  if (own_layer)
+    for (const DisplayItem& it : content->items)
+      own_layer = own_layer && it.kind != DisplayItem::Kind::Functor;
+  if (own_layer) {
+    // A hole punched under the layer clears the layer, and what the layer is
+    // composited onto would still be there where the hole should be. The hole
+    // is punched in that first, as hwui does when it composites a layer that
+    // has one; what the layer draws over its hole then lands on top.
+    if (g_holes_punched.load(std::memory_order_relaxed)) {
+      std::vector<SkPath> holes;
+      collect_holes(n, parent_ctm, &holes);
+      if (!holes.empty()) {
+        SkAutoCanvasRestore hcr(c, true);
+        c->resetMatrix();
+        SkPaint hp;
+        hp.setBlendMode(SkBlendMode::kSrc);
+        hp.setColor(SK_ColorTRANSPARENT);
+        for (const SkPath& hole : holes)
+          c->drawPath(hole, hp);
+      }
+    }
+    SkPaint lp;
+    lp.setAlphaf(n->alpha * static_cast<float>(n->layerAlpha) / 255.0f);
+    lp.setBlendMode(n->layerBlend);
+    lp.setColorFilter(n->layer_color_filter());
+    if (n->render_effect != nullptr)
+      lp.setImageFilter(n->render_effect);
+    const SkRect bounds = SkRect::MakeWH(w, h);
+    c->saveLayer(&bounds, &lp);
+    c->clipRect(bounds);
+  } else if (n->alpha < 1.0f || n->render_effect != nullptr) {
     SkPaint lp;
     lp.setAlphaf(n->alpha);
     if (n->render_effect != nullptr)
@@ -7378,12 +7508,14 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
       (it.kind == DisplayItem::Kind::Picture ? np
        : it.kind == DisplayItem::Kind::Child ? nc
                                              : nl)++;
-    // The items in drawing order: p = picture, c = child node, l = layer.
+    // The items in drawing order: p = picture, c = child node, h = the note
+    // of a hole, l = layer or functor.
     char order[33] = {0};
     for (std::size_t i = 0; i < content->items.size() && i < 32; ++i) {
       const DisplayItem::Kind k = content->items[i].kind;
       order[i] = k == DisplayItem::Kind::Picture ? 'p'
                  : k == DisplayItem::Kind::Child ? 'c'
+                 : k == DisplayItem::Kind::Hole  ? 'h'
                                                  : 'l';
     }
     std::fprintf(stderr,
@@ -7434,6 +7566,8 @@ void draw_rendernode_immediate(SkCanvas* c, AclRenderNode* n) {
           if (it.picture)
             c->drawPicture(it.picture);
           break;
+        case DisplayItem::Kind::Hole:
+          break;  // drawn by the picture it is in; see collect_holes
         case DisplayItem::Kind::Child: {
           SkAutoCanvasRestore bcr(c, true);
           if (it.has_clip)
@@ -8768,11 +8902,19 @@ void BaseRecordingCanvas_nPunchHole(JNIEnv*,
                     ? 0x80FF00FFu
                     : SK_ColorTRANSPARENT);
   const SkRect rect = SkRect::MakeLTRB(l, t, r, b);
-  if (rx > 0 && ry > 0) {
+  const bool round = rx > 0 && ry > 0;
+  if (round) {
     hole.setAntiAlias(true);
     c->drawRoundRect(rect, rx, ry, hole);
   } else {
     c->drawRect(rect, hole);
+  }
+  // For a compositing layer over this node (draw_rendernode_immediate).
+  if (is_recorder_handle(canvas)) {
+    g_holes_punched.store(true, std::memory_order_relaxed);
+    recorder_of(canvas)->note_hole(
+        (round ? SkPath::RRect(rect, rx, ry) : SkPath::Rect(rect))
+            .makeTransform(c->getTotalMatrix()));
   }
 }
 
