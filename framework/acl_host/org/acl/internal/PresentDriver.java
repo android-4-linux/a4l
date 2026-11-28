@@ -106,13 +106,17 @@ public final class PresentDriver {
 
     // Where a SurfaceView that an engine draws GL into sits in the window, and its size: the
     // size of the surface eglCreateWindowSurface makes for it, and the place of the plane its
-    // frames are shown on under the view tree. 0 x 0: there is no such view any more.
-    private static native void nSetGlPlane(long s, int x, int y, int w, int h);
+    // frames are shown on. The plane is under the view tree, or over it (onTop) for a view
+    // that asks to be over its window; over it, a view that asked for a format with alpha
+    // (alpha) shows the views where its picture is clear. 0 x 0: there is no such view any
+    // more.
+    private static native void nSetGlPlane(long s, int x, int y, int w, int h, boolean onTop,
+            boolean alpha);
 
     /** See {@link #nSetGlPlane}. */
-    public static void setGlPlane(int x, int y, int w, int h) {
+    public static void setGlPlane(int x, int y, int w, int h, boolean onTop, boolean alpha) {
         final long s = sSession;
-        if (s != 0L) nSetGlPlane(s, x, y, w, h);
+        if (s != 0L) nSetGlPlane(s, x, y, w, h, onTop, alpha);
     }
 
     // GL present (Flutter / SurfaceView): Mesa renders + commits the toplevel; acl owns the Looper

@@ -358,6 +358,10 @@ struct GlPlane {
   // swap, and ANativeWindow_getWidth and _getHeight read the size with no
   // lock (their caller may be on a bionic thread pointer).
   std::atomic<int> x{0}, y{0}, w{0}, h{0};
+  // The view asks to be over its window (setZOrderOnTop): its plane is
+  // stacked over the app's surface. And it asked for a format with alpha
+  // (SurfaceHolder.setFormat): what it leaves clear is clear on the plane.
+  std::atomic<bool> on_top{false}, alpha{false};
   // What the compositor takes on a plane, for a window with and without
   // alpha. Filled on the present thread, where the presenter can be asked.
   std::vector<std::uint64_t> mods_xrgb, mods_argb;
@@ -467,6 +471,13 @@ bool gl_plane_swap(void* egl_surface, bool on_donor) {
         log::w(kTag, "egl10: the SurfaceView's swap failed: {}", err);
     } else if (const int w = g_gl_plane.w.load(), h = g_gl_plane.h.load();
                w > 0 && h > 0) {
+      // A window's frames are opaque (GlWindow::has_alpha). Over the app's
+      // surface, a view that asked for alpha shows the app's views where it
+      // is clear, as a surface over its window does on Android.
+      constexpr std::uint32_t kDrmArgb8888 = 0x34325241;  // 'AR24'
+      if (g_gl_plane.on_top.load() && g_gl_plane.alpha.load() &&
+          win->has_alpha())
+        frame.drm_format = kDrmArgb8888;
       // The presenter keeps its own reference to the buffer and shows it from
       // its own thread; the window owns `frame` until its next swap.
       if (wm::IPresenter* p = wm::active_video_presenter()) {
@@ -3323,16 +3334,19 @@ void JNICALL PresentDriver_nSetVideoBounds(JNIEnv*,
   s->presenter->set_video_bounds(static_cast<int>(x), static_cast<int>(y),
                                  static_cast<int>(w), static_cast<int>(h));
 }
-// Where a SurfaceView that an engine draws GL into is, and its size (see
-// GlPlane). No size: the view is gone, and its plane is hidden. Present
-// thread.
+// Where a SurfaceView that an engine draws GL into is, its size, whether its
+// plane goes over the app's surface, and whether the view asked for a format
+// with alpha (see GlPlane). No size: the view is gone, and its plane is
+// hidden. Present thread.
 void JNICALL PresentDriver_nSetGlPlane(JNIEnv*,
                                        jclass,
                                        jlong sp,
                                        jint x,
                                        jint y,
                                        jint w,
-                                       jint h) {
+                                       jint h,
+                                       jboolean on_top,
+                                       jboolean alpha) {
 #if ACL_HAVE_GL
   auto* s = reinterpret_cast<PresentSession*>(sp);
   if (s == nullptr || !s->presenter)
@@ -3343,10 +3357,18 @@ void JNICALL PresentDriver_nSetGlPlane(JNIEnv*,
     if (g_gl_plane.w.exchange(0) > 0)
       s->presenter->hide_video();
     g_gl_plane.h.store(0);
+    // The plane is a decoder's again, and a decoder's goes under.
+    if (g_gl_plane.on_top.exchange(false))
+      s->presenter->set_video_on_top(false);
+    g_gl_plane.alpha.store(false);
     wm::set_video_plane_taken(false);
     return;
   }
   wm::set_video_plane_taken(true);
+  const bool top = on_top != JNI_FALSE;
+  if (g_gl_plane.on_top.exchange(top) != top)
+    s->presenter->set_video_on_top(top);
+  g_gl_plane.alpha.store(alpha != JNI_FALSE);
   // Called every frame, and nearly always with what it was told before.
   if (g_gl_plane.x.load() == x && g_gl_plane.y.load() == y &&
       g_gl_plane.w.load() == w && g_gl_plane.h.load() == h)
@@ -3370,6 +3392,8 @@ void JNICALL PresentDriver_nSetGlPlane(JNIEnv*,
   (void)y;
   (void)w;
   (void)h;
+  (void)on_top;
+  (void)alpha;
 #endif
 }
 // The eventfd the decode thread signals after a video frame is ready; the
@@ -4580,7 +4604,7 @@ void register_present_driver_natives(JNIEnv* env) {
        reinterpret_cast<void*>(PresentDriver_nMakeVideoSurface)},
       {const_cast<char*>("nSetVideoBounds"), const_cast<char*>("(JIIII)V"),
        reinterpret_cast<void*>(PresentDriver_nSetVideoBounds)},
-      {const_cast<char*>("nSetGlPlane"), const_cast<char*>("(JIIII)V"),
+      {const_cast<char*>("nSetGlPlane"), const_cast<char*>("(JIIIIZZ)V"),
        reinterpret_cast<void*>(PresentDriver_nSetGlPlane)},
       {const_cast<char*>("nVideoWakeFd"), const_cast<char*>("(J)I"),
        reinterpret_cast<void*>(PresentDriver_nVideoWakeFd)},

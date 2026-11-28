@@ -530,6 +530,7 @@ class GbmGlWindow final : public GlWindow {
   bool has_free_buffer() const override {
     return surf_ == nullptr || gbm_surface_has_free_buffers(surf_) != 0;
   }
+  bool has_alpha() const override { return format_ == GBM_FORMAT_ARGB8888; }
   bool set_hold_buffers(bool hold) override {
     if (hold == hold_)
       return true;

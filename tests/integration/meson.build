@@ -403,6 +403,19 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 300,
       is_parallel : false,
     )
+    # A SurfaceView that asks to be over its window and is clear where it draws nothing,
+    # in a translucent Activity (a Flutter screen with a clear background): the screen
+    # underneath shows there, read off a headless Weston's screen. Needs what
+    # gl-surfaceview-under-views needs; SKIPs otherwise, which includes CI. is_parallel
+    # off: it reads the screen.
+    test(
+      'surface-on-top',
+      py3,
+      args : [files('run_surface_on_top_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 240,
+      is_parallel : false,
+    )
     # A screen drawn by an engine through native EGL, opened from an app's own views (a
     # Flutter screen in an app built of views): the engine gets a pbuffer and a window on
     # the view, makes the window again eight times, and its picture is read off a headless

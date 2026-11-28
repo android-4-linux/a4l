@@ -3723,6 +3723,9 @@ public final class HostBootstrap {
      * plane: it goes to the SurfaceView nearest the top that can take it.
      */
     static void prepareWindows(android.view.View top) {
+        if (sTopDecor == null || sTopDecor.get() != top) {
+            sTopDecor = new java.lang.ref.WeakReference<>(top);
+        }
         boolean surfaced = maybeInjectVideoSurface(top);
         maybeLogVideoPlayer(top);
         prepareTextureViews(top);
@@ -6965,14 +6968,47 @@ public final class HostBootstrap {
         } catch (Throwable t) {
             android.util.Log.w("acl", "releaseGlPlane failed: " + t);
         }
-        PresentDriver.setGlPlane(0, 0, 0, 0);
+        PresentDriver.setGlPlane(0, 0, 0, 0, false, false);
+        sGlPlaneOnTop = false;
     }
+
+    // Whether the view's plane goes over the app's surface: the view asks to be over its
+    // window (SurfaceView.setZOrderOnTop, which a Flutter screen with a clear background
+    // does), and its Activity is the one on top. What is clear in its picture then shows
+    // the window, and the Activity under a translucent one with it. The plane was always
+    // under the views, through a hole: what was clear showed nothing, black.
+    //
+    // In an Activity that another is shown over, the plane stays under, as before: there is
+    // one surface for all the Activities' views, and a plane over it would be over the top
+    // Activity's as well.
+    private static boolean overWindow(android.view.SurfaceView sv) {
+        final android.view.View top = sTopDecor != null ? sTopDecor.get() : null;
+        return top != null && sv.getRootView() == top
+                && getIntField(android.view.SurfaceView.class, sv, "mSubLayer", -2) > 0;
+    }
+    // Whether the view asked for a surface with alpha (SurfaceHolder.setFormat). Android
+    // shows a surface as opaque unless it did, whatever its EGL config holds.
+    private static boolean wantsAlpha(android.view.SurfaceView sv) {
+        return android.graphics.PixelFormat.formatHasAlpha(getIntField(
+                android.view.SurfaceView.class, sv, "mRequestedFormat",
+                android.graphics.PixelFormat.RGBX_8888));
+    }
+    private static boolean sGlPlaneOnTop;
+    private static java.lang.ref.WeakReference<android.view.View> sTopDecor;
 
     private static void maybeInjectGlPlane(android.view.SurfaceView sv, int[] loc, int w, int h)
             throws Exception {
         Class<?> c = android.view.SurfaceView.class;
+        final boolean onTop = overWindow(sv);
         if (sGlPlaneSv != null && sGlPlaneSv.get() == sv) {  // backed: keep the plane where it is
-            PresentDriver.setGlPlane(loc[0], loc[1], w, h);
+            if (onTop != sGlPlaneOnTop) {
+                // Its Activity was covered, or is on top again: the hole comes and goes
+                // with the plane's place.
+                sGlPlaneOnTop = onTop;
+                if (onTop) fillPlaneHole(sv);
+                else punchPlaneHole(sv);
+            }
+            PresentDriver.setGlPlane(loc[0], loc[1], w, h, onTop, wantsAlpha(sv));
             if (w != sGlPlaneW || h != sGlPlaneH) {
                 sGlPlaneW = w;
                 sGlPlaneH = h;
@@ -6987,7 +7023,8 @@ public final class HostBootstrap {
             return;
         }
         releaseGlPlane();  // another view's, in an Activity that is still on top
-        PresentDriver.setGlPlane(loc[0], loc[1], w, h);
+        sGlPlaneOnTop = onTop;
+        PresentDriver.setGlPlane(loc[0], loc[1], w, h, onTop, wantsAlpha(sv));
         int fmt = getIntField(c, sv, "mRequestedFormat", android.graphics.PixelFormat.RGBX_8888);
         // mHaveFrame stays false, as for a video view (maybeInjectVideoSurface).
         setField(c, sv, "mVisible", Boolean.TRUE);
@@ -7005,10 +7042,23 @@ public final class HostBootstrap {
             cb.surfaceCreated(holder);
             cb.surfaceChanged(holder, fmt, w, h);
         }
-        final int punched = punchPlaneHole(sv);
+        final int punched = onTop ? 0 : punchPlaneHole(sv);
         android.util.Log.i("acl", "maybeInjectGlPlane: " + sv.getClass().getName()
                 + " surfaceCreated (" + w + "x" + h + " @" + loc[0] + "," + loc[1]
-                + ") punchHole nodes=" + punched);
+                + ") " + (onTop ? "over the window" : "punchHole nodes=" + punched));
+    }
+
+    // Take back the holes punchPlaneHole made in the view's node and its ancestors': the
+    // plane is over the window now. The view punches none of its own while it is over its
+    // parent (SurfaceView.draw).
+    private static void fillPlaneHole(android.view.SurfaceView sv) {
+        for (Object v = sv; v instanceof android.view.View;
+                v = ((android.view.View) v).getParent()) {
+            if (v.getClass().getName().contains("androidx.compose.ui.platform")) break;
+            final long rn = renderNodeHandle((android.view.View) v);
+            if (rn != 0L) PresentDriver.setVideoPunchHole(rn, false);
+        }
+        sv.invalidate();
     }
 
     // A TextureView makes its SurfaceTexture, and tells its listener the surface is available,
