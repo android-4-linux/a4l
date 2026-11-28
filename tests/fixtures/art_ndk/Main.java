@@ -89,6 +89,11 @@ public class Main extends Activity {
         return a + b;
     }
 
+    // What a trace of this method prints: a String, a long, and an argument named by kind.
+    String traced(String name, long big, int[] more) {
+        return name + big + more.length;
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -131,6 +136,13 @@ public class Main extends Activity {
         // own, as a crash reporter does.
         if (System.getenv("ACL_NDK_TEST_HANDLER") != null) {
             Log.i("acl", "HANDLER: a4l's fault handler back=" + handlerKept());
+        }
+
+        // Opt-in (run_ndk_art_test.py --trace): a static method and an instance method the
+        // test has named in ACL_JVMTI_TRACE, called with arguments it looks for in the trace.
+        if (System.getenv("ACL_NDK_TEST_TRACE") != null) {
+            Log.i("acl", "TRACE: called " + helper(40, 2) + " "
+                         + traced("a4l", 7000000000L, new int[3]));
         }
 
         // Opt-in (run_ndk_art_test.py --nullcheck): with the library loaded, a null dereference

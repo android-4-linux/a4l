@@ -1057,8 +1057,122 @@ void JNICALL acl_jvmti_exception(jvmtiEnv* jvmti,
 // how far the engine gets (does executeDartEntrypoint run?). Breakpoints only
 // fire for the named methods, so this is cheap (unlike global MethodEntry). Set
 // from a ClassPrepare hook as the classes load.
+// The first arguments of the method the thread has just entered, where they are
+// strings or integers: what tells one call of a traced method from the next (a
+// channel's name, a reply's number). Other arguments are named by kind. ART
+// numbers a method's slots as dex does its registers, with the arguments last:
+// the first is at max locals less the arguments' size, and is `this` unless
+// the method is static.
+std::string jvmti_entry_arguments(jvmtiEnv* jvmti,
+                                  JNIEnv* jni,
+                                  jthread thread,
+                                  jmethodID method) {
+  char* sig = nullptr;
+  jint modifiers = 0;
+  if (jvmti->GetMethodName(method, nullptr, &sig, nullptr) !=
+          JVMTI_ERROR_NONE ||
+      sig == nullptr)
+    return {};
+  jvmti->GetMethodModifiers(method, &modifiers);
+  constexpr jint kStatic = 0x0008;
+  constexpr int kMaxShown = 4;
+  constexpr std::size_t kMaxText = 96;
+  jint max_locals = 0;
+  jint arguments_size = 0;
+  if (jvmti->GetMaxLocals(method, &max_locals) != JVMTI_ERROR_NONE ||
+      jvmti->GetArgumentsSize(method, &arguments_size) != JVMTI_ERROR_NONE ||
+      arguments_size > max_locals) {
+    jvmti->Deallocate(reinterpret_cast<unsigned char*>(sig));
+    return {};
+  }
+  jint slot =
+      max_locals - arguments_size + ((modifiers & kStatic) != 0 ? 0 : 1);
+  std::string out;
+  int shown = 0;
+  for (const char* p = sig + 1; *p != '\0' && *p != ')' && shown < kMaxShown;
+       ++shown) {
+    std::string value = "?";
+    switch (*p) {
+      case 'I':
+      case 'Z':
+      case 'B':
+      case 'S':
+      case 'C': {
+        jint v = 0;
+        if (jvmti->GetLocalInt(thread, 0, slot, &v) == JVMTI_ERROR_NONE)
+          value = std::to_string(v);
+        slot += 1;
+        ++p;
+        break;
+      }
+      case 'J': {
+        jlong v = 0;
+        if (jvmti->GetLocalLong(thread, 0, slot, &v) == JVMTI_ERROR_NONE)
+          value = std::to_string(v);
+        slot += 2;
+        ++p;
+        break;
+      }
+      case 'F':
+        value = "float";
+        slot += 1;
+        ++p;
+        break;
+      case 'D':
+        value = "double";
+        slot += 2;
+        ++p;
+        break;
+      case 'L': {
+        const char* end = std::strchr(p, ';');
+        if (std::strncmp(p, "Ljava/lang/String;", 18) == 0) {
+          jobject o = nullptr;
+          if (jvmti->GetLocalObject(thread, 0, slot, &o) == JVMTI_ERROR_NONE) {
+            if (o == nullptr) {
+              value = "null";
+            } else {
+              const auto text = static_cast<jstring>(o);
+              if (const char* c = jni->GetStringUTFChars(text, nullptr)) {
+                value = '"' + std::string(c).substr(0, kMaxText) + '"';
+                jni->ReleaseStringUTFChars(text, c);
+              }
+              jni->DeleteLocalRef(o);
+            }
+          }
+        } else {
+          value = "object";
+        }
+        slot += 1;
+        p = end != nullptr ? end + 1 : p + std::strlen(p);
+        break;
+      }
+      case '[': {
+        while (*p == '[')
+          ++p;
+        if (*p == 'L') {
+          const char* end = std::strchr(p, ';');
+          p = end != nullptr ? end + 1 : p + std::strlen(p);
+        } else if (*p != '\0') {
+          ++p;
+        }
+        value = "array";
+        slot += 1;
+        break;
+      }
+      default:
+        ++p;  // not a type: skip it and go on
+        break;
+    }
+    if (!out.empty())
+      out += ", ";
+    out += value;
+  }
+  jvmti->Deallocate(reinterpret_cast<unsigned char*>(sig));
+  return out;
+}
+
 void JNICALL acl_jvmti_breakpoint(jvmtiEnv* jvmti,
-                                  JNIEnv*,
+                                  JNIEnv* jni,
                                   jthread thread,
                                   jmethodID method,
                                   jlocation) {
@@ -1069,8 +1183,9 @@ void JNICALL acl_jvmti_breakpoint(jvmtiEnv* jvmti,
   if (jvmti->GetMethodDeclaringClass(method, &decl) == JVMTI_ERROR_NONE &&
       decl != nullptr)
     jvmti->GetClassSignature(decl, &dsig, nullptr);
-  log::i(kTag, "JVMTI-TRACE: entered {}.{}", dsig ? dsig : "?",
-         mname ? mname : "?");
+  log::i(kTag, "JVMTI-TRACE: entered {}.{}({})", dsig ? dsig : "?",
+         mname ? mname : "?",
+         jvmti_entry_arguments(jvmti, jni, thread, method));
   // For Runtime.exit/halt (ACL_TRACE_EXIT), dump WHO is exiting — a clean
   // System.exit(0) during startup is otherwise anonymous (ART logs the status,
   // not the caller).
@@ -1324,6 +1439,9 @@ void install_jvmti_diag(JavaVM* vm) {
   caps.can_generate_exception_events = 1;
   if (trace || trace_exit) {
     caps.can_generate_breakpoint_events = 1;
+  }
+  if (trace) {
+    caps.can_access_local_variables = 1;  // a traced method's arguments
   }
   if (suppress_exit) {
     caps.can_force_early_return = 1;
