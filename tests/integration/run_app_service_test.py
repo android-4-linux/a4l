@@ -78,6 +78,7 @@ CHECKS = [
     "SERVICE: location service enabled=true gps=true providers=true gnss=true",
     "SERVICE: vibrator manager ids=0 has=false same=true",
     "SERVICE: process natives cpu=true signal=true",
+    "SERVICE: software layer limit=true",
     "SERVICE: network callback link=true wifi info=true ip=true",
     "SERVICE: dns resolver answered=true loopback=true rcode=0 raw=1",
     "SERVICE: paint long color srgb=ff336699 wide red=true",

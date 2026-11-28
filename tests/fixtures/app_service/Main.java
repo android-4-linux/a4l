@@ -384,6 +384,17 @@ public class Main extends Activity {
             process = t.toString();
         }
         log("process natives " + process);
+        // The largest software layer a View may have, which ViewConfiguration takes from the
+        // display's bounds: four bytes a pixel. At 0 a View with LAYER_TYPE_SOFTWARE is not
+        // drawn at all ("too large to fit into a software layer").
+        final android.util.DisplayMetrics screen = getResources().getDisplayMetrics();
+        final int limit =
+                android.view.ViewConfiguration.get(this).getScaledMaximumDrawingCacheSize();
+        final String softwareLayer = "limit=" + (limit > 0
+                && limit == 4 * screen.widthPixels * screen.heightPixels);
+        log("software layer " + softwareLayer);
+        expect("limit=true".equals(softwareLayer),
+                "software layer " + softwareLayer + " (" + limit + ")");
         // What an app reads off its network before it looks for devices on it: the link's
         // properties, which come to a network callback after the capabilities, and for a
         // Wi-Fi network its WifiInfo, as the capabilities' transport info, with the address
