@@ -59,6 +59,11 @@ final class MediaSessions {
         private final List<Object> controllerCallbacks = new CopyOnWriteArrayList<>();
         final Object session;     // android.media.session.ISession
         final Object controller;  // android.media.session.ISessionController
+        // What asBinder() of the two gives. MediaSession.Token.hashCode and equals call
+        // asBinder().hashCode() and equals on the controller's: an app that logs its
+        // session's token, or keeps tokens in a map, threw on a null one.
+        private final android.os.IBinder sessionBinder = new android.os.Binder();
+        private final android.os.IBinder controllerBinder = new android.os.Binder();
         volatile MediaMetadata metadata;
         volatile PlaybackState playbackState;
         volatile List<Object> queue;  // MediaSession.QueueItem; null for none
@@ -103,6 +108,8 @@ final class MediaSessions {
         // ISession: the app's side.
         private Object fromSession(Method m, Object[] a) throws Throwable {
             switch (m.getName()) {
+                case "asBinder":
+                    return sessionBinder;
                 case "getController":
                     return controller;
                 case "setMetadata":
@@ -203,6 +210,8 @@ final class MediaSessions {
         // ISessionController: a MediaController's side.
         private Object fromController(Method m, Object[] a) throws Throwable {
             switch (m.getName()) {
+                case "asBinder":
+                    return controllerBinder;
                 case "getMetadata":
                     return metadata;
                 case "getPlaybackState":

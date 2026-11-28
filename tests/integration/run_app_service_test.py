@@ -117,6 +117,8 @@ CHECKS = [
     "SERVICE: overlay touch taken true/true at 0@10,12 1@10,12 above dismissed true"
     " outside taken true dismissed true",
     "SERVICE: popup at 300,200 dropdown at 300,250",
+    "SERVICE: start-up window metrics=true session tokens=2/true router=1/true"
+    " prefs applied, at on main",
     "SERVICE: PASS",
     "SERVICE: keystore generators made keys=true",
 ]

@@ -801,6 +801,8 @@ public final class HostBootstrap {
         c.orientation = cfg.orientation;
         c.screenLayout = cfg.screenLayout;
         c.windowConfiguration.setMaxBounds(cfg.windowConfiguration.getMaxBounds());
+        c.windowConfiguration.setBounds(cfg.windowConfiguration.getBounds());
+        c.windowConfiguration.setAppBounds(cfg.windowConfiguration.getAppBounds());
         android.util.DisplayMetrics m = new android.util.DisplayMetrics();
         m.setTo(r.getDisplayMetrics());
         m.widthPixels = m.noncompatWidthPixels = dm.widthPixels;
@@ -860,6 +862,12 @@ public final class HostBootstrap {
         // may have from them (four bytes a pixel of the display): left empty the limit was
         // 0, and a View with LAYER_TYPE_SOFTWARE was not drawn at all.
         cfg.windowConfiguration.setMaxBounds(0, 0, DISPLAY_W, DISPLAY_H);
+        // The window's own bounds: it fills what a4l calls the display.
+        // WindowManager.getCurrentWindowMetrics reads them here, and androidx.window takes a
+        // window's size class from that. Left empty the window was 0 wide ("Width must be
+        // positive, received 0.0", thrown out of Spotify's first Activity).
+        cfg.windowConfiguration.setBounds(new android.graphics.Rect(0, 0, DISPLAY_W, DISPLAY_H));
+        cfg.windowConfiguration.setAppBounds(0, 0, DISPLAY_W, DISPLAY_H);
         return cfg;
     }
 
@@ -3586,6 +3594,17 @@ public final class HostBootstrap {
             java.lang.reflect.Field s = at.getDeclaredField("sCurrentActivityThread");
             s.setAccessible(true);
             s.set(null, atInst);
+            // ActivityThread.main makes this handler, and the framework posts to it from
+            // other threads without a look: SharedPreferences.Editor.apply() on a worker
+            // thread hands its listeners' notification to it. Null, that apply() threw
+            // (Spotify, on a coroutine worker).
+            try {
+                java.lang.reflect.Field h = at.getDeclaredField("sMainThreadHandler");
+                h.setAccessible(true);
+                if (h.get(null) == null) {
+                    h.set(null, new android.os.Handler(android.os.Looper.getMainLooper()));
+                }
+            } catch (Throwable ignored) {}
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: seedActivityThread failed: " + t);
         }
@@ -5856,6 +5875,52 @@ public final class HostBootstrap {
     }
 
     // A no-op InvocationHandler returning type-appropriate defaults (false/0/null).
+    // IMediaRouterService for MediaRouter2. Its constructor asks for the system's routes and
+    // the system's routing session, and throws without them ("Null or empty
+    // currentSystemRoutes. Something is wrong."): Spotify makes one once it is signed in.
+    // What an app with no audio-routing permission is given on a device with nothing
+    // attached (SystemMediaRoute2Provider's default route): one route, the device's own
+    // output, and a session that has it selected. Its volume is fixed: the volume is the
+    // host's to set. Everything else is the no-op it was.
+    private static final String SYSTEM_ROUTE_PROVIDER =
+            "com.android.server.media/.SystemMediaRoute2Provider";
+    private static Object makeMediaRouterHandler(Class<?> iface) {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[]{iface}, (p, method, a) -> {
+                    switch (method.getName()) {
+                        case "getSystemRoutes": {
+                            final java.util.ArrayList<android.media.MediaRoute2Info> routes =
+                                    new java.util.ArrayList<>();
+                            routes.add(new android.media.MediaRoute2Info.Builder(
+                                    "DEFAULT_ROUTE", "Speaker")
+                                    .setVolumeHandling(
+                                            android.media.MediaRoute2Info.PLAYBACK_VOLUME_FIXED)
+                                    .setType(android.media.MediaRoute2Info.TYPE_BUILTIN_SPEAKER)
+                                    .addFeature(android.media.MediaRoute2Info.FEATURE_LIVE_AUDIO)
+                                    .addFeature(android.media.MediaRoute2Info.FEATURE_LIVE_VIDEO)
+                                    .addFeature(
+                                            android.media.MediaRoute2Info.FEATURE_LOCAL_PLAYBACK)
+                                    .setConnectionState(android.media.MediaRoute2Info
+                                            .CONNECTION_STATE_CONNECTED)
+                                    .setSystemRoute(true)
+                                    .setProviderId(SYSTEM_ROUTE_PROVIDER)
+                                    .build());
+                            return routes;
+                        }
+                        case "getSystemSessionInfo":
+                        case "getSystemSessionInfoForPackage":
+                            return new android.media.RoutingSessionInfo.Builder(
+                                    "SYSTEM_SESSION", "" /* clientPackageName */)
+                                    .setProviderId(SYSTEM_ROUTE_PROVIDER)
+                                    .setSystemSession(true)
+                                    .addSelectedRoute("DEFAULT_ROUTE")
+                                    .build();
+                        default:
+                            return defaultValue(method.getReturnType());
+                    }
+                });
+    }
+
     private static Object noop(Class<?> iface) {
         return java.lang.reflect.Proxy.newProxyInstance(
                 iface.getClassLoader(), new Class<?>[]{iface},
@@ -6742,8 +6807,10 @@ public final class HostBootstrap {
         // MediaSession routes through ISessionManager; makeSessionManagerHandler returns a no-op
         // ISession (with a no-op ISessionController) so MediaSession construction completes.
         svc.put("media_session", "android.media.session.ISessionManager");
-        // android.media.MediaRouter asks for IMediaRouterService when it is made; a no-op one
-        // (no remote routes, no client state kept) is enough for the local route.
+        // android.media.MediaRouter asks for IMediaRouterService when it is made; one that
+        // keeps no client state and has no remote routes is enough for the local route.
+        // MediaRouter2 will not be made without the system's route and session, which
+        // makeMediaRouterHandler gives.
         svc.put("media_router", "android.media.IMediaRouterService");
         // An Activity makes its SearchManager when a menu holds a SearchView; a no-op service
         // answers that no Activity is searchable.
@@ -6766,6 +6833,7 @@ public final class HostBootstrap {
                                 : "uimode".equals(name) ? makeUiModeHandler(iface)
                                 : "power".equals(name) ? makePowerHandler(iface)
                                 : "media_session".equals(name) ? makeSessionManagerHandler(iface)
+                                : "media_router".equals(name) ? makeMediaRouterHandler(iface)
                                 : "activity_task".equals(name) ? makeActivityTaskHandler(iface)
                                 : "activity".equals(name) ? makeActivityManagerHandler(iface)
                                 : "window".equals(name) ? makeWindowManagerHandler(iface)

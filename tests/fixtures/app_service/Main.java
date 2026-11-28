@@ -1022,6 +1022,7 @@ public class Main extends Activity {
             case 18: windowIds(); break;
             case 19: overlayTouches(); break;
             case 20: popupPlaces(); break;
+            case 21: startUp(); break;
             default:
                 log("PASS");
                 // An app ends itself this way; it does not return.
@@ -1037,6 +1038,84 @@ public class Main extends Activity {
 
     // A view in a PopupWindow knows where it is on the screen, and a second PopupWindow
     // anchored to it opens under it, as a submenu does under its item.
+    // 21. What an app's start-up code reads and does. Each threw with nothing behind it,
+    //     and took the app's first screen with it:
+    //     - the window's metrics, from which androidx.window takes a size class: a window
+    //       0 wide is "Width must be positive";
+    //     - a media session's token as a key: hashCode and equals go to its binder;
+    //     - MediaRouter2, which will not be made without the system's route and session;
+    //     - a SharedPreferences change applied on a worker thread with a listener
+    //       registered: the listener is told on the main thread.
+    void startUp() {
+        final android.graphics.Rect bounds =
+                getWindowManager().getCurrentWindowMetrics().getBounds();
+        final android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        final boolean metrics = bounds.width() > 0 && bounds.width() == dm.widthPixels
+                && bounds.height() == dm.heightPixels;
+        String tokens;
+        try {
+            final android.media.session.MediaSession a =
+                    new android.media.session.MediaSession(this, "start-a");
+            final android.media.session.MediaSession b =
+                    new android.media.session.MediaSession(this, "start-b");
+            final java.util.HashSet<android.media.session.MediaSession.Token> set =
+                    new java.util.HashSet<>();
+            set.add(a.getSessionToken());
+            set.add(a.getController().getSessionToken());
+            set.add(b.getSessionToken());
+            tokens = set.size() + "/" + a.getSessionToken().equals(a.getSessionToken());
+            a.release();
+            b.release();
+        } catch (Throwable t) {
+            tokens = t.toString();
+        }
+        String router;
+        try {
+            final android.media.MediaRouter2 r = android.media.MediaRouter2.getInstance(this);
+            final java.util.List<android.media.MediaRoute2Info> selected =
+                    r.getSystemController().getSelectedRoutes();
+            router = selected.size() + "/"
+                    + (selected.size() == 1 && selected.get(0).isSystemRoute());
+        } catch (Throwable t) {
+            router = t.toString();
+        }
+        final android.content.SharedPreferences prefs =
+                getSharedPreferences("start-up", MODE_PRIVATE);
+        final String[] told = {"not told"}, applied = {"not applied"};
+        final android.content.SharedPreferences.OnSharedPreferenceChangeListener listener =
+                new android.content.SharedPreferences.OnSharedPreferenceChangeListener() {
+            @Override public void onSharedPreferenceChanged(
+                    android.content.SharedPreferences p, String key) {
+                told[0] = key + " on " + (android.os.Looper.myLooper()
+                        == android.os.Looper.getMainLooper() ? "main" : "another thread");
+            }
+        };
+        prefs.registerOnSharedPreferenceChangeListener(listener);
+        final Thread worker = new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    prefs.edit().putLong("at", android.os.SystemClock.uptimeMillis()).apply();
+                    applied[0] = "applied";
+                } catch (Throwable t) {
+                    applied[0] = t.toString();
+                }
+            }
+        }, "start-up-worker");
+        worker.start();
+        final String first = "start-up window metrics=" + metrics + " session tokens=" + tokens
+                + " router=" + router;
+        new Handler(getMainLooper()).postDelayed(new Runnable() {
+            @Override public void run() {
+                prefs.unregisterOnSharedPreferenceChangeListener(listener);
+                final String line = first + " prefs " + applied[0] + ", " + told[0];
+                log(line);
+                expect(("start-up window metrics=true session tokens=2/true router=1/true"
+                        + " prefs applied, at on main").equals(line), "start-up");
+                next();
+            }
+        }, 500);
+    }
+
     void popupPlaces() {
         final android.view.View first = new android.view.View(this);
         final android.view.View second = new android.view.View(this);
