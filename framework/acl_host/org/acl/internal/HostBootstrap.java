@@ -1168,9 +1168,19 @@ public final class HostBootstrap {
         // crash-report email via the Application context). Route the external intents acl can host
         // (email -> Email portal, http(s) VIEW -> OpenURI portal) and swallow the rest instead of
         // crashing — there is no ActivityManager to launch an arbitrary component.
+        //
+        // One of the app's own Activities is launched, as it is when an Activity starts it: a
+        // plugin brings its screen up from the Application's context with
+        // FLAG_ACTIVITY_NEW_TASK (Sonos's setup screen, a Flutter Activity, is started so).
         @Override public void startActivity(android.content.Intent intent) { startActivity(intent, null); }
         @Override public void startActivity(android.content.Intent intent, android.os.Bundle options) {
             if (intent == null) return;
+            final android.content.ComponentName own = intent.getComponent();
+            if (own != null && getPackageName() != null
+                    && getPackageName().equals(own.getPackageName())) {
+                startOwnActivity(intent);
+                return;
+            }
             if (composeEmailFromIntent(intent)) return;
             try {
                 android.net.Uri d = intent.getData();
@@ -4103,6 +4113,22 @@ public final class HostBootstrap {
         // Adopt this activity into the task stack with a token (see ActivityRecord). The first push is
         // the root; each internal startActivity pushes on top. finish()/BACK/the toolbar arrow pop it.
         registerActivity(a);
+    }
+
+    // An Activity of the app, started from a Context that is not an Activity. There is no
+    // caller to give a result to. Launched on the main thread, and once a finish that is
+    // under way is done (sFinishing), as a start from an Activity is.
+    static void startOwnActivity(final android.content.Intent intent) {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper() || sFinishing) {
+            new android.os.Handler(android.os.Looper.getMainLooper())
+                    .post(() -> startOwnActivity(intent));
+            return;
+        }
+        sPendingCallerToken = null;
+        sPendingRequestCode = -1;
+        if (!launchInternalActivity(intent)) {
+            System.out.println("acl HostBootstrap: Context.startActivity did not launch " + intent);
+        }
     }
 
     // Launch an Activity of THIS app internally and make it the presented decor. Many apps run a

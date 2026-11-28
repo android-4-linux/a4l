@@ -107,6 +107,7 @@ CHECKS = [
     "SERVICE: permissions asked twice 5/1/0 6/2/0",
     "SERVICE: dialog drawn=true while covered=0 back=true returned=srR",
     "SERVICE: result then start order=psArp drawn=true",
+    "SERVICE: activity started from the application context=true",
     "SERVICE: window ids dialog true same true activity true other false",
     "SERVICE: overlay touch taken true/true at 0@10,12 1@10,12 above dismissed true"
     " outside taken true dismissed true",
@@ -198,7 +199,8 @@ def main():
                                 services=SERVICES, receivers=RECEIVERS,
                                 activities=[(f"{PACKAGE}.Main$Cover", None),
                                             (f"{PACKAGE}.Main$Asked", None),
-                                            (f"{PACKAGE}.Main$Answered", None)],
+                                            (f"{PACKAGE}.Main$Answered", None),
+                                            (f"{PACKAGE}.Main$FromContext", None)],
                                 application=f"{PACKAGE}.Main$App"))
         unaligned = os.path.join(work, "u.apk")
         apk = os.path.join(work, "app-service.apk")
