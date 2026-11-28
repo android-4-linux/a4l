@@ -268,6 +268,11 @@ def main() -> int:
             if not re.search(r"VR: activity onConfigurationChanged 800x600 resources 800x600 "
                              r"metrics 800x600 orientation 2", out):
                 return "the resources did not say 800x600 when the activity was told", None
+            # ViewConfiguration's limit on a View's software layer: four bytes a pixel of
+            # the display, which is now 800x600.
+            if not re.search(r"VR: activity onConfigurationChanged 800x600 .* layer limit "
+                             + str(4 * 800 * 600) + r"\b", out):
+                return "the software layer limit did not follow the display to 800x600", None
             m = re.search(r"VR: done \((.*?)\) configs (\d+) sizes (\d+) draws (\d+) created (\d+)",
                           out)
             if not m:

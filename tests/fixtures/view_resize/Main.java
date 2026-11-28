@@ -95,7 +95,10 @@ public class Main extends Activity {
         final Configuration rc = getResources().getConfiguration();
         Log.i(TAG, "VR: activity onConfigurationChanged " + c.screenWidthDp + "x" + c.screenHeightDp
                 + " resources " + rc.screenWidthDp + "x" + rc.screenHeightDp + " metrics "
-                + dm.widthPixels + "x" + dm.heightPixels + " orientation " + c.orientation);
+                + dm.widthPixels + "x" + dm.heightPixels + " orientation " + c.orientation
+                // The largest software layer a View may have follows the display: 4 bytes a pixel.
+                + " layer limit "
+                + android.view.ViewConfiguration.get(this).getScaledMaximumDrawingCacheSize());
         if (configs++ == 0) {
             handler.postDelayed(new Runnable() {
                 public void run() { finishRun("after the configuration change"); }

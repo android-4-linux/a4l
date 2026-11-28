@@ -800,6 +800,7 @@ public final class HostBootstrap {
         c.smallestScreenWidthDp = cfg.smallestScreenWidthDp;
         c.orientation = cfg.orientation;
         c.screenLayout = cfg.screenLayout;
+        c.windowConfiguration.setMaxBounds(cfg.windowConfiguration.getMaxBounds());
         android.util.DisplayMetrics m = new android.util.DisplayMetrics();
         m.setTo(r.getDisplayMetrics());
         m.widthPixels = m.noncompatWidthPixels = dm.widthPixels;
@@ -855,6 +856,10 @@ public final class HostBootstrap {
         if (sNightMode != 0) {
             cfg.uiMode = (cfg.uiMode & ~android.content.res.Configuration.UI_MODE_NIGHT_MASK) | sNightMode;
         }
+        // The display's bounds. ViewConfiguration takes the largest software layer a View
+        // may have from them (four bytes a pixel of the display): left empty the limit was
+        // 0, and a View with LAYER_TYPE_SOFTWARE was not drawn at all.
+        cfg.windowConfiguration.setMaxBounds(0, 0, DISPLAY_W, DISPLAY_H);
         return cfg;
     }
 
@@ -6395,6 +6400,17 @@ public final class HostBootstrap {
             seen.add(Resources.getSystem());
             seen.remove(null);
             for (Resources r : seen) applyDisplaySize(r, cfg, dm);
+            // ViewConfiguration keeps one instance a density, with the software layer limit
+            // it took from the display's bounds when it was made. The next one made takes
+            // the new bounds: a View larger than the old display is still drawn.
+            try {
+                final java.lang.reflect.Field made =
+                        android.view.ViewConfiguration.class.getDeclaredField("sConfigurations");
+                made.setAccessible(true);
+                ((android.util.SparseArray<?>) made.get(null)).clear();
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                android.util.Log.w("acl", "resizeWindow: ViewConfiguration keeps its limit: " + e);
+            }
             // The frames a hollow ViewRootImpl answers getWindowVisibleDisplayFrame from.
             java.util.List<android.view.View> decors = new java.util.ArrayList<android.view.View>();
             if (decor != null) decors.add(decor);
