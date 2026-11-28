@@ -36,9 +36,24 @@
 # the main loop. Then a tap on the tab's close button ends the tab, and the waiting screen is
 # resumed with no answer.
 #
+# Run three (A4L_TEST_BROWSER=silent, ACL_BROWSER unset): two rounds of that plain link on a
+# host whose portal never answers, which is what a kiosk session is. The app is given a
+# session bus of its own, on which the portal's name can be started and never comes up, so
+# the call for the link runs its five seconds out. The fixture asks for the link three times
+# in round one, as a user does who taps a link that has not opened. The host is asked once,
+# off the main loop, and one tab opens when it has not answered. In round two the tab opens
+# at once: a portal that gave no answer is not asked again. An email and a shared link sent
+# in round two do not hold the main loop either.
+#
+# Run four (A4L_TEST_BROWSER=host, ACL_BROWSER unset): the plain link on a host that takes
+# it. The bus has a stand-in portal (fake_portal.py) that answers OpenURI and writes down
+# what it was asked to open. It is asked once, for the link's address, no tab opens and the
+# page is not loaded. Not made where there is no PyGObject for the stand-in.
+#
 # Needs a host ART build (ACL_ART_HOME), the AOSP toolchain, a WebView APK (ACL_WEBVIEW_APK, or
-# the AOSP prebuilt under external/chromium-webview), a render node, and Weston with its kiosk
-# shell and weston-screenshooter. Exits 77 (skip) where any of these is missing.
+# the AOSP prebuilt under external/chromium-webview), a render node, Weston with its kiosk
+# shell and weston-screenshooter, and dbus-daemon. Exits 77 (skip) where any of these is
+# missing.
 #
 # Usage: run_browser_tab_test.py <a4l> <android.jar>
 import glob
@@ -115,6 +130,97 @@ CANCEL_CHECKS = [
     "BROWSER: PASS",
 ]
 
+# The host's portal never answers. Three asks for the link in round one are one call to the
+# host, and one tab; round two's link is not a call at all.
+SILENT_CHECKS = [
+    AGAIN,
+    THREW,
+    IME_KEY,
+    f"BROWSER: round 1 starts with {FOREGROUND}",
+    "BROWSER: round 1 link held the main loop under a second, tab up after the host's timeout",
+    "BROWSER: round 1 cancelled sign-in=crpsrpsd redirect= others=[]",
+    f"BROWSER: round 2 starts with {FOREGROUND}",
+    "BROWSER: round 2 email and share held the main loop under a second",
+    "BROWSER: round 2 link held the main loop under a second, tab up at once",
+    "BROWSER: round 2 cancelled sign-in=crpsrpsd redirect= others=[]",
+    "BROWSER: PASS",
+]
+SILENT_COUNTS = [
+    ("OpenURI failed (", 1, "calls to the host's portal"),
+    ("it is not asked again", 1, "notes that the portal gave no answer"),
+    ("activity-stack: pushed org.acl.internal.BrowserActivity", 2, "tabs opened"),
+    ("BROWSER: site /wait -> 200 OK", 2, "loads of the page"),
+]
+# Round one's tab is up about seven seconds in; each round's is closed by the next tap.
+SILENT_CLOSE_TAPS = ";".join(f"20,20,{ms}" for ms in range(16000, 90000, 1500))
+
+# The host takes the link: its portal is asked once, and nothing of the app's opens.
+HOST_CHECKS = [
+    AGAIN,
+    THREW,
+    IME_KEY,
+    f"BROWSER: round 1 starts with {FOREGROUND}",
+    "BROWSER: round 1 link held the main loop under a second, no tab",
+    "BROWSER: round 1 left to the host sign-in=crpsd redirect= others=[]",
+    "BROWSER: PASS",
+]
+HOST_COUNTS = [
+    ("OpenURI -> host portal (", 1, "links the host's portal took"),
+    ("activity-stack: pushed org.acl.internal.BrowserActivity", 0, "tabs opened"),
+    ("BROWSER: site /wait", 0, "loads of the page"),
+]
+
+# A session bus of the test's own. With `silent`, org.freedesktop.portal.Desktop can be
+# started on it and never comes up: what the bus of a kiosk session with xdg-desktop-portal
+# installed is.
+SILENT_BUS = """<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:path={socket}</listen>
+  <servicedir>{services}</servicedir>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+"""
+SILENT_PORTAL = """[D-BUS Service]
+Name=org.freedesktop.portal.Desktop
+Exec={sleep} 300
+"""
+
+
+def start_bus(work, tag, silent):
+    """A dbus-daemon as above. Returns (process, address), or (None, why not)."""
+    daemon, sleep = shutil.which("dbus-daemon"), shutil.which("sleep")
+    if not daemon or not sleep:
+        return None, "dbus-daemon not found"
+    services = os.path.join(work, tag, "bus-services")
+    os.makedirs(services)
+    socket = os.path.join(work, tag, "bus")
+    conf = os.path.join(work, tag, "bus.conf")
+    with open(conf, "w", encoding="utf-8") as fh:
+        fh.write(SILENT_BUS.format(socket=socket, services=services))
+    if silent:
+        with open(os.path.join(services, "org.freedesktop.portal.Desktop.service"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(SILENT_PORTAL.format(sleep=sleep))
+    bus = subprocess.Popen([daemon, f"--config-file={conf}", "--nofork"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           start_new_session=True)
+    for _ in range(50):
+        if os.path.exists(socket):
+            return bus, f"unix:path={socket}"
+        if bus.poll() is not None:
+            break
+        time.sleep(0.1)
+    if bus.poll() is None:
+        bus.kill()
+    return None, "dbus-daemon did not start"
+
+
 # The tab on the screen: its bar, 48 dp high, and under it the page, which is one color.
 BAR = ((W // 2, 24), (241, 243, 244))
 PAGE = ((W // 2, H // 2), (32, 96, 192))
@@ -137,7 +243,8 @@ def story_of(out):
                      if "BROWSER: " in ln or "browser: " in ln or "acl WebView" in ln
                      or "activity-stack" in ln or "Fatal signal" in ln
                      or "dispatchActivity" in ln or "FATAL EXCEPTION" in ln
-                     or "input: synthetic KEYS" in ln)
+                     or "input: synthetic KEYS" in ln or "svc.share" in ln
+                     or "HostBootstrap: Share" in ln or "HostBootstrap: email" in ln)
 
 
 def painted(display, work):
@@ -190,7 +297,8 @@ def main():
 
     fixtures = os.path.join(src_root, "tests/fixtures")
     work = tempfile.mkdtemp(prefix="a4l-browser-")
-    weston = app = None
+    weston = app = bus = bus2 = portal = None
+    answered = "the host's portal took a link"
     try:
         sys.path.insert(0, fixtures)
         from make_axml import build_axml  # noqa: E402
@@ -313,6 +421,77 @@ def main():
                                  f"{out[-4000:]}\n")
                 return 1
         sys.stdout.write(f"cancel:\n{story_of(out)}\n")
+
+        # Run three: the host's portal never answers.
+        bus, address = start_bus(work, "silent-bus", True)
+        if bus is None:
+            return skip(address)
+        p = subprocess.run(command, env=environment("silent", {
+            "A4L_TEST_BROWSER": "silent", "ACL_TEST_MS": "1",
+            "ACL_TEST_TAP": SILENT_CLOSE_TAPS, "DBUS_SESSION_BUS_ADDRESS": address}),
+            capture_output=True, text=True, errors="replace", timeout=300)
+        out = p.stdout + p.stderr
+        if "BROWSER: FAIL" in out:
+            sys.stderr.write("FAIL (silent): the fixture reported a failure\n"
+                             f"{story_of(out)}\n{out[-4000:]}\n")
+            return 1
+        if "FATAL EXCEPTION" in out:
+            sys.stderr.write("FAIL (silent): an exception on the main loop\n"
+                             f"{story_of(out)}\n{out[-4000:]}\n")
+            return 1
+        for c in SILENT_CHECKS:
+            if c not in out:
+                sys.stderr.write(f"FAIL (silent): missing '{c}'\n{story_of(out)}\n"
+                                 f"{out[-4000:]}\n")
+                return 1
+        for text, want, what in SILENT_COUNTS:
+            if out.count(text) != want:
+                sys.stderr.write(f"FAIL (silent): {out.count(text)} {what}, not {want}\n"
+                                 f"{story_of(out)}\n{out[-4000:]}\n")
+                return 1
+        sys.stdout.write(f"silent:\n{story_of(out)}\n")
+
+        # Run four: the host's portal takes the link.
+        bus2, address = start_bus(work, "host-bus", False)
+        if bus2 is None:
+            return skip(address)
+        record = os.path.join(work, "host-bus", "asked")
+        portal = subprocess.Popen(
+            [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "fake_portal.py"), address, record],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            start_new_session=True)
+        if portal.stdout.readline().strip() != "ready":
+            # No PyGObject (77), or the stand-in did not get the name.
+            answered = f"the run with a portal that answers was not made ({portal.wait(10)})"
+        else:
+            p = subprocess.run(command, env=environment("host", {
+                "A4L_TEST_BROWSER": "host", "DBUS_SESSION_BUS_ADDRESS": address}),
+                capture_output=True, text=True, errors="replace", timeout=300)
+            out = p.stdout + p.stderr
+            asked = []
+            if os.path.isfile(record):
+                with open(record, encoding="utf-8") as fh:
+                    asked = fh.read().split()
+            problem = None
+            if "BROWSER: FAIL" in out:
+                problem = "the fixture reported a failure"
+            elif "FATAL EXCEPTION" in out:
+                problem = "an exception on the main loop"
+            elif len(asked) != 1 or not (asked[0].startswith("http://127.0.0.1:")
+                                         and asked[0].endswith("/wait")):
+                problem = f"the portal was asked for {asked}, not the link once"
+            for c in HOST_CHECKS:
+                if problem is None and c not in out:
+                    problem = f"missing '{c}'"
+            for text, want, what in HOST_COUNTS:
+                if problem is None and out.count(text) != want:
+                    problem = f"{out.count(text)} {what}, not {want}"
+            if problem is not None:
+                sys.stderr.write(f"FAIL (host): {problem}\n{story_of(out)}\n"
+                                 f"{out[-4000:]}\n")
+                return 1
+            sys.stdout.write(f"host:\n{story_of(out)}\n")
     except subprocess.CalledProcessError as e:
         sys.stderr.write(f"FAIL: build step: {e.cmd}\n{e.stderr}\n")
         return 1
@@ -320,7 +499,7 @@ def main():
         sys.stderr.write(f"FAIL: the app did not end: {e}\n")
         return 1
     finally:
-        for proc in (app, weston):
+        for proc in (app, portal, bus, bus2, weston):
             if proc is not None and proc.poll() is None:
                 try:
                     os.killpg(proc.pid, 15)
@@ -329,7 +508,9 @@ def main():
                     proc.kill()
         shutil.rmtree(work, ignore_errors=True)
     sys.stdout.write("OK: two sign-ins answered through a tab in the app's window; a third "
-                     "tab's page on the screen, typed into, and closed by its button\n")
+                     "tab's page on the screen, typed into, and closed by its button; a link "
+                     "tapped three times on a host that does not answer opened one tab; "
+                     f"{answered}\n")
     return 0
 
 

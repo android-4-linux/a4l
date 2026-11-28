@@ -5,6 +5,9 @@
 // spec. No GPL-3.0 sources.
 #include "svc/share/share_jni.h"
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <string>
@@ -59,6 +62,37 @@ jboolean JNICALL n_compose_email(JNIEnv* env,
 // thread for sd-bus's default 25 s.
 constexpr std::chrono::seconds kPortalTimeout{5};
 
+// A portal that gave no answer is not asked again. On a board with no desktop
+// the bus can start xdg-desktop-portal, which never comes up there, and every
+// call then costs the whole timeout. svc/appearance does the same for its
+// query.
+std::atomic<bool> g_no_portal{false};
+
+// Whether `e` says that no portal answered, and not that a portal refused this
+// one request: the name has no owner and cannot be started, or the call ran
+// out of time.
+bool no_answer(const sdbus::Error& e) {
+  static constexpr std::array<std::string_view, 6> kNames = {
+      "org.freedesktop.DBus.Error.ServiceUnknown",
+      "org.freedesktop.DBus.Error.NameHasNoOwner",
+      "org.freedesktop.DBus.Error.NoReply",
+      "org.freedesktop.DBus.Error.Timeout",
+      "org.freedesktop.DBus.Error.TimedOut",
+      "System.Error.ETIMEDOUT",
+  };
+  const std::string_view name{e.getName()};
+  return name.starts_with("org.freedesktop.DBus.Error.Spawn.") ||
+         std::ranges::find(kNames, name) != kNames.end();
+}
+
+// Take note of a call that failed: a portal that gave no answer is given up
+// on.
+void note_failure(const sdbus::Error& e) {
+  if (no_answer(e) && !g_no_portal.exchange(true, std::memory_order_relaxed))
+    log::w(kTag, "the host's portal gave no answer ({}); it is not asked again",
+           e.getName());
+}
+
 // Ask the host's desktop portal to open a URI. The portal shows the user's
 // default handler (a browser for http/https) — the sandbox-correct alternative
 // to the (unavailable) Android chooser. One-shot: create a session-bus
@@ -66,7 +100,7 @@ constexpr std::chrono::seconds kPortalTimeout{5};
 // handle; the actual open is the portal's job, so this does not block on the
 // browser.
 bool open_uri(const std::string& uri) {
-  if (uri.empty())
+  if (uri.empty() || g_no_portal.load(std::memory_order_relaxed))
     return false;
   try {
     auto conn = sdbus::createSessionBusConnection();
@@ -86,6 +120,7 @@ bool open_uri(const std::string& uri) {
     return true;
   } catch (const sdbus::Error& e) {
     log::w(kTag, "OpenURI failed ({}); URI not opened", e.getMessage());
+    note_failure(e);
     return false;
   } catch (...) {
     log::w(kTag, "OpenURI failed (unknown); URI not opened");
@@ -116,6 +151,9 @@ bool compose_email(const std::string& address,
                    const std::string& subject,
                    const std::string& body,
                    std::vector<sdbus::UnixFd>&& attachments) {
+  // The caller's descriptors are closed with its vector either way.
+  if (g_no_portal.load(std::memory_order_relaxed))
+    return false;
   try {
     auto conn = sdbus::createSessionBusConnection();
     auto proxy = sdbus::createProxy(
@@ -147,6 +185,7 @@ bool compose_email(const std::string& address,
   } catch (const sdbus::Error& e) {
     log::w(kTag, "ComposeEmail failed ({}); email not composed",
            e.getMessage());
+    note_failure(e);
     return false;
   } catch (...) {
     log::w(kTag, "ComposeEmail failed (unknown); email not composed");

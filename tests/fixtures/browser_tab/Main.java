@@ -18,7 +18,12 @@
 // an address in a scheme nothing takes, then to the app's. Round two's is an HTTP redirect
 // straight to the app's scheme. A second run (A4L_TEST_BROWSER=cancel) is a plain link, with
 // no tab asked for, to a page of one color that goes nowhere: the test looks for the color on
-// the screen, types into the page's text field, and closes the tab with its button.
+// the screen, types into the page's text field, and closes the tab with its button. A third
+// run (A4L_TEST_BROWSER=silent) is two rounds of that plain link on a host whose portal
+// never answers: the link is tapped again while nothing has opened, and round two also
+// sends an email and shares a link. None of it may hold the main loop. A fourth run
+// (A4L_TEST_BROWSER=host) is the plain link on a host that takes it: no tab comes up, and
+// the waiting screen ends the round itself.
 //
 // Logs "BROWSER:" lines and "BROWSER: PASS" at the end;
 // tests/integration/run_browser_tab_test.py reads them.
@@ -66,6 +71,14 @@ public class Main extends Activity {
     // onActivityPreCreated, and down in onActivityStopped and onActivityPaused.
     static int sStarted, sResumed;
     static boolean sAgain;  // Main has been started again while it was the top Activity
+    static final String RUN = System.getenv("A4L_TEST_BROWSER");
+    static final boolean CANCEL = "cancel".equals(RUN);
+    static final boolean SILENT = "silent".equals(RUN);
+    static final boolean HOST = "host".equals(RUN);
+    static final boolean PLAIN = CANCEL || SILENT || HOST;  // a link with no tab asked for
+    // The longest a startActivity for something of the host's held the main loop this
+    // round, when the link was first asked for, and how long after that the tab was up.
+    static long sHeld, sAskedAt, sTabUp;
     static final StringBuilder sMain = new StringBuilder();  // Main's lifecycle from then on
 
     static void log(String s) {
@@ -120,14 +133,13 @@ public class Main extends Activity {
         }
         sMain.append('r');
         if (sRound == 0) log("started again on top: " + sMain);
-        final boolean cancel = "cancel".equals(System.getenv("A4L_TEST_BROWSER"));
         if (sRound > 0) {
             if ("none".equals(sAnswer)) fail("back on the main screen with no outcome");
             log("round " + sRound + " " + sAnswer + " sign-in=" + sSignIn
                     + " redirect=" + sRedirect + " others=[" + sOthers.toString().trim() + "]");
             log("round " + sRound + " callbacks=" + sCallbacks.toString().trim());
         }
-        if (sRound == (cancel ? 1 : 2)) {
+        if (sRound == (CANCEL || HOST ? 1 : 2)) {
             log("PASS");
             finish();
             System.exit(0);
@@ -137,7 +149,7 @@ public class Main extends Activity {
         sSignIn.setLength(0);
         sRedirect.setLength(0);
         sCallbacks.setLength(0);
-        final String page = cancel ? "/wait" : sRound == 1 ? "/start" : "/direct";
+        final String page = PLAIN ? "/wait" : sRound == 1 ? "/start" : "/direct";
         // Started as a tap on a button starts it: not from inside this screen's own launch.
         // A little later, so that the launch screen, which finished as it started this one,
         // is gone.
@@ -164,7 +176,7 @@ public class Main extends Activity {
                 }
                 startActivity(new Intent(Main.this, SignIn.class)
                         .putExtra(EXTRA_PAGE, "http://127.0.0.1:" + sPort + page)
-                        .putExtra(EXTRA_TAB, !cancel));
+                        .putExtra(EXTRA_TAB, !PLAIN));
             }
         }, 300);
     }
@@ -236,7 +248,7 @@ public class Main extends Activity {
     public static class Splash extends Activity {
         @Override protected void onCreate(Bundle b) {
             super.onCreate(b);
-            if ("cancel".equals(System.getenv("A4L_TEST_BROWSER"))) {
+            if (CANCEL) {
                 startActivity(new Intent(this, Main.class));
                 finish();
                 return;
@@ -266,6 +278,7 @@ public class Main extends Activity {
     /** The library's waiting screen. */
     public static class SignIn extends Activity {
         private boolean mAsked;  // the tab has been opened and no answer has come
+        private boolean mResumed;
 
         @Override protected void onCreate(Bundle b) {
             super.onCreate(b);
@@ -294,10 +307,18 @@ public class Main extends Activity {
                 // Back with nothing: the user closed the tab.
                 mAsked = false;
                 sAnswer = "cancelled";
+                if (SILENT) {
+                    log("round " + sRound + " link held the main loop "
+                            + (sHeld < 1000 ? "under a second" : sHeld + " ms") + ", tab up "
+                            + (sTabUp >= 4000 ? "after the host's timeout"
+                                    : sTabUp >= 0 && sTabUp < 3000 ? "at once"
+                                    : "in " + sTabUp + " ms"));
+                }
                 finish();
                 return;
             }
             mAsked = true;
+            mResumed = true;
             final Intent view = new Intent(Intent.ACTION_VIEW,
                     Uri.parse(getIntent().getStringExtra(EXTRA_PAGE)));
             if (getIntent().getBooleanExtra(EXTRA_TAB, true)) {
@@ -305,12 +326,59 @@ public class Main extends Activity {
                 session.putBinder(EXTRA_SESSION, null);
                 view.putExtras(session);
             }
+            sHeld = 0;
+            sTabUp = -1;
+            if (SILENT && sRound == 2) {
+                // An email and a shared link are the host's to take too.
+                final long from = android.os.SystemClock.uptimeMillis();
+                startActivity(new Intent(Intent.ACTION_SENDTO,
+                        Uri.parse("mailto:nobody@example.com?subject=a4l")));
+                startActivity(Intent.createChooser(new Intent(Intent.ACTION_SEND)
+                        .setType("text/plain")
+                        .putExtra(Intent.EXTRA_TEXT, "http://127.0.0.1:" + sPort + "/shared"),
+                        null));
+                final long held = android.os.SystemClock.uptimeMillis() - from;
+                log("round 2 email and share held the main loop "
+                        + (held < 1000 ? "under a second" : held + " ms"));
+            }
+            // The link again, twice, while nothing has opened: a user who taps it again.
+            // Queued before the first ask, as a tap is that comes while the main loop is
+            // held.
+            for (int i = 1; SILENT && i <= 2; i++) {
+                new Handler(getMainLooper()).postDelayed(new Runnable() {
+                    @Override public void run() {
+                        if (mResumed && !isFinishing()) open(new Intent(view));
+                    }
+                }, 300 * i);
+            }
+            sAskedAt = android.os.SystemClock.uptimeMillis();
+            open(view);
+            if (!HOST) return;
+            // The host takes the link: nothing of the app's comes up over this screen.
+            new Handler(getMainLooper()).postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (!mResumed || isFinishing()) return;
+                    mAsked = false;
+                    sAnswer = "left to the host";
+                    log("round " + sRound + " link held the main loop "
+                            + (sHeld < 1000 ? "under a second" : sHeld + " ms")
+                            + ", no tab");
+                    finish();
+                }
+            }, 2000);
+        }
+
+        private void open(Intent view) {
+            final long from = android.os.SystemClock.uptimeMillis();
             startActivity(view);
+            sHeld = Math.max(sHeld, android.os.SystemClock.uptimeMillis() - from);
         }
 
         @Override protected void onPause() {
             super.onPause();
             sSignIn.append('p');
+            mResumed = false;
+            if (mAsked && sTabUp < 0) sTabUp = android.os.SystemClock.uptimeMillis() - sAskedAt;
         }
 
         @Override protected void onStop() {

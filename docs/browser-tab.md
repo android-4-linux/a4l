@@ -29,6 +29,14 @@ screen that opened it.
 A tab needs a WebView: `ACL_WEBVIEW_APK` names the WebView APK, and `tools/run-apk.sh` sets
 it when it finds AOSP's prebuilt. With none, a link that asks for a tab goes to the host.
 
+The host is asked off the app's main thread, and a link that has been asked for and has not
+opened yet is not opened a second time: a second tap on it does nothing. The portal's answer
+can be five seconds in coming when it is "no". A kiosk session with xdg-desktop-portal
+installed is such a host: the bus starts the portal, which never comes up. The link is then
+shown in the app's window, and a portal that gave no answer is not asked again while the app
+runs, so the links after it open in the app's window at once. `ACL_BROWSER=app` on such a
+host saves the first wait.
+
 ## Signing in
 
 An app that signs in through a browser opens the sign-in page in a tab and waits. The site
