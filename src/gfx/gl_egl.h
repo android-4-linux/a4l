@@ -67,6 +67,12 @@ class GlWindow {
     return egl_;
   }  // EGLSurface — EGLImpl's window-surface result
 
+  // The EGLSurface has been destroyed by the one it was handed to: an app's
+  // engine calls eglDestroySurface on what eglCreateWindowSurface gave it.
+  // From here this window has no EGLSurface and destroys none. The handle is
+  // the driver's again, and the next surface made may be given the same one.
+  void surrender_egl_surface() { egl_ = nullptr; }
+
   // Make this window's EGLSurface + context current on the calling thread
   // (common to all backends).
   bool make_current(std::string* error);

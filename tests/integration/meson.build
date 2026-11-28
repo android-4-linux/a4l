@@ -375,6 +375,20 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 300,
       is_parallel : false,
     )
+    # A screen drawn by an engine through native EGL, opened from an app's own views (a
+    # Flutter screen in an app built of views): the engine gets a pbuffer and a window on
+    # the view, makes the window again eight times, and its picture is read off a headless
+    # Weston's screen under a banner view. Needs what gl-surfaceview-under-views needs and a
+    # built bionic; SKIPs otherwise, which includes CI. is_parallel off: it reads the screen.
+    test(
+      'native-egl-under-views',
+      py3,
+      args : [files('run_native_egl_test.py'), acl_exe, meson.project_source_root(),
+              framework_android_jar],
+      depends : [acl_exe],
+      timeout : 300,
+      is_parallel : false,
+    )
     # Offscreen GL through android.opengl.EGL14 on the default display, as a player's
     # placeholder surface sets it up, where Mesa's default platform has no server running and
     # where there is no display server at all. Needs host ART, Mesa and a render node; SKIPs

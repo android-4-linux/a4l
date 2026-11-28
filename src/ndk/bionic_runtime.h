@@ -67,6 +67,18 @@ struct NativeGlHooks {
                                     void* egl_config,
                                     int width,
                                     int height) = nullptr;
+  // Put first, among the `count` configs Mesa answered an eglChooseConfig on
+  // `egl_display` with, those a window can be made for. An engine takes the
+  // first config it is given, and on a gbm display that may be one no window
+  // has a format for. Unset: the configs go to the engine as Mesa ordered them.
+  void (*order_configs)(void* user,
+                        void* egl_display,
+                        void** configs,
+                        int count) = nullptr;
+  // The engine is destroying `egl_surface` with eglDestroySurface, which the
+  // shim passes on to Mesa after this. A window the runtime made for the
+  // engine gives the handle up here.
+  void (*surface_destroyed)(void* egl_surface, void* user) = nullptr;
   void* user = nullptr;
 };
 // Register the hooks (idempotent; last wins). Called by the runtime at EGL

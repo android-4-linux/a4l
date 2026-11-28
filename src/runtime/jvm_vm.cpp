@@ -383,6 +383,11 @@ EGLSurface make_gl_plane_surface(EGLConfig config) {
   EGLint alpha = 0;
   eglGetConfigAttrib(static_cast<EGLDisplay>(dev->egl_display()), config,
                      EGL_ALPHA_SIZE, &alpha);
+  // The window before goes first, with its buffers. An engine makes the
+  // view's window again when the view is given its size, and has destroyed the
+  // first by then: kept until the new one existed, the old window still named
+  // a handle that the driver had by then given to the new surface.
+  g_gl_plane.window.reset();
   std::string err;
   auto win = dev->make_window(
       w, h, nullptr, alpha > 0 ? g_gl_plane.mods_argb : g_gl_plane.mods_xrgb,
@@ -393,7 +398,7 @@ EGLSurface make_gl_plane_surface(EGLConfig config) {
     return EGL_NO_SURFACE;
   }
   auto* egl = static_cast<EGLSurface>(win->egl_surface());
-  g_gl_plane.window = std::move(win);  // the one before goes, with its buffers
+  g_gl_plane.window = std::move(win);
   g_gl_plane.told_live = false;
   log::i(kTag,
          "egl10: eglCreateWindowSurface -> a {}x{} offscreen window, shown on "
@@ -402,9 +407,22 @@ EGLSurface make_gl_plane_surface(EGLConfig config) {
   return egl;
 }
 
+// The engine is destroying `egl_surface`. If it is the view's window, the
+// window gives the handle up: the driver may give the same one to the next
+// surface it makes, and a window that still named it would take that surface's
+// swaps for its own and destroy it in its place later. The window itself, and
+// its buffers, stay until the view's next window is made: the driver can hold
+// a destroyed surface while a context is still bound to it.
+void gl_plane_surface_destroyed(void* egl_surface) {
+  std::lock_guard<std::mutex> lk(g_gl_plane.mtx);
+  if (egl_surface != nullptr && g_gl_plane.window != nullptr &&
+      g_gl_plane.window->egl_surface() == egl_surface)
+    g_gl_plane.window->surrender_egl_surface();
+}
+
 bool is_gl_plane_surface(void* egl_surface) {
   std::lock_guard<std::mutex> lk(g_gl_plane.mtx);
-  return g_gl_plane.window != nullptr &&
+  return egl_surface != nullptr && g_gl_plane.window != nullptr &&
          g_gl_plane.window->egl_surface() == egl_surface;
 }
 
@@ -422,7 +440,8 @@ bool gl_plane_swap(void* egl_surface, bool on_donor) {
   {
     std::lock_guard<std::mutex> lk(g_gl_plane.mtx);
     gfx::GlWindow* win = g_gl_plane.window.get();
-    if (win == nullptr || win->egl_surface() != egl_surface)
+    if (win == nullptr || egl_surface == nullptr ||
+        win->egl_surface() != egl_surface)
       return false;
     gfx::DmabufFrame frame{};
     std::string err;
@@ -8647,6 +8666,9 @@ class ArtVm final : public JniVm {
     // size that is never presented, on the device the config is from. That
     // is the fallback device for an app with no GLSurfaceView session (an
     // engine that sets up offscreen first), or a --split child's device.
+    hooks.surface_destroyed = [](void* egl_surface, void*) {
+      gl_plane_surface_destroyed(egl_surface);
+    };
     hooks.create_offscreen_surface = [](EGLDisplay display, EGLConfig config,
                                         int w, int h, void*) -> EGLSurface {
       if (w <= 0 || h <= 0 || w > 16384 || h > 16384)
@@ -8706,10 +8728,23 @@ class ArtVm final : public JniVm {
     nhooks.get_display = [](void*) -> void* {
       // Fast path: the present session is already published (nGlOpen ran, or a
       // prior get_display created it) — return its display.
+      bool view_tree = false;
       {
         std::unique_lock<std::mutex> lk(g_gl_session.mtx);
         if (g_gl_session.ready && g_gl_session.device != nullptr)
           return static_cast<void*>(g_gl_session.device->egl_display());
+        view_tree = g_gl_session.no_gl_session;
+      }
+      // The app is on the View-tree present, so no GL session is coming for
+      // this engine: a Flutter screen an app opens from its own views. Its view
+      // is a SurfaceView under the app's other views (GlPlane), and it draws on
+      // the headless gbm device, as an engine that goes through Java EGL10
+      // does. A session made in place here would put a second GL window on the
+      // toplevel the view tree is drawn to.
+      if (view_tree) {
+        gfx::GlDevice* gbm = acl_fallback_gbm_device();
+        return gbm != nullptr ? static_cast<void*>(gbm->egl_display())
+                              : nullptr;
       }
       // The newer Flutter engine builds its GL environment AND rendering
       // surface SYNCHRONOUSLY on its raster thread DURING onCreate, while the
@@ -8814,20 +8849,32 @@ class ArtVm final : public JniVm {
              st_readback_and_swap(egl_surface);
     };
     // A --split child renders on Mesa's gbm platform, which has window
-    // configs only. An engine's offscreen (pbuffer) surface is backed by a
-    // gbm window of its size that is never presented.
+    // configs only, and so does an engine in an app that is on the View-tree
+    // present (see get_display). An engine's offscreen (pbuffer) surface is
+    // backed by a gbm window of its size that is never presented.
     nhooks.offscreen_on_window = [](void*) -> bool {
-      return g_gl_session.split;  // set once, before the engine can ask
+      if (g_gl_session.split)  // set once, before the engine can ask
+        return true;
+      std::lock_guard<std::mutex> lk(g_gl_session.mtx);
+      return g_gl_session.device == nullptr && g_gl_session.no_gl_session;
+    };
+    nhooks.surface_destroyed = [](void* egl_surface, void*) {
+      gl_plane_surface_destroyed(egl_surface);
+    };
+    nhooks.order_configs = [](void*, void* dpy, void** configs, int count) {
+      gfx::order_window_configs(dpy, configs, count);
     };
     nhooks.create_offscreen_surface = [](void*, void* cfg, int w,
                                          int h) -> void* {
       std::lock_guard<std::mutex> lk(g_gl_session.mtx);
-      if (g_gl_session.device == nullptr || w <= 0 || h <= 0 || w > 16384 ||
-          h > 16384)
+      gfx::GlDevice* dev = g_gl_session.device.get();
+      if (dev == nullptr && g_gl_session.no_gl_session)
+        dev = acl_fallback_gbm_device();
+      if (dev == nullptr || w <= 0 || h <= 0 || w > 16384 || h > 16384)
         return nullptr;
       std::string err;
-      auto win = g_gl_session.device->make_window(w, h, nullptr, {}, &err,
-                                                  static_cast<EGLConfig>(cfg));
+      auto win = dev->make_window(w, h, nullptr, {}, &err,
+                                  static_cast<EGLConfig>(cfg));
       if (!win) {
         log::w(kTag, "native egl: offscreen {}x{} surface failed: {}", w, h,
                err);
