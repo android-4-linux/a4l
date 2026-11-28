@@ -76,6 +76,7 @@ CHECKS = [
     "SERVICE: context calls locked=false enforced=true",
     "SERVICE: telephony callback registered=true",
     "SERVICE: location service answered=true gnss=true",
+    "SERVICE: vibrator manager ids=0 has=false same=true",
     "SERVICE: process natives cpu=true signal=true",
     "SERVICE: dns resolver answered=true loopback=true rcode=0 raw=1",
     "SERVICE: paint long color srgb=ff336699 wide red=true",
