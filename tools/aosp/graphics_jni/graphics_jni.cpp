@@ -2298,52 +2298,215 @@ void Path_nAddRoundRect(JNIEnv*,
     s->addRoundRect(SkRect::MakeLTRB(l, t, r, b), rx, ry,
                     static_cast<SkPathDirection>(dir));
 }
-// Path.nApproximate(long, float) -> float[]: sample the path into [fraction, x,
-// y] triples (PathInterpolator reads the x,y of each). Needed by androidx
-// EdgeToEdge / any XML PathInterpolator. Arc-length sampling via SkPathMeasure
-// over the first contour (interpolator curves are single-contour, monotonic in
-// x).
+// Path.nApproximate(long, float) -> float[]: the path as line segments, three
+// floats to a point: how far along the path's length it lies (0 to 1), x, y.
+// PathInterpolator, an animation along a path (PathKeyframes) and
+// PatternPathMotion are built on it.
+//
+// Done the way Android's hwui does it, so that an app gets the points it gets
+// there. Every contour is walked. A curve is halved in its parameter until the
+// middle of each piece is within `error` of the middle of its chord, and each
+// point is the curve's own value: a line is its two ends and an easing curve a
+// dozen points or so. A move adds a point at the length the path already has,
+// so a path with a gap shows two points at one fraction.
+//
+// a4l used to step along the first contour at even lengths, a few hundred
+// points to a curve. Where an easing curve is level in x at an end, as
+// (1, 0, 1, 1) is, points next to each other differed by less than the
+// arithmetic's error and one came out behind the one before it;
+// PathInterpolator then threw
+// "The Path cannot loop back on itself".
+struct Flattened {
+  std::vector<SkPoint> points;
+  std::vector<float> lengths;  // the path's length up to each point
+  // More points than any path needs. A tolerance near zero would otherwise
+  // halve every curve down to the last bit of a float; past this the pieces
+  // are taken as they are.
+  static constexpr std::size_t kMost = std::size_t{1} << 20;
+
+  void move(const SkPoint& p) {
+    lengths.push_back(lengths.empty() ? 0.0f : lengths.back());
+    points.push_back(p);
+  }
+  void line(const SkPoint& p) {
+    if (points.empty()) {  // no move before it: from the origin
+      points.push_back(SkPoint::Make(0, 0));
+      lengths.push_back(0.0f);
+    } else if (points.back() == p) {
+      return;
+    }
+    lengths.push_back(lengths.back() + SkPoint::Distance(points.back(), p));
+    points.push_back(p);
+  }
+};
+
+// One coordinate of a cubic and of a quadratic at t, as sums of the control
+// values times weights that are never negative. The ends come out exact.
+float cubic_at(float t, float p0, float p1, float p2, float p3) {
+  const float u = 1 - t;
+  const float uu = u * u;
+  const float tt = t * t;
+  return (uu * u * p0) + (3 * uu * t * p1) + (3 * u * tt * p2) + (tt * t * p3);
+}
+float quad_at(float t, float p0, float p1, float p2) {
+  const float u = 1 - t;
+  return u * ((u * p0) + (t * p1)) + t * ((u * p1) + (t * p2));
+}
+SkPoint cubic_point(float t, const SkPoint* c) {
+  return SkPoint::Make(cubic_at(t, c[0].x(), c[1].x(), c[2].x(), c[3].x()),
+                       cubic_at(t, c[0].y(), c[1].y(), c[2].y(), c[3].y()));
+}
+SkPoint quad_point(float t, const SkPoint* c) {
+  return SkPoint::Make(quad_at(t, c[0].x(), c[1].x(), c[2].x()),
+                       quad_at(t, c[0].y(), c[1].y(), c[2].y()));
+}
+
+// The curve's point in the middle of [t0, t1], and whether it is further than
+// the tolerance from the middle of the chord p0-p1. A coordinate that is not a
+// number compares false, and the piece is then left whole.
+bool off_chord(SkPoint (*at)(float, const SkPoint*),
+               const SkPoint* c,
+               float t0,
+               const SkPoint& p0,
+               float t1,
+               const SkPoint& p1,
+               float tol_sq,
+               float* mid_t,
+               SkPoint* mid) {
+  *mid_t = (t0 + t1) / 2;
+  *mid = at(*mid_t, c);
+  const float dx = mid->x() - ((p0.x() + p1.x()) / 2);
+  const float dy = mid->y() - ((p0.y() + p1.y()) / 2);
+  return (dx * dx) + (dy * dy) > tol_sq;
+}
+
+// Adds a curve from its start to its end, left to right. A cubic can cross its
+// chord at the middle (an S), which reads as flat, so a piece that passes is
+// looked at once more at its first quarter; after the first piece that fails
+// there the curve's bend has been found and the second look is dropped. The
+// same pieces, in the same order, as hwui's map of t to point gives.
+void flatten_curve(Flattened& out,
+                   SkPoint (*at)(float, const SkPoint*),
+                   const SkPoint* c,
+                   float tol_sq,
+                   bool second_look) {
+  struct Piece {
+    float t;
+    SkPoint p;
+  };
+  std::vector<Piece> ends;  // right ends still to reach, nearest last
+  ends.push_back({1.0f, at(1.0f, c)});
+  float t0 = 0.0f;
+  SkPoint p0 = at(0.0f, c);
+  out.line(p0);
+  while (!ends.empty()) {
+    const Piece end = ends.back();
+    float mid_t = 0.0f;
+    SkPoint mid{};
+    bool split = off_chord(at, c, t0, p0, end.t, end.p, tol_sq, &mid_t, &mid);
+    if (!split && second_look) {
+      float quarter_t = 0.0f;
+      SkPoint quarter{};
+      split =
+          off_chord(at, c, t0, p0, mid_t, mid, tol_sq, &quarter_t, &quarter);
+      if (split)
+        second_look = false;
+    }
+    // Not below what a float can halve: with a tolerance of zero a piece
+    // between two neighboring values of t would be split forever.
+    if (split && mid_t > t0 && mid_t < end.t &&
+        out.points.size() + ends.size() < Flattened::kMost) {
+      ends.push_back({mid_t, mid});
+      continue;
+    }
+    out.line(end.p);
+    t0 = end.t;
+    p0 = end.p;
+    ends.pop_back();
+  }
+}
+
+// A conic as quadratics, 2^n of them: one quadratic is off the conic by
+// |(w - 1) / (4 (w + 1))| times its control points' second difference, and each
+// halving of the conic quarters that. Skia's own count for a tolerance.
+void flatten_conic(Flattened& out, const SkPoint* c, float w, float tol) {
+  constexpr int kMostHalvings = 5;
+  int halvings = 0;
+  if (tol >= 0 && std::isfinite(tol) && c[0].isFinite() && c[1].isFinite() &&
+      c[2].isFinite()) {
+    const float k = (w - 1) / (4 * (w + 1));
+    const float ex = k * (c[0].x() - (2 * c[1].x()) + c[2].x());
+    const float ey = k * (c[0].y() - (2 * c[1].y()) + c[2].y());
+    float err = std::sqrt((ex * ex) + (ey * ey));
+    for (; halvings < kMostHalvings; ++halvings) {
+      if (err <= tol)
+        break;
+      err *= 0.25f;
+    }
+  }
+  SkPoint quads[1 + (2 * (1 << kMostHalvings))];
+  const int n =
+      SkPath::ConvertConicToQuads(c[0], c[1], c[2], w, quads, halvings);
+  // The tolerance is not squared here, as it is not on Android.
+  for (int i = 0; i < n && i < (1 << kMostHalvings); ++i)
+    flatten_curve(out, quad_point, quads + (i * 2), tol, false);
+}
+
 jfloatArray Path_nApproximate(JNIEnv* env, jclass, jlong p, jfloat error) {
   auto* path = reinterpret_cast<SkPath*>(p);
   if (path == nullptr)
     return env->NewFloatArray(0);
-  const float step = error > 1e-4f ? error : 0.5f / 200.0f;
-  SkPathMeasure meas(*path, false);
-  const float len = meas.getLength();
-  if (len <= 0.0f) {  // degenerate → flat [0,0,0, 1,0,0]
-    const float z[6] = {0, 0, 0, 1, 0, 0};
-    jfloatArray a = env->NewFloatArray(6);
-    env->SetFloatArrayRegion(a, 0, 6, z);
-    return a;
+  Flattened out;
+  const float tol_sq = error * error;
+  SkPath::Iter iter(*path, false);
+  SkPoint c[4];
+  for (SkPath::Verb verb = iter.next(c); verb != SkPath::kDone_Verb;
+       verb = iter.next(c)) {
+    switch (verb) {
+      case SkPath::kMove_Verb:
+        out.move(c[0]);
+        break;
+      case SkPath::kLine_Verb:
+        out.line(c[1]);
+        break;
+      case SkPath::kQuad_Verb:
+        flatten_curve(out, quad_point, c, tol_sq, false);
+        break;
+      case SkPath::kConic_Verb:
+        flatten_conic(out, c, iter.conicWeight(), error / 2);
+        break;
+      case SkPath::kCubic_Verb:
+        flatten_curve(out, cubic_point, c, tol_sq, true);
+        break;
+      case SkPath::kClose_Verb:
+        out.line(c[0]);
+        break;
+      default:
+        break;
+    }
   }
-  int n = static_cast<int>(len / step) + 1;
-  if (n < 2)
-    n = 2;
-  if (n > 3000)
-    n = 3000;
-  // Endpoints from the authored control points, exact — getPosTan interpolates
-  // and can land a hair off, and PathInterpolator requires the first/last
-  // points to be exactly the path ends (e.g. (0,0)/(1,1) for an easing curve).
-  const int cnt = path->countPoints();
-  const SkPoint start = cnt > 0 ? path->getPoint(0) : SkPoint{0, 0};
-  const SkPoint end = cnt > 0 ? path->getPoint(cnt - 1) : SkPoint{0, 0};
-  std::vector<float> out;
-  out.reserve(static_cast<std::size_t>(n) * 3);
-  for (int i = 0; i < n; ++i) {
-    const float frac = static_cast<float>(i) / static_cast<float>(n - 1);
-    SkPoint pos{};
-    if (i == 0)
-      pos = start;
-    else if (i == n - 1)
-      pos = end;
-    else if (!meas.getPosTan(frac * len, &pos, nullptr))
-      continue;
-    out.push_back(frac);
-    out.push_back(pos.fX);
-    out.push_back(pos.fY);
+  // Nothing but a move, which the walk leaves out: that point. No path: the
+  // origin.
+  if (out.points.empty())
+    out.move(path->countVerbs() == 1 ? path->getPoint(0) : SkPoint::Make(0, 0));
+  float total = out.lengths.back();
+  if (!(total > 0.0f)) {  // one place from start to end
+    out.points.push_back(out.points.back());
+    out.lengths.push_back(1.0f);
+    total = 1.0f;
   }
-  jfloatArray arr = env->NewFloatArray(static_cast<jsize>(out.size()));
-  env->SetFloatArrayRegion(arr, 0, static_cast<jsize>(out.size()), out.data());
+  std::vector<float> flat;
+  flat.reserve(out.points.size() * 3);
+  for (std::size_t i = 0; i < out.points.size(); ++i) {
+    flat.push_back(out.lengths[i] / total);
+    flat.push_back(out.points[i].x());
+    flat.push_back(out.points[i].y());
+  }
+  jfloatArray arr = env->NewFloatArray(static_cast<jsize>(flat.size()));
+  if (arr == nullptr)
+    return nullptr;  // OutOfMemoryError is pending
+  env->SetFloatArrayRegion(arr, 0, static_cast<jsize>(flat.size()),
+                           flat.data());
   return arr;
 }
 // Relative + arc + compound path ops — Compose vector graphics (Material icons,

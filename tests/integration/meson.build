@@ -375,6 +375,20 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 240,
       is_parallel : false,
     )
+    # Path.approximate as Android gives it: a path's own points, a curve halved only as far
+    # as the error asked for needs, every contour walked. Android builds PathInterpolator on
+    # it, and the 121 easing curves with control points on a tenth all make one; a4l's
+    # even steps along the first contour had one step back in x where a curve is level at
+    # an end. Needs what gl-surfaceview-under-views needs; SKIPs otherwise, which includes
+    # CI.
+    test(
+      'path-approximate',
+      py3,
+      args : [files('run_path_approximate_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 240,
+      is_parallel : false,
+    )
     # Views drawn into a compositing layer of their own (LAYER_TYPE_HARDWARE,
     # RenderNode.setUseCompositingLayer): what one erases with DST_OUT is erased from its
     # layer and not from the window under it, a layer's paint is applied, and a layer is
