@@ -4788,25 +4788,37 @@ class JniVm : public Vm {
       // onCreate(null) -> onStart() -> onPostCreate(null) -> onResume() ->
       // onPostResume(), the order Activity.performCreate/Start/Resume and
       // ActivityThread give. androidx FragmentActivity resumes its fragments
-      // from onPostResume.
+      // from onPostResume. Each of onCreate, onStart and onResume has the
+      // ActivityLifecycleCallbacks that performCreate/Start/Resume run before
+      // and after it (activity_callbacks).
+      activity_callbacks(activity, "onCreate", false);
       result = call_lifecycle(cls, activity, "onCreate",
                               "(Landroid/os/Bundle;)V", true);
-      if (result.is_ok())
+      if (result.is_ok()) {
+        activity_callbacks(activity, "onCreate", true);
         probe_managers(activity);
-      if (result.is_ok())
+      }
+      if (result.is_ok()) {
+        activity_callbacks(activity, "onStart", false);
         result = call_lifecycle(cls, activity, "onStart", "()V", false);
-      if (result.is_ok())
+      }
+      if (result.is_ok()) {
+        activity_callbacks(activity, "onStart", true);
         result = call_lifecycle(cls, activity, "onPostCreate",
                                 "(Landroid/os/Bundle;)V", true);
-      if (result.is_ok())
+      }
+      if (result.is_ok()) {
+        activity_callbacks(activity, "onResume", false);
         result = call_lifecycle(cls, activity, "onResume", "()V", false);
+      }
       if (result.is_ok())
         result = call_lifecycle(cls, activity, "onPostResume", "()V", false);
-      // androidx ComponentActivity's LifecycleRegistry only reaches RESUMED via
-      // the framework's Application.dispatchActivityResumed path, which acl's
-      // stub Application doesn't complete — force it so lifecycle-gated Compose
-      // content (LaunchedEffect / collectAsStateWithLifecycle / ViewModels)
-      // actually composes. Best-effort; ignore if HostBootstrap/androidx is
+      if (result.is_ok())
+        activity_callbacks(activity, "onResume", true);
+      // An androidx ComponentActivity's Lifecycle reaches RESUMED on those
+      // callbacks. One they did not move is moved here, so that Compose content
+      // waiting on it (LaunchedEffect / collectAsStateWithLifecycle /
+      // ViewModels) composes. Best-effort; ignore if HostBootstrap/androidx is
       // absent.
       if (result.is_ok()) {
         if (jclass boot = env_->FindClass("org/acl/internal/HostBootstrap")) {
@@ -6953,6 +6965,29 @@ class JniVm : public Vm {
 #endif
     env_->DeleteLocalRef(cb_cls);
     env_->DeleteLocalRef(cb);
+  }
+
+  // Runs the ActivityLifecycleCallbacks that come before (`after` false) or
+  // after the lifecycle method `method`: onActivityPreCreated and
+  // onActivityPostCreated around onCreate, and so on. On Android
+  // Activity.performCreate and its siblings run them; here the lifecycle
+  // method is called itself, so HostBootstrap.activityCallbacks runs them. A
+  // no-op where HostBootstrap is not loaded.
+  void activity_callbacks(jobject activity, const char* method, bool after) {
+    jclass boot = env_->FindClass("org/acl/internal/HostBootstrap");
+    if (boot != nullptr) {
+      jmethodID m =
+          env_->GetStaticMethodID(boot, "activityCallbacks",
+                                  "(Ljava/lang/Object;Ljava/lang/String;Z)V");
+      jstring name = m != nullptr ? env_->NewStringUTF(method) : nullptr;
+      if (name != nullptr) {
+        env_->CallStaticVoidMethod(boot, m, activity, name,
+                                   after ? JNI_TRUE : JNI_FALSE);
+        env_->DeleteLocalRef(name);
+      }
+      env_->DeleteLocalRef(boot);
+    }
+    clear_exception();
   }
 
   // Invoke one lifecycle callback (found on `cls` or a superclass).

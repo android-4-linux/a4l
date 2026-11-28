@@ -3493,7 +3493,9 @@ public final class HostBootstrap {
         // Its theme has windowIsTranslucent or windowIsFloating: the Activity under it stays
         // on screen, as ActivityInfo.isTranslucentOrFloating decides on Android.
         final boolean translucent;
-        boolean stopped;  // onStop has been called, and onRestart has not been since
+        boolean started;  // onStart has been called, and onStop has not been since
+        boolean stopped;  // onStop has been called, and onStart has not been since
+        boolean resumed;  // onResume has been called, and onPause has not been since
         boolean created = true;  // false while a launch is still inside its onCreate
         ActivityRecord(android.app.Activity a, android.os.IBinder t, android.os.IBinder caller, int rc) {
             activity = a; token = t; callerToken = caller; requestCode = rc;
@@ -3595,10 +3597,9 @@ public final class HostBootstrap {
         for (ActivityRecord r : new java.util.ArrayList<ActivityRecord>(sTask)) {
             final boolean visible = i++ < shown;
             if (!sByToken.containsKey(r.token)) continue;
-            if (!visible && !r.stopped) {
-                r.stopped = true;
-                safeLifecycle(r.activity, "onStop");
-            } else if (visible && r.stopped) {
+            if (!visible) {
+                stop(r);
+            } else if (r.stopped) {
                 r.stopped = false;
                 safeLifecycle(r.activity, "onRestart");
                 safeLifecycle(r.activity, "onStart");
@@ -3741,6 +3742,29 @@ public final class HostBootstrap {
     private static void safeLifecycle(android.app.Activity a, String name) {
         try { invokeActivityLifecycle(a, name, null, null); }
         catch (Throwable t) { System.err.println("acl activity-stack: " + name + " failed: " + t); }
+    }
+    // onPause for an Activity that is resumed, and onStop for one that is started: each
+    // once, and neither for one that has not got that far. An Activity that finishes from
+    // under another one was paused and stopped when that one covered it, and gets onDestroy
+    // and no more, as on Android. One that starts another from inside its own onCreate is
+    // covered before it has been started, and has nothing to be stopped from. An app counts
+    // its started and resumed Activities by these calls (androidx's ProcessLifecycleOwner
+    // does), and an onPause or onStop too many takes the count below what is on screen: the
+    // app then believes it is in the background.
+    private static void pause(ActivityRecord r) {
+        if (!r.resumed) return;
+        safeLifecycle(r.activity, "onPause");
+        r.resumed = false;  // even where onPause threw
+    }
+    private static void stop(ActivityRecord r) {
+        if (!r.started) return;
+        safeLifecycle(r.activity, "onStop");
+        r.started = false;  // even where onStop threw
+        r.stopped = true;
+    }
+    private static ActivityRecord recordOf(Object activity) {
+        for (ActivityRecord r : sByToken.values()) if (r.activity == activity) return r;
+        return null;
     }
     // Deliver a for-result callback to the caller being returned to (Activity.onActivityResult is protected).
     private static void deliverActivityResult(android.app.Activity a, int requestCode, int resultCode,
@@ -3905,8 +3929,8 @@ public final class HostBootstrap {
         sFinishing = true;
         try {
             final boolean wasTop = (sTask.peek() == rec);
-            safeLifecycle(rec.activity, "onPause");
-            safeLifecycle(rec.activity, "onStop");
+            pause(rec);
+            stop(rec);
             safeLifecycle(rec.activity, "onDestroy");
             sTask.remove(rec);
             sByToken.remove(rec.token);
@@ -4380,6 +4404,10 @@ public final class HostBootstrap {
             if (top != null && (flags & android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP) != 0
                     && targetCls.equals(top.activity.getClass().getName())) {
                 try { setField(android.app.Activity.class, top.activity, "mIntent", intent); } catch (Throwable ignored) {}
+                // Paused for it and resumed after, as Android gives onNewIntent to a resumed
+                // Activity: each onResume then has its onPause, which an app that counts
+                // them needs.
+                pause(top);
                 invokeActivityLifecycle(top.activity, "onNewIntent", android.content.Intent.class, intent);
                 invokeActivityLifecycle(top.activity, "onResume", null, null);
                 android.util.Log.i("acl", "launchInternalActivity: " + targetCls + " singleTop -> onNewIntent");
@@ -4396,7 +4424,8 @@ public final class HostBootstrap {
                         // is destroyed and no more, as an Activity that finishes in onCreate
                         // is on Android. A redirect screen passes its address on from there.
                         if (r.created) {
-                            safeLifecycle(r.activity, "onPause"); safeLifecycle(r.activity, "onStop");
+                            pause(r);
+                            stop(r);
                         }
                         safeLifecycle(r.activity, "onDestroy");
                     }
@@ -4416,7 +4445,7 @@ public final class HostBootstrap {
             if (!android.app.Activity.class.isAssignableFrom(cls)) return false;
             a = (android.app.Activity) cls.getConstructor().newInstance();
             prev = sTask.peek();
-            if (prev != null) safeLifecycle(prev.activity, "onPause");  // pause the outgoing before the new resumes
+            if (prev != null) pause(prev);  // pause the outgoing before the new resumes
             // attachActivityContext (not attachActivity) also sets mApplication, so getApplication()
             // is non-null before onCreate -- androidx ComponentActivity.getDefaultViewModelProvider
             // Factory() throws "activity is not yet attached to the Application instance" otherwise.
@@ -4501,16 +4530,91 @@ public final class HostBootstrap {
     }
     // Invoke a protected Activity lifecycle method (declared on android.app.Activity) reflectively;
     // Method.invoke virtual-dispatches to the app's override. onCreate takes a Bundle, the rest none.
+    // The ActivityLifecycleCallbacks that come before and after it are run with it: see
+    // activityCallbacks.
     private static void invokeActivityLifecycle(android.app.Activity a, String name,
                                                 Class<?> argType, Object arg) throws Exception {
         java.lang.reflect.Method m = argType != null
                 ? android.app.Activity.class.getDeclaredMethod(name, argType)
                 : android.app.Activity.class.getDeclaredMethod(name);
         m.setAccessible(true);
+        activityCallbacks(a, name, false);
         if (argType != null) m.invoke(a, arg); else m.invoke(a);
         // Activity.performResume calls onPostResume after onResume. androidx FragmentActivity
         // resumes its fragments there, not in onResume.
         if ("onResume".equals(name)) invokeActivityLifecycle(a, "onPostResume", null, null);
+        activityCallbacks(a, name, true);
+    }
+
+    // Activities whose onDestroy has run. Weak: an Activity is not kept for being in it.
+    private static final java.util.Set<Object> sDestroyed = java.util.Collections.newSetFromMap(
+            new java.util.WeakHashMap<Object, Boolean>());
+
+    /**
+     * Runs the ActivityLifecycleCallbacks that come before ({@code after} false) or after a
+     * lifecycle method: onActivityPreCreated and onActivityPostCreated around onCreate, and
+     * the same pair for onStart, onResume, onPause, onStop and onDestroy. Does nothing for
+     * any other method.
+     *
+     * <p>On Android Activity.performCreate and its siblings run them, through the
+     * Activity's own dispatchActivityPre and dispatchActivityPost methods. a4l calls the
+     * lifecycle method itself, which runs only the middle callback of each three
+     * (onActivityCreated, from Activity.onCreate), so the outer two are run from here. An
+     * app counts on them: androidx's ProcessLifecycleOwner takes an Activity up in
+     * onActivityPreCreated and counts it started and resumed in onActivityPostStarted and
+     * onActivityPostResumed, and an app that never saw those believes it is in the
+     * background. A ComponentActivity moves its own Lifecycle on the Post and Pre callbacks.
+     *
+     * <p>Called from the native launch of the first Activity too (jvm_vm.cpp).
+     */
+    public static void activityCallbacks(Object activity, String method, boolean after) {
+        if (!(activity instanceof android.app.Activity) || method == null) return;
+        final String step;
+        switch (method) {
+            case "onCreate": step = "Created"; break;
+            case "onStart": step = "Started"; break;
+            case "onResume": step = "Resumed"; break;
+            case "onPause": step = "Paused"; break;
+            case "onStop": step = "Stopped"; break;
+            case "onDestroy": step = "Destroyed"; break;
+            default: return;
+        }
+        // Where the Activity now is, for pause() and stop(). Kept here because every
+        // lifecycle call, a4l's and the native launch's, comes through.
+        if (after) {
+            final ActivityRecord r = recordOf(activity);
+            if (r != null) {
+                switch (step) {
+                    case "Started": r.started = true; r.stopped = false; break;
+                    case "Resumed": r.resumed = true; break;
+                    case "Paused": r.resumed = false; break;
+                    case "Stopped": r.started = false; r.stopped = true; break;
+                    default: break;
+                }
+            }
+        }
+        final boolean destroy = "Destroyed".equals(step);
+        // An Activity cleared from inside one of its own lifecycle methods has been
+        // destroyed by the time that method returns, and gets nothing after it.
+        if (!destroy && sDestroyed.contains(activity)) return;
+        if (destroy && after) sDestroyed.add(activity);
+        final String name = "dispatchActivity" + (after ? "Post" : "Pre") + step;
+        try {
+            final boolean bundle = "Created".equals(step);
+            final java.lang.reflect.Method m = bundle
+                    ? android.app.Activity.class.getDeclaredMethod(name, android.os.Bundle.class)
+                    : android.app.Activity.class.getDeclaredMethod(name);
+            m.setAccessible(true);
+            if (bundle) m.invoke(activity, (android.os.Bundle) null); else m.invoke(activity);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            // A callback of the app's threw, or the Activity has no Application to run
+            // them. The lifecycle goes on, as it does when one of the app's lifecycle
+            // methods throws here.
+            android.util.Log.w("acl", name + " on " + activity.getClass().getName() + ": "
+                    + e.getCause());
+        } catch (ReflectiveOperationException e) {
+            // Not in this framework: these callbacks came with Android 10.
+        }
     }
 
     // Attach the decor view tree to a window before the measure/layout/draw pass — real
@@ -4519,21 +4623,16 @@ public final class HostBootstrap {
     // skipping setView's Binder-heavy relayout. dispatchAttachedToWindow fires onAttachedToWindow
     // across the tree — needed by e.g. Jetpack ComposeView (it can't locate its window recomposer
     // until attached).
-    // Drive an androidx ComponentActivity's Lifecycle to RESUMED. The framework normally advances it
-    // via Application.dispatchActivityResumed -> registered ActivityLifecycleCallbacks (ReportFragment
-    // / LifecycleCallbacks), a path acl's stub Application/Instrumentation doesn't complete. Compose
-    // content, LaunchedEffect, collectAsStateWithLifecycle and ViewModels gate on RESUMED, so force
-    // the LifecycleRegistry there directly. Reflection-only (no compile-time androidx dep). Best effort.
+    // Make sure an androidx ComponentActivity's Lifecycle is RESUMED once the Activity is. On
+    // Android 10 and later androidx moves it on the Activity's lifecycle callbacks
+    // (activityCallbacks: ON_CREATE on onActivityPostCreated, ON_START on
+    // onActivityPostStarted, ON_RESUME on onActivityPostResumed). Compose content,
+    // LaunchedEffect, collectAsStateWithLifecycle and ViewModels wait for RESUMED, so a
+    // registry the callbacks did not move is moved here. Reflection only (no compile-time
+    // androidx dependency). Best effort.
     public static void ensureResumed(Object activity) {
         if (activity == null) return;
-        // Robust path first: run the Activity's registered ActivityLifecycleCallbacks via the
-        // framework's own dispatch methods. androidx ComponentActivity registers a ReportFragment/
-        // LifecycleCallbacks there that advances its Lifecycle to RESUMED. acl calls onCreate/onStart/
-        // onResume directly but never the dispatch, so the Lifecycle stays CREATED and Compose's
-        // WindowRecomposer never activates → blank content. Unlike the androidx-name reflection below,
-        // this works even when the app obfuscates androidx.lifecycle (forkyz renames all of it).
-        dispatchLifecycleCallbacks(activity);
-        // Then check the registry itself. An app that renames androidx.lifecycle keeps neither
+        // An app that renames androidx.lifecycle keeps neither
         // getLifecycle() nor Lifecycle.Event by name, so the registry is told from its shape:
         // handleLifecycleEvent(Event) takes an enum of 7 constants and getCurrentState() returns
         // one of 5. Events go by ordinal, which renaming leaves alone.
@@ -4601,37 +4700,6 @@ public final class HostBootstrap {
             }
         }
         return null;
-    }
-
-    // Run the Activity's registered ActivityLifecycleCallbacks in lifecycle order, via the
-    // framework Activity's own (private) dispatch methods. Those method names are the framework's,
-    // never renamed, and they invoke the app's OWN callbacks (androidx ReportFragment, obfuscated
-    // but self-consistent) — so ComponentActivity's Lifecycle advances INITIALIZED→…→RESUMED without
-    // acl referencing any androidx name. Best-effort per step.
-    private static void dispatchLifecycleCallbacks(Object activity) {
-        final String[] noArg = {
-            "dispatchActivityStarted", "dispatchActivityPostStarted",
-            "dispatchActivityResumed", "dispatchActivityPostResumed",
-        };
-        try {
-            for (String name : new String[]{"dispatchActivityCreated", "dispatchActivityPostCreated"}) {
-                try {
-                    java.lang.reflect.Method m = android.app.Activity.class
-                            .getDeclaredMethod(name, android.os.Bundle.class);
-                    m.setAccessible(true);
-                    m.invoke(activity, (android.os.Bundle) null);
-                } catch (Throwable ignored) {}
-            }
-            for (String name : noArg) {
-                try {
-                    java.lang.reflect.Method m = android.app.Activity.class.getDeclaredMethod(name);
-                    m.setAccessible(true);
-                    m.invoke(activity);
-                } catch (Throwable ignored) {}
-            }
-        } catch (Throwable t) {
-            System.err.println("acl HostBootstrap: lifecycle-callback dispatch skipped: " + t);
-        }
     }
 
     // Instrumentation that suppresses activity launches. acl has no ActivityManager to start another

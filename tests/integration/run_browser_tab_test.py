@@ -18,6 +18,16 @@
 # Activity, cleared from inside its own onCreate, is destroyed and not started, and the app's
 # ActivityLifecycleCallbacks are not told of the tab's Activity.
 #
+# The app follows its Activities the way androidx's ProcessLifecycleOwner does, and the test
+# checks what it saw. The waiting screen's callbacks come in Android's order, each lifecycle
+# method's between the one before it and the one after (onActivityPreCreated,
+# onActivityCreated, onActivityPostCreated, and so on), each once. And when a round starts
+# the app counts one Activity started and one resumed: its launch screen, which started the
+# main screen and finished, got no onPause or onStop too many on the way out, and the main
+# screen, started again while on top (FLAG_ACTIVITY_SINGLE_TOP), was paused for onNewIntent
+# and resumed after it. The launch screen starts the main screen once it is up in run one,
+# and from inside its own onCreate in run two.
+#
 # Run two (A4L_TEST_BROWSER=cancel, ACL_BROWSER=app): a plain link, with no tab asked for, to
 # a page of one color that goes nowhere. The test finds the tab's bar and the page's color on
 # a headless Weston's screen, with the AOSP prebuilt WebView and nothing set for it. Then a
@@ -49,23 +59,49 @@ PACKAGE = "com.acl.browsertab"
 # redirect screen, which finishes in onCreate, is created and destroyed (cd) and no more.
 ANSWERED = "crpsnrpsd"
 
+# The waiting screen's ActivityLifecycleCallbacks over a round, as Android gives them: each
+# lifecycle method's callback between the one before it ("<c") and the one after ("c>").
+# Created, started and resumed; paused and stopped under the tab; started and resumed again
+# when the tab is gone, with an answer or without; paused, stopped and destroyed.
+UP = "<s s s> <r r r>"
+DOWN = "<p p p> <t t t>"
+ANSWERED_CALLBACKS = f"<c c c> {UP} {DOWN} {UP} {DOWN} <d d d>"
+# One Activity of the app's is started and resumed when a round starts, counted the way
+# androidx's ProcessLifecycleOwner counts: an app reads that as being in the foreground.
+FOREGROUND = "started=1 resumed=1"
+# The main screen's lifecycle when it is started again on top: onPause, onNewIntent, onResume.
+AGAIN = "BROWSER: started again on top: pnr"
+# The fixture's last callback for its launch screen throws. a4l logs it and goes on.
+THREW = ("dispatchActivityPostDestroyed on com.acl.browsertab.Main$Splash: "
+         "java.lang.IllegalStateException: thrown by the app's callback")
+
 REDIRECT_CHECKS = [
+    AGAIN,
+    THREW,
     "BROWSER: site /start -> 302 Found",
     "BROWSER: site /login -> 200 OK",
     "browser: nothing in the app takes a4l-test-nobody: addresses",
     "browser: nothing in the app takes a4l-test-private: addresses",
     "BROWSER: redirect started with a4l-test-signin browsable=true",
+    f"BROWSER: round 1 starts with {FOREGROUND}",
     f"BROWSER: round 1 answer code=one state=r1 sign-in={ANSWERED} redirect=cd others=[]",
+    f"BROWSER: round 1 callbacks={ANSWERED_CALLBACKS}",
     "BROWSER: site /direct -> 302 Found",
+    f"BROWSER: round 2 starts with {FOREGROUND}",
     f"BROWSER: round 2 answer code=two state=r2 sign-in={ANSWERED} redirect=cd others=[]",
+    f"BROWSER: round 2 callbacks={ANSWERED_CALLBACKS}",
     "BROWSER: PASS",
 ]
 
 # Closed by hand: the waiting screen is resumed (r) with no answer before it.
 CANCEL_CHECKS = [
+    AGAIN,
+    THREW,
+    f"BROWSER: round 1 starts with {FOREGROUND}",
     "BROWSER: site /wait -> 200 OK",
     "browser: closed",
     "BROWSER: round 1 cancelled sign-in=crpsrpsd redirect= others=[]",
+    f"BROWSER: round 1 callbacks={ANSWERED_CALLBACKS}",
     "BROWSER: PASS",
 ]
 
@@ -82,7 +118,8 @@ CLOSE_TAPS = ";".join(f"20,20,{ms}" for ms in range(CLOSE_FROM_MS, 90000, 1500))
 def story_of(out):
     return "\n".join(ln for ln in out.splitlines()
                      if "BROWSER: " in ln or "browser: " in ln or "acl WebView" in ln
-                     or "activity-stack" in ln or "Fatal signal" in ln)
+                     or "activity-stack" in ln or "Fatal signal" in ln
+                     or "dispatchActivity" in ln)
 
 
 def painted(display, work):
@@ -151,9 +188,11 @@ def main():
         run(["cp", os.path.join(dexdir, "classes.dex"), appdir])
         with open(os.path.join(appdir, "AndroidManifest.xml"), "wb") as fh:
             fh.write(build_axml(
-                utf8=True, package=PACKAGE, launcher=f"{PACKAGE}.Main",
+                utf8=True, package=PACKAGE, launcher=f"{PACKAGE}.Main$Splash",
+                application=f"{PACKAGE}.Main$App",
                 permissions=["android.permission.INTERNET"],
                 activities=[
+                    (f"{PACKAGE}.Main", None),
                     (f"{PACKAGE}.Main$SignIn", None),
                     (f"{PACKAGE}.Main$Redirect", None,
                      {"exported": True, "view": "a4l-test-signin"}),
