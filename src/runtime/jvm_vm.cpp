@@ -8044,6 +8044,7 @@ class ArtVm final : public JniVm {
     populate_system_properties(env);
     load_system_resources(env);
     register_no_binder(env);
+    register_no_incremental(env);
     register_systemproperties_override(
         env);  // neutralize the device-only fast-property abort
     bootstrap_host_env(env);
@@ -8285,6 +8286,35 @@ class ArtVm final : public JniVm {
     } else {
       env->ExceptionClear();
     }
+  }
+
+  // No incremental file system: no APK here is on one. The framework's APK
+  // certificate reader (ApkSignatureVerifier) asks for a file's v4 signature
+  // from IncFS before it looks for any other; with no native behind the ask
+  // it ended in an UnsatisfiedLinkError, and a4l had no certificates to give
+  // an app (PackageInfo.signatures, hasSigningCertificate). Each method is
+  // registered alone: one a framework lacks must not take the other with it.
+  void register_no_incremental(JNIEnv* env) {
+    jclass c = env->FindClass("android/os/incremental/IncrementalManager");
+    if (c == nullptr) {
+      env->ExceptionClear();
+      return;
+    }
+    const JNINativeMethod m[] = {
+        {const_cast<char*>("nativeUnsafeGetFileSignature"),
+         const_cast<char*>("(Ljava/lang/String;)[B"),
+         reinterpret_cast<void*>(
+             +[](JNIEnv*, jclass, jstring) -> jbyteArray { return nullptr; })},
+        {const_cast<char*>("nativeIsIncrementalPath"),
+         const_cast<char*>("(Ljava/lang/String;)Z"),
+         reinterpret_cast<void*>(
+             +[](JNIEnv*, jclass, jstring) -> jboolean { return JNI_FALSE; })},
+    };
+    for (const JNINativeMethod& one : m) {
+      if (env->RegisterNatives(c, &one, 1) != JNI_OK)
+        env->ExceptionClear();
+    }
+    env->DeleteLocalRef(c);
   }
 
   void register_no_binder(JNIEnv* env) {
