@@ -377,6 +377,19 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 240,
       is_parallel : false,
     )
+    # A character the Paint's typeface has no glyph for (the katakana middle dot, in
+    # Roboto) is measured and drawn from a fallback font: one named by ACL_FONT_FALLBACK,
+    # and one the host's fontconfig finds. Also a String with a character past ASCII
+    # measures as its char[] does. Needs what gl-surfaceview-under-views needs and the
+    # AOSP tree's noto-fonts; SKIPs otherwise, which includes CI.
+    test(
+      'font-fallback',
+      py3,
+      args : [files('run_font_fallback_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 240,
+      is_parallel : false,
+    )
     # An Activity with a translucent theme over another, a card over a map: the one
     # underneath shows through, paused and not stopped, with its GL view's surface, and is
     # resumed when the one over it finishes. Read off a headless Weston's screen and the

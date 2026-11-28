@@ -13,6 +13,7 @@
 // libskia. Registered by acl (register_acl_graphics) after dlopen; the Canvas's
 // SkBitmap is later backed by acl's dma-buf VkImage for GPU present (S3/S4).
 
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <jni.h>
 #include <pthread.h>
@@ -33,6 +34,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -500,6 +502,297 @@ extern "C" jlong acl_typeface_from_path(const char* path) {
   if (!tf)
     return 0;
   return handle_mint(tf.release(), HandleKind::kTypeface);
+}
+
+// ── Font fallback ────────────────────────────────────────────────────────────
+// A Paint draws with one typeface, and a character that typeface has no glyph
+// for came out as its "missing glyph" box: the katakana middle dot an app
+// puts between two words, in a UI font that is Latin only. Android looks the
+// character up in the system's other fonts (minikin's fallback chain). Here
+// text is cut into runs by font: the paint's, and for a character it has no
+// glyph for, the first fallback font that has one. There is no shaping: a
+// script that needs it gets its glyphs and not its ligatures or reordering.
+
+// fontconfig, found at run time: it is the host's library, and the AOSP tree
+// this file is built in has no headers for it. Only what a lookup needs,
+// declared as fontconfig documents it (FcBool is int, FcChar32 unsigned int,
+// FcChar8 unsigned char, FcResultMatch and FcMatchPattern are 0).
+struct FontConfig {
+  using Config = void;
+  using Pattern = void;
+  using CharSet = void;
+  Config* (*init_load)() = nullptr;             // FcInitLoadConfigAndFonts
+  Pattern* (*pattern_create)() = nullptr;       // FcPatternCreate
+  void (*pattern_destroy)(Pattern*) = nullptr;  // FcPatternDestroy
+  CharSet* (*charset_create)() = nullptr;       // FcCharSetCreate
+  int (*charset_add)(CharSet*, unsigned int) = nullptr;  // FcCharSetAddChar
+  void (*charset_destroy)(CharSet*) = nullptr;           // FcCharSetDestroy
+  int (*add_charset)(Pattern*, const char*, const CharSet*) = nullptr;
+  int (*add_string)(Pattern*, const char*, const unsigned char*) = nullptr;
+  int (*substitute)(Config*, Pattern*, int) = nullptr;   // FcConfigSubstitute
+  void (*default_substitute)(Pattern*) = nullptr;        // FcDefaultSubstitute
+  Pattern* (*match)(Config*, Pattern*, int*) = nullptr;  // FcFontMatch
+  int (*get_string)(const Pattern*,
+                    const char*,
+                    int,
+                    unsigned char**) = nullptr;
+  int (*get_integer)(const Pattern*, const char*, int, int*) = nullptr;
+  Config* config = nullptr;
+
+  // Load the library and the host's font configuration. False where there is
+  // none. RTLD_DEEPBIND: fontconfig uses the host's FreeType and expat, and
+  // must not be bound to the AOSP builds of them this library is linked to.
+  bool load() {
+    int flags = RTLD_NOW | RTLD_LOCAL;
+#ifdef RTLD_DEEPBIND
+    flags |= RTLD_DEEPBIND;
+#endif
+    void* lib = ::dlopen("libfontconfig.so.1", flags);
+    if (lib == nullptr)
+      return false;
+    const auto sym = [lib](const char* name, auto* fn) {
+      *fn = reinterpret_cast<std::remove_pointer_t<decltype(fn)>>(
+          ::dlsym(lib, name));
+      return *fn != nullptr;
+    };
+    if (!sym("FcInitLoadConfigAndFonts", &init_load) ||
+        !sym("FcPatternCreate", &pattern_create) ||
+        !sym("FcPatternDestroy", &pattern_destroy) ||
+        !sym("FcCharSetCreate", &charset_create) ||
+        !sym("FcCharSetAddChar", &charset_add) ||
+        !sym("FcCharSetDestroy", &charset_destroy) ||
+        !sym("FcPatternAddCharSet", &add_charset) ||
+        !sym("FcPatternAddString", &add_string) ||
+        !sym("FcConfigSubstitute", &substitute) ||
+        !sym("FcDefaultSubstitute", &default_substitute) ||
+        !sym("FcFontMatch", &match) ||
+        !sym("FcPatternGetString", &get_string) ||
+        !sym("FcPatternGetInteger", &get_integer))
+      return false;
+    config = init_load();
+    return config != nullptr;
+  }
+
+  // The font file fontconfig likes best for `cp`, a sans-serif one where it
+  // has the choice, and the face's index in it. It names a file whether or not
+  // any font has the character; the caller looks.
+  bool best_for(SkUnichar cp, std::string* file, int* index) const {
+    Pattern* want = pattern_create();
+    CharSet* chars = charset_create();
+    if (want == nullptr || chars == nullptr) {
+      if (want != nullptr)
+        pattern_destroy(want);
+      if (chars != nullptr)
+        charset_destroy(chars);
+      return false;
+    }
+    charset_add(chars, static_cast<unsigned int>(cp));
+    add_charset(want, "charset", chars);
+    add_string(want, "family",
+               reinterpret_cast<const unsigned char*>("sans-serif"));
+    substitute(config, want, 0);
+    default_substitute(want);
+    int result = 0;
+    Pattern* found = match(config, want, &result);
+    bool ok = false;
+    if (found != nullptr) {
+      unsigned char* path = nullptr;
+      if (get_string(found, "file", 0, &path) == 0 && path != nullptr) {
+        *file = reinterpret_cast<const char*>(path);
+        *index = 0;
+        get_integer(found, "index", 0, index);
+        ok = true;
+      }
+      pattern_destroy(found);
+    }
+    charset_destroy(chars);
+    pattern_destroy(want);
+    return ok;
+  }
+};
+
+// The fonts looked in for a character the paint's typeface has no glyph for:
+// the files ACL_FONT_FALLBACK names (separated by colons), then whatever the
+// host's fontconfig finds. A font is loaded when it is first needed and kept.
+class FallbackFonts {
+ public:
+  static FallbackFonts& get() {
+    static FallbackFonts* fonts = new FallbackFonts();  // never destroyed
+    return *fonts;
+  }
+
+  // A typeface with a glyph for `cp`, or null.
+  sk_sp<SkTypeface> find(SkUnichar cp) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (sk_sp<SkTypeface> have = loaded(cp))
+      return have;
+    if (missing_.count(cp) != 0)
+      return nullptr;
+    if (!named_) {
+      named_ = true;
+      if (const char* list = std::getenv("ACL_FONT_FALLBACK")) {
+        const std::string all(list);
+        for (std::size_t at = 0; at <= all.size();) {
+          const std::size_t end = std::min(all.find(':', at), all.size());
+          if (end > at)
+            load(all.substr(at, end - at), 0);
+          at = end + 1;
+        }
+        if (sk_sp<SkTypeface> have = loaded(cp))
+          return have;
+      }
+    }
+    if (!asked_host_) {
+      asked_host_ = true;
+      host_ok_ = host_.load();
+    }
+    std::string file;
+    int index = 0;
+    if (host_ok_ && host_.best_for(cp, &file, &index)) {
+      load(file, index);
+      if (sk_sp<SkTypeface> have = loaded(cp))
+        return have;
+    }
+    // Not asked for again. Bounded: text can hold any number of characters
+    // that no font has.
+    if (missing_.size() >= kMaxMissing)
+      missing_.clear();
+    missing_.insert(cp);
+    return nullptr;
+  }
+
+ private:
+  static constexpr std::size_t kMaxMissing = 4096;
+  static constexpr std::size_t kMaxFaces = 64;
+
+  sk_sp<SkTypeface> loaded(SkUnichar cp) const {
+    for (const sk_sp<SkTypeface>& face : faces_)
+      if (face->unicharToGlyph(cp) != 0)
+        return face;
+    return nullptr;
+  }
+
+  void load(const std::string& file, int index) {
+    const std::string key = file + '#' + std::to_string(index);
+    if (faces_.size() >= kMaxFaces || !files_.insert(key).second)
+      return;
+    if (sk_sp<SkTypeface> face = SkTypeface::MakeFromFile(file.c_str(), index))
+      faces_.push_back(std::move(face));
+  }
+
+  std::mutex mu_;
+  std::vector<sk_sp<SkTypeface>> faces_;
+  std::unordered_set<std::string> files_;  // tried, loaded or not
+  std::unordered_set<SkUnichar> missing_;
+  bool named_ = false, asked_host_ = false, host_ok_ = false;
+  FontConfig host_;
+};
+
+// The code point of UTF-16 `text` at `*i`, which moves past it. Half a
+// surrogate pair on its own is U+FFFD.
+inline SkUnichar next_utf16(const jchar* text, int n, int* i) {
+  const jchar a = text[(*i)++];
+  if (a < 0xD800 || a > 0xDFFF)
+    return a;
+  if (a <= 0xDBFF && *i < n && text[*i] >= 0xDC00 && text[*i] <= 0xDFFF)
+    return 0x10000 + ((static_cast<SkUnichar>(a) - 0xD800) << 10) +
+           (text[(*i)++] - 0xDC00);
+  return 0xFFFD;
+}
+
+// Calls run(font, start, count) for each stretch of text[0, n) that one font
+// draws, in order: the paint's font, or a copy of it with a fallback typeface.
+// ASCII is the paint's without a look.
+template <class Run>
+void for_each_font_run(const SkFont& font,
+                       const jchar* text,
+                       int n,
+                       Run&& run) {
+  int ascii = 0;
+  while (ascii < n && text[ascii] < 0x80)
+    ++ascii;
+  if (ascii == n) {
+    if (n > 0)
+      run(font, 0, n);
+    return;
+  }
+  const auto emit = [&](const sk_sp<SkTypeface>& face, int start, int count) {
+    if (face == nullptr) {
+      run(font, start, count);
+      return;
+    }
+    SkFont other(font);
+    other.setTypeface(face);
+    run(other, start, count);
+  };
+  sk_sp<SkTypeface> face;  // of the run under way; null is the paint's own
+  int start = 0;
+  for (int i = 0; i < n;) {
+    const int at = i;
+    const SkUnichar cp = next_utf16(text, n, &i);
+    sk_sp<SkTypeface> want;
+    if (cp >= 0x80 && font.unicharToGlyph(cp) == 0)
+      want = FallbackFonts::get().find(cp);
+    if (want.get() != face.get()) {
+      if (at > start)
+        emit(face, start, at - start);
+      face = std::move(want);
+      start = at;
+    }
+  }
+  emit(face, start, n - start);
+}
+
+// The advance of UTF-16 text[0, n), and its bounds from the pen's start if
+// asked for, each run in its own font.
+float measure_utf16(const AclPaint* ap,
+                    const jchar* text,
+                    int n,
+                    SkRect* bounds = nullptr) {
+  float total = 0;
+  bool any = false;
+  for_each_font_run(
+      ap->font, text, n, [&](const SkFont& font, int start, int count) {
+        SkRect b = SkRect::MakeEmpty();
+        const float w =
+            font.measureText(text + start, static_cast<std::size_t>(count) * 2,
+                             SkTextEncoding::kUTF16,
+                             bounds != nullptr ? &b : nullptr, &ap->paint);
+        if (bounds != nullptr) {
+          b.offset(total, 0);
+          if (any)
+            bounds->join(b);
+          else
+            *bounds = b;
+          any = true;
+        }
+        total += w;
+      });
+  if (bounds != nullptr && !any)
+    *bounds = SkRect::MakeEmpty();
+  return total;
+}
+
+// The advance of each UTF-16 unit of text[0, n) into adv[0, n): a character's
+// on its first unit, and none on the second half of a surrogate pair. Returns
+// their sum.
+float unit_advances(const AclPaint* ap, const jchar* text, int n, jfloat* adv) {
+  float total = 0;
+  for_each_font_run(
+      ap->font, text, n, [&](const SkFont& font, int start, int count) {
+        for (int i = start; i < start + count;) {
+          const int at = i;
+          next_utf16(text, start + count, &i);
+          const float w =
+              font.measureText(text + at, static_cast<std::size_t>(i - at) * 2,
+                               SkTextEncoding::kUTF16, nullptr, &ap->paint);
+          adv[at] = w;
+          for (int k = at + 1; k < i; ++k)
+            adv[k] = 0;
+          total += w;
+        }
+      });
+  return total;
 }
 
 jclass g_bitmap_class = nullptr;  // global ref, for nativeCreate -> NewObject
@@ -1628,9 +1921,19 @@ void draw_utf16(SkCanvas* c,
     return;
   const int s = off < 0 ? 0 : off;
   const int n = (s + cnt > len) ? (len - s) : cnt;
-  if (n > 0)
-    c->drawSimpleText(chars + s, static_cast<std::size_t>(n) * 2,
-                      SkTextEncoding::kUTF16, x, y, ap->font, ap->paint);
+  if (n <= 0)
+    return;
+  // Each run in its font, the pen moved on by the run before it.
+  float pen = x;
+  for_each_font_run(
+      ap->font, chars + s, n, [&](const SkFont& font, int start, int count) {
+        const std::size_t bytes = static_cast<std::size_t>(count) * 2;
+        c->drawSimpleText(chars + s + start, bytes, SkTextEncoding::kUTF16, pen,
+                          y, font, ap->paint);
+        if (start + count < n)
+          pen += font.measureText(chars + s + start, bytes,
+                                  SkTextEncoding::kUTF16, nullptr, &ap->paint);
+      });
 }
 // nDrawText(String, start, end)
 void Canvas_nDrawText(JNIEnv* env,
@@ -3810,8 +4113,30 @@ jfloat Paint_nGetFontMetrics(JNIEnv* env, jclass, jlong p, jobject fm) {
   }
   return spacing;
 }
-jboolean Paint_nHasGlyph(JNIEnv*, jclass, jlong p, jint, jstring) {
-  return reinterpret_cast<AclPaint*>(p) != nullptr ? JNI_TRUE : JNI_FALSE;
+// Paint.hasGlyph: whether the string is drawn as a glyph of some font. For
+// one character, whether the paint's typeface or a fallback font has it. A
+// longer string (a ligature, an emoji sequence) is said to be one, as before:
+// telling needs shaping.
+jboolean Paint_nHasGlyph(JNIEnv* env, jclass, jlong p, jint, jstring text) {
+  const auto* ap = reinterpret_cast<const AclPaint*>(p);
+  if (ap == nullptr || text == nullptr)
+    return JNI_FALSE;
+  const int n = env->GetStringLength(text);
+  if (n == 0)
+    return JNI_FALSE;
+  const jchar* chars = env->GetStringChars(text, nullptr);
+  if (chars == nullptr)
+    return JNI_FALSE;
+  int i = 0;
+  const SkUnichar cp = next_utf16(chars, n, &i);
+  const bool one = i == n;
+  env->ReleaseStringChars(text, chars);
+  if (!one)
+    return JNI_TRUE;
+  return ap->font.unicharToGlyph(cp) != 0 ||
+                 FallbackFonts::get().find(cp) != nullptr
+             ? JNI_TRUE
+             : JNI_FALSE;
 }
 // Advance width of UTF-16 units [start, offset) — text run measurement for
 // layout.
@@ -3836,8 +4161,7 @@ jfloat Paint_nGetRunAdvance(JNIEnv* env,
   const int o = offset > len ? len : offset;
   float adv = 0;
   if (o > s)
-    adv = ap->font.measureText(chars + s, static_cast<std::size_t>(o - s) * 2,
-                               SkTextEncoding::kUTF16, nullptr, &ap->paint);
+    adv = measure_utf16(ap, chars + s, o - s);
   env->ReleaseCharArrayElements(text, chars, JNI_ABORT);
   return adv;
 }
@@ -3863,9 +4187,11 @@ jint Paint_nGetOffsetForAdvance(JNIEnv* env,
   const int e = end > len ? len : end;
   float acc = 0;
   int off = s;
+  std::vector<jfloat> adv(static_cast<std::size_t>(e > s ? e - s : 0), 0.0f);
+  if (e > s)
+    unit_advances(ap, chars + s, e - s, adv.data());
   for (int i = s; i < e; ++i) {
-    const float w = ap->font.measureText(chars + i, 2, SkTextEncoding::kUTF16,
-                                         nullptr, &ap->paint);
+    const float w = adv[static_cast<std::size_t>(i - s)];
     if (acc + w * 0.5f > advance)
       break;
     acc += w;
@@ -3939,8 +4265,7 @@ void Paint_nGetCharArrayBounds(JNIEnv* env,
   const int cnt = (i + count > len) ? (len - i) : count;
   SkRect b{};
   if (cnt > 0)
-    ap->font.measureText(chars + i, static_cast<std::size_t>(cnt) * 2,
-                         SkTextEncoding::kUTF16, &b, &ap->paint);
+    measure_utf16(ap, chars + i, cnt, &b);
   env->ReleaseCharArrayElements(text, chars, JNI_ABORT);
   static jfieldID fl = nullptr, ft, fr, fb;
   if (fl == nullptr) {
@@ -3998,11 +4323,7 @@ jint Paint_nBreakTextChars(JNIEnv* env,
       const jsize len = env->GetArrayLength(text);
       const int i = index < 0 ? 0 : index;
       const int cnt = (i + n > len) ? (len - i) : n;
-      const float w = cnt > 0
-                          ? ap->font.measureText(
-                                chars + i, static_cast<std::size_t>(cnt) * 2,
-                                SkTextEncoding::kUTF16, nullptr, &ap->paint)
-                          : 0;
+      const float w = cnt > 0 ? measure_utf16(ap, chars + i, cnt) : 0;
       env->SetFloatArrayRegion(measured, 0, 1, &w);
       env->ReleaseCharArrayElements(text, chars, JNI_ABORT);
     }
@@ -4025,10 +4346,7 @@ jint Paint_nBreakTextString(JNIEnv* env,
       env->GetArrayLength(measured) > 0) {
     const jchar* chars = env->GetStringChars(text, nullptr);
     if (chars != nullptr) {
-      const float w = n > 0 ? ap->font.measureText(
-                                  chars, static_cast<std::size_t>(n) * 2,
-                                  SkTextEncoding::kUTF16, nullptr, &ap->paint)
-                            : 0;
+      const float w = n > 0 ? measure_utf16(ap, chars, n) : 0;
       env->SetFloatArrayRegion(measured, 0, 1, &w);
       env->ReleaseStringChars(text, chars);
     }
@@ -4203,8 +4521,10 @@ jint Paint_nGetFontMetricsInt(JNIEnv* env,
   return descent - ascent;
 }
 // Backs Paint.measureText / getTextWidths: return the total advance of
-// text[start,end); fill per-glyph advances if the array is provided. Latin path
-// (per-char measure; no shaping).
+// text[start,end); fill the advance of each UTF-16 unit if the array is
+// provided. start and end count UTF-16 units, as the String's indexes do. (They
+// were applied to the string's modified UTF-8, so text with a character past
+// ASCII before `end` was measured short.) No shaping.
 jfloat Paint_nGetTextAdvances(JNIEnv* env,
                               jclass,
                               jlong paintPtr,
@@ -4219,25 +4539,23 @@ jfloat Paint_nGetTextAdvances(JNIEnv* env,
   auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
   if (ap == nullptr || text == nullptr)
     return 0.0f;
-  const char* utf8 = env->GetStringUTFChars(text, nullptr);
-  if (utf8 == nullptr)
+  const jchar* chars = env->GetStringChars(text, nullptr);
+  if (chars == nullptr)
     return 0.0f;
-  const int len = static_cast<int>(std::strlen(utf8));
+  const int len = env->GetStringLength(text);
   const int s = start < 0 ? 0 : start;
   const int e = end > len ? len : end;
   float total = 0.0f;
   if (e > s) {
-    total = ap->font.measureText(utf8 + s, static_cast<std::size_t>(e - s),
-                                 SkTextEncoding::kUTF8, nullptr, &ap->paint);
     if (advances != nullptr) {
       std::vector<jfloat> adv(static_cast<std::size_t>(e - s), 0.0f);
-      for (int i = 0; i < e - s; ++i)
-        adv[i] = ap->font.measureText(utf8 + s + i, 1, SkTextEncoding::kUTF8,
-                                      nullptr, &ap->paint);
+      total = unit_advances(ap, chars + s, e - s, adv.data());
       env->SetFloatArrayRegion(advances, advIdx, e - s, adv.data());
+    } else {
+      total = measure_utf16(ap, chars + s, e - s);
     }
   }
-  env->ReleaseStringUTFChars(text, utf8);
+  env->ReleaseStringChars(text, chars);
   return total;
 }
 // Paint.getTextRunAdvances / measureText(char[]): the char[] overload of
@@ -4266,16 +4584,12 @@ jfloat Paint_nGetTextAdvancesChars(JNIEnv* env,
   const int e = (index + count) > arlen ? arlen : (index + count);
   float total = 0.0f;
   if (e > s) {
-    total = ap->font.measureText(
-        buf + s, static_cast<std::size_t>(e - s) * sizeof(jchar),
-        SkTextEncoding::kUTF16, nullptr, &ap->paint);
     if (advances != nullptr) {
       std::vector<jfloat> adv(static_cast<std::size_t>(e - s), 0.0f);
-      for (int i = 0; i < e - s; ++i)
-        adv[i] =
-            ap->font.measureText(buf + s + i, sizeof(jchar),
-                                 SkTextEncoding::kUTF16, nullptr, &ap->paint);
+      total = unit_advances(ap, buf + s, e - s, adv.data());
       env->SetFloatArrayRegion(advances, advIdx, e - s, adv.data());
+    } else {
+      total = measure_utf16(ap, buf + s, e - s);
     }
   }
   env->ReleaseCharArrayElements(chars, buf, JNI_ABORT);
@@ -4295,17 +4609,16 @@ void Paint_nGetStringBounds(JNIEnv* env,
   auto* ap = reinterpret_cast<AclPaint*>(paintPtr);
   if (ap == nullptr || text == nullptr || rect == nullptr)
     return;
-  const char* utf8 = env->GetStringUTFChars(text, nullptr);
-  if (utf8 == nullptr)
+  const jchar* chars = env->GetStringChars(text, nullptr);
+  if (chars == nullptr)
     return;
-  const int len = static_cast<int>(std::strlen(utf8));
+  const int len = env->GetStringLength(text);
   const int s = start < 0 ? 0 : start;
   const int e = end > len ? len : end;
   SkRect b = SkRect::MakeEmpty();
   if (e > s)
-    ap->font.measureText(utf8 + s, static_cast<std::size_t>(e - s),
-                         SkTextEncoding::kUTF8, &b, &ap->paint);
-  env->ReleaseStringUTFChars(text, utf8);
+    measure_utf16(ap, chars + s, e - s, &b);
+  env->ReleaseStringChars(text, chars);
   jclass rc = env->GetObjectClass(rect);
   const auto set = [&](const char* f, int v) {
     if (jfieldID id = env->GetFieldID(rc, f, "I"))
@@ -9198,11 +9511,9 @@ jlong MtBuilder_nBuild(JNIEnv* env,
       ap->font.getMetrics(&fm);
       mt->ascent = std::min(mt->ascent, fm.fAscent);
       mt->descent = std::max(mt->descent, fm.fDescent);
-      for (int i = s; i < e; ++i) {
-        const jchar u = chars[i];
-        mt->adv[i] = ap->font.measureText(
-            &u, sizeof(jchar), SkTextEncoding::kUTF16, nullptr, &ap->paint);
-      }
+      if (s < e)
+        unit_advances(ap, chars + s, e - s,
+                      &mt->adv[static_cast<std::size_t>(s)]);
     }
   }
   if (chars != nullptr)
