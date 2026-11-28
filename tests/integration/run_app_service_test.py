@@ -78,6 +78,7 @@ CHECKS = [
     "SERVICE: location service enabled=true gps=true providers=true gnss=true",
     "SERVICE: vibrator manager ids=0 has=false same=true",
     "SERVICE: process natives cpu=true signal=true",
+    "SERVICE: network callback link=true wifi info=true ip=true",
     "SERVICE: dns resolver answered=true loopback=true rcode=0 raw=1",
     "SERVICE: paint long color srgb=ff336699 wide red=true",
     "SERVICE: camera z -8.0 turned 0.500/1.000/0.00150 canvas true facing -0.500 restored true",
@@ -218,8 +219,11 @@ def main():
                 return skip(display)
 
         # A location source that needs no daemon: the fixture asks whether location is on.
+        # ACL_NET_WIRED_AS_WIFI: a host on a wired network is a Wi-Fi one to the fixture,
+        # which then has a WifiInfo to ask for.
         env = dict(os.environ, WAYLAND_DISPLAY=display, ACL_RUN_TIMEOUT="60", ACL_BIN=acl,
                    ACL_PRESENT_GPU="1", ACL_LOCATION_LATLON="1.5,2.5",
+                   ACL_NET_WIRED_AS_WIFI="1",
                    XDG_CACHE_HOME=os.path.join(work, "cache"),
                    XDG_DATA_HOME=os.path.join(work, "data"))
         p = subprocess.run([os.path.join(src_root, "tools/run-apk.sh"), apk, "--verify=off",
