@@ -79,7 +79,8 @@ class LocationHub {
   bool last(LocationFix* out) const;
 
   // Whether a real (non-null) source backs this hub — drives
-  // LocationManager.isProviderEnabled().
+  // LocationManager.isProviderEnabled() and isLocationEnabled(). The answer
+  // does not wait for start().
   bool available() const;
 
   const char* source_name() const;
@@ -89,7 +90,9 @@ class LocationHub {
   void on_fix(const LocationFix& f);
 
   mutable std::mutex m_;
-  std::unique_ptr<LocationSource> source_;
+  // Made by the first of available() and start() to need it.
+  mutable std::unique_ptr<LocationSource> source_;
+  bool source_used_ = false;  // start() has been called on source_
   LocationSink listener_;
   LocationFix last_;
   bool have_last_ = false;

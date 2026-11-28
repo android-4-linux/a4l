@@ -335,22 +335,28 @@ public class Main extends Activity {
         }
         log("telephony callback " + telephony);
         // LocationManager looks its service up by name for isLocationEnabled() and for a
-        // GNSS status callback; both threw "No service published for: location".
+        // GNSS status callback; both threw "No service published for: location". An app asks
+        // whether location is on, and which providers are, before it asks for a location: the
+        // test runs with a source (ACL_LOCATION_LATLON), so the answer is yes from the start.
         String location;
         try {
             final android.location.LocationManager lm =
                     getSystemService(android.location.LocationManager.class);
             final boolean enabled = lm.isLocationEnabled();
+            final boolean gps = lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER);
+            final int providers = lm.getProviders(true).size();
             final android.location.GnssStatus.Callback gnss =
                     new android.location.GnssStatus.Callback() {};
             lm.registerGnssStatusCallback(getMainExecutor(), gnss);
             lm.unregisterGnssStatusCallback(gnss);
-            location = "answered=" + (enabled || !enabled) + " gnss=true";
+            location = "enabled=" + enabled + " gps=" + gps + " providers=" + (providers > 0)
+                    + " gnss=true";
         } catch (RuntimeException e) {
             location = e.toString();
         }
         log("location service " + location);
-        expect("answered=true gnss=true".equals(location), "location service " + location);
+        expect("enabled=true gps=true providers=true gnss=true".equals(location),
+                "location service " + location);
         // The vibrator manager, which an app asks for from API 31 where it once asked for the
         // vibrator. A host has no vibrator: there is a manager all the same, and its vibrator
         // says so and takes an effect without complaint.

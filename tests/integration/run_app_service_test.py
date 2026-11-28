@@ -75,7 +75,7 @@ CHECKS = [
     "SERVICE: sweep gradient drawn=true",
     "SERVICE: context calls locked=false enforced=true",
     "SERVICE: telephony callback registered=true",
-    "SERVICE: location service answered=true gnss=true",
+    "SERVICE: location service enabled=true gps=true providers=true gnss=true",
     "SERVICE: vibrator manager ids=0 has=false same=true",
     "SERVICE: process natives cpu=true signal=true",
     "SERVICE: dns resolver answered=true loopback=true rcode=0 raw=1",
@@ -214,8 +214,9 @@ def main():
             if weston is None:
                 return skip(display)
 
+        # A location source that needs no daemon: the fixture asks whether location is on.
         env = dict(os.environ, WAYLAND_DISPLAY=display, ACL_RUN_TIMEOUT="60", ACL_BIN=acl,
-                   ACL_PRESENT_GPU="1",
+                   ACL_PRESENT_GPU="1", ACL_LOCATION_LATLON="1.5,2.5",
                    XDG_CACHE_HOME=os.path.join(work, "cache"),
                    XDG_DATA_HOME=os.path.join(work, "data"))
         p = subprocess.run([os.path.join(src_root, "tools/run-apk.sh"), apk, "--verify=off",
