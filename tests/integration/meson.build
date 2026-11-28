@@ -883,6 +883,17 @@ if py3.found() and have_jni
         depends : [acl_exe, ndk_apk],
         timeout : 300,
       )
+      # ACL_JVMTI_TRACE logs a traced method's entry with its arguments, for a static
+      # method and an instance one. Same fixture, ACL_NDK_TEST_TRACE=1. SKIPs without
+      # ART's JVMTI plugin.
+      test(
+        'run-apk-ndk-art-trace',
+        py3,
+        args : [files('run_ndk_art_test.py'), acl_exe,
+                meson.project_source_root(), framework_android_jar, ndk_apk, '--trace'],
+        depends : [acl_exe, ndk_apk],
+        timeout : 300,
+      )
       # An app library plays through libaaudio.so: an output stream with a data callback,
       # into the null sink. Same fixture, ACL_NDK_TEST_AAUDIO=1.
       test(

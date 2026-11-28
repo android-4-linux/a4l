@@ -78,6 +78,16 @@ NULLCHECK_CHECKS = [
     "NULLCHECK: main=caught after a native=caught plain=caught",
 ]
 
+# --trace: ACL_JVMTI_TRACE names a static method and an instance method of the fixture. Each
+# entry is logged with the method's arguments: integers and longs by value, a String in
+# quotes, an array by kind. The static method's first argument is in the frame's first
+# argument slot; the instance method's follows `this`. Needs ART's JVMTI plugin.
+TRACE_CHECKS = [
+    "JVMTI-TRACE: entered Lcom/acl/ndktest/Main;.helper(40, 2)",
+    'JVMTI-TRACE: entered Lcom/acl/ndktest/Main;.traced("a4l", 7000000000, array)',
+    "TRACE: called 42 a4l70000000003",
+]
+
 # --aaudio: the library opens libaaudio.so and plays a silent stream through a data callback.
 AAUDIO_CHECKS = [
     "acl.audio.ndk: output: 48000 Hz, 2 ch",
@@ -136,6 +146,9 @@ def main() -> int:
     nullcheck = "--nullcheck" in argv     # Java null checks under a4l's handler
     if nullcheck:
         argv.remove("--nullcheck")
+    trace = "--trace" in argv             # a method trace with arguments; see TRACE_CHECKS
+    if trace:
+        argv.remove("--trace")
     aaudio = "--aaudio" in argv           # libaaudio.so output; see AAUDIO_CHECKS
     if aaudio:
         argv.remove("--aaudio")
@@ -145,7 +158,7 @@ def main() -> int:
     if len(argv) != 4:
         sys.stderr.write(
             "usage: run_ndk_art_test.py <acl> <src_root> <android.jar> <ndk.apk> "
-            "[--worker|--donor|--storm|--handler|--nullcheck|--aaudio|--opensles]\n")
+            "[--worker|--donor|--storm|--handler|--nullcheck|--trace|--aaudio|--opensles]\n")
         return 2
     acl, src_root, android_jar, ndk_apk = argv
 
@@ -276,6 +289,14 @@ def main() -> int:
             env.pop("ACL_NO_CRASHPAD_SHIM_KEEPER", None)
         if nullcheck:
             env["ACL_NDK_TEST_NULLCHECK"] = "1"
+        if trace:
+            if not os.path.isfile(os.path.join(target_home, "lib64", "libopenjdkjvmti.so")):
+                sys.stdout.write("SKIP: ART's JVMTI plugin (libopenjdkjvmti.so) is not built\n")
+                return SKIP
+            env["ACL_NDK_TEST_TRACE"] = "1"
+            env["ACL_JVMTI_DIAG"] = "1"
+            env["ACL_JVMTI_TRACE"] = ("Lcom/acl/ndktest/Main;.helper,"
+                                      "Lcom/acl/ndktest/Main;.traced")
         p = subprocess.run(wrapper + [acl, "run", apk, "--vm=art"],
                            env=env, capture_output=True, text=True, timeout=300)
         out = p.stdout + p.stderr
@@ -323,6 +344,14 @@ def main() -> int:
             sys.stderr.write(f"FAIL: null checks: acl exit {p.returncode}\n")
             ok = False
         for c in NULLCHECK_CHECKS:
+            if c not in out:
+                sys.stderr.write(f"FAIL: missing '{c}'\n")
+                ok = False
+    elif trace:
+        if p.returncode != 0:
+            sys.stderr.write(f"FAIL: method trace: acl exit {p.returncode}\n")
+            ok = False
+        for c in TRACE_CHECKS:
             if c not in out:
                 sys.stderr.write(f"FAIL: missing '{c}'\n")
                 ok = False
