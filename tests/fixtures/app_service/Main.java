@@ -82,6 +82,7 @@ public class Main extends Activity {
     protected void onStart() {
         super.onStart();
         launch.append('s');
+        if (resultOrder != null) resultOrder.append('s');
     }
 
     @Override
@@ -94,6 +95,21 @@ public class Main extends Activity {
     protected void onResume() {
         super.onResume();
         launch.append('r');
+        if (resultOrder != null) resultOrder.append('r');
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (resultOrder != null) resultOrder.append('p');
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != ASKED || resultOrder == null) return;
+        resultOrder.append('A');
+        startActivity(new Intent(this, Answered.class));
     }
 
     @Override
@@ -896,9 +912,10 @@ public class Main extends Activity {
             case 12: keyGenerators(); break;
             case 13: permissions(); break;
             case 14: coveredDialog(); break;
-            case 15: windowIds(); break;
-            case 16: overlayTouches(); break;
-            case 17: popupPlaces(); break;
+            case 15: resultThenStart(); break;
+            case 16: windowIds(); break;
+            case 17: overlayTouches(); break;
+            case 18: popupPlaces(); break;
             default:
                 log("PASS");
                 // An app ends itself this way; it does not return.
@@ -1054,6 +1071,64 @@ public class Main extends Activity {
                 }
             }, 300);
         }
+    }
+
+    static final int ASKED = 77;
+    /** Main's callbacks from the time it asks Asked for a result: p, s, r, and A for the result. */
+    private StringBuilder resultOrder;
+    static String sAnsweredOrder;
+    static int sAnsweredDraws;
+
+    /** Finishes at once with a result. */
+    public static class Asked extends Activity {
+        @Override protected void onCreate(Bundle b) {
+            super.onCreate(b);
+            setContentView(new android.view.View(this));
+            setResult(RESULT_OK);
+            finish();
+        }
+    }
+
+    static final class AnsweredView extends android.view.View {
+        AnsweredView(Context c) { super(c); }
+        @Override protected void onDraw(android.graphics.Canvas canvas) {
+            sAnsweredDraws++;
+            canvas.drawColor(0xff996633);
+            invalidate();
+        }
+    }
+
+    /**
+     * Started by Main from onActivityResult. Notes what Main had been through by then, and
+     * its view counts its draws: it is the screen only if it is the one drawn.
+     */
+    public static class Answered extends Activity {
+        @Override protected void onCreate(Bundle b) {
+            super.onCreate(b);
+            sAnsweredOrder = sMain.resultOrder.toString();
+            setContentView(new AnsweredView(this));
+            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                @Override public void run() {
+                    finish();
+                    sMain.main.postDelayed(new Runnable() {
+                        @Override public void run() { sMain.afterAnswered(); }
+                    }, 300);
+                }
+            }, 500);
+        }
+    }
+
+    void resultThenStart() {
+        resultOrder = new StringBuilder();
+        startActivityForResult(new Intent(this, Asked.class), ASKED);
+    }
+
+    void afterAnswered() {
+        // Paused under Asked, started again, given the result, resumed, and only then paused
+        // under the Activity the result made it start: the order ActivityThread gives.
+        log("result then start order=" + sAnsweredOrder + " drawn=" + (sAnsweredDraws > 0));
+        resultOrder = null;
+        next();
     }
 
     private android.app.Dialog coverDialog;
