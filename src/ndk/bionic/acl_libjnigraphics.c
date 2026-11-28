@@ -17,12 +17,19 @@
 // mutates; unlockPixels copies them BACK via Bitmap.setPixels (acl's
 // nativeSetPixels). getInfo reports width/height/rowBytes so the caller strides
 // correctly. This is a copy-emulated lock (fine for the small downsampled
-// bitmaps these paths use); the buffer holds unpremultiplied Color ints, which
-// a channel-agnostic filter (blur) round-trips correctly.
+// bitmaps these paths use).
+//
+// Bitmap.getPixels and setPixels deal in Color ints, and a caller of
+// AndroidBitmap_lockPixels in RGBA_8888 bytes (acl_bitmap_pixels.h). The buffer
+// is converted on the way out and on the way back. Left as Color ints, red and
+// blue changed places for a caller that reads or writes colors: a blur did not
+// show it, and a WebView that draws its page into a Bitmap did.
 #include <jni.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+#include "acl_bitmap_pixels.h"
 
 // Mirrors <android/bitmap.h> so callers link cleanly.
 typedef struct {
@@ -49,6 +56,7 @@ typedef struct LockEntry {
   jlong key;
   void* buf;
   int w, h;
+  int premul;  // the buffer's colors are premultiplied
   struct LockEntry* next;
 } LockEntry;
 static LockEntry* g_locks = 0;
@@ -68,6 +76,24 @@ static int bmp_int(JNIEnv* env, jobject b, const char* name) {
     return -1;
   }
   return v;
+}
+
+// Bitmap.isPremultiplied(): true for a Bitmap with alpha unless the app turned
+// it off. A Bitmap that cannot say is taken to be premultiplied, the default.
+static int bmp_premul(JNIEnv* env, jobject b) {
+  jclass c = (*env)->GetObjectClass(env, b);
+  jmethodID m = (*env)->GetMethodID(env, c, "isPremultiplied", "()Z");
+  (*env)->DeleteLocalRef(env, c);
+  if (!m) {
+    (*env)->ExceptionClear(env);
+    return 1;
+  }
+  const jboolean v = (*env)->CallBooleanMethod(env, b, m);
+  if ((*env)->ExceptionCheck(env)) {
+    (*env)->ExceptionClear(env);
+    return 1;
+  }
+  return v != JNI_FALSE;
 }
 
 static jlong bmp_native_ptr(JNIEnv* env, jobject b) {
@@ -148,6 +174,8 @@ EXPORT int AndroidBitmap_lockPixels(JNIEnv* env, jobject bmp, void** addr) {
   e->buf = buf;
   e->w = w;
   e->h = h;
+  e->premul = bmp_premul(env, bmp);
+  acl_colors_to_rgba((uint8_t*)buf, (size_t)n, e->premul);
   pthread_mutex_lock(&g_mu);
   e->next = g_locks;
   g_locks = e;
@@ -175,6 +203,7 @@ EXPORT int AndroidBitmap_unlockPixels(JNIEnv* env, jobject bmp) {
     return ANDROID_BITMAP_RESULT_SUCCESS;  // never locked (or already
                                            // committed)
   const jsize n = (jsize)((size_t)e->w * (size_t)e->h);
+  acl_rgba_to_colors((uint8_t*)e->buf, (size_t)n, e->premul);
   jintArray arr = (*env)->NewIntArray(env, n);
   if (arr) {
     (*env)->SetIntArrayRegion(env, arr, 0, n, (const jint*)e->buf);
