@@ -62,6 +62,7 @@
 #endif
 
 #include "log/log.h"
+#include "ndk/thread_pointer.h"
 
 namespace acl::ndk {
 namespace {
@@ -783,26 +784,22 @@ struct SavedSig {
 SavedSig g_saved_sig[65];  // indexed by signo (1..64)
 std::atomic<bool> g_shims_installed{false};
 
-// True if `fs` is a glibc thread pointer (TCB), signal-safe. A glibc x86-64
-// tcbhead_t self- references at BOTH %fs:0x00 (`tcb`) and %fs:0x10 (`self`) —
-// TLS_INIT_TP sets head->tcb = head->self = the thread pointer. A bionic x86-64
-// TLS block self-references at %fs:0x00 (TLS_SLOT_SELF) too, but %fs:0x10 is
-// TLS_SLOT_APP (slot 2, historically errno), never the base. So the 0x10
-// self-reference distinguishes an ART/glibc thread — whose %fs ART's own fault
-// handler must use (Thread::Current() lives in it) — from a bionic-spawned
-// thread ART never owned. This is the correct generalization of
-// is_known_glibc_fs(): it recognizes EVERY glibc thread, including ART's own
-// worker/JIT/app (e.g. Telegram DispatchQueue) threads that never attached
-// across the bionic boundary and so are absent from the pairing table. `fs` is
-// the live TCB of the faulting thread, so both loads are always mapped — no
-// fault, no allocation.
+// True if `fs` is a glibc thread pointer (TCB) and not a bionic one,
+// signal-safe: the layouts are in ndk/thread_pointer.h. It tells an ART/glibc
+// thread — whose %fs ART's own fault handler must use (Thread::Current() lives
+// in it) — from a bionic-spawned thread ART never owned. This is the correct
+// generalization of is_known_glibc_fs(): it recognizes EVERY glibc thread,
+// including ART's own worker/JIT/app (e.g. Telegram DispatchQueue) threads
+// that never attached across the bionic boundary and so are absent from the
+// pairing table. `fs` is the live TCB of the faulting thread, so the loads are
+// always mapped — no fault, no allocation.
+//
+// The test was x86-64's alone, and false for every thread on AArch64. There a
+// Java null dereference on an ART thread, once an app library was loaded, was
+// handed to ART under the null-ART thread pointer below: ART declined its own
+// null check and the process died of SIGSEGV.
 bool is_glibc_fs(std::uintptr_t fs) {
-  if (fs == 0)
-    return false;
-  const auto slot = [](std::uintptr_t base, std::uintptr_t off) {
-    return *reinterpret_cast<const std::uintptr_t*>(base + off);
-  };
-  return slot(fs, 0x00) == fs && slot(fs, 0x10) == fs;
+  return is_glibc_thread_pointer(fs);
 }
 
 // A glibc %fs whose libart Thread::self_tls_ reads null, donated by a real

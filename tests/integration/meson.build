@@ -871,6 +871,18 @@ if py3.found() and have_jni
         depends : [acl_exe, ndk_apk],
         timeout : 300,
       )
+      # With an app library loaded, a4l's handler is over ART's fault handler: a null
+      # dereference in Java must still be a NullPointerException, on the main thread, on a
+      # thread that has called a native and on one that has not. Same fixture,
+      # ACL_NDK_TEST_NULLCHECK=1.
+      test(
+        'run-apk-ndk-art-nullcheck',
+        py3,
+        args : [files('run_ndk_art_test.py'), acl_exe,
+                meson.project_source_root(), framework_android_jar, ndk_apk, '--nullcheck'],
+        depends : [acl_exe, ndk_apk],
+        timeout : 300,
+      )
       # An app library plays through libaaudio.so: an output stream with a data callback,
       # into the null sink. Same fixture, ACL_NDK_TEST_AAUDIO=1.
       test(
