@@ -61,6 +61,7 @@ CHECKS = [
     "SERVICE: base context chain ends=true",
     "SERVICE: media and obb dirs, display context=true",
     "SERVICE: wifi link true -1/-1/-1 standard 0 security -1 scan 0/0/0",
+    "SERVICE: features follow the host: wifi true bluetooth true le true nfc false none false",
     "SERVICE: color matrix filtered=true",
     "SERVICE: memory info sane=true",
     "SERVICE: link properties consistent=true",
@@ -103,6 +104,7 @@ CHECKS = [
     "SERVICE: undeclared service not found=true declared found=true",
     "SERVICE: web link resolves=true",
     "SERVICE: settings android_id=16 stable=true",
+    "SERVICE: settings location_mode=3 enabled=true",
     "SERVICE: job network=true/false specifier=null scheduled=1",
     "SERVICE: artwork shared=3x2/ff336699/false parcel=3x2/ff336699 next=77 views=true"
     " notification=true sdk=24/33",

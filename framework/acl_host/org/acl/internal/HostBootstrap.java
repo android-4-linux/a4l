@@ -3056,11 +3056,34 @@ public final class HostBootstrap {
         }
         // WebView support gate (WebViewFactory.isWebViewSupported): acl provides a vendored Chromium
         // WebView provider (installWebViewProvider), so advertise the feature when it is configured.
+        // The hardware a4l has a host service behind is reported when the host has it. An
+        // app asks before it reads the state: Sonos's setup takes "no Bluetooth LE feature"
+        // to mean Bluetooth is off, and "no Wi-Fi feature" the same for Wi-Fi, without
+        // asking the adapter or the WifiManager.
         @Override public boolean hasSystemFeature(String name) {
-            if (android.content.pm.PackageManager.FEATURE_WEBVIEW.equals(name))
-                return System.getenv("ACL_WEBVIEW_APK") != null;
-            return false;
+            if (name == null) return false;
+            switch (name) {
+                case android.content.pm.PackageManager.FEATURE_WEBVIEW:
+                    return System.getenv("ACL_WEBVIEW_APK") != null;
+                // The host has a Bluetooth adapter (BlueZ gives its address). BlueZ does
+                // not say whether the controller does LE; one made since 2010 does.
+                case android.content.pm.PackageManager.FEATURE_BLUETOOTH:
+                case android.content.pm.PackageManager.FEATURE_BLUETOOTH_LE:
+                    return !BluetoothBridge.address().isEmpty();
+                // A Wi-Fi radio that is on, or the wired network shown as Wi-Fi
+                // (ACL_NET_WIRED_AS_WIFI). A radio that is switched off is not told from
+                // none here. The host's network daemon is asked, so a yes is kept: a
+                // device's features do not change while an app runs, and a radio that is
+                // switched off later is WifiManager.isWifiEnabled's to report.
+                case android.content.pm.PackageManager.FEATURE_WIFI:
+                    if (!sWifiFeature)
+                        sWifiFeature = new android.net.wifi.WifiManager().isWifiEnabled();
+                    return sWifiFeature;
+                default:
+                    return false;
+            }
         }
+        private static volatile boolean sWifiFeature;
         @Override public boolean hasSystemFeature(String name, int version) {
             return hasSystemFeature(name);
         }
@@ -3090,9 +3113,13 @@ public final class HostBootstrap {
             if ("settings".equals(authority)) return settingsProvider();
             return stubProvider();
         }
-        // The settings provider, answering one key: Settings.Secure.ANDROID_ID. Android always has
-        // a value there and apps hash it unchecked (Firebase Performance does). Every other
-        // setting stays unset, so its reader takes the default.
+        // The settings provider, answering two keys. Settings.Secure.ANDROID_ID: Android always
+        // has a value there and apps hash it unchecked (Firebase Performance does).
+        // Settings.Secure.LOCATION_MODE: on (LOCATION_MODE_ON) when the host has a location
+        // source, which is what LocationManager.isLocationEnabled answers, and off without
+        // one. An app reads it in place of asking the LocationManager (Sonos's setup does), and
+        // takes a setting that is not there to mean location is off. Every other setting stays
+        // unset, so its reader takes the default.
         private static android.content.IContentProvider sSettings;
         private static synchronized android.content.IContentProvider settingsProvider() {
             if (sSettings == null) {
@@ -3101,10 +3128,20 @@ public final class HostBootstrap {
                         iface.getClassLoader(), new Class<?>[]{iface}, (p, method, a) -> {
                             // call(AttributionSource, authority, method, arg, extras)
                             if ("call".equals(method.getName()) && a != null && a.length == 5
-                                    && "GET_secure".equals(a[2]) && "android_id".equals(a[3])) {
-                                android.os.Bundle b = new android.os.Bundle();
-                                b.putString("value", androidId());
-                                return b;
+                                    && "GET_secure".equals(a[2])) {
+                                String value = null;
+                                if ("android_id".equals(a[3])) {
+                                    value = androidId();
+                                } else if ("location_mode".equals(a[3])) {
+                                    value = String.valueOf(AclLocationManager.enabled()
+                                            ? android.provider.Settings.Secure.LOCATION_MODE_ON
+                                            : android.provider.Settings.Secure.LOCATION_MODE_OFF);
+                                }
+                                if (value != null) {
+                                    android.os.Bundle b = new android.os.Bundle();
+                                    b.putString("value", value);
+                                    return b;
+                                }
                             }
                             return defaultValue(method.getReturnType());
                         });
