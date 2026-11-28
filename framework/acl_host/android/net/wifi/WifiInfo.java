@@ -86,8 +86,23 @@ public class WifiInfo implements android.net.TransportInfo {
      */
     public String getMacAddress() { return "02:00:00:00:00:00"; }
 
-    /** Deprecated IPv4-as-int accessor; acl does not surface the address here. */
-    public int getIpAddress() { return 0; }
+    /**
+     * The IPv4 address on the network, as the platform packs it: the first octet in the low
+     * byte. It is the address of the interface the default route leaves by, which is the
+     * network this is the Wi-Fi of. 0 when not connected, or with no IPv4 address there.
+     */
+    public int getIpAddress() {
+        if (!connected) return 0;
+        try {
+            for (android.net.LinkAddress a : new android.net.LinkProperties().getLinkAddresses()) {
+                final byte[] b = a.getAddress().getAddress();
+                if (b.length != 4) continue;
+                return (b[0] & 0xff) | (b[1] & 0xff) << 8 | (b[2] & 0xff) << 16
+                        | (b[3] & 0xff) << 24;
+            }
+        } catch (RuntimeException ignored) { }
+        return 0;
+    }
 
     public SupplicantState getSupplicantState() {
         return connected ? SupplicantState.COMPLETED : SupplicantState.DISCONNECTED;

@@ -384,6 +384,50 @@ public class Main extends Activity {
             process = t.toString();
         }
         log("process natives " + process);
+        // What an app reads off its network before it looks for devices on it: the link's
+        // properties, which come to a network callback after the capabilities, and for a
+        // Wi-Fi network its WifiInfo, as the capabilities' transport info, with the address
+        // the app has on that link. Whatever the host's network is, the three agree.
+        String network;
+        try {
+            final android.net.ConnectivityManager cm =
+                    getSystemService(android.net.ConnectivityManager.class);
+            final android.net.NetworkCapabilities[] caps = new android.net.NetworkCapabilities[1];
+            final android.net.LinkProperties[] link = new android.net.LinkProperties[1];
+            final android.net.ConnectivityManager.NetworkCallback cb =
+                    new android.net.ConnectivityManager.NetworkCallback() {
+                        @Override public void onCapabilitiesChanged(android.net.Network n,
+                                android.net.NetworkCapabilities c) { caps[0] = c; }
+                        @Override public void onLinkPropertiesChanged(android.net.Network n,
+                                android.net.LinkProperties l) { link[0] = l; }
+                    };
+            cm.registerDefaultNetworkCallback(cb);
+            cm.unregisterNetworkCallback(cb);
+            final boolean connected = cm.getActiveNetwork() != null;
+            final boolean wifi = caps[0] != null && caps[0].hasTransport(
+                    android.net.NetworkCapabilities.TRANSPORT_WIFI);
+            final android.net.TransportInfo info =
+                    caps[0] != null ? caps[0].getTransportInfo() : null;
+            int address = 0;
+            if (link[0] != null) {
+                for (android.net.LinkAddress a : link[0].getLinkAddresses()) {
+                    final byte[] b = a.getAddress().getAddress();
+                    if (b.length != 4) continue;
+                    address = (b[0] & 0xff) | (b[1] & 0xff) << 8 | (b[2] & 0xff) << 16
+                            | (b[3] & 0xff) << 24;
+                    break;
+                }
+            }
+            final boolean ip = !(info instanceof android.net.wifi.WifiInfo)
+                    || ((android.net.wifi.WifiInfo) info).getIpAddress() == address;
+            network = "link=" + ((link[0] != null) == connected)
+                    + " wifi info=" + ((info instanceof android.net.wifi.WifiInfo) == wifi)
+                    + " ip=" + ip;
+        } catch (RuntimeException e) {
+            network = e.toString();
+        }
+        log("network callback " + network);
+        expect("link=true wifi info=true ip=true".equals(network), "network callback " + network);
         // android.net.DnsResolver: a name resolved on a thread of the resolver's, answered
         // on the caller's executor. An app's own HTTP stack uses it; the class was missing.
         String dns;

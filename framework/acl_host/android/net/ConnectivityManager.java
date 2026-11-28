@@ -120,6 +120,9 @@ public class ConnectivityManager {
         if ((st & 0x1) != 0) {
             cb.onAvailable(Network.DEFAULT);
             cb.onCapabilitiesChanged(Network.DEFAULT, NetworkCapabilities.fromPacked(st));
+            // The link's properties follow the capabilities, as on Android. An app takes its
+            // interface and its address on the network from here.
+            cb.onLinkPropertiesChanged(Network.DEFAULT, new LinkProperties());
         } else {
             cb.onLost(Network.DEFAULT);
         }
@@ -176,6 +179,7 @@ public class ConnectivityManager {
         public void onLost(Network network) {}
         public void onUnavailable() {}
         public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {}
+        public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {}
         public void onBlockedStatusChanged(Network network, boolean blocked) {}
     }
 

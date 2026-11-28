@@ -39,12 +39,18 @@ public final class NetworkCapabilities {
     public int getLinkDownstreamBandwidthKbps() { return 0; }
     // Signal strength is likewise unknown; AOSP's sentinel is SIGNAL_STRENGTH_UNSPECIFIED.
     public int getSignalStrength() { return Integer.MIN_VALUE; }
-    // Transport-specific info (a WifiInfo for a WIFI network, etc.). acl carries none on the packed
-    // capability word, so report null — exactly what AOSP returns for a network with no transport
-    // info. Callers guard it (`getTransportInfo() instanceof WifiInfo ? ... : null`), e.g. Sonos's
-    // WifiNetworkMonitor / ActiveNetworkMonitor, so null is handled; without the method they threw
-    // NoSuchMethodError. (Real SSID/BSSID for a WIFI transport is a follow-on — see svc/net WifiInfo.)
-    public android.net.TransportInfo getTransportInfo() { return null; }
+    // Transport-specific info: the WifiInfo of a Wi-Fi network, as from Android 12, and null
+    // for any other, which is what AOSP returns for a network with none. It is the access
+    // point WifiManager.getConnectionInfo() reports. An app takes its network's SSID and
+    // BSSID from here (Sonos's network monitors do).
+    public android.net.TransportInfo getTransportInfo() {
+        if (!hasTransport(TRANSPORT_WIFI)) return null;
+        try {
+            return new android.net.wifi.WifiManager().getConnectionInfo();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
 
     // Build from ConnectivityManager's packed native state word (see ConnectivityManager).
     static NetworkCapabilities fromPacked(int st) {
