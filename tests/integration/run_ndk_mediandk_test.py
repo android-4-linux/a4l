@@ -13,6 +13,10 @@
 #   - AMediaFormat_toString names the keys and values
 #   - AMediaCodec_createDecoderByType returns NULL, and a call on NULL is an error: no codec
 #     stands behind AMediaCodec yet
+#   - the rest of <media/NdkMediaCodec.h> is there to be imported (the .so does not load
+#     with one symbol missing): AMediaCodec_releaseOutputBufferAtTime and AMediaCodec_getName
+#     say there is no codec, the action codes are told apart, and an AMediaCodecCryptoInfo
+#     gives back the key, IV and subsample sizes it was made with
 #
 # Needs a staged bionic runtime ($AOSP). SKIPs (exit 77) when absent.
 #
