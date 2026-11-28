@@ -16,6 +16,7 @@ unit_test_sources = files(
   'ipc_test.cpp',
   'split_present_test.cpp',
   'touch_pointer_test.cpp',
+  'thread_pointer_test.cpp',
   'egl_attribs_test.cpp',
   'gpsd_tpv_test.cpp',
   'split_validate_test.cpp',

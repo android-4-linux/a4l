@@ -73,6 +73,17 @@ public class Main extends Activity {
     // Java_com_acl_ndktest_Main_openslesPlay in tools/build-ndk-repro.sh.
     public static native int openslesPlay();
 
+    // A null dereference, which ART finds by the fault it raises: the handler that turns the
+    // fault into the exception has to know the thread is ART's.
+    static Object sNothing;
+    static String nullCheck() {
+        try {
+            return sNothing.toString();
+        } catch (NullPointerException e) {
+            return "caught";
+        }
+    }
+
     // Up-called BY the native, from bionic %fs back into ART's glibc %fs.
     public static int helper(int a, int b) {
         return a + b;
@@ -120,6 +131,36 @@ public class Main extends Activity {
         // own, as a crash reporter does.
         if (System.getenv("ACL_NDK_TEST_HANDLER") != null) {
             Log.i("acl", "HANDLER: a4l's fault handler back=" + handlerKept());
+        }
+
+        // Opt-in (run_ndk_art_test.py --nullcheck): with the library loaded, a null dereference
+        // is a NullPointerException on the main thread, on a thread that has called a native
+        // and on one that has not.
+        if (System.getenv("ACL_NDK_TEST_NULLCHECK") != null) {
+            final String[] seen = new String[2];
+            final Thread[] threads = {
+                new Thread(new Runnable() {
+                    public void run() {
+                        nativeAnswer();
+                        seen[0] = nullCheck();
+                    }
+                }),
+                new Thread(new Runnable() {
+                    public void run() {
+                        seen[1] = nullCheck();
+                    }
+                }),
+            };
+            for (Thread t : threads) {
+                t.start();
+                try {
+                    t.join();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            Log.i("acl", "NULLCHECK: main=" + nullCheck() + " after a native=" + seen[0]
+                         + " plain=" + seen[1]);
         }
 
         // Opt-in (run_ndk_thread_test.py): call the same native from a NON-main thread. Only the

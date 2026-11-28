@@ -69,6 +69,15 @@ HANDLER_CHECKS = [
     "HANDLER: a4l's fault handler back=1",
 ]
 
+# --nullcheck: with the library loaded, so with a4l's handler over ART's fault handler, a null
+# dereference in Java is still a NullPointerException: on the main thread, on a thread that
+# has called a native, and on one that has not. On arm64 a4l took every such thread for one
+# ART does not own, and the process died of SIGSEGV.
+NULLCHECK_CHECKS = [
+    "signal fs-shim installed",
+    "NULLCHECK: main=caught after a native=caught plain=caught",
+]
+
 # --aaudio: the library opens libaaudio.so and plays a silent stream through a data callback.
 AAUDIO_CHECKS = [
     "acl.audio.ndk: output: 48000 Hz, 2 ch",
@@ -124,6 +133,9 @@ def main() -> int:
     handler = "--handler" in argv         # fault-handler keeper mode; see HANDLER_CHECKS
     if handler:
         argv.remove("--handler")
+    nullcheck = "--nullcheck" in argv     # Java null checks under a4l's handler
+    if nullcheck:
+        argv.remove("--nullcheck")
     aaudio = "--aaudio" in argv           # libaaudio.so output; see AAUDIO_CHECKS
     if aaudio:
         argv.remove("--aaudio")
@@ -133,7 +145,7 @@ def main() -> int:
     if len(argv) != 4:
         sys.stderr.write(
             "usage: run_ndk_art_test.py <acl> <src_root> <android.jar> <ndk.apk> "
-            "[--worker|--donor|--storm|--handler|--aaudio|--opensles]\n")
+            "[--worker|--donor|--storm|--handler|--nullcheck|--aaudio|--opensles]\n")
         return 2
     acl, src_root, android_jar, ndk_apk = argv
 
@@ -262,6 +274,8 @@ def main() -> int:
         if handler:
             env["ACL_NDK_TEST_HANDLER"] = "1"
             env.pop("ACL_NO_CRASHPAD_SHIM_KEEPER", None)
+        if nullcheck:
+            env["ACL_NDK_TEST_NULLCHECK"] = "1"
         p = subprocess.run(wrapper + [acl, "run", apk, "--vm=art"],
                            env=env, capture_output=True, text=True, timeout=300)
         out = p.stdout + p.stderr
@@ -304,6 +318,14 @@ def main() -> int:
             if c not in out:
                 sys.stderr.write(f"FAIL: missing '{c}'\n")
                 ok = False
+    elif nullcheck:
+        if p.returncode != 0:
+            sys.stderr.write(f"FAIL: null checks: acl exit {p.returncode}\n")
+            ok = False
+        for c in NULLCHECK_CHECKS:
+            if c not in out:
+                sys.stderr.write(f"FAIL: missing '{c}'\n")
+                ok = False
     elif donor:
         if p.returncode != 0:
             sys.stderr.write(f"FAIL: attach after detach: acl exit {p.returncode}\n")
@@ -342,6 +364,9 @@ def main() -> int:
     elif handler:
         sys.stdout.write("OK: a4l's fault handler was back in place after an app library "
                          "installed its own\n")
+    elif nullcheck:
+        sys.stdout.write("OK: a null dereference in Java was a NullPointerException on three "
+                         "threads, with an app library loaded\n")
     elif donor:
         sys.stdout.write("OK: a native thread that attached after another had detached took a "
                          "native call from Java on its own TCB\n")
