@@ -2538,12 +2538,19 @@ public final class HostBootstrap {
             if (subject == null) subject = uSubject;
             CharSequence text = intent.getCharSequenceExtra(android.content.Intent.EXTRA_TEXT);
             String body = text != null ? text.toString() : uBody;
-            int[] fds = openAttachmentFds(intent);  // EXTRA_STREAM content:// -> the portal's attachment_fds
-            boolean ok = HostShare.composeEmail(address, subject, body, fds);
-            System.out.println("acl HostBootstrap: email intent -> xdg Email portal ("
-                    + (ok ? "composed" : "portal unavailable") + "): to=" + address
-                    + (subject != null ? " subject=\"" + subject + "\"" : "")
-                    + (fds.length > 0 ? " +" + fds.length + " attachment(s)" : ""));
+            // EXTRA_STREAM content:// -> the portal's attachment_fds
+            final int[] fds = openAttachmentFds(intent);
+            final String to = address, about = subject, message = body;
+            // The portal is asked off this thread. composeEmail owns the descriptors from
+            // here, so where the call cannot wait its turn it is made on this thread.
+            final Runnable compose = () -> {
+                boolean ok = HostShare.composeEmail(to, about, message, fds);
+                System.out.println("acl HostBootstrap: email intent -> xdg Email portal ("
+                        + (ok ? "composed" : "portal unavailable") + "): to=" + to
+                        + (about != null ? " subject=\"" + about + "\"" : "")
+                        + (fds.length > 0 ? " +" + fds.length + " attachment(s)" : ""));
+            };
+            if (!askHost(compose)) compose.run();
             return true;
         } catch (Throwable t) {
             System.err.println("acl HostBootstrap: composeEmailFromIntent failed: " + t);
@@ -4199,6 +4206,12 @@ public final class HostBootstrap {
     // the host's handler, and is shown in the app's window when the host opens nothing (a
     // kiosk with no browser). ACL_BROWSER=app shows every link in the app's window;
     // ACL_BROWSER=host sends every link to the host, tabs too.
+    //
+    // The host is asked on a thread of its own (askHost), and a link that is on its way is
+    // not opened a second time (sOpening). The host's answer can take five seconds to be
+    // "no": on a kiosk the bus starts a portal that never comes up. Asked on the main
+    // thread, the app stood still that long, the taps made meanwhile were queued, and each
+    // one that landed on the link asked again and opened a tab of its own.
     static boolean openWebLink(final android.content.Intent intent) {
         final android.net.Uri d;
         boolean tab;
@@ -4213,14 +4226,66 @@ public final class HostBootstrap {
             return false;  // extras that do not unparcel
         }
         final String where = System.getenv("ACL_BROWSER");
-        if ("host".equals(where)) return HostShare.openUri(d.toString());
-        final boolean inApp = tab || "app".equals(where);
+        final boolean hostOnly = "host".equals(where);
+        final boolean inApp = !hostOnly && (tab || "app".equals(where));
+        final String url = d.toString();
+        if (!opening(url, true)) return true;  // a second tap on a link that has not opened
         if (inApp && browseInApp(d)) return true;
-        if (HostShare.openUri(d.toString())) return true;
-        return !inApp && browseInApp(d);
+        final boolean asked = askHost(() -> {
+            boolean inTab = false;
+            try {
+                if (HostShare.openUri(url)) return;
+                inTab = !hostOnly && !inApp && browseInApp(d);
+                if (!inTab) {
+                    android.util.Log.w("acl", "browser: nothing opened "
+                            + BrowserActivity.site(d));
+                }
+            } finally {
+                if (!inTab) opening(url, false);
+            }
+        });
+        if (!asked) opening(url, false);
+        return asked;
     }
 
-    // Show `page` in the app's window. False when there is no WebView to show it in.
+    // The web addresses that are on their way to being shown: the host has been asked and
+    // has not answered, or a tab has been posted and has not started. True when `url` was
+    // added (begin) or taken out.
+    private static final java.util.Set<String> sOpening = new java.util.HashSet<>();
+    private static boolean opening(String url, boolean begin) {
+        synchronized (sOpening) {
+            return begin ? sOpening.add(url) : sOpening.remove(url);
+        }
+    }
+
+    // Run a call to the host's portal off the caller's thread: it can take seconds to
+    // fail. One thread, which ends when it has been idle; the calls are made in the order
+    // asked. False when sixteen are waiting and this one was not taken.
+    private static final class HostAsks {
+        static final java.util.concurrent.ThreadPoolExecutor POOL =
+                new java.util.concurrent.ThreadPoolExecutor(1, 1, 10,
+                        java.util.concurrent.TimeUnit.SECONDS,
+                        new java.util.concurrent.ArrayBlockingQueue<Runnable>(16), r -> {
+                            final Thread t = new Thread(r, "a4l-host-ask");
+                            t.setDaemon(true);
+                            return t;
+                        });
+        static {
+            POOL.allowCoreThreadTimeOut(true);
+        }
+    }
+    static boolean askHost(Runnable ask) {
+        try {
+            HostAsks.POOL.execute(ask);
+            return true;
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            android.util.Log.w("acl", "host: too many calls waiting; one was not made");
+            return false;
+        }
+    }
+
+    // Show `page` in the app's window. False when there is no WebView to show it in. The
+    // caller has put the page in sOpening; it is taken out once the tab's start has run.
     private static boolean browseInApp(final android.net.Uri page) {
         final String apk = System.getenv("ACL_WEBVIEW_APK");
         final AppContext c = sAppContext;
@@ -4232,8 +4297,13 @@ public final class HostBootstrap {
                         .setClassName(c.getPackageName(), BrowserActivity.CLASS);
         // On a later turn of the main loop, as a start is on Android: the app is often
         // inside its own onCreate or onResume when it asks.
-        new android.os.Handler(android.os.Looper.getMainLooper())
-                .post(() -> startOwnActivity(view));
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+            try {
+                startOwnActivity(view);
+            } finally {
+                opening(page.toString(), false);
+            }
+        });
         return true;
     }
 
@@ -4792,10 +4862,11 @@ public final class HostBootstrap {
             String shared = extractShareText(intent);
             if (shared != null && !shared.isEmpty()) {
                 PresentDriver.setClipboard(shared);      // always available to paste
-                String url = firstUrl(shared);
-                boolean opened = url != null && HostShare.openUri(url);  // + open in the host handler
+                final String url = firstUrl(shared);
+                // + open in the host handler, asked off this thread
+                final boolean asked = url != null && askHost(() -> HostShare.openUri(url));
                 System.out.println("acl HostBootstrap: Share -> host clipboard (" + shared.length()
-                        + " chars)" + (opened ? " + portal OpenURI " + url : ""));
+                        + " chars)" + (asked ? " + portal OpenURI asked for " + url : ""));
                 return null;
             }
             // A web link an Activity opens is opened as one opened from a Context is.
