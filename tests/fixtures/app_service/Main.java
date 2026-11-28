@@ -936,9 +936,10 @@ public class Main extends Activity {
             case 14: coveredDialog(); break;
             case 15: resultThenStart(); break;
             case 16: contextStart(); break;
-            case 17: windowIds(); break;
-            case 18: overlayTouches(); break;
-            case 19: popupPlaces(); break;
+            case 17: videoSurface(); break;
+            case 18: windowIds(); break;
+            case 19: overlayTouches(); break;
+            case 20: popupPlaces(); break;
             default:
                 log("PASS");
                 // An app ends itself this way; it does not return.
@@ -1139,6 +1140,76 @@ public class Main extends Activity {
                 }
             }, 500);
         }
+    }
+
+    static int sVideoCreated, sVideoDestroyed;
+    static boolean sVideoDestroyedWhileCovered;
+
+    /**
+     * A screen with a player's SurfaceView. It is covered by another Activity for a while,
+     * then finishes: the view's surface goes each time the screen is no longer shown, as it
+     * does on Android, where that is what tells a player to stop drawing to it.
+     */
+    public static class VideoScreen extends Activity {
+        @Override protected void onCreate(Bundle b) {
+            super.onCreate(b);
+            final android.view.SurfaceView view = new android.view.SurfaceView(this);
+            view.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
+                @Override public void surfaceCreated(android.view.SurfaceHolder h) {
+                    sVideoCreated++;
+                }
+                @Override public void surfaceChanged(android.view.SurfaceHolder h, int format,
+                        int width, int height) { }
+                @Override public void surfaceDestroyed(android.view.SurfaceHolder h) {
+                    sVideoDestroyed++;
+                }
+            });
+            setContentView(view);
+            final Handler h = new Handler(Looper.getMainLooper());
+            h.postDelayed(new Runnable() {
+                @Override public void run() {
+                    startActivity(new Intent(VideoScreen.this, VideoCover.class));
+                }
+            }, 500);
+        }
+
+        // Back from under VideoCover: the view is given a surface again, and then this
+        // screen is done.
+        @Override protected void onRestart() {
+            super.onRestart();
+            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                @Override public void run() {
+                    finish();
+                    sMain.main.postDelayed(new Runnable() {
+                        @Override public void run() { sMain.afterVideoSurface(); }
+                    }, 400);
+                }
+            }, 500);
+        }
+    }
+
+    /** Covers VideoScreen, notes whether its surface went, and finishes. */
+    public static class VideoCover extends Activity {
+        @Override protected void onCreate(Bundle b) {
+            super.onCreate(b);
+            setContentView(new android.view.View(this));
+            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                @Override public void run() {
+                    sVideoDestroyedWhileCovered = sVideoDestroyed == 1;
+                    finish();
+                }
+            }, 400);
+        }
+    }
+
+    void videoSurface() {
+        startActivity(new Intent(this, VideoScreen.class));
+    }
+
+    void afterVideoSurface() {
+        log("video surface created=" + sVideoCreated + " destroyed=" + sVideoDestroyed
+                + " while covered=" + sVideoDestroyedWhileCovered);
+        next();
     }
 
     static boolean sFromContextCreated;

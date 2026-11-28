@@ -396,6 +396,14 @@ class IPresenter {
 IPresenter* active_video_presenter() noexcept;
 void set_active_video_presenter(IPresenter* p) noexcept;
 
+// Whether the video plane has been given to something that is not a decoder: a
+// SurfaceView an engine draws GL into (the runtime's GlPlane). A decoder's
+// pictures are kept off the plane meanwhile. There is one plane, and a player
+// that is still decoding for a screen that has gone would put its picture over
+// the engine's. Thread-safe.
+bool video_plane_taken() noexcept;
+void set_video_plane_taken(bool taken) noexcept;
+
 // Connect to the compositor and create a titled xdg_toplevel, returning a
 // presenter ready for its first frame (configured, one buffer free). `input`
 // (may be empty) receives pointer/key/IME. Returns nullptr when no

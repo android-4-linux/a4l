@@ -6463,7 +6463,7 @@ public final class HostBootstrap {
     public static boolean dropHiddenPlanes() {
         final android.view.SurfaceView video = sVideoSv != null ? sVideoSv.get() : null;
         final boolean keepVideo = video != null && onScreen(video);
-        if (!keepVideo) sVideoSv = null;
+        if (!keepVideo) releaseVideoSurface();
         final android.view.SurfaceView gl = sGlPlaneSv != null ? sGlPlaneSv.get() : null;
         final boolean keepGl = gl != null && onScreen(gl);
         if (!keepGl) releaseGlPlane();
@@ -6478,6 +6478,28 @@ public final class HostBootstrap {
     // the view tree, through a hole punched where the view is.
     private static java.lang.ref.WeakReference<android.view.SurfaceView> sGlPlaneSv;
     private static int sGlPlaneW, sGlPlaneH;
+
+    // The Activity that holds a player's SurfaceView is no longer shown: the view is told its
+    // surface is gone, as on Android, where that is what makes a player stop drawing to it.
+    // Not told, a player went on decoding, and its pictures went on to the plane under the
+    // next screen: unseen under views, and over an engine's picture where that screen has
+    // one (GlPlane). The view gets a surface again when it is next found on screen
+    // (maybeInjectVideoSurface). Main thread.
+    private static void releaseVideoSurface() {
+        final android.view.SurfaceView sv = sVideoSv != null ? sVideoSv.get() : null;
+        sVideoSv = null;
+        if (sv == null) return;
+        try {
+            Class<?> c = android.view.SurfaceView.class;
+            android.view.SurfaceHolder holder = sv.getHolder();
+            for (android.view.SurfaceHolder.Callback cb : snapshotCallbacks(c, sv)) {
+                if (cb != null) cb.surfaceDestroyed(holder);
+            }
+            setField(c, sv, "mSurfaceCreated", Boolean.FALSE);
+        } catch (Throwable t) {
+            android.util.Log.w("acl", "releaseVideoSurface failed: " + t);
+        }
+    }
 
     // The Activity that holds the view is no longer the one shown: its surface goes, as it
     // does on Android when an Activity stops, and comes back with surfaceCreated when the
