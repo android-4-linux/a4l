@@ -1186,18 +1186,18 @@ public final class HostBootstrap {
                 startOwnActivity(intent);
                 return;
             }
+            // An address in a scheme of the app's own goes to the Activity that takes it.
+            final android.content.ComponentName takes = ownActivityFor(intent, false);
+            if (takes != null) {
+                startOwnActivity(new android.content.Intent(intent).setComponent(takes));
+                return;
+            }
             if (composeEmailFromIntent(intent)) return;
-            try {
-                android.net.Uri d = intent.getData();
-                String action = intent.getAction();
-                if (android.content.Intent.ACTION_VIEW.equals(action) && d != null) {
-                    String sc = d.getScheme();
-                    if ("http".equalsIgnoreCase(sc) || "https".equalsIgnoreCase(sc)) {
-                        HostShare.openUri(d.toString());
-                        return;
-                    }
-                }
-            } catch (Throwable ignored) { }
+            if (BrowserActivity.isWeb(intent.getData())
+                    && android.content.Intent.ACTION_VIEW.equals(intent.getAction())) {
+                openWebLink(intent);
+                return;
+            }
             System.out.println("acl HostBootstrap: Context.startActivity suppressed (no external host): " + intent);
         }
         @Override public boolean canLoadUnsafeResources() { return true; }  // same, @hide
@@ -3494,6 +3494,7 @@ public final class HostBootstrap {
         // on screen, as ActivityInfo.isTranslucentOrFloating decides on Android.
         final boolean translucent;
         boolean stopped;  // onStop has been called, and onRestart has not been since
+        boolean created = true;  // false while a launch is still inside its onCreate
         ActivityRecord(android.app.Activity a, android.os.IBinder t, android.os.IBinder caller, int rc) {
             activity = a; token = t; callerToken = caller; requestCode = rc;
             translucent = translucentOrFloating(a);
@@ -4123,6 +4124,229 @@ public final class HostBootstrap {
     // An Activity of the app, started from a Context that is not an Activity. There is no
     // caller to give a result to. Launched on the main thread, and once a finish that is
     // under way is done (sFinishing), as a start from an Activity is.
+    // What an ACTION_VIEW of a web address carries when the app wants the page in a tab over
+    // itself and not in the browser app: a Custom Tabs session (androidx.browser, and the
+    // support library before it). The value is the session's binder, or null.
+    private static final String EXTRA_TAB_SESSION = "android.support.customtabs.extra.SESSION";
+
+    // A web link the app opens: an ACTION_VIEW of an http or https address. False when the
+    // intent is not one, or nothing took it.
+    //
+    // A link that asks for a tab is shown in the app's window (BrowserActivity), which is
+    // where a tab is on a phone. A sign-in page is opened so, and hands its answer back
+    // through an address only a browser inside the app can pass on. Any other link goes to
+    // the host's handler, and is shown in the app's window when the host opens nothing (a
+    // kiosk with no browser). ACL_BROWSER=app shows every link in the app's window;
+    // ACL_BROWSER=host sends every link to the host, tabs too.
+    static boolean openWebLink(final android.content.Intent intent) {
+        final android.net.Uri d;
+        boolean tab;
+        try {
+            d = intent != null ? intent.getData() : null;
+            if (d == null || !android.content.Intent.ACTION_VIEW.equals(intent.getAction())
+                    || !BrowserActivity.isWeb(d)) {
+                return false;
+            }
+            tab = intent.hasExtra(EXTRA_TAB_SESSION);
+        } catch (RuntimeException e) {
+            return false;  // extras that do not unparcel
+        }
+        final String where = System.getenv("ACL_BROWSER");
+        if ("host".equals(where)) return HostShare.openUri(d.toString());
+        final boolean inApp = tab || "app".equals(where);
+        if (inApp && browseInApp(d)) return true;
+        if (HostShare.openUri(d.toString())) return true;
+        return !inApp && browseInApp(d);
+    }
+
+    // Show `page` in the app's window. False when there is no WebView to show it in.
+    private static boolean browseInApp(final android.net.Uri page) {
+        final String apk = System.getenv("ACL_WEBVIEW_APK");
+        final AppContext c = sAppContext;
+        if (c == null || apk == null || apk.isEmpty() || !new java.io.File(apk).exists()) {
+            return false;
+        }
+        final android.content.Intent view =
+                new android.content.Intent(android.content.Intent.ACTION_VIEW, page)
+                        .setClassName(c.getPackageName(), BrowserActivity.CLASS);
+        // On a later turn of the main loop, as a start is on Android: the app is often
+        // inside its own onCreate or onResume when it asks.
+        new android.os.Handler(android.os.Looper.getMainLooper())
+                .post(() -> startOwnActivity(view));
+        return true;
+    }
+
+    // The Application an Activity of a4l's own is attached to. An app's
+    // ActivityLifecycleCallbacks are on its own Application. On a phone they are not told of
+    // a browser tab's Activity, which is another app's, and they are not told of this one:
+    // an app that keeps track of its current Activity would take it for one of its own.
+    private static android.app.Application sHostApplication;
+    private static synchronized android.app.Application hostApplication() throws Exception {
+        if (sHostApplication == null) {
+            final android.app.Application app = new android.app.Application();
+            setField(ContextWrapper.class, app, "mBase", sAppContext);
+            sHostApplication = app;
+        }
+        return sHostApplication;
+    }
+
+    // An <intent-filter> of one of the app's Activities that names data: the Activity takes
+    // addresses, from the app itself or from a browser.
+    private static final class DataFilter {
+        final String activity;  // the class to start: an alias's target
+        final boolean exported;
+        final android.content.IntentFilter filter;
+        DataFilter(String activity, boolean exported, android.content.IntentFilter filter) {
+            this.activity = activity;
+            this.exported = exported;
+            this.filter = filter;
+        }
+    }
+    // Read from the manifest the first time an address has to be matched.
+    private static java.util.List<DataFilter> sDataFilters;
+    private static synchronized java.util.List<DataFilter> dataFilters() {
+        if (sDataFilters != null) return sDataFilters;
+        final java.util.List<DataFilter> out = new java.util.ArrayList<DataFilter>();
+        final AppContext c = sAppContext;
+        if (c == null) return out;  // asked again once there is a context
+        android.content.res.XmlResourceParser xml = null;
+        try {
+            final String NS = "http://schemas.android.com/apk/res/android";
+            final String p = c.getPackageName();
+            final android.content.res.Resources res = c.getResources();
+            xml = openBaseManifest(res.getAssets(),
+                    c.getApplicationInfo() != null ? c.getApplicationInfo().sourceDir : null);
+            String current = null;
+            boolean exported = false;
+            android.content.IntentFilter filter = null;
+            boolean data = false;
+            for (int ev = xml.getEventType();
+                 ev != android.content.res.XmlResourceParser.END_DOCUMENT; ev = xml.next()) {
+                final String tag = xml.getName();
+                if (ev == android.content.res.XmlResourceParser.END_TAG) {
+                    if ("intent-filter".equals(tag)) {
+                        if (filter != null && data && current != null) {
+                            out.add(new DataFilter(current, exported, filter));
+                        }
+                        filter = null;
+                    } else if ("activity".equals(tag) || "activity-alias".equals(tag)) {
+                        current = null;
+                    }
+                    continue;
+                }
+                if (ev != android.content.res.XmlResourceParser.START_TAG) continue;
+                if ("activity".equals(tag) || "activity-alias".equals(tag)) {
+                    current = xml.getAttributeBooleanValue(NS, "enabled", true)
+                            ? normalizeClass(xml.getAttributeValue(NS, "activity".equals(tag)
+                                    ? "name" : "targetActivity"), p)
+                            : null;
+                    // An Activity with a filter is exported unless it says it is not: the
+                    // rule before Android 12, from which a manifest has to say.
+                    exported = xml.getAttributeBooleanValue(NS, "exported", true);
+                } else if (current == null) {
+                    continue;  // a service's, a receiver's
+                } else if ("intent-filter".equals(tag)) {
+                    filter = new android.content.IntentFilter();
+                    data = false;
+                } else if (filter == null) {
+                    continue;
+                } else if ("action".equals(tag)) {
+                    final String name = xml.getAttributeValue(NS, "name");
+                    if (name != null) filter.addAction(name);
+                } else if ("category".equals(tag)) {
+                    final String name = xml.getAttributeValue(NS, "name");
+                    if (name != null) filter.addCategory(name);
+                } else if ("data".equals(tag)) {
+                    final String scheme = manifestString(xml, res, NS, "scheme");
+                    final String host = manifestString(xml, res, NS, "host");
+                    final String path = manifestString(xml, res, NS, "path");
+                    final String prefix = manifestString(xml, res, NS, "pathPrefix");
+                    final String pattern = manifestString(xml, res, NS, "pathPattern");
+                    final String type = manifestString(xml, res, NS, "mimeType");
+                    if (scheme != null) {
+                        filter.addDataScheme(scheme);
+                        data = true;
+                    }
+                    if (host != null) {
+                        filter.addDataAuthority(host, manifestString(xml, res, NS, "port"));
+                    }
+                    if (path != null) {
+                        filter.addDataPath(path, android.os.PatternMatcher.PATTERN_LITERAL);
+                    }
+                    if (prefix != null) {
+                        filter.addDataPath(prefix, android.os.PatternMatcher.PATTERN_PREFIX);
+                    }
+                    if (pattern != null) {
+                        filter.addDataPath(pattern,
+                                android.os.PatternMatcher.PATTERN_SIMPLE_GLOB);
+                    }
+                    if (type != null) {
+                        try {
+                            filter.addDataType(type);
+                        } catch (android.content.IntentFilter.MalformedMimeTypeException e) {
+                            // The filter is kept without the type.
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            System.err.println("acl HostBootstrap: activity filter parse failed: " + t);
+        } finally {
+            if (xml != null) xml.close();
+        }
+        sDataFilters = out;
+        return out;
+    }
+
+    // A manifest attribute that is a string or a string resource (android:scheme="@string/…").
+    private static String manifestString(android.content.res.XmlResourceParser xml,
+            android.content.res.Resources res, String ns, String name) {
+        final int id = xml.getAttributeResourceValue(ns, name, 0);
+        if (id == 0) return xml.getAttributeValue(ns, name);
+        try {
+            return res.getString(id);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    // The Activity of the app's own that takes `intent`: an ACTION_VIEW of an address in a
+    // scheme of the app's own, naming no component. null when none does. The match is
+    // IntentFilter's. As on Android, the filter has to have CATEGORY_DEFAULT, and for an
+    // address that comes from a web page (`fromBrowser`) CATEGORY_BROWSABLE too, on an
+    // Activity that is exported: a page does not get to start the others.
+    //
+    // http and https addresses are web links, and file and content addresses are files;
+    // those keep the handlers they have, whatever the app's filters say.
+    static android.content.ComponentName ownActivityFor(android.content.Intent intent,
+            boolean fromBrowser) {
+        final AppContext c = sAppContext;
+        if (intent == null || c == null || intent.getComponent() != null
+                || !android.content.Intent.ACTION_VIEW.equals(intent.getAction())) {
+            return null;
+        }
+        final android.net.Uri d = intent.getData();
+        final String scheme = d != null ? d.getScheme() : null;
+        if (scheme == null || "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)
+                || "file".equalsIgnoreCase(scheme) || "content".equalsIgnoreCase(scheme)) {
+            return null;
+        }
+        final String pkg = c.getPackageName();
+        if (intent.getPackage() != null && !intent.getPackage().equals(pkg)) return null;
+        final java.util.Set<String> categories = new java.util.HashSet<String>();
+        if (intent.getCategories() != null) categories.addAll(intent.getCategories());
+        categories.add(android.content.Intent.CATEGORY_DEFAULT);
+        if (fromBrowser) categories.add(android.content.Intent.CATEGORY_BROWSABLE);
+        for (DataFilter f : dataFilters()) {
+            if (fromBrowser && !f.exported) continue;
+            if (f.filter.match(intent.getAction(), intent.getType(), scheme, d, categories,
+                    "acl") >= 0) {
+                return new android.content.ComponentName(pkg, f.activity);
+            }
+        }
+        return null;
+    }
+
     static void startOwnActivity(final android.content.Intent intent) {
         if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper() || sFinishing) {
             new android.os.Handler(android.os.Looper.getMainLooper())
@@ -4168,7 +4392,12 @@ public final class HostBootstrap {
                 if (existing != null) {
                     while (sTask.peek() != null && sTask.peek() != existing) {
                         ActivityRecord r = sTask.pop(); sByToken.remove(r.token);
-                        safeLifecycle(r.activity, "onPause"); safeLifecycle(r.activity, "onStop");
+                        // One that is still inside its own onCreate was never started: it
+                        // is destroyed and no more, as an Activity that finishes in onCreate
+                        // is on Android. A redirect screen passes its address on from there.
+                        if (r.created) {
+                            safeLifecycle(r.activity, "onPause"); safeLifecycle(r.activity, "onStop");
+                        }
                         safeLifecycle(r.activity, "onDestroy");
                     }
                     try { setField(android.app.Activity.class, existing.activity, "mIntent", intent); } catch (Throwable ignored) {}
@@ -4191,9 +4420,23 @@ public final class HostBootstrap {
             // attachActivityContext (not attachActivity) also sets mApplication, so getApplication()
             // is non-null before onCreate -- androidx ComponentActivity.getDefaultViewModelProvider
             // Factory() throws "activity is not yet attached to the Application instance" otherwise.
-            attachActivityContext(a, sAppContext, sApplication);  // sets token + pushes record (top = a)
+            // An Activity of a4l's own (BrowserActivity) is not the app's: see hostApplication.
+            attachActivityContext(a, sAppContext,
+                    a instanceof BrowserActivity ? hostApplication() : sApplication);  // pushes record
             try { setField(android.app.Activity.class, a, "mIntent", intent); } catch (Throwable ignored) {}
+            final ActivityRecord rec = sTask.peek();
+            final boolean own = rec != null && rec.activity == a;
+            if (own) rec.created = false;
             invokeActivityLifecycle(a, "onCreate", android.os.Bundle.class, null);
+            // Cleared from the task inside its own onCreate, by starting another Activity
+            // with FLAG_ACTIVITY_CLEAR_TOP: it has been destroyed, and is not started,
+            // resumed or shown. What it started is on top and on screen.
+            if (own && !sTask.contains(rec)) {
+                android.util.Log.i("acl", "launchInternalActivity: " + targetCls
+                        + " cleared during onCreate");
+                return true;
+            }
+            if (own) rec.created = true;
             invokeActivityLifecycle(a, "onStart", null, null);
             invokeActivityLifecycle(a, "onPostCreate", android.os.Bundle.class, null);
             invokeActivityLifecycle(a, "onResume", null, null);
@@ -4403,7 +4646,13 @@ public final class HostBootstrap {
             if (intent == null || sAppContext == null) return false;
             android.content.ComponentName cmp = intent.getComponent();
             String pkg = sAppContext.getPackageName();
-            boolean ownComponent = cmp != null && pkg != null && pkg.equals(cmp.getPackageName());
+            if (cmp == null) {
+                // An address in a scheme of the app's own goes to the Activity that takes it.
+                final android.content.ComponentName takes = ownActivityFor(intent, false);
+                return takes != null && launchInternalActivity(
+                        new android.content.Intent(intent).setComponent(takes));
+            }
+            boolean ownComponent = pkg != null && pkg.equals(cmp.getPackageName());
             if (!ownComponent) return false;
             return launchInternalActivity(intent);
         }
@@ -4444,17 +4693,8 @@ public final class HostBootstrap {
                         + " chars)" + (opened ? " + portal OpenURI " + url : ""));
                 return null;
             }
-            // A web link an Activity opens goes to the host's handler, as one opened from a
-            // Context does.
-            try {
-                final android.net.Uri d = intent.getData();
-                if (android.content.Intent.ACTION_VIEW.equals(intent.getAction()) && d != null
-                        && ("http".equalsIgnoreCase(d.getScheme())
-                                || "https".equalsIgnoreCase(d.getScheme()))
-                        && HostShare.openUri(d.toString())) {
-                    return null;
-                }
-            } catch (Throwable ignored) { }
+            // A web link an Activity opens is opened as one opened from a Context is.
+            if (openWebLink(intent)) return null;
             System.out.println("acl HostBootstrap: startActivity suppressed (no external-activity host): " + intent);
             return null;
         }

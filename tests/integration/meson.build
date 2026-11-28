@@ -588,6 +588,20 @@ if py3.found() and have_gl and have_ffmpeg
       depends : [acl_exe],
       timeout : 300,
     )
+    # A sign-in through a browser tab: the app opens its sign-in page with a Custom Tabs
+    # intent, a4l shows it in the app's window, and the page's redirect to the app's own
+    # scheme starts the app's redirect Activity, which ends the tab. A second run closes a
+    # tab with its button. Starts a headless Weston for itself. Needs what webview-late
+    # needs; SKIPs otherwise, which includes CI. is_parallel off: the second run taps at set
+    # times.
+    test(
+      'browser-tab',
+      py3,
+      args : [files('run_browser_tab_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 600,
+      is_parallel : false,
+    )
     # Video on a TextureView: a fixture app decodes an H.264 clip onto
     # new Surface(surfaceTexture), and the test reads back the frame a4l rendered and checks the
     # picture inside the TextureView, with the frame imported on the GPU and with its pixels
