@@ -10,7 +10,8 @@
 // subclass) over the whole window and a red banner view over its top. MapView draws on a
 // thread of its own through EGL10: green on the left half, blue on the right, and a light
 // band along the bottom of GL's coordinates, which must be the bottom of the screen. The
-// test reads the colors off a screenshot.
+// test reads the colors off a screenshot. With A4L_TEST_LAYER=1 Map's views are drawn into
+// a compositing layer, and the picture has to be the same.
 package com.acl.glplane;
 
 import android.app.Activity;
@@ -63,7 +64,19 @@ public class Main extends Activity {
             banner.setBackgroundColor(0xFFC02020);
             root.addView(banner, new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT, BANNER_HEIGHT, Gravity.TOP));
-            setContentView(root);
+            // The views sit in a parent with a background of its own, which the map's hole
+            // has to go through as well.
+            final FrameLayout outer = new FrameLayout(this);
+            outer.setBackgroundColor(0xFF404040);
+            outer.addView(root, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+            // A4L_TEST_LAYER: the views are drawn into a compositing layer of their own.
+            // The hole the map's view punches is then punched in the layer, and has to
+            // reach the window all the same, under the banner the layer also holds.
+            if ("1".equals(System.getenv("A4L_TEST_LAYER"))) {
+                root.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+            }
+            setContentView(outer);
             log("map activity created");
         }
     }

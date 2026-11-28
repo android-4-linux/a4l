@@ -351,13 +351,28 @@ if py3.found() and have_gl and have_ffmpeg
     endif
     # A SurfaceView that an engine draws GL into, under the app's other views and in its
     # second Activity: the picture is read off a headless Weston's screen, under a banner
-    # view, the right way up, with the render thread held to a swap a refresh. Needs host
-    # ART, Weston's kiosk shell and weston-screenshooter, and a render node; SKIPs
-    # otherwise, which includes CI. is_parallel off: it reads the screen.
+    # view, the right way up, with the render thread held to a swap a refresh. Run a
+    # second time with the views in a compositing layer, which the view's hole has to get
+    # through. Needs host ART, Weston's kiosk shell and weston-screenshooter, and a render
+    # node; SKIPs otherwise, which includes CI. is_parallel off: it reads the screen.
     test(
       'gl-surfaceview-under-views',
       py3,
       args : [files('run_gl_surfaceview_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 240,
+      is_parallel : false,
+    )
+    # Views drawn into a compositing layer of their own (LAYER_TYPE_HARDWARE,
+    # RenderNode.setUseCompositingLayer): what one erases with DST_OUT is erased from its
+    # layer and not from the window under it, a layer's paint is applied, and a layer is
+    # its node's size. Read off a headless Weston's screen. Needs what
+    # gl-surfaceview-under-views needs; SKIPs otherwise, which includes CI. is_parallel
+    # off: it reads the screen.
+    test(
+      'compositing-layer',
+      py3,
+      args : [files('run_compositing_layer_test.py'), acl_exe, framework_android_jar],
       depends : [acl_exe],
       timeout : 240,
       is_parallel : false,

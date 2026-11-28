@@ -13,6 +13,11 @@
 # a screenshot: the banner over the GL picture, the picture the right way up and the right
 # way round, and the render thread held to about a swap a refresh.
 #
+# A second run (A4L_TEST_LAYER=1) has the fixture draw its views into a compositing layer
+# (View.setLayerType(LAYER_TYPE_HARDWARE)). The hole the GL view punches is then punched in
+# the layer, and the picture has to show all the same, under the banner: a4l punches the
+# hole in the window before it composites the layer.
+#
 # Needs: a host ART build (ACL_ART_HOME), the AOSP toolchain, Weston with its kiosk shell and
 # weston-screenshooter, and a render node. Exits 77 (skip) where any of these is missing.
 #
@@ -135,57 +140,62 @@ def main() -> int:
         weston, display = start_weston(runtime_dir, work)
         if weston is None:
             return skip(display)
-        env = dict(os.environ, WAYLAND_DISPLAY=display, ACL_RUN_TIMEOUT="90", ACL_BIN=acl,
-                   ACL_PRESENT_GPU="1", XDG_CACHE_HOME=os.path.join(work, "cache"),
-                   XDG_DATA_HOME=os.path.join(work, "data"))
-        app = subprocess.Popen([os.path.join(src_root, "tools/run-apk.sh"), apk,
-                                "--verify=off", "--present"], env=env,
-                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                               errors="replace", start_new_session=True)
-        lines = []
-        paced = threading.Event()
+        for tag, layer, what in (("plain", "0", "views drawn as they are"),
+                                 ("layer", "1", "views in a compositing layer")):
+            env = dict(os.environ, WAYLAND_DISPLAY=display, ACL_RUN_TIMEOUT="90", ACL_BIN=acl,
+                       ACL_PRESENT_GPU="1", XDG_CACHE_HOME=os.path.join(work, tag, "cache"),
+                       XDG_DATA_HOME=os.path.join(work, tag, "data"), A4L_TEST_LAYER=layer)
+            app = subprocess.Popen([os.path.join(src_root, "tools/run-apk.sh"), apk,
+                                    "--verify=off", "--present"], env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                   errors="replace", start_new_session=True)
+            lines = []
+            paced = threading.Event()
 
-        def read():
-            for line in app.stdout:
-                lines.append(line)
-                if "GLPLANE: 120 frames in" in line or "GLPLANE: FAILED" in line:
-                    paced.set()
-            paced.set()
+            def read(app=app, lines=lines, paced=paced):
+                for line in app.stdout:
+                    lines.append(line)
+                    if "GLPLANE: 120 frames in" in line or "GLPLANE: FAILED" in line:
+                        paced.set()
+                paced.set()
 
-        threading.Thread(target=read, daemon=True).start()
-        paced.wait(80)
-        out = "".join(lines)
-        if app.poll() == 77:
-            return skip("run-apk.sh (vendored framework not built)", out[-2000:])
-        failed = re.search(r"GLPLANE: (FAILED .*)", out)
-        m = re.search(r"GLPLANE: 120 frames in (\d+) ms", out)
-        if failed or not m:
-            why = failed.group(1) if failed else "the fixture did not draw 120 frames"
-            sys.stderr.write(f"FAIL: {why}\n{out[-6000:]}\n")
-            return 1
-        image = shot(display, work)
-        if image is None:
-            sys.stderr.write("FAIL: no screenshot\n")
-            return 1
-        w, h, px = image
-        if (w, h) != (W, H):
-            sys.stderr.write(f"FAIL: the screen is {w}x{h}, not {W}x{H}\n")
-            return 1
-        wrong = []
-        for name, ((x, y), want) in WANT.items():
-            got = tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3])
-            if any(abs(g - c) > TOLERANCE for g, c in zip(got, want)):
-                wrong.append(f"{name} at {x},{y} is {got}, not {want}")
-        if wrong:
-            sys.stderr.write("FAIL: " + "; ".join(wrong) + f"\n{out[-4000:]}\n")
-            return 1
-        elapsed = int(m.group(1))
-        # 120 swaps at 60 Hz are two seconds. Far less means nothing held the thread.
-        if elapsed < 1400:
-            sys.stderr.write(f"FAIL: 120 swaps took {elapsed} ms: the swap does not wait\n")
-            return 1
-        sys.stdout.write(f"OK: the GL picture under the banner, the right way up, "
-                         f"120 swaps in {elapsed} ms\n")
+            threading.Thread(target=read, daemon=True).start()
+            paced.wait(80)
+            out = "".join(lines)
+            if app.poll() == 77:
+                return skip("run-apk.sh (vendored framework not built)", out[-2000:])
+            failed = re.search(r"GLPLANE: (FAILED .*)", out)
+            m = re.search(r"GLPLANE: 120 frames in (\d+) ms", out)
+            if failed or not m:
+                why = failed.group(1) if failed else "the fixture did not draw 120 frames"
+                sys.stderr.write(f"FAIL ({what}): {why}\n{out[-6000:]}\n")
+                return 1
+            image = shot(display, work)
+            if image is None:
+                sys.stderr.write(f"FAIL ({what}): no screenshot\n")
+                return 1
+            w, h, px = image
+            if (w, h) != (W, H):
+                sys.stderr.write(f"FAIL ({what}): the screen is {w}x{h}, not {W}x{H}\n")
+                return 1
+            wrong = []
+            for name, ((x, y), want) in WANT.items():
+                got = tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3])
+                if any(abs(g - c) > TOLERANCE for g, c in zip(got, want)):
+                    wrong.append(f"{name} at {x},{y} is {got}, not {want}")
+            if wrong:
+                sys.stderr.write(f"FAIL ({what}): " + "; ".join(wrong) + f"\n{out[-4000:]}\n")
+                return 1
+            elapsed = int(m.group(1))
+            # 120 swaps at 60 Hz are two seconds. Far less means nothing held the thread.
+            if elapsed < 1400:
+                sys.stderr.write(f"FAIL ({what}): 120 swaps took {elapsed} ms: the swap "
+                                 "does not wait\n")
+                return 1
+            sys.stdout.write(f"OK ({what}): the GL picture under the banner, the right way "
+                             f"up, 120 swaps in {elapsed} ms\n")
+            os.killpg(app.pid, 15)
+            app.wait(timeout=10)
         return 0
     except subprocess.CalledProcessError as e:
         sys.stderr.write(f"FAIL: build step: {e.cmd}\n{e.stderr}\n")
