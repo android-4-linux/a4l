@@ -19,6 +19,7 @@ unit_test_sources = files(
   'thread_pointer_test.cpp',
   'egl_attribs_test.cpp',
   'gpsd_tpv_test.cpp',
+  'wired_as_wifi_test.cpp',
   'split_validate_test.cpp',
   'gl_hold_test.cpp',
   'vsync_cap_test.cpp',
