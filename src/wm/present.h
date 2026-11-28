@@ -363,6 +363,12 @@ class IPresenter {
                                 int /*y*/,
                                 int /*w*/,
                                 int /*h*/) noexcept {}
+  // Whether the video plane is stacked over the app's surface, and not under
+  // it. A SurfaceView that asks to be over its window (setZOrderOnTop) is
+  // shown so: what is clear in its picture shows the window, and nothing of
+  // the window is punched out for it. Takes effect with the next frame put on
+  // the plane. Default no-op: the plane stays under.
+  virtual void set_video_on_top(bool /*on_top*/) noexcept {}
   // An eventfd the decode thread signals after stashing a video frame, so the
   // present loop wakes to commit it WITHOUT depending on UI frames or input
   // events (otherwise idle-UI video freezes until the next mouse move). The

@@ -219,7 +219,18 @@ class SubsurfacePlane {
     // hole-punch), so the video shows through the hole while the UI draws over
     // the rest. Above the parent (the old default) the opaque video occluded
     // the whole UI.
-    subsurface_.Get()->PlaceBelow(parent.GetProxy());
+    parent_ = parent.GetProxy();
+    subsurface_.Get()->PlaceBelow(parent_);
+    // The plane takes no input, wherever it is stacked: over the app's surface
+    // (stack) it would take the pointer and the touches meant for the views.
+    // An empty region; it is copied when set.
+    if (wl_proxy* rraw =
+            wl::construct<wl_region_traits,
+                          wl_compositor_traits::Op::CreateRegion>(comp)) {
+      wl::WlPtr<RegionH> none;
+      none.Attach(rraw);
+      surface_.Get()->SetInputRegion(none.Get()->GetProxy());
+    }
     // wp_viewport on the child surface: scale the decoded buffer (its own
     // encoded size) to the video View's on-screen rect. Without it the
     // compositor shows the buffer at 1:1 buffer pixels, so a 1280x720 clip
@@ -272,6 +283,17 @@ class SubsurfacePlane {
   }
 
   bool created() const noexcept { return created_; }
+
+  // Stack the plane over the parent surface, or under it. Double-buffered on
+  // the PARENT, as the position is: the caller commits the parent.
+  void stack(bool on_top) noexcept {
+    if (subsurface_.Get() == nullptr || parent_ == nullptr)
+      return;
+    if (on_top)
+      subsurface_.Get()->PlaceAbove(parent_);
+    else
+      subsurface_.Get()->PlaceBelow(parent_);
+  }
 
   // Position of the plane's top-left in the PARENT surface's coordinate space.
   // Double-buffered on the PARENT: the caller must commit the parent surface
@@ -396,6 +418,7 @@ class SubsurfacePlane {
   };
   wl::WlPtr<SurfaceH> surface_;
   wl::WlPtr<SubsurfaceH> subsurface_;
+  wl_proxy* parent_ = nullptr;  // the surface the plane is stacked against
   wl::WlPtr<ViewportH>
       viewport_;  // scales the buffer to the View bounds (may be null)
   int dest_w_ = 0, dest_h_ = 0;
@@ -990,6 +1013,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     vb_h_ = h;
     vb_set_ = true;
   }
+  void set_video_on_top(bool on_top) noexcept override {
+    std::lock_guard<std::mutex> lk(video_mu_);
+    video_on_top_req_ = on_top;
+  }
   // Activity transition: the old screen's video SurfaceView is gone. Hide the
   // (stale) video plane, drop any pending frame, and mark the toplevel fully
   // OPAQUE again — otherwise the empty opaque-region hole from the video
@@ -1101,7 +1128,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   // frame. Called each present tick (submit/keepalive/dispatch).
   void drain_video() noexcept {
     gfx::DmabufFrame frame{};
-    bool has = false, hide = false;
+    bool has = false, hide = false, on_top = false;
     int x = 0, y = 0, w = 0, h = 0;
     {
       std::lock_guard<std::mutex> lk(video_mu_);
@@ -1109,6 +1136,7 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
       video_has_pending_ = false;
       hide = video_hide_req_;
       video_hide_req_ = false;
+      on_top = video_on_top_req_;
       frame = video_pending_;
       x = video_x_;
       y = video_y_;
@@ -1206,10 +1234,22 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     }
     video_plane_.set_position(vx, vy);
     video_plane_.set_source_dest(sx, sy, sw, sh, vw, vh);
+    // Over the app's surface or under it, as asked. Applied by the commit of
+    // the toplevel below, as the position is.
+    if (on_top != video_on_top_) {
+      video_plane_.stack(on_top);
+      video_on_top_ = on_top;
+      log::i(kTag, "video HW-plane: stacked {} the app's surface",
+             on_top ? "over" : "under");
+    }
     // Tell the compositor the video's on-screen rect is a transparent hole (so
     // it doesn't cull the subsurface below the toplevel and show black through
-    // the punch).
-    set_toplevel_opaque_hole(vx, vy, vw, vh);
+    // the punch). A plane over the toplevel has no hole: the toplevel is whole
+    // under it.
+    if (on_top)
+      set_toplevel_opaque_hole(0, 0, 0, 0);
+    else
+      set_toplevel_opaque_hole(vx, vy, vw, vh);
     video_plane_.present(frame);  // create_immed dups the fds on the wire
     gfx::close_frame(&frame);     // drop our owned dups
     // wl_subsurface.set_position/stacking + the opaque region are applied on
@@ -1242,7 +1282,10 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
     video_plane_.set_source_dest(place.sx + placed_crop_x_,
                                  place.sy + placed_crop_y_, place.sw, place.sh,
                                  place.w, place.h);
-    set_toplevel_opaque_hole(place.x, place.y, place.w, place.h);
+    if (video_on_top_)
+      set_toplevel_opaque_hole(0, 0, 0, 0);
+    else
+      set_toplevel_opaque_hole(place.x, place.y, place.w, place.h);
     video_plane_.commit_geometry();
     oq_dirty_ = false;
     surface_.Get()->Commit();  // position and opaque region are the parent's
@@ -2311,6 +2354,8 @@ class Presenter : public IPresenter, public wl::ime::TextInputListener {
   gfx::DmabufFrame video_pending_{};
   bool video_has_pending_ = false;
   bool video_hide_req_ = false;
+  bool video_on_top_req_ = false;  // asked for (set_video_on_top); video_mu_
+  bool video_on_top_ = false;      // how the plane is stacked; Wayland thread
   int video_x_ = 0, video_y_ = 0, video_w_ = 0, video_h_ = 0;
   int vb_x_ = 0, vb_y_ = 0, vb_w_ = 0,
       vb_h_ = 0;  // video View on-screen bounds (set_video_bounds)

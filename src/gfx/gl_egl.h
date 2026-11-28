@@ -93,6 +93,11 @@ class GlWindow {
   // Each frame's DmabufFrame::buffer_index says which buffer it is. Gbm only;
   // false elsewhere.
   virtual bool set_hold_buffers(bool /*hold*/) { return false; }
+  // Whether the surface's buffers have an alpha channel. swap() gives every
+  // frame's format as the opaque one all the same: an app that draws to a
+  // window leaves what it likes in the alpha. The caller that knows the alpha
+  // is meant names the format with alpha itself.
+  virtual bool has_alpha() const { return false; }
   // Give buffer `index` back to the GL driver. No-op if it is not held.
   virtual void release_buffer(int /*index*/) {}
   // How many buffers are held right now.
