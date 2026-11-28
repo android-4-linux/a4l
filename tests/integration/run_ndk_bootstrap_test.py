@@ -102,6 +102,18 @@ def main() -> int:
         if cc.returncode != 0:
             sys.stderr.write(f"FAIL: could not build the GL fixture library\n{cc.stderr}\n")
             return 1
+        # A third, which links a4l's libGLESv3.so in place of libGLESv2.so.
+        gles3_lib = os.path.join(work, "libgles3call.so")
+        cc = subprocess.run(
+            [clang, f"--target={triple}", "-fPIC", "-shared", "-nostdlib", "-fno-emulated-tls",
+             "-O1", "-Wl,-soname,libgles3call.so", "-o", gles3_lib, crtb,
+             os.path.join(src_root, "tests/fixtures/ndk_gles3_call.c"), crte,
+             os.path.join(stage, "bionic/libc.so"), os.path.join(stage, "bionic/libEGL.so"),
+             os.path.join(stage, "bionic/libGLESv3.so"), "-fuse-ld=lld"],
+            capture_output=True, text=True)
+        if cc.returncode != 0:
+            sys.stderr.write(f"FAIL: could not build the GLES 3 fixture library\n{cc.stderr}\n")
+            return 1
         env = dict(os.environ,
                    ACL_BIONIC_LINKER=os.path.join(stage, "linker64"),
                    ACL_BIONIC_SYSROOT=os.path.join(stage, "bionic"),
@@ -154,6 +166,16 @@ def main() -> int:
             if p.returncode != 0 or "2 calls, 2 on the donor (PASS)" not in out:
                 sys.stderr.write(
                     f"FAIL: --glforward run {attempt + 1}: exit {p.returncode}\n{out}\n")
+                return 1
+            # A GL call through libGLESv3.so reaches the host's GL library and returns: a4l
+            # filled in that copy's table as well as libGLESv2.so's.
+            p = subprocess.run(wrapper + [probe, gles3_lib, "--glhost"], env=env,
+                               capture_output=True, text=True, timeout=120)
+            out = p.stdout + p.stderr
+            if p.returncode != 0 or "returned 42 (PASS)" not in out:
+                sys.stderr.write(
+                    f"FAIL: a GL call through libGLESv3.so, run {attempt + 1}: "
+                    f"exit {p.returncode}\n{out[-3000:]}\n")
                 return 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
