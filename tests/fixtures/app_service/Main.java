@@ -929,9 +929,10 @@ public class Main extends Activity {
             case 13: permissions(); break;
             case 14: coveredDialog(); break;
             case 15: resultThenStart(); break;
-            case 16: windowIds(); break;
-            case 17: overlayTouches(); break;
-            case 18: popupPlaces(); break;
+            case 16: contextStart(); break;
+            case 17: windowIds(); break;
+            case 18: overlayTouches(); break;
+            case 19: popupPlaces(); break;
             default:
                 log("PASS");
                 // An app ends itself this way; it does not return.
@@ -1132,6 +1133,37 @@ public class Main extends Activity {
                 }
             }, 500);
         }
+    }
+
+    static boolean sFromContextCreated;
+
+    /** Started from the Application's context, which is not an Activity's. */
+    public static class FromContext extends Activity {
+        @Override protected void onCreate(Bundle b) {
+            super.onCreate(b);
+            sFromContextCreated = true;
+            setContentView(new android.view.View(this));
+            finish();
+        }
+    }
+
+    // An app starts one of its own Activities from its Application's context, with
+    // FLAG_ACTIVITY_NEW_TASK, and from a thread that is not the main one: a plugin does that
+    // to bring up its screen. It is started as one started from an Activity is.
+    void contextStart() {
+        final Context app = getApplicationContext();
+        new Thread(new Runnable() {
+            @Override public void run() {
+                app.startActivity(new Intent(app, FromContext.class)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            }
+        }, "context-start").start();
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                log("activity started from the application context=" + sFromContextCreated);
+                next();
+            }
+        }, 600);
     }
 
     void resultThenStart() {
