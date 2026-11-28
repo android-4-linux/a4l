@@ -63,13 +63,40 @@ it and binds it as `org.acl.internal.HostBootstrap.nTypefaceFromPath(String)`;
 (`free_typeface` unrefs it). Verified: serif (`NotoSerif`) and monospace (`AdwaitaMono`) now load
 as distinct faces, no segfault.
 
-## Remaining (option 2) — full fonts.xml fallback collection
+## A character the typeface does not have
 
-The single-`SkTypeface`-per-family model has no **per-script glyph fallback** (CJK, Arabic, …) or
-**emoji** — that is minikin/SkShaper's job. The complete answer is `graphics_jni` building a real
-`SkFontMgr_Custom` / font collection from a vendored `fonts.xml`
-(`frameworks/base/data/fonts/fonts.xml`, Apache-2.0) + a probed/vendored font set, so text with
-mixed scripts resolves glyph-by-glyph. Left as future work; the family-map + probing seam is wired.
+A Paint draws with one typeface. A character it has no glyph for used to come out as the
+font's missing-glyph box: the katakana middle dot (U+30FB) an app puts between two words,
+in a UI font that is Latin only. Android takes such a character from another of the system's
+fonts.
+
+`graphics_jni` now cuts text into runs by font (`for_each_font_run`): the Paint's typeface,
+and for a character it has no glyph for, the first fallback font that has one. Measuring and
+drawing go by the same runs, and `Paint.hasGlyph` answers for one character from both.
+
+The fallback fonts are looked for in this order, each loaded when it is first needed:
+
+| Source | |
+|---|---|
+| `ACL_FONT_FALLBACK` | font files, separated by colons |
+| the host's fontconfig | the font it likes best for the character, sans-serif where it has the choice |
+
+fontconfig is found at run time (`libfontconfig.so.1`); a host without it has only the named
+files. ASCII text is the Paint's without a look.
+
+Limits:
+
+- There is no shaping. A script that needs it (Arabic, the Indic scripts) gets its glyphs,
+  not its ligatures or reordering.
+- A fallback font is used as it is: no bold or italic is made for it where the Paint's
+  typeface is bold or italic.
+- Line metrics are the Paint's typeface's alone.
+- A character that is meant to be invisible and that no font has (a variation selector) is
+  still drawn as the Paint's typeface draws a missing glyph.
+- The first character that needs it loads the host's font configuration on the thread that
+  asked.
+
+A full `fonts.xml` collection, with per-language preference, is still not built.
 
 ## Verify
 
