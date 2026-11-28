@@ -110,6 +110,10 @@ case "$APK" in
     BASEAPK=$(first "$BDIR/base.apk" "$BDIR"/*base*.apk)
     [ -n "$BASEAPK" ] || die_skip "no base.apk inside app-bundle $APK"
     RUNAPK="$W/app.apk"; cp "$BASEAPK" "$RUNAPK"
+    # The base APK as it was signed. Adding the native libraries to the copy below moves its
+    # central directory away from its APK Signing Block, so the app's signing certificates
+    # are read from the original (HostBootstrap's signing()).
+    export ACL_APK_SIGNED="$BASEAPK"
     # Host-abi native split -> merge its lib/<abi>/*.so into the run APK, stored (uncompressed) so
     # the bionic loader can mmap/extract them. acl is an x86_64 host.
     HOSTABI=x86_64; case "$(uname -m)" in aarch64|arm64) HOSTABI=arm64_v8a;; esac

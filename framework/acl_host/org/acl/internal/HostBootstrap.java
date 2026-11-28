@@ -2720,7 +2720,7 @@ public final class HostBootstrap {
         // subclass"), an uncaught crash rather than the NameNotFoundException apps guard against.
         @Override public android.content.pm.PackageInfo getPackageInfo(String p, int flags)
                 throws android.content.pm.PackageManager.NameNotFoundException {
-            if (p != null && p.equals(pkg)) return ownPackageInfo();
+            if (p != null && p.equals(pkg)) return signed(ownPackageInfo(), flags);
             // The vendored WebView package (chromium queries it during provider init).
             if (sWebViewPackageInfo != null && "com.android.webview".equals(p)) return sWebViewPackageInfo;
             throw new android.content.pm.PackageManager.NameNotFoundException(p);
@@ -2749,7 +2749,96 @@ public final class HostBootstrap {
         @Override public android.content.pm.PackageInfo getPackageInfo(String p,
                 android.content.pm.PackageManager.PackageInfoFlags flags)
                 throws android.content.pm.PackageManager.NameNotFoundException {
-            return getPackageInfo(p, 0);
+            return getPackageInfo(p, flags != null ? (int) flags.getValue() : 0);
+        }
+
+        // The certificates the app's APK is signed with. An app asks for them to prove what
+        // it is to a server (Firebase and Google's APIs take the SHA-1 of the first one in an
+        // X-Android-Cert header), and asks hasSigningCertificate whether it is the build its
+        // publisher signed. With none to give, the first had no header, and the second threw
+        // "not implemented in subclass" out of the app's first Activity.
+        //
+        // They are read with the framework's own reader (ApkSignatureVerifier), which takes
+        // them from the APK Signing Block, or from META-INF where the APK has only a JAR
+        // signature. Read, not verified: whether the signature holds is --verify's to check
+        // before the app runs. ACL_APK_SIGNED names the APK to read them from where the one
+        // a4l runs is not the one that was signed: tools/run-apk.sh adds a bundle's native
+        // libraries to a copy of its base APK, which leaves the copy's Signing Block where a
+        // reader no longer finds it. Null where the APK has none that can be read.
+        private static android.content.pm.SigningDetails sSigning;
+        private static boolean sSigningRead;
+        private static synchronized android.content.pm.SigningDetails signing() {
+            if (sSigningRead) return sSigning;
+            sSigningRead = true;
+            final String named = System.getenv("ACL_APK_SIGNED");
+            final AppContext c = sAppContext;
+            final String[] from = {named, c != null ? c.getPackageCodePath() : null};
+            for (String apk : from) {
+                if (apk == null || apk.isEmpty() || !new java.io.File(apk).isFile()) continue;
+                try {
+                    final android.content.pm.parsing.result.ParseResult<
+                            android.content.pm.SigningDetails> r =
+                            android.util.apk.ApkSignatureVerifier.unsafeGetCertsWithoutVerification(
+                                    android.content.pm.parsing.result.ParseTypeImpl
+                                            .forParsingWithoutPlatformCompat().reset(),
+                                    apk,
+                                    android.content.pm.SigningDetails.SignatureSchemeVersion.JAR);
+                    if (r.isSuccess() && r.getResult() != null
+                            && r.getResult().getSignatures() != null
+                            && r.getResult().getSignatures().length > 0) {
+                        sSigning = r.getResult();
+                        return sSigning;
+                    }
+                } catch (Throwable t) {
+                    android.util.Log.w("acl", "signing certificates of " + apk + ": " + t);
+                }
+            }
+            android.util.Log.i("acl", "the app's APK has no signing certificates that can be read");
+            return null;
+        }
+
+        // PackageInfo.signatures and signingInfo, where the flags ask for them, as
+        // PackageManagerService fills them: the first signer the app ever had where its key
+        // was rotated, else its signers.
+        private static android.content.pm.PackageInfo signed(android.content.pm.PackageInfo pi,
+                int flags) {
+            final boolean old = (flags & android.content.pm.PackageManager.GET_SIGNATURES) != 0;
+            final boolean all =
+                    (flags & android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES) != 0;
+            if (!old && !all) return pi;
+            final android.content.pm.SigningDetails d = signing();
+            if (d == null) return pi;
+            if (old) {
+                final android.content.pm.Signature[] past = d.getPastSigningCertificates();
+                pi.signatures = past != null && past.length > 0
+                        ? new android.content.pm.Signature[]{past[0]}
+                        : d.getSignatures().clone();
+            }
+            if (all) pi.signingInfo = new android.content.pm.SigningInfo(d);
+            return pi;
+        }
+
+        // Whether the app is signed with this certificate, given whole or as its SHA-256.
+        // Only the app's own package has certificates here; no other package is installed.
+        @Override public boolean hasSigningCertificate(String packageName, byte[] certificate,
+                int type) {
+            if (packageName == null || !packageName.equals(pkg) || certificate == null) {
+                return false;
+            }
+            final android.content.pm.SigningDetails d = signing();
+            if (d == null) return false;
+            switch (type) {
+                case android.content.pm.PackageManager.CERT_INPUT_RAW_X509:
+                    return d.hasCertificate(certificate);
+                case android.content.pm.PackageManager.CERT_INPUT_SHA256:
+                    return d.hasSha256Certificate(certificate);
+                default:
+                    return false;
+            }
+        }
+        @Override public boolean hasSigningCertificate(int uid, byte[] certificate, int type) {
+            return uid == android.os.Process.myUid()
+                    && hasSigningCertificate(pkg, certificate, type);
         }
         // Where the app was installed from. There is no installer/store on acl (the APK is run
         // directly), so report an unknown source — what a sideloaded app sees — rather than letting

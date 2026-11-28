@@ -363,6 +363,18 @@ if py3.found() and have_gl and have_ffmpeg
       timeout : 240,
       is_parallel : false,
     )
+    # The certificate an app is signed with, as the app sees it: PackageInfo.signatures,
+    # signingInfo and hasSigningCertificate, for an APK signed here with scheme v2, for an
+    # unsigned one, and for one whose signed original ACL_APK_SIGNED names. Needs what
+    # gl-surfaceview-under-views needs, and openssl; SKIPs otherwise, which includes CI.
+    test(
+      'signing-certificates',
+      py3,
+      args : [files('run_signing_test.py'), acl_exe, framework_android_jar],
+      depends : [acl_exe],
+      timeout : 240,
+      is_parallel : false,
+    )
     # Views drawn into a compositing layer of their own (LAYER_TYPE_HARDWARE,
     # RenderNode.setUseCompositingLayer): what one erases with DST_OUT is erased from its
     # layer and not from the window under it, a layer's paint is applied, and a layer is
