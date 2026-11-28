@@ -8,6 +8,7 @@
 
 #include "acl_config.h"
 #include "log/log.h"
+#include "svc/net/wired_as_wifi.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -368,9 +369,8 @@ bool name_has_owner(sdbus::IConnection& conn, const char* bus_name) {
 }
 #endif
 
-}  // namespace
-
-std::unique_ptr<INetBackend> make_net_backend() {
+// The backend for the daemon that owns the host's networking.
+std::unique_ptr<INetBackend> make_host_backend() {
 #if ACL_HAVE_SDBUS
   std::unique_ptr<sdbus::IConnection> conn;
   try {
@@ -414,6 +414,21 @@ std::unique_ptr<INetBackend> make_net_backend() {
       "no supported connectivity daemon on the bus; offline (null backend)");
 #endif  // ACL_HAVE_SDBUS
   return std::make_unique<NullBackend>();
+}
+
+}  // namespace
+
+std::unique_ptr<INetBackend> make_net_backend() {
+  std::unique_ptr<INetBackend> host = make_host_backend();
+  const WiredAsWifi wired =
+      parse_wired_as_wifi(std::getenv("ACL_NET_WIRED_AS_WIFI"));
+  if (!wired.enabled)
+    return host;
+  acl::log::i(kTag,
+              "a wired network is shown to the app as the Wi-Fi network "
+              "\"{}\" (ACL_NET_WIRED_AS_WIFI)",
+              wired.ssid);
+  return std::make_unique<WiredAsWifiBackend>(std::move(host), wired.ssid);
 }
 
 }  // namespace acl::net

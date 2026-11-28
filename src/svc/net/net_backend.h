@@ -77,6 +77,9 @@ class INetBackend {
 // ACL_NET_BACKEND env override, then falls back to whichever daemon is present;
 // with no daemon (or no sdbus-c++) returns the Null backend (permanently
 // offline, today's stub behavior). Never returns null.
+//
+// With ACL_NET_WIRED_AS_WIFI set, the backend's wired network is shown to the
+// app as a Wi-Fi one (svc/net/wired_as_wifi.h).
 std::unique_ptr<INetBackend> make_net_backend();
 
 }  // namespace acl::net
