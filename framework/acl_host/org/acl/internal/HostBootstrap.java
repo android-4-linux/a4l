@@ -862,6 +862,9 @@ public final class HostBootstrap {
     // falls back to this when its own instance wasn't wired (the Activity's separate AppContext).
     static volatile android.app.Application sApplication;
 
+    // android.os.VibratorManager for getSystemService("vibrator_manager"), made on first use.
+    private static NoVibratorManager sVibratorManager;
+
     static final class AppContext extends ContextWrapper {
         private static AclSensorManager sSensorManager;  // one per app (native events dispatch to it)
         private final Resources res;
@@ -1483,6 +1486,19 @@ public final class HostBootstrap {
                     return null;
                 }
             }
+            if ("vibrator_manager".equals(name)) {
+                // The API 31 way to the same vibrator. An app that asks for the manager takes
+                // its default vibrator with no check for null (Sonos's setup component does,
+                // and failed to load for it).
+                synchronized (AppContext.class) {
+                    if (sVibratorManager == null) {
+                        final Object none = getSystemService("vibrator");
+                        if (none instanceof android.os.Vibrator)
+                            sVibratorManager = new NoVibratorManager((android.os.Vibrator) none);
+                    }
+                    return sVibratorManager;
+                }
+            }
             if ("netstats".equals(name)) {
                 // acl's clean-room android.app.usage.NetworkStatsManager (boot classpath). The real
                 // one lives in the connectivity apex (absent from acl's bcp), and acl has no per-uid
@@ -1881,6 +1897,7 @@ public final class HostBootstrap {
             if ("android.net.nsd.NsdManager".equals(serviceClass.getName())) return "servicediscovery";
             if ("android.app.usage.NetworkStatsManager".equals(serviceClass.getName())) return "netstats";
             if ("android.os.Vibrator".equals(serviceClass.getName())) return "vibrator";
+            if ("android.os.VibratorManager".equals(serviceClass.getName())) return "vibrator_manager";
             if ("android.bluetooth.BluetoothManager".equals(serviceClass.getName())) return "bluetooth";
             if (serviceClass == android.os.storage.StorageManager.class) return "storage";
             if (serviceClass == android.os.UserManager.class) return "user";

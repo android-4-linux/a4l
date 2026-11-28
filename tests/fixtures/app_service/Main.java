@@ -351,6 +351,22 @@ public class Main extends Activity {
         }
         log("location service " + location);
         expect("answered=true gnss=true".equals(location), "location service " + location);
+        // The vibrator manager, which an app asks for from API 31 where it once asked for the
+        // vibrator. A host has no vibrator: there is a manager all the same, and its vibrator
+        // says so and takes an effect without complaint.
+        String haptics;
+        try {
+            final android.os.VibratorManager vm =
+                    (android.os.VibratorManager) getSystemService(VIBRATOR_MANAGER_SERVICE);
+            final android.os.Vibrator v = vm.getDefaultVibrator();
+            v.vibrate(android.os.VibrationEffect.createOneShot(10, 1));
+            haptics = "ids=" + vm.getVibratorIds().length + " has=" + v.hasVibrator()
+                    + " same=" + (vm == getSystemService(android.os.VibratorManager.class));
+        } catch (RuntimeException e) {
+            haptics = e.toString();
+        }
+        log("vibrator manager " + haptics);
+        expect("ids=0 has=false same=true".equals(haptics), "vibrator manager " + haptics);
         // Process.getElapsedCpuTime(), and a signal for a process that is not the app's,
         // which is not sent.
         String process;
