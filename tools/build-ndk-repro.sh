@@ -588,6 +588,21 @@ bool AMediaFormat_getBuffer(AMediaFormat*, const char*, void**, size_t*);
 const char* AMediaFormat_toString(AMediaFormat*);
 AMediaCodec* AMediaCodec_createDecoderByType(const char*);
 int32_t AMediaCodec_start(AMediaCodec*);
+int32_t AMediaCodec_releaseOutputBufferAtTime(AMediaCodec*, size_t, int64_t);
+int32_t AMediaCodec_getName(AMediaCodec*, char**);
+void AMediaCodec_releaseName(AMediaCodec*, char*);
+bool AMediaCodecActionCode_isRecoverable(int32_t);
+bool AMediaCodecActionCode_isTransient(int32_t);
+typedef struct AMediaCodecCryptoInfo AMediaCodecCryptoInfo;
+AMediaCodecCryptoInfo* AMediaCodecCryptoInfo_new(int, uint8_t key[16], uint8_t iv[16], int,
+                                                 size_t*, size_t*);
+int32_t AMediaCodecCryptoInfo_delete(AMediaCodecCryptoInfo*);
+size_t AMediaCodecCryptoInfo_getNumSubSamples(AMediaCodecCryptoInfo*);
+int32_t AMediaCodecCryptoInfo_getKey(AMediaCodecCryptoInfo*, uint8_t*);
+int32_t AMediaCodecCryptoInfo_getIV(AMediaCodecCryptoInfo*, uint8_t*);
+int AMediaCodecCryptoInfo_getMode(AMediaCodecCryptoInfo*);
+int32_t AMediaCodecCryptoInfo_getClearBytes(AMediaCodecCryptoInfo*, size_t*);
+int32_t AMediaCodecCryptoInfo_getEncryptedBytes(AMediaCodecCryptoInfo*, size_t*);
 
 // 77 when every step holds; a negative number names the step that did not.
 __attribute__((visibility("default")))
@@ -629,6 +644,30 @@ int Java_com_acl_ndktest_Main_mediaFormatTest(void* e, void* c) {
   AMediaCodec* codec = AMediaCodec_createDecoderByType("audio/mp4a-latm");
   if (codec != NULL) return -13;
   if (AMediaCodec_start(codec) == 0) return -14;
+  // The rest of the codec's calls are there to be imported, and say the same.
+  if (AMediaCodec_releaseOutputBufferAtTime(codec, 0, 0) == 0) return -15;
+  char* name = (char*)mime;
+  if (AMediaCodec_getName(codec, &name) == 0 || name != NULL) return -16;
+  AMediaCodec_releaseName(codec, name);
+  if (!AMediaCodecActionCode_isTransient(1) || AMediaCodecActionCode_isTransient(2) ||
+      !AMediaCodecActionCode_isRecoverable(2) || AMediaCodecActionCode_isRecoverable(0))
+    return -17;
+  // AMediaCodecCryptoInfo keeps what it is given, as its own copy.
+  uint8_t key[16], iv[16], got[16];
+  for (int i = 0; i < 16; i++) { key[i] = (uint8_t)(i + 1); iv[i] = (uint8_t)(0xf0 + i); }
+  size_t clear[2] = {4, 8}, encrypted[2] = {16, 32}, sizes[2] = {0, 0};
+  AMediaCodecCryptoInfo* info = AMediaCodecCryptoInfo_new(2, key, iv, 1, clear, encrypted);
+  if (!info) return -18;
+  clear[0] = 99;
+  if (AMediaCodecCryptoInfo_getNumSubSamples(info) != 2 ||
+      AMediaCodecCryptoInfo_getMode(info) != 1) return -19;
+  if (AMediaCodecCryptoInfo_getKey(info, got) != 0 || memcmp(got, key, 16) != 0) return -20;
+  if (AMediaCodecCryptoInfo_getIV(info, got) != 0 || memcmp(got, iv, 16) != 0) return -21;
+  if (AMediaCodecCryptoInfo_getClearBytes(info, sizes) != 0 || sizes[0] != 4 || sizes[1] != 8)
+    return -22;
+  if (AMediaCodecCryptoInfo_getEncryptedBytes(info, sizes) != 0 || sizes[0] != 16 ||
+      sizes[1] != 32) return -23;
+  if (AMediaCodecCryptoInfo_delete(info) != 0) return -24;
   return 77;
 }
 EOF

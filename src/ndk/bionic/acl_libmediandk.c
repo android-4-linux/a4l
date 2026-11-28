@@ -567,3 +567,244 @@ EXPORT media_status_t AMediaCodec_releaseOutputBuffer(AMediaCodec* c,
   (void)c, (void)idx, (void)render;
   NO_CODEC("AMediaCodec_releaseOutputBuffer");
 }
+
+// The rest of <media/NdkMediaCodec.h>. A library that imports one of these and
+// finds it missing does not load: Spotify 9's liborbit-jni-spotify.so imports
+// AMediaCodec_releaseOutputBufferAtTime beside the calls above.
+EXPORT media_status_t
+AMediaCodec_releaseOutputBufferAtTime(AMediaCodec* c,
+                                      size_t idx,
+                                      int64_t timestampNs) {
+  (void)c, (void)idx, (void)timestampNs;
+  NO_CODEC("AMediaCodec_releaseOutputBufferAtTime");
+}
+
+EXPORT media_status_t AMediaCodec_setOutputSurface(AMediaCodec* c,
+                                                   ANativeWindow* surface) {
+  (void)c, (void)surface;
+  NO_CODEC("AMediaCodec_setOutputSurface");
+}
+
+EXPORT media_status_t AMediaCodec_setParameters(AMediaCodec* c,
+                                                const AMediaFormat* params) {
+  (void)c, (void)params;
+  NO_CODEC("AMediaCodec_setParameters");
+}
+
+EXPORT media_status_t AMediaCodec_createInputSurface(AMediaCodec* c,
+                                                     ANativeWindow** surface) {
+  (void)c;
+  if (surface != NULL)
+    *surface = NULL;
+  NO_CODEC("AMediaCodec_createInputSurface");
+}
+
+EXPORT media_status_t
+AMediaCodec_createPersistentInputSurface(ANativeWindow** surface) {
+  if (surface != NULL)
+    *surface = NULL;
+  NO_CODEC("AMediaCodec_createPersistentInputSurface");
+}
+
+EXPORT media_status_t AMediaCodec_setInputSurface(AMediaCodec* c,
+                                                  ANativeWindow* surface) {
+  (void)c, (void)surface;
+  NO_CODEC("AMediaCodec_setInputSurface");
+}
+
+EXPORT media_status_t AMediaCodec_signalEndOfInputStream(AMediaCodec* c) {
+  (void)c;
+  NO_CODEC("AMediaCodec_signalEndOfInputStream");
+}
+
+EXPORT AMediaFormat* AMediaCodec_getInputFormat(AMediaCodec* c) {
+  (void)c;
+  say("AMediaCodec_getInputFormat: no codec");
+  return NULL;
+}
+
+EXPORT AMediaFormat* AMediaCodec_getBufferFormat(AMediaCodec* c, size_t idx) {
+  (void)c, (void)idx;
+  say("AMediaCodec_getBufferFormat: no codec");
+  return NULL;
+}
+
+EXPORT media_status_t AMediaCodec_getName(AMediaCodec* c, char** out_name) {
+  (void)c;
+  if (out_name != NULL)
+    *out_name = NULL;
+  NO_CODEC("AMediaCodec_getName");
+}
+
+// What AMediaCodec_getName gave. It gives none, and free(NULL) is a no-op.
+EXPORT void AMediaCodec_releaseName(AMediaCodec* c, char* name) {
+  (void)c;
+  free(name);
+}
+
+// By value: four function pointers.
+typedef struct {
+  void* onAsyncInputAvailable;
+  void* onAsyncOutputAvailable;
+  void* onAsyncFormatChanged;
+  void* onAsyncError;
+} AMediaCodecOnAsyncNotifyCallback;
+
+EXPORT media_status_t
+AMediaCodec_setAsyncNotifyCallback(AMediaCodec* c,
+                                   AMediaCodecOnAsyncNotifyCallback callback,
+                                   void* userdata) {
+  (void)c, (void)callback, (void)userdata;
+  NO_CODEC("AMediaCodec_setAsyncNotifyCallback");
+}
+
+EXPORT media_status_t AMediaCodec_setOnFrameRenderedCallback(AMediaCodec* c,
+                                                             void* callback,
+                                                             void* userdata) {
+  (void)c, (void)callback, (void)userdata;
+  NO_CODEC("AMediaCodec_setOnFrameRenderedCallback");
+}
+
+EXPORT media_status_t AMediaCodec_releaseCrypto(AMediaCodec* c) {
+  (void)c;
+  NO_CODEC("AMediaCodec_releaseCrypto");
+}
+
+// MediaCodec.CodecException's action codes: 1 is transient, 2 recoverable.
+EXPORT bool AMediaCodecActionCode_isRecoverable(int32_t actionCode) {
+  return actionCode == 2;
+}
+
+EXPORT bool AMediaCodecActionCode_isTransient(int32_t actionCode) {
+  return actionCode == 1;
+}
+
+// ── AMediaCodecCryptoInfo ───────────────────────────────────────────────────
+// Whole, as AMediaFormat is: what an encrypted sample's subsamples are, kept
+// and given back. Nothing decrypts with it: there is no codec to queue to.
+typedef struct {
+  int32_t encryptBlocks;
+  int32_t skipBlocks;
+} cryptoinfo_pattern_t;
+
+typedef struct AMediaCodecCryptoInfo {
+  int numsubsamples;
+  uint8_t key[16];
+  uint8_t iv[16];
+  int mode;  // cryptoinfo_mode_t
+  cryptoinfo_pattern_t pattern;
+  size_t* clearbytes;      // numsubsamples of them
+  size_t* encryptedbytes;  // numsubsamples of them
+} AMediaCodecCryptoInfo;
+
+EXPORT AMediaCodecCryptoInfo* AMediaCodecCryptoInfo_new(
+    int numsubsamples,
+    uint8_t key[16],
+    uint8_t iv[16],
+    int mode,
+    size_t* clearbytes,
+    size_t* encryptedbytes) {
+  if (numsubsamples < 0 || numsubsamples > (1 << 20))
+    return NULL;
+  AMediaCodecCryptoInfo* info = calloc(1, sizeof *info);
+  if (info == NULL)
+    return NULL;
+  const size_t n = (size_t)numsubsamples;
+  info->clearbytes = calloc(n > 0 ? n : 1, sizeof(size_t));
+  info->encryptedbytes = calloc(n > 0 ? n : 1, sizeof(size_t));
+  if (info->clearbytes == NULL || info->encryptedbytes == NULL) {
+    free(info->clearbytes);
+    free(info->encryptedbytes);
+    free(info);
+    return NULL;
+  }
+  info->numsubsamples = numsubsamples;
+  info->mode = mode;
+  if (key != NULL)
+    memcpy(info->key, key, 16);
+  if (iv != NULL)
+    memcpy(info->iv, iv, 16);
+  if (clearbytes != NULL)
+    memcpy(info->clearbytes, clearbytes, n * sizeof(size_t));
+  if (encryptedbytes != NULL)
+    memcpy(info->encryptedbytes, encryptedbytes, n * sizeof(size_t));
+  return info;
+}
+
+EXPORT media_status_t
+AMediaCodecCryptoInfo_delete(AMediaCodecCryptoInfo* info) {
+  if (info != NULL) {
+    free(info->clearbytes);
+    free(info->encryptedbytes);
+    free(info);
+  }
+  return AMEDIA_OK;
+}
+
+EXPORT void AMediaCodecCryptoInfo_setPattern(AMediaCodecCryptoInfo* info,
+                                             cryptoinfo_pattern_t* pattern) {
+  if (info != NULL && pattern != NULL)
+    info->pattern = *pattern;
+}
+
+EXPORT size_t
+AMediaCodecCryptoInfo_getNumSubSamples(AMediaCodecCryptoInfo* info) {
+  return info != NULL ? (size_t)info->numsubsamples : 0;
+}
+
+EXPORT media_status_t AMediaCodecCryptoInfo_getKey(AMediaCodecCryptoInfo* info,
+                                                   uint8_t* dst) {
+  if (info == NULL)
+    return AMEDIA_ERROR_INVALID_OBJECT;
+  if (dst == NULL)
+    return AMEDIA_ERROR_INVALID_PARAMETER;
+  memcpy(dst, info->key, 16);
+  return AMEDIA_OK;
+}
+
+EXPORT media_status_t AMediaCodecCryptoInfo_getIV(AMediaCodecCryptoInfo* info,
+                                                  uint8_t* dst) {
+  if (info == NULL)
+    return AMEDIA_ERROR_INVALID_OBJECT;
+  if (dst == NULL)
+    return AMEDIA_ERROR_INVALID_PARAMETER;
+  memcpy(dst, info->iv, 16);
+  return AMEDIA_OK;
+}
+
+EXPORT int AMediaCodecCryptoInfo_getMode(AMediaCodecCryptoInfo* info) {
+  return info != NULL ? info->mode : AMEDIA_ERROR_INVALID_OBJECT;
+}
+
+EXPORT media_status_t
+AMediaCodecCryptoInfo_getClearBytes(AMediaCodecCryptoInfo* info, size_t* dst) {
+  if (info == NULL)
+    return AMEDIA_ERROR_INVALID_OBJECT;
+  if (dst == NULL)
+    return AMEDIA_ERROR_INVALID_PARAMETER;
+  memcpy(dst, info->clearbytes, (size_t)info->numsubsamples * sizeof(size_t));
+  return AMEDIA_OK;
+}
+
+EXPORT media_status_t
+AMediaCodecCryptoInfo_getEncryptedBytes(AMediaCodecCryptoInfo* info,
+                                        size_t* dst) {
+  if (info == NULL)
+    return AMEDIA_ERROR_INVALID_OBJECT;
+  if (dst == NULL)
+    return AMEDIA_ERROR_INVALID_PARAMETER;
+  memcpy(dst, info->encryptedbytes,
+         (size_t)info->numsubsamples * sizeof(size_t));
+  return AMEDIA_OK;
+}
+
+EXPORT media_status_t
+AMediaCodec_queueSecureInputBuffer(AMediaCodec* c,
+                                   size_t idx,
+                                   off_t offset,
+                                   AMediaCodecCryptoInfo* info,
+                                   uint64_t time,
+                                   uint32_t flags) {
+  (void)c, (void)idx, (void)offset, (void)info, (void)time, (void)flags;
+  NO_CODEC("AMediaCodec_queueSecureInputBuffer");
+}
