@@ -294,6 +294,41 @@ static bool run_jni_selftest(acl::ndk::BionicRuntime& rt, const char* so_path) {
 #if defined(ACL_NDK_PROBE_REALVM)
 // End-to-end against a REAL JVM (the host OpenJDK linked via jni_dep) — the
 // strongest proof that the jvm_vm.cpp Runtime.nativeLoad hook will work: boot a
+// GL-through-the-host mode: load the library the way an app's is loaded, which
+// points the GL forwarders it links at the host's GL library, and call its
+// acl_gl_host_call(). Which forwarder the call goes through is the library's
+// choice: the one it links. 42 passes.
+static bool run_gl_host_call(acl::ndk::BionicRuntime& rt, const char* so_path) {
+  g_fake_env_tbl = {};
+  g_fake_env_tbl.GetVersion = fake_GetVersion;
+  g_fake_env.functions = &g_fake_env_tbl;
+  g_fake_vm_tbl = {};
+  g_fake_vm_tbl.GetEnv = fake_GetEnv;
+  g_fake_vm.functions = &g_fake_vm_tbl;
+  std::string err;
+  void* h = rt.load_library(so_path, reinterpret_cast<JavaVM*>(&g_fake_vm),
+                            reinterpret_cast<JNIEnv*>(&g_fake_env), &err);
+  if (h == nullptr) {
+    std::fprintf(stderr, "load_library failed: %s\n", err.c_str());
+    return false;
+  }
+  void* fn = rt.symbol(h, "acl_gl_host_call");
+  if (fn == nullptr) {
+    std::fprintf(stderr, "symbol 'acl_gl_host_call' not found\n");
+    return false;
+  }
+  int result;
+  {
+    const acl::ndk::BionicRuntime::RunScope scope(rt);
+    result = reinterpret_cast<int (*)()>(fn)();
+  }
+  std::printf(
+      "acl-ndk-probe: a GL call through the library's forwarder "
+      "returned %d %s\n",
+      result, result == 42 ? "(PASS)" : "(FAIL)");
+  return result == 42;
+}
+
 // genuine JVM, load_library the bionic .so (drives JNI_OnLoad ->
 // FindClass(Main) -> RegisterNatives(answer) with a down-call trampoline), then
 // call Main.answer() from Java. The JVM's own dispatch invokes the trampoline
@@ -522,7 +557,7 @@ int main(int argc, char** argv) {
         stderr,
         "usage: %s <abs-path-to.so> "
         "<symbol>|--boundary|--jni|--realvm|--thread|--looper|--mediaformat|"
-        "--load\n",
+        "--load|--glforward|--glhost\n",
         argv[0]);
     return 2;
   }
@@ -597,6 +632,9 @@ int main(int argc, char** argv) {
   // GL forwarder mode: see run_gl_forward_selftest.
   if (std::string(argv[2]) == "--glforward") {
     return run_gl_forward_selftest(*rt, h) ? 0 : 1;
+  }
+  if (std::string(argv[2]) == "--glhost") {
+    return run_gl_host_call(*rt, argv[1]) ? 0 : 1;
   }
 
   // Thread mode: attach a second thread and run bionic code as that thread.

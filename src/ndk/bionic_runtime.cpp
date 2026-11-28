@@ -1654,6 +1654,15 @@ void install_gl_forwarders(BionicRuntime* rt, bool opens_gl_itself) {
   };
   const bool e = wire("libEGL.so", "acl_gl_egl_bridge", &egl_b);
   const bool g = wire("libGLESv2.so", "acl_gl_gles_bridge", &gles_b);
+  // libGLESv3.so and libGLESv1_CM.so are the same forwarder under the other
+  // names an app library links, each with a bridge slot of its own. A library
+  // that links one of them and not libGLESv2.so calls through that copy
+  // (Rive's renderer links libGLESv3.so). With its slot left empty, its first
+  // GL call read a function pointer from address zero.
+  for (const char* also : {"libGLESv3.so", "libGLESv1_CM.so"}) {
+    if (::access((std::string(sysroot) + "/" + also).c_str(), R_OK) == 0)
+      wire(also, "acl_gl_gles_bridge", &gles_b);
+  }
   log::i(kTag,
          "GL forwarders wired: EGL {}/{} GLES {}/{} donor-pool={} pick={} "
          "(egl={} gles={})",
