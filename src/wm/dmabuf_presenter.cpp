@@ -2426,12 +2426,19 @@ bool present_dmabuf_loop(int /*width*/,
 // (see present.h).
 namespace {
 std::atomic<IPresenter*> g_active_video_presenter{nullptr};
-}
+std::atomic<bool> g_video_plane_taken{false};
+}  // namespace
 IPresenter* active_video_presenter() noexcept {
   return g_active_video_presenter.load(std::memory_order_acquire);
 }
 void set_active_video_presenter(IPresenter* p) noexcept {
   g_active_video_presenter.store(p, std::memory_order_release);
+}
+bool video_plane_taken() noexcept {
+  return g_video_plane_taken.load(std::memory_order_acquire);
+}
+void set_video_plane_taken(bool taken) noexcept {
+  g_video_plane_taken.store(taken, std::memory_order_release);
 }
 
 std::unique_ptr<IPresenter> presenter_open(int width,

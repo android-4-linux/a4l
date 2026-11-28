@@ -506,6 +506,8 @@ void show_on_texture(TextureSink& sink,
 // modifier) gets the picture converted to one it does list; the frames sent
 // before the refusal was known are lost. Timed-release thread.
 void show_on_plane(wm::IPresenter* p, const gfx::DmabufFrame& frame) {
+  if (wm::video_plane_taken())
+    return;  // an engine's view has the plane: this picture is not shown
   const int w = static_cast<int>(frame.width);
   const int h = static_cast<int>(frame.height);
   // Once turned away, a format stays converted: the presenter remembers only

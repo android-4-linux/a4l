@@ -3324,8 +3324,10 @@ void JNICALL PresentDriver_nSetGlPlane(JNIEnv*,
     if (g_gl_plane.w.exchange(0) > 0)
       s->presenter->hide_video();
     g_gl_plane.h.store(0);
+    wm::set_video_plane_taken(false);
     return;
   }
+  wm::set_video_plane_taken(true);
   // Called every frame, and nearly always with what it was told before.
   if (g_gl_plane.x.load() == x && g_gl_plane.y.load() == y &&
       g_gl_plane.w.load() == w && g_gl_plane.h.load() == h)
