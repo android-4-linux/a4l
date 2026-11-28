@@ -569,6 +569,33 @@ public class Main extends Activity {
         log("wifi link " + link);
         expect("true -1/-1/-1 standard 0 security -1 scan 0/0/0".equals(link),
                 "WifiInfo and ScanResult: " + link);
+        // An app asks whether the device has Wi-Fi or Bluetooth before it reads their
+        // state, and takes "no such feature" to mean off. The answer is the host's: Wi-Fi
+        // where WifiManager says it is on, Bluetooth and Bluetooth LE where the adapter has
+        // an address of its own (a host without one gives the placeholder).
+        final android.content.pm.PackageManager features = getPackageManager();
+        final boolean wifiOn = ((android.net.wifi.WifiManager) getApplicationContext()
+                .getSystemService(WIFI_SERVICE)).isWifiEnabled();
+        final android.bluetooth.BluetoothAdapter adapter =
+                android.bluetooth.BluetoothAdapter.getDefaultAdapter();
+        final boolean radio = adapter != null
+                && !"02:00:00:00:00:00".equals(adapter.getAddress());
+        final String has = "wifi "
+                + (features.hasSystemFeature(android.content.pm.PackageManager.FEATURE_WIFI)
+                        == wifiOn)
+                + " bluetooth "
+                + (features.hasSystemFeature(
+                        android.content.pm.PackageManager.FEATURE_BLUETOOTH) == radio)
+                + " le "
+                + (features.hasSystemFeature(
+                        android.content.pm.PackageManager.FEATURE_BLUETOOTH_LE) == radio)
+                + " nfc "
+                + features.hasSystemFeature(android.content.pm.PackageManager.FEATURE_NFC)
+                + " none " + features.hasSystemFeature(null);
+        log("features follow the host: " + has + " (wifi on=" + wifiOn + " bluetooth radio="
+                + radio + ")");
+        expect("wifi true bluetooth true le true nfc false none false".equals(has),
+                "hasSystemFeature: " + has);
         // ColorMatrixColorFilter: red drawn through a matrix that moves red into blue and
         // adds 51 to green comes out (0, 51, 255). The 51 is the matrix's fifth column, which
         // Android gives on the 0..255 scale.
@@ -1652,6 +1679,20 @@ public class Main extends Activity {
         boolean hex = id != null && id.matches("[0-9a-f]{16}");
         log("settings android_id=" + (hex ? 16 : -1) + " stable=" + (id != null && id.equals(again)));
         expect(hex && id.equals(again), "android_id");
+        // Settings.Secure.LOCATION_MODE is what LocationManager.isLocationEnabled answers: an
+        // app reads either, and takes a setting that is not there to mean location is off.
+        int mode = -1;
+        try {
+            mode = android.provider.Settings.Secure.getInt(getContentResolver(),
+                    android.provider.Settings.Secure.LOCATION_MODE);
+        } catch (android.provider.Settings.SettingNotFoundException e) {
+            // stays -1
+        }
+        final boolean on = ((android.location.LocationManager) getSystemService(LOCATION_SERVICE))
+                .isLocationEnabled();
+        log("settings location_mode=" + mode + " enabled=" + on);
+        expect(mode == (on ? android.provider.Settings.Secure.LOCATION_MODE_HIGH_ACCURACY
+                : android.provider.Settings.Secure.LOCATION_MODE_OFF), "location_mode");
         next();
     }
 

@@ -41,6 +41,11 @@ public final class AclLocationManager {
     private static native void nStop();
     private static native boolean nAvailable();
 
+    /** Whether the host has a location source: what LocationManager.isLocationEnabled answers. */
+    static boolean enabled() {
+        try { return nAvailable(); } catch (Throwable t) { return false; }  // natives absent
+    }
+
     // The bridging ILocationManager for `new LocationManager(context, service)`.
     public static ILocationManager newService() {
         return (ILocationManager) Proxy.newProxyInstance(
