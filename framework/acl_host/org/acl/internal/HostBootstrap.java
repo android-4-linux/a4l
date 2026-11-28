@@ -5290,6 +5290,21 @@ public final class HostBootstrap {
                 ukmCtor.setAccessible(true);
                 setField(vriCls, vri, "mUnhandledKeyManager", ukmCtor.newInstance());
             } catch (Throwable ignored) {}
+            // An input event handed back to the root is queued on its handler and taken up by
+            // doProcessInputEvents, which uses these two before it looks for an input stage.
+            // A WebView hands back each key event its page did not take
+            // (WebViewClient.onUnhandledKeyEvent -> dispatchUnhandledInputEvent), and
+            // BaseInputConnection.sendKeyEvent comes the same way (dispatchKeyFromIme). Left
+            // null, every such key threw on the main loop, and typing into a page ended the
+            // app. This root has no input stages, so the event ends there, not handled.
+            for (String[] f : new String[][]{
+                    {"mInputEventAssigner", "android.view.InputEventAssigner"},
+                    {"mViewFrameInfo", "android.view.ViewFrameInfo"}}) {
+                try {
+                    setField(vriCls, vri, f[0],
+                            Class.forName(f[1]).getDeclaredConstructor().newInstance());
+                } catch (Throwable ignored) {}
+            }
             // The ViewRootImpl ctor creates mImeFocusController (final); the hollow one skips it, so
             // a focus change during dispatchAttachedToWindow — View.onFocusChanged reaches
             // mViewRootImpl.getImeFocusController().onViewFocusChanged (View.java) — NPEs on the null

@@ -18,7 +18,7 @@
 // an address in a scheme nothing takes, then to the app's. Round two's is an HTTP redirect
 // straight to the app's scheme. A second run (A4L_TEST_BROWSER=cancel) is a plain link, with
 // no tab asked for, to a page of one color that goes nowhere: the test looks for the color on
-// the screen and closes the tab with its button.
+// the screen, types into the page's text field, and closes the tab with its button.
 //
 // Logs "BROWSER:" lines and "BROWSER: PASS" at the end;
 // tests/integration/run_browser_tab_test.py reads them.
@@ -146,6 +146,22 @@ public class Main extends Activity {
                 // This screen is up and nothing else is: one started, one resumed.
                 log("round " + sRound + " starts with started=" + sStarted
                         + " resumed=" + sResumed);
+                // A key an input method sends goes to the window's root through its handler,
+                // as a key a WebView hands back does. The root has to take it without
+                // throwing on the main loop.
+                if (sRound == 1) {
+                    String sent;
+                    try {
+                        sent = String.valueOf(new android.view.inputmethod.BaseInputConnection(
+                                getWindow().getDecorView(), false).sendKeyEvent(
+                                        new android.view.KeyEvent(
+                                                android.view.KeyEvent.ACTION_DOWN,
+                                                android.view.KeyEvent.KEYCODE_A)));
+                    } catch (Throwable t) {
+                        sent = t.toString();
+                    }
+                    log("key from an input method sent=" + sent);
+                }
                 startActivity(new Intent(Main.this, SignIn.class)
                         .putExtra(EXTRA_PAGE, "http://127.0.0.1:" + sPort + page)
                         .putExtra(EXTRA_TAB, !cancel));
@@ -402,9 +418,17 @@ public class Main extends Activity {
             status = "302 Found";
             location = app + "two&state=r2";
         } else if (path.startsWith("/wait")) {
-            // A page of one color, which the test looks for on the screen.
+            // A page of one color, which the test looks for on the screen. The text field
+            // in its corner tells the site what it holds each time that changes.
             body = "<!doctype html><html><body style=\"margin:0;background:#2060c0\">"
+                    + "<input id=\"t\" style=\"position:absolute;left:0;top:0;width:200px;"
+                    + "height:60px;box-sizing:border-box\">"
+                    + "<script>var t=document.getElementById('t');"
+                    + "t.addEventListener('input',function(){"
+                    + "fetch('/typed?v='+encodeURIComponent(t.value));});</script>"
                     + "</body></html>";
+        } else if (path.startsWith("/typed")) {
+            // What the page's text field holds; the line logged below carries it.
         } else {
             status = "404 Not Found";
         }

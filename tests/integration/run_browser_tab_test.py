@@ -30,8 +30,11 @@
 #
 # Run two (A4L_TEST_BROWSER=cancel, ACL_BROWSER=app): a plain link, with no tab asked for, to
 # a page of one color that goes nowhere. The test finds the tab's bar and the page's color on
-# a headless Weston's screen, with the AOSP prebuilt WebView and nothing set for it. Then a
-# tap on the tab's close button ends it, and the waiting screen is resumed with no answer.
+# a headless Weston's screen, with the AOSP prebuilt WebView and nothing set for it. A tap on
+# the page's text field and two keys put "hi" in it, which the page's script tells the site.
+# The WebView hands the root each key event the page did not take, and that must not throw on
+# the main loop. Then a tap on the tab's close button ends the tab, and the waiting screen is
+# resumed with no answer.
 #
 # Needs a host ART build (ACL_ART_HOME), the AOSP toolchain, a WebView APK (ACL_WEBVIEW_APK, or
 # the AOSP prebuilt under external/chromium-webview), a render node, and Weston with its kiosk
@@ -75,9 +78,14 @@ AGAIN = "BROWSER: started again on top: pnr"
 THREW = ("dispatchActivityPostDestroyed on com.acl.browsertab.Main$Splash: "
          "java.lang.IllegalStateException: thrown by the app's callback")
 
+# A key from an input method is taken by the window's root. Without the fields its queue
+# needs, the root threw on the main loop: "FATAL EXCEPTION" in the log fails a run.
+IME_KEY = "BROWSER: key from an input method sent=false"
+
 REDIRECT_CHECKS = [
     AGAIN,
     THREW,
+    IME_KEY,
     "BROWSER: site /start -> 302 Found",
     "BROWSER: site /login -> 200 OK",
     "browser: nothing in the app takes a4l-test-nobody: addresses",
@@ -97,8 +105,10 @@ REDIRECT_CHECKS = [
 CANCEL_CHECKS = [
     AGAIN,
     THREW,
+    IME_KEY,
     f"BROWSER: round 1 starts with {FOREGROUND}",
     "BROWSER: site /wait -> 200 OK",
+    "BROWSER: site /typed?v=hi -> 200 OK",
     "browser: closed",
     "BROWSER: round 1 cancelled sign-in=crpsrpsd redirect= others=[]",
     f"BROWSER: round 1 callbacks={ANSWERED_CALLBACKS}",
@@ -114,12 +124,20 @@ PAGE = ((W // 2, H // 2), (32, 96, 192))
 CLOSE_FROM_MS = 20000
 CLOSE_TAPS = ";".join(f"20,20,{ms}" for ms in range(CLOSE_FROM_MS, 90000, 1500))
 
+# The page's text field is its first 200x60 px, under the bar and the progress line. Tapped a
+# few times before the keys, in case the page is late: a tap on a field that has the focus
+# changes nothing.
+FIELD_TAPS = ";".join(f"100,80,{ms}" for ms in range(10000, 17000, 1500))
+KEYS = "104,105"  # h, i
+KEYS_AT_MS = 17500
+
 
 def story_of(out):
     return "\n".join(ln for ln in out.splitlines()
                      if "BROWSER: " in ln or "browser: " in ln or "acl WebView" in ln
                      or "activity-stack" in ln or "Fatal signal" in ln
-                     or "dispatchActivity" in ln)
+                     or "dispatchActivity" in ln or "FATAL EXCEPTION" in ln
+                     or "input: synthetic KEYS" in ln)
 
 
 def painted(display, work):
@@ -233,6 +251,10 @@ def main():
             sys.stderr.write("FAIL (redirect): the fixture reported a failure\n"
                              f"{story_of(out)}\n{out[-4000:]}\n")
             return 1
+        if "FATAL EXCEPTION" in out:
+            sys.stderr.write("FAIL (redirect): an exception on the main loop\n"
+                             f"{story_of(out)}\n{out[-4000:]}\n")
+            return 1
         for c in REDIRECT_CHECKS:
             if c not in out:
                 sys.stderr.write(f"FAIL (redirect): missing '{c}'\n{story_of(out)}\n"
@@ -245,7 +267,8 @@ def main():
         app = subprocess.Popen(
             command, env=environment("cancel", {
                 "A4L_TEST_BROWSER": "cancel", "ACL_BROWSER": "app", "ACL_TEST_MS": "1",
-                "ACL_TEST_TAP": CLOSE_TAPS}),
+                "ACL_TEST_TAP": FIELD_TAPS + ";" + CLOSE_TAPS,
+                "ACL_TEST_KEYS": KEYS, "ACL_TEST_KEYS_AT": str(KEYS_AT_MS)}),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
             start_new_session=True)
         lines = []
@@ -279,6 +302,11 @@ def main():
             sys.stderr.write("FAIL (cancel): the fixture reported a failure\n"
                              f"{story_of(out)}\n{out[-4000:]}\n")
             return 1
+        if "FATAL EXCEPTION" in out:
+            at = out.index("FATAL EXCEPTION")
+            sys.stderr.write("FAIL (cancel): an exception on the main loop\n"
+                             f"{story_of(out)}\n{out[at:at + 1500]}\n")
+            return 1
         for c in CANCEL_CHECKS:
             if c not in out:
                 sys.stderr.write(f"FAIL (cancel): missing '{c}'\n{story_of(out)}\n"
@@ -301,7 +329,7 @@ def main():
                     proc.kill()
         shutil.rmtree(work, ignore_errors=True)
     sys.stdout.write("OK: two sign-ins answered through a tab in the app's window; a third "
-                     "tab's page on the screen, closed by its button\n")
+                     "tab's page on the screen, typed into, and closed by its button\n")
     return 0
 
 
