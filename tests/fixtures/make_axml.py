@@ -42,6 +42,8 @@ ATTR_NAMES = [
     ("enabled", 0x0101000E),
     ("noHistory", 0x0101022D),
     ("authorities", 0x01010018),
+    ("exported", 0x01010010),
+    ("scheme", 0x01010027),
 ]
 
 
@@ -188,15 +190,33 @@ def build_axml(utf8=True, package="com.example.app", launcher=".MainActivity",
                        [a("name", ("str", "com.example.app.OtherActivity"))])
     body += end_elem(pool, "activity")
     # More <activity android:name="..." android:theme="@...">: activities is a list of
-    # (class name, theme resource id or None) or (class name, theme, {"noHistory": bool}).
+    # (class name, theme resource id or None) or (class name, theme, {...}) with any of
+    # "noHistory": bool, "exported": bool, and "view": scheme, which gives the Activity an
+    # <intent-filter> a browser can start it through: VIEW, DEFAULT, BROWSABLE and
+    # <data android:scheme="...">.
     for entry in (activities or []):
         name, theme = entry[0], entry[1]
+        extra = entry[2] if len(entry) > 2 else {}
         attrs = [a("name", ("str", name))]
         if theme is not None:
             attrs.append(a("theme", ("ref", theme)))
-        if len(entry) > 2 and "noHistory" in entry[2]:
-            attrs.append(a("noHistory", ("bool", entry[2]["noHistory"])))
+        if "noHistory" in extra:
+            attrs.append(a("noHistory", ("bool", extra["noHistory"])))
+        if "exported" in extra:
+            attrs.append(a("exported", ("bool", extra["exported"])))
         body += start_elem(pool, "activity", attrs)
+        if "view" in extra:
+            body += start_elem(pool, "intent-filter", [])
+            body += start_elem(pool, "action",
+                               [a("name", ("str", "android.intent.action.VIEW"))])
+            body += end_elem(pool, "action")
+            for category in ("DEFAULT", "BROWSABLE"):
+                body += start_elem(pool, "category", [
+                    a("name", ("str", "android.intent.category." + category))])
+                body += end_elem(pool, "category")
+            body += start_elem(pool, "data", [a("scheme", ("str", extra["view"]))])
+            body += end_elem(pool, "data")
+            body += end_elem(pool, "intent-filter")
         body += end_elem(pool, "activity")
     # <service android:name="..."> and <receiver android:name="..."> with an <intent-filter>
     # of its actions, if any: each list holds (class name, [action, ...]) or
