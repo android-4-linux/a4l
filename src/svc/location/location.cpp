@@ -307,7 +307,11 @@ bool LocationHub::start() {
       return source_ != nullptr &&
              std::strcmp(source_->name(), "none") != 0;  // already up
     started_ = true;
-    source_ = make_location_source();
+    // A source is started once. The one available() made is still unused;
+    // one that was stopped is replaced.
+    if (source_ == nullptr || source_used_)
+      source_ = make_location_source();
+    source_used_ = true;
   }
   // start() the source outside the lock (it may block on D-Bus / call the sink
   // re-entrantly).
@@ -346,8 +350,14 @@ bool LocationHub::last(LocationFix* out) const {
 
 bool LocationHub::available() const {
   std::lock_guard<std::mutex> lk(m_);
+  // An app asks whether location is on, and which providers are, before it
+  // asks for a location, and there was no source until it asked for one: the
+  // answer was no, and the app said to turn location on. The source is made
+  // here, and not started.
+  if (source_ == nullptr)
+    source_ = make_location_source();
   // A real source is anything but the NullSource ("none").
-  return source_ != nullptr && std::strcmp(source_->name(), "none") != 0;
+  return std::strcmp(source_->name(), "none") != 0;
 }
 
 const char* LocationHub::source_name() const {
