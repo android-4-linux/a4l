@@ -1386,8 +1386,30 @@ unsigned int acl_native_egl_choose_config(void* dpy,
     rewritten = rewritten && attribs[n] == kEglNone;
     copy[n] = kEglNone;
   }
-  return real(dpy, rewritten ? copy : attribs, configs, config_size,
-              num_config);
+  const int* use = rewritten ? copy : attribs;
+  if (configs == nullptr || config_size <= 0 ||
+      g_native_gl_hooks.order_configs == nullptr)
+    return real(dpy, use, configs, config_size, num_config);
+  // Mesa is asked for more configs than the engine wants, so that the runtime
+  // can put one a window can be made for first, even for an engine that asks
+  // for a single config.
+  static constexpr int kAsk = 128;
+  void* many[kAsk];
+  int found = 0;
+  const unsigned int ok =
+      real(dpy, use, static_cast<void*>(many), kAsk, &found);
+  if (ok == 0u)
+    return ok;
+  if (found > kAsk)
+    found = kAsk;
+  g_native_gl_hooks.order_configs(g_native_gl_hooks.user, dpy, many, found);
+  const int given = found < config_size ? found : config_size;
+  void** out = static_cast<void**>(configs);
+  for (int i = 0; i < given; ++i)
+    out[i] = many[i];
+  if (num_config != nullptr)
+    *num_config = given;
+  return ok;
 }
 // eglCreatePbufferSurface override. Args: dpy, config, attrib_list.
 void* acl_native_egl_create_pbuffer_surface(void* dpy,
@@ -1411,6 +1433,18 @@ void* acl_native_egl_create_pbuffer_surface(void* dpy,
              ? reinterpret_cast<Fn>(g_mesa_egl_create_pbuffer)(dpy, config,
                                                                attribs)
              : nullptr;
+}
+// eglDestroySurface override. Args: dpy, surface. The runtime is told first, so
+// that a window it made for the engine lets go of the handle before Mesa is
+// free to hand it out again.
+void* g_mesa_egl_destroy_surface = nullptr;
+unsigned int acl_native_egl_destroy_surface(void* dpy, void* surface) {
+  if (g_native_gl_hooks.surface_destroyed != nullptr)
+    g_native_gl_hooks.surface_destroyed(surface, g_native_gl_hooks.user);
+  using Fn = unsigned int (*)(void*, void*);
+  return g_mesa_egl_destroy_surface != nullptr
+             ? reinterpret_cast<Fn>(g_mesa_egl_destroy_surface)(dpy, surface)
+             : 0u;
 }
 // Mesa's real eglSwapBuffers, saved before the bridge slot is redirected to the
 // shim below.
@@ -1614,6 +1648,9 @@ void install_gl_forwarders(BionicRuntime* rt, bool opens_gl_itself) {
         g_mesa_egl_create_pbuffer = egl_b.fns[i];
         egl_b.fns[i] =
             reinterpret_cast<void*>(&acl_native_egl_create_pbuffer_surface);
+      } else if (std::strcmp(kEglForwardSyms[i], "eglDestroySurface") == 0) {
+        g_mesa_egl_destroy_surface = egl_b.fns[i];
+        egl_b.fns[i] = reinterpret_cast<void*>(&acl_native_egl_destroy_surface);
       }
     }
     // Let ANativeWindow_getWidth/Height (in the loaded libandroid.so) report

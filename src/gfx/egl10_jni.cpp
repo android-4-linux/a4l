@@ -502,6 +502,8 @@ jboolean _eglDestroySurface(JNIEnv* e,
                             jobject display,
                             jobject surface) {
   forget_offscreen_surface(get_surface(e, surface));
+  if (g_hooks.surface_destroyed != nullptr)
+    g_hooks.surface_destroyed(get_surface(e, surface), g_hooks.user);
   return to_jbool(
       eglDestroySurface(get_display(e, display), get_surface(e, surface)));
 }

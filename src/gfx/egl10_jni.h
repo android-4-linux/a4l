@@ -75,6 +75,10 @@ struct AclEgl10Hooks {
                                          int width,
                                          int height,
                                          void* user) = nullptr;
+  // The app is destroying `egl_surface` with eglDestroySurface, which runs
+  // next. A window a4l made for the app gives the handle up here (see
+  // GlWindow::surrender_egl_surface).
+  void (*surface_destroyed)(void* egl_surface, void* user) = nullptr;
   void* user = nullptr;
 };
 
